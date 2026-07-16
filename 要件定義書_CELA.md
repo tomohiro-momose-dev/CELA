@@ -205,7 +205,7 @@ AIのコンテキスト忘却と「会話の調子（チューニング）」の
 | ID | 要件 | 説明 |
 | :--- | :--- | :--- |
 | F-8.1 | 非対称メモリ圧縮 | 会話履歴を切り詰める際、以下の非対称パースを行いアセンブルする。<br>・**User（問い）**: 生のニュアンスやこだわりを100%保持するため、一切要約せず**生データ（Raw Message）**として結合する。<br>・**AI（応答）**: 前置きや冗長表現を削ぎ落とすため、意思決定の要点のみを箇条書き等に**高度要約（Summarized Message）**して結合する。<br>・**注記**: 圧縮・結合時に、HTMLやMarkdown外注コメントタグ（`<comment-tag>`）で囲まれた履歴や非ファクトデータはノイズとして判定し、コンテキスト圧縮の対象から自動排除する。 |
-| F-8.2 | **Hydrate Refresh 5節プロトコル（★V23完全刷新）** | コンテキスト再起動（アセンブル）時、以下の5つの独立した要素をSQLiteからクエリして抽出し、単一のシステムプロンプトとして統合してモデルに渡す。<br>1. **What (製品憲章)**: 絶対目標・存在意義・現在のフェーズと予算・リソース等の絶対物理制約。<br>2. **Why (判断系譜：正負の理由)**: 確定した設計方針（Approved：正の理由）に加え、**過去に却下された案と「なぜ却下したか」（Rejected：負の理由・Why Rejected）**をDecisionPairから直接抽出・同梱する。これによって同じ議論のループを物理的に回避する。<br>3. **Current (現在地)**: 共有ホワイトボード（たたき台）の最新バージョンと、現在適用されている最新のパッチ状態。<br>4. **NEXT_RECOMMENDATION (自律1手・先回りピッチ)**: システム（SLM-3等）が自律推論した「次にやるべき1手とその論理的理由」。<br>5. **Open / Next (未解決課題と生履歴)**: 現状の未解決タスク（Pending Actions）と、直近の生会話（Raw Message）のセット。 |
+| F-8.2 | **Hydrate Refresh 5節プロトコル（★V23完全刷新）** | コンテキスト再起動（アセンブル）時、以下の5つの独立した要素をSQLiteからクエリして抽出し、単一のシステムプロンプトとして統合してモデルに渡す。<br>1. **What (製品憲章)**: 絶対目標・存在意義・現在のフェーズと予算・リソース等の絶対物理制約。<br>2. **Why (判断系譜：正負の理由)**: 確定した設計方針（Approved：正の理由）に加え、**過去に却下された案と「なぜ却下したか」（Rejected：負の理由・Why Rejected）**をDecisionPairから直接抽出・同梱する。これによって同じ議論のループを物理的に回避する。<br>3. **Current (現在地)**: 共有ホワイトボード（たたき台）の最新バージョンと、現在適用されている最新のパッチ状態。<br>4. **NEXT_RECOMMENDATION (自律1手・先回りピッチ)**: システム（SLM-3等）が自律推論した「次にやるべき1手とその論理的理由」。<br>5. **Open / Next (未解決課題と生履歴)**: 現状の未解決タスク（Pending Actions）と、直近の生会話（Raw Message, 直近N件は生ログ、それより古いものは要約）のセット。 |
 | F-8.3 | **Freeze（神ノードピン）機能（★V23新規）** | 泥臭い政治的妥協、ステークホルダーが激怒する「地雷条件」、あるいは絶対に覆してはならない「神の決定」に対し、人間またはシステムが `is_frozen=1` フラグ（📌）を立てる。Freezeされたノードは履歴切り詰めの対象から完全に除外され、Hydrate 5節の「Why」に永久にピン留めされて引き継がれ続ける。 |
 
 ---
@@ -214,8 +214,14 @@ AIのコンテキスト忘却と「会話の調子（チューニング）」の
 
 | ID | 要件 | 説明 |
 | :--- | :--- | :--- |
-| F-9.1 | 多角的ハイブリッド検索 | 現在のフェーズID、適用しようとしている技術要素、および制約条件の残余率をクエリパラメータとし、SQLite内の `lessons_learned` テーブルに対して「セマンティック類似度（Vector RAG）」または「メタデータ属性マッチ」によるハイブリッド検索を実行する。 |
-| F-9.2 | 失敗の事前枝刈り（Pruning） | RAGによって引き当てられた過去の失敗教訓を、新しく進もうとしているルートの「事前禁止制約」としてエージェントの思考コンテキストに注入し、同じ轍を踏むのを未未然に防ぐ。 |
+| F-9.1 | sqlite-vec拡張によるSQLネイティブ・ハイブリッド検索 | SQLite3の公式ベクトル検索拡張モジュールである sqlite-vec をロードし、標準SQL内でメタデータフィルタとベクトル類似度計算を同時に実行する。
+
+
+例: SELECT lesson_id FROM lessons_learned WHERE category = 'BUDGET' ORDER BY vec_distance_cosine(vector_embedding, ?) LIMIT 3;
+
+
+これにより、Python側への不要なデータ転送（全件ロード）を避け、高速なPre-filtering型のRAGを実現する。 |
+| F-9.2 | 失敗の事前枝刈り（Pruning） |RAGによって引き当てられた過去の失敗教訓を、新しく進もうとしているルートの「事前禁止制約」としてエージェントの思考コンテキストに注入し、同じ轍を踏むのを未然に防ぐ。 |
 
 ---
 
@@ -276,17 +282,21 @@ flowchart TD
 本システムは、高度な認知制御と並行シミュレーションを行う仕様上、実際のプログラム実装時に深刻な技術的・物理的ボトルネックが発生しやすい。これらを未然に防ぐため、以下の防御設計および調停ロジックの実装を義務付ける。
 
 ```mermaid
-focal_points
-    B1[物理障壁1: APIコストと処理遅延] -->|調停策| A1[非同期並行スレッド化 asyncio<br>+ 探索(即答) / マージ(思考)のハイブリッドモデル分離]
-    B2[物理障壁2: 歴史の衝突・セマンティック競合] -->|調停策| A2[統合監査ノードによる論理相反自動検出<br>+ コンフリクト自動調停 System2 プロンプト]
-    B3[物理障壁3: SQLite3 データベースロック] -->|調停策| A3[WALモード有効化 + timeout=60.0秒<br>+ 直列書き込みシングルライターキュー]
+flowchart LR
+    B1["物理障壁1: APIコストと処理遅延"] -->|調停策| A1["非同期並行スレッド化 asyncio<br>+ 探索(即答) / マージ(思考)のハイブリッドモデル分離"]
+    B2["物理障壁2: 歴史の衝突・セマンティック競合"] -->|調停策| A2["統合監査ノードによる論理相反自動検出<br>+ コンフリクト自動調停 System2 プロンプト"]
+    B3["物理障壁3: SQLite3 データベースロック"] -->|調停策| A3["WALモード有効化 + timeout=60.0秒<br>+ 直列書き込みシングルライターキュー"]
 ```
 
 | ID | 要件 | 説明 |
 | :--- | :--- | :--- |
 | **F-11** | **APIコストおよびレイテンシ（実行遅延）の抑制とモデル分離の最適化** | **【設計対策】** 1. **非同期並行スレッド化**: Pythonの `asyncio` または `ThreadPoolExecutor` を用い、フォークした子グラフの探索を同時並行で処理させ、待機時間を1スレッド実行時間分に短縮する。 2. **探索・マージ時におけるハイブリッドモデル戦略**: 各並行世界の探索は、安価で高速な「即答モデル」を割り当て、最終決定（マージ・採用判定）を行う瞬間のみ「重量思考モデル」にスイッチして熟考させる。 |
 | **F-12** | **マルチブランチ合流時における「セマンティック・マージコンフリクト（論理競合）」の自動調停** | **【設計対策】** 1. **コンフリクト自動検出**: 統合監査ノードは、マージ対象テキスト間に明白な物理仕様・論理の相反（例:「バス停を廃止してリース解約」と「バス停にシニアカー配備」が同一仕様書内に混在）がないか検出し、競合箇所を特定する。 2. **論理競合調停（Conflict Resolution）ノード**: 競合が検出された場合、マージ調停専用のシステム2プロンプトを起動し、論理的な歪みを解消して矛盾なく統合した新しい仕様書パッチを自律生成させる。 |
-| **F-13** | **SQLite 3 におけるマルチスレッド書き込み競合（Database Locked）の回避** | **【設計対策】** 1. **WAL（Write-Ahead Logging）モードの有効化**: データベース接続 of 初期化時に、必ず `PRAGMA journal_mode=WAL;` および `PRAGMA synchronous=NORMAL;` を実行し、読込と書込の競合を大幅に緩和する。 2. **接続タイムアウトの延長**: `sqlite3.connect('lineage_orchestrator.db', timeout=60.0)` を指定し、最大60秒間自動待機させる。 3. **直列書き込みキュー（Single Writer）パターンの適用**: （推奨）データベースの更新処理をすべて一元管理する「書き込み用シングルスレッドバックグラウンドキュー」を経由させ、物理的な同時書込アクセスを排除する。 |
+| **F-13** | **SQLite 3 におけるマルチスレッド書き込み競合（Database Locked）の回避** | **【設計対策】** 1. **WAL（Write-Ahead Logging）モードの有効化**: データベース接続 of 初期化時に、必ず `PRAGMA journal_mode=WAL;` および `PRAGMA synchronous=NORMAL;` を実行し、読込と書込の競合を大幅に緩和する。 2. **接続タイムアウトの延長**: `sqlite3.connect('lineage_orchestrator.db', timeout=60.0)` を指定し、最大60秒間自動待機させる。 3. **直列書き込みキュー（Single Writer）パターンの適用**: （必須）データベースの更新処理をすべて一元管理する「書き込み用シングルスレッドバックグラウンドキュー」を経由させ、物理的な同時書込アクセスを排除する。 |
+| **F-14** | **SQLiteベクトル拡張（sqlite-vec）の依存関係管理** | 【設計対策】
+lessons_learned.vector_embedding (BLOB) に対する類似度検索を実現するため、実行環境（Python）には pip install sqlite-vec を必須要件とする。DBコネクション初期化時に db.enable_load_extension(True) および sqlite_vec.load(db) を実行し、C拡張モジュールを安全に読み込む初期化ルーチンを確実に実装すること。|
+
+
 
 ---
 
@@ -409,7 +419,7 @@ CREATE TABLE IF NOT EXISTS stakeholder_profiles (
 CREATE TABLE IF NOT EXISTS opportunity_signals (
     signal_id TEXT PRIMARY KEY,        -- 'SIG-' + timestamp_ms 形式
     source_type TEXT NOT NULL,         -- web_search / customer_log / social_media / patent
-    raw_payload NOT NULL,              -- センシングした生データ（JSON）
+    raw_payload JSON NOT NULL,              -- センシングした生データ（JSON）
     detected_friction TEXT,            -- 哲学レンズによって抽出された潜在的摩擦・問いの内容
     cognitive_score REAL DEFAULT 0.0,  -- 哲学アライメント度合い (0.0 〜 1.0)
     status TEXT DEFAULT 'Unprocessed', -- Unprocessed / Forking / Pitched / Ignored
@@ -426,6 +436,23 @@ CREATE TABLE IF NOT EXISTS current_goal (
     absolute_constraints TEXT,         -- 物理的/財務的絶対制約（JSON配列：予算上限等）
     updated_at REAL NOT NULL           -- タイムスタンプ
 );
+```
+
+### 4.9 goal_shift_events テーブル（★F-22.4）
+
+```sql
+CREATE TABLE IF NOT EXISTS goal_shift_events (
+    shift_id TEXT PRIMARY KEY,         -- 'GS-' + timestamp_ms 形式
+    timestamp REAL NOT NULL,           -- 変容が発生したUnixエポックタイム
+    shift_kind TEXT NOT NULL,          -- 変容の種類 (scope_expand / narrow / architecture_pivot / constraint_hit / silent_drift)
+    from_goal_state TEXT NOT NULL,     -- 変更前の目標状態（JSON、または過去の current_goal のスナップショット）
+    to_goal_state TEXT NOT NULL,       -- 変更後の目標状態（JSON）
+    reason_why TEXT NOT NULL,          -- なぜゴールを変えざるを得なかったのか（Why Shifted）
+    evidence TEXT,                     -- ゴール変更の決定的な根拠（シミュレーション結果、市場シグナル等）
+    triggered_by TEXT NOT NULL         -- 何によって引き起こされたか (MCTS_Fork_Result / Human_Override / OpportunityScout)
+);
+
+CREATE INDEX IF NOT EXISTS idx_goal_shift_kind ON goal_shift_events(shift_kind);
 ```
 
 ---
