@@ -100,7 +100,7 @@ graph TD
 
 | ID | 要件 | 説明 |
 | :--- | :--- | :--- |
-| F-2.1 | **Detector（独立監査）と二重防衛線構造** | **【二重防衛線（Defense in Depth）の確立】**<br>・**第1防衛線 (User AIによる能動的検閲)**: 交渉の当事者として、主観の歪みや都合の良い前提条件を看破。不承認（Reject）または条件付き承認（Approved with Conditions）を突き返す。<br>・**第2防衛線 (Detectorによる客観的監査)**: 独立した第3者（司法）として、両者が妥協したり見落とした「倫理・安全リスク」および「物理上限（予算のtotal_cap超過）」を、会話履歴から直接検知して強制的に差し戻す。 |
+| F-2.1 | **Detector（独立監査）と二重防衛線構造** | **【二重防衛線（Defense in Depth）の確立】**<br>・**第1防衛線 (User AIによる能動的検閲)**: 交渉の当事者として、主観の歪みや都合の良い前提条件を看破。不承認（Reject）または条件付き承認（Approved with Conditions）を突き返す。<br>・**第2防衛線 (Detectorによる客観的監査)**: 独立した第3者（司法）として、両者が妥協したり見落とした「倫理・安全リスク」および「物理上限（予算のtotal_cap超過）」を、会話履歴から直接検知して強制的に差し戻す。 【思考プロセス監査の追加】 Detectorは、提案された「決定（What）と理由（Why）」の表面的な整合性を見るだけでなく、背後にある internal_thought_process（思考過程ログ）を直接読み込む。「計算ツールを使っていないのに適当な数字を出している」「都合の悪い制約から意図的に目を逸らして結論を急いでいる」といった**AIの事後正当化（取り繕い）**を検知した場合、重度のハルシネーションと判定して強制差し戻し（major）を行う。|
 | F-2.2 | Reflection（内省監査） | 3ターンごとにマクロなゴール監査を実行。議論の「収束（completed）」「停滞（stagnant）」「進行中」を判定。 |
 | F-2.3 | Reviewer（QA審査） | 最終成果物を絶対目標と照合し、網羅性・検証データ（具体的な数値・根拠）の有無を厳格に審査。不合格時はリテイク。 |
 | F-2.4 | Integrator（統合監査） | 各タスクの成果物を物理結合し、フェーズ間・タスク間の論理的・数値的な横断矛盾を自動チェック。 |
@@ -139,6 +139,7 @@ sequenceDiagram
 | F-3.4 | 成果物ファイルの自律生成 | AIが `entry_type="Deliverable"` としてツールを発行した際、最終フィルターは本文を `log/deliverables/` 配下にMarkdownファイルとして自動物理保存し、生成されたファイルパスをSQLiteの `content` フィールドに格納する。 |
 | F-3.5 | **DecisionPair と AI Reason の完全分離（★V23新規）** | AIが合意DBにデータを書き込む際、`hypothesis_decision` の記述を**「決定内容（Decision_What: What）」**と**「採用の理由（Reason_Why: Why）」**に物理カラムレベルで厳格に分離する。単なる直感的出力や結果の書き下しを許さず、論理的な背後関係・選択因子の説明責任を強制記録する。 |
 | F-3.6 | **「負の理由（Rejected）」の徹底資産化（★V23新規）** | 提案や世界線がUser AI（またはDetector）によって却下（Reject）された場合、単にエラーメッセージとして流すのではない。**「提案内容（What）」と「却下された理由（Why Rejected）」をセット（DecisionPair）としてSQLiteの `agreements` 表に status="Rejected" で永久保存する**。これにより、「過去のボツ案とその否決理由」が未来の同じミスの再発や無駄な手戻りを防ぐ強力なアクティブ知財となる。 |
+| F-3.7 | **思考過程（スクラッチパッド）の強制露出と透過的記録（【新規追加】** | エージェント（User/Expert）が write_agreement_tool を呼び出す際、必ずその手前のテキスト出力（<think> タグや思考用スクラッチパッド領域）で「どのような検証・計算を経てその結論に至ったか」を言語化させる。システムはツール実行をフックした際、この直前の思考テキストをキャプチャし、agreements テーブルの internal_thought_process に保存する。 |
 
 ---
 
@@ -346,6 +347,7 @@ CREATE TABLE IF NOT EXISTS agreements (
     status TEXT NOT NULL,              -- Proposed / Approved / Rejected / Superseded
     topic TEXT NOT NULL,               -- 簡潔なタイトル
     decision_what TEXT NOT NULL,       -- 決定・提案の具体的記述・内容 (What)
+    internal_thought_process TEXT,     -- 【追加】ツール実行直前に出力された生々しい思考過程・スクラッチパッド (<think>タグの中身など)
     reason_why TEXT NOT NULL,          -- 採用の論理的理由、または却下の理由 (Why / Why Rejected)
     evidence TEXT,                     -- 決定または否決の客観的根拠となったログ、実測値、エラー等
     proposed_by TEXT,                  -- 提案者（expert_xxx / user）
