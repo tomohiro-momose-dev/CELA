@@ -413,13 +413,26 @@ CREATE TABLE IF NOT EXISTS stakeholder_profiles (
 );
 ```
 
+
+### 4.6.1 stakeholder_topic_relevance テーブル（★F-21 トピック別発言権の多対多管理）
+
+```sql
+CREATE TABLE IF NOT EXISTS stakeholder_topic_relevance (
+    profile_id TEXT NOT NULL,
+    topic_tag TEXT NOT NULL,           -- トピックタグ (例: "UX", "予算", "運行ルート")
+    relevance_weight REAL DEFAULT 1.0, -- そのトピックにおける発言の重み（base_influence_weightと乗算等で利用）
+    PRIMARY KEY (profile_id, topic_tag),
+    FOREIGN KEY (profile_id) REFERENCES stakeholder_profiles(profile_id)
+);
+```
+
 ### 4.7 opportunity_signals テーブル（★F-22自律センシング）
 
 ```sql
 CREATE TABLE IF NOT EXISTS opportunity_signals (
     signal_id TEXT PRIMARY KEY,        -- 'SIG-' + timestamp_ms 形式
     source_type TEXT NOT NULL,         -- web_search / customer_log / social_media / patent
-    raw_payload JSON NOT NULL,              -- センシングした生データ（JSON）
+    raw_payload TEXT NOT NULL,              -- センシングした生データ（JSON）
     detected_friction TEXT,            -- 哲学レンズによって抽出された潜在的摩擦・問いの内容
     cognitive_score REAL DEFAULT 0.0,  -- 哲学アライメント度合い (0.0 〜 1.0)
     status TEXT DEFAULT 'Unprocessed', -- Unprocessed / Forking / Pitched / Ignored
@@ -450,9 +463,11 @@ CREATE TABLE IF NOT EXISTS goal_shift_events (
     reason_why TEXT NOT NULL,          -- なぜゴールを変えざるを得なかったのか（Why Shifted）
     evidence TEXT,                     -- ゴール変更の決定的な根拠（シミュレーション結果、市場シグナル等）
     triggered_by TEXT NOT NULL         -- 何によって引き起こされたか (MCTS_Fork_Result / Human_Override / OpportunityScout)
+    triggering_agreement_id TEXT       -- 【追加】この変容の引き金となった agreements (DecisionPair) のID (DAG追跡用)
 );
 
 CREATE INDEX IF NOT EXISTS idx_goal_shift_kind ON goal_shift_events(shift_kind);
+CREATE INDEX IF NOT EXISTS idx_goal_shift_timestamp ON goal_shift_events(timestamp); -- 【追加】時系列ソート用
 ```
 
 ---
