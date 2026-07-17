@@ -1,9 +1,12 @@
 ---
-description: Project agent rules — MCP workflow, Code Modification & Implementation Guidelines, minor-language references
+description: Project agent rules — docs model, code comments, constants, niche-language refs
 alwaysApply: true
 ---
 
-## Codebase Memory MCP
+# Agent Rules (Project Template)
+
+
+## 1. Codebase Memory MCP
 
 **MANDATORY: use Codebase Memory MCP graph tools FIRST — before reading files or making code changes.**
 
@@ -47,106 +50,124 @@ mcp_codebase-memo_get_architecture({ "project": "<display_name>" })
 - `manage_adr(action)` — CRUD for Architecture Decision Records
 - `ingest_traces(traces)` — Ingest runtime traces to validate HTTP edges
 
-## Code Modification & Implementation Guidelines
 
-### **1\. Core Mandate: "Why" Over "What"**
+## 2. Documentation Model (Source of Truth)
 
-You must **NEVER** write comments that simply paraphrase the syntax or describe *what* the code is doing. The code itself explains the "What". Your comments must explain the **"Why"**—the intent, the architectural decisions, the physical constraints, and the alternative solutions that were rejected.
+**MANDATORY for every request that changes requirements, design, or implementation tasks.**
 
-* **Do not write:** \# Open the serial port (This is obvious from the code).  
-* **Do write:** \# Configure timeout=0 (non-blocking) to prevent the background thread from blocking the GUI event loop if the device goes offline (This explains the engineering decision).
+### Core rules
 
-### **2\. Documenting Hierarchy**
+1. **Source of truth** for requirements and design is `docs/design`, **not** a GitHub Issue body (if any).
+2. **Starting point** for a greenfield project: `docs/要件定義.md`.
+3. **Before coding or design edits:** read `STATUS.md` → `要件定義.md` `cela_roadmap_vXX.md`→ `issue_backlog.md` → `phase_gates.md` (and the relevant `phaseN/` doc).
+4. **Layers must not mix:**
+   - Requirements narrative → `要件定義.md`
+   - How / constraints / tests → `phaseN/`
+   - Implementation tasks / bugs → `issue_backlog.md` (BL-xxx)
+   - Decisions (Why) → `decision_log.md` (D-xxx) — **`Reason for the decision` is mandatory** for every `decided` entry
+   - Progress → `STATUS.md` / `phase_gates.md` / `traceability.md`
+5. **When changing requirements or constraints:**
+   1. Update `要件定義.md` and the relevant `cela_roadmap_vXX.md` and `phaseN/` doc.
+   2. Record decisions in `decision_log.md` (why chosen + why alternatives rejected).
+   3. Add implementation follow-ups to `issue_backlog.md` (BL), not into the requirements narrative.
+   4. Sync any GitHub Issue **summary only at milestones** — not on every edit.
+6. **End of each implementation turn:** append remaining work, edge cases, and known issues to `issue_backlog.md` as BL-xxx.
+   
+## 3 Coding, Thinking Analysing
+1. **Calculations** 
+　　In principle, LLMs are incapable of performing calculations. 
+    Whenever a task requires calculation—whether based on premises, constraints, code comments, or numerical values ​​embedded in the code—the model must invariably invoke a Python tool, generate mechanical calculation code, and perform both the calculation and verification, even for simple operations like addition.
 
-You must structure your comments at three levels of granularity:
+2. **Grounded Architecture & Verification**
+   - **No Guessing/Fabricating:** NEVER assume or guess the existence of any API, library, or framework feature. Use official, up-to-date syntax. If you are unsure of a function signature or version-specific API, stop and ask the user or verify it using search/read tools first.
+   - **Controlled Dependencies:** Do not arbitrarily import uninstalled packages. When a new library/dependency is required:
+     1. Propose the specific package and explain why it is necessary.
+     2. Ask for user approval, OR explicitly add it to the package configuration file (e.g., package.json, requirements.txt, go.mod) and run the install command before importing it in your code.
 
-#### **A. Module-Level Docstring (The File Header)**
+3. **Design Before Implementation (For New Features)**
+   - **Blueprint First:** Before creating new files or writing large blocks of new code, briefly present your plan:
+     1. Proposed file structure and where the new code fits.
+     2. Key architectural choices (e.g., state management, design patterns).
+     3. Integration points with the existing code (if any).
+   - **Style Consistency:** Follow the existing project's directory structure, naming conventions, and coding style.
 
-Every single file must start with a module-level docstring containing the "worldview" of the file. This must be written before any imports.  
-Include the following sections:
+4.  **Code Quality & Completeness**
+    - **No Lazy Placeholders:** Never use placeholders like `// ... existing code ...` or `// TODO: implement` inside modified or newly created files. Always output complete, fully functional, and syntactically valid code blocks.
+  
+5.  **Communication Preference**
+    - **Language:** Always explain your plans, logic, and reasoning in Japanese. Keep the actual code, variables, and technical terms in English.
 
-* **\[Purpose\]**: What is the ultimate business/technical goal of this file?  
-* **\[System & Communication Spec\]**: What external systems, hardware, or APIs does this interact with? What are their specifications?  
-* **\[Core Constraints & Why\]**: What are the critical, uncompromisable design decisions (e.g., multi-threading, memory limits) and *why* were they made?
-
-#### **B. Class & Function Docstrings**
-
-Before class definitions or function bodies, write a docstring focusing on **Design Intent**.
-
-* Explain what problem this function solves in the grand scheme.  
-* Describe any non-obvious side effects.  
-* Highlight any specific assumptions about the input state.
-
-#### **C. Inline Comments (Use Sparingly)**
-
-Only use inline comments for:
-
-* **Magic numbers**: Explain *why* that specific value is used (e.g., hardware buffer limits).  
-* **Workarounds/Hacks**: Explain *why* a seemingly sub-optimal approach was used (e.g., bypassing a known hardware bug).  
-* **Interlock/Safety Logic**: Explain *why* certain UI elements are disabled or locked.
-
-### **3\. Reference Examples for AI Writing**
-
-| Comment Type | ❌ BAD (What) | GOOD (Why / Intent) |
-| :---- | :---- | :---- |
-| **I/O & Hardware** | self.ser.write(b"EOF") *(Obvious syntax paraphrase)* | \# Send "EOF" packet to signal the end of the binary stream so the device FS can close the file handler. |
-| **Threading** | with self.buffer\_lock: *(Describes the syntax)* | \# Guard self.rx\_buffer with a mutex to prevent race conditions between the Receiver and Automation threads. |
-| **Performance** | self.rx\_buffer \= self.rx\_buffer\[length:\] *(Describes array slicing)* | \# Silently discard (drain) the readback payload from memory to prevent Tkinter rendering lag or OOM crashes. |
-| **User Interface** | self.btn\_start.config(state=tk.DISABLED) *(Obvious UI action)* | \# Interlock safety: Lock the start button to prevent duplicate triggers and command stream corruption. |
-
-### **4\. The "Zero Stale Comments" Policy**
-
-* When you modify, optimize, or rewrite any block of code, you **MUST** review all adjacent comments.  
-* If the code's behavior changes, you must immediately update the comments to ensure they remain 100% truthful.  
-* If a comment no longer aligns with the updated code, rewrite it immediately. **A stale comment is worse than no comment at all.**
-
-### **5\. Metadata Tags for High-Attention Warnings**
-
-When documenting critical constraints that other developers (or future AI runs) must not touch, prefix your inline comments with these standardized tags:
-
-* \# \[CONSTRAINT\]: Hard limits imposed by hardware, OS, or third-party APIs.  
-* \# \[SAFETY\]: Logic preventing physical hazards, user data loss, or UI freezes.  
-* \# \[REJECTED\]: Explains *why* an alternative, seemingly better solution failed during testing.
-
-
-### **6. Constant Modifications (Strict Control)**
-* **Prior Approval Required:** BEFORE modifying any critical constants—including but not limited to **buffer sizes, array lengths, and timeout values**—you must explicitly state the reason for the proposed change and **obtain explicit, written approval from the user**.
-* **DO NOT** alter these configuration values unilaterally without prior consent.
-
-### **7. Issue & Backlog Management**
-* **Task Handover:** At the end of each implementation step, if there are any remaining unimplemented features, edge cases, or known issues, you must append them to `docs/design/<feature_name>/issue_backlog.md` as BL-xxx entries.
-* This backlog must be structured clearly so that the next implementation turn can pick up remaining work.
-* **Do not** treat GitHub Issue #1 as the detailed requirements master. Follow the documentation model in `docs/design/<feature_name>/README.md`.
-
-## MAC Address Feature — Documentation Model (`docs/design/mac_addr_impl(<feature_name>)/`)
+**Index:** `docs/design/README.md`
 
 | Layer | File / location | Role |
 |-------|-----------------|------|
-| Epic entry | GitHub Issue #1 | Summary, completion criteria, link to docs |
-| Requirements integration | `issue#1 mac_address_setting_and_storage.md` | **Working master during design** — update when refining requirements with the user |
-| Phase design | `phaseN/` | How, constraints, tests per phase |
-| Implementation tasks | `issue_backlog.md` | BL-xxx bugs, open items, not requirements |
-| Decisions (why) | `decision_log.md` | Record after resolving BL "undecided" items |
-| Progress | `STATUS.md`, `phase_gates.md`, `traceability.md` | PM artifacts |
+| Requirements start / working master | `要件定義.md` | Background, tasks, acceptance criteria |
+| Phase design | `phaseN/` | How, constraints, tests |
+| Implementation tasks | `issue_backlog.md` | BL-xxx bugs and open items |
+| Decisions (why) | `decision_log.md` | Mandatory rationale |
+| Progress | `STATUS.md`, `phase_gates.md`, `traceability.md` | Where we are / Done / coverage |
+| Optional epic entry | GitHub Issue (short) | Link to docs only |
 
-**When changing requirements or constraints:**
-1. Update `issue#1 ...md` and the relevant `phaseN/` doc.
-2. Record decisions in `decision_log.md`. **`決定理由` is mandatory** for every `decided` entry — include why this option was chosen and why alternatives were rejected.
-3. Add implementation follow-ups to `issue_backlog.md` (BL), not into the issue#1 narrative.
-4. Sync GitHub Issue #1 summary only at milestones — not on every edit.
+Optional GitHub Issue: summary + link to `docs/design/README.md` only. Do **not** treat Issue comments as the requirements master.
 
-**Index:** `docs/design/mac_addr_impl(<feature_name>)/README.md`
+---
 
-## Minor / Niche Languages — Official Reference First
+## 3. Code Comments — "Why" Over "What"
 
-When writing or modifying code in a **minor or niche language** the model is not confident about (e.g. TeraTerm TTL `*.ttl`, Mbed-specific macros, vendor DSLs):
+- Never write comments that only paraphrase syntax.
+- Comments must explain **intent, constraints, rejected alternatives**.
+- Update adjacent comments when code changes (**no stale comments**).
+- Prefer tags for critical notes: `[CONSTRAINT]`, `[SAFETY]`, `[REJECTED]`.
 
-1. **Before implementation or design that names APIs/commands:** use **web search** (or fetch) against the **official reference** — not memory, not project docs alone.
-2. **Cache locally:** save the relevant official excerpts under `docs/refs/<tool>/` (command syntax, examples, version notes). Record source URL and fetch date in that file.
-3. **Reuse the cache:** on later turns, read the local file in `docs/refs/` first instead of re-fetching the same pages unless the API is unclear or the manual may have changed.
-4. **Sync project docs:** if design docs (`decision_log.md`, `phaseN/`, `issue_backlog.md`) name a command/API, verify it against the cached reference before coding.
+Module / class / function docs should describe purpose and non-obvious assumptions.
 
-## Autocomplete & Inline Comment Generation Rules (CRITICAL)
+---
+
+## 4. Constant Modifications (Strict Control)
+
+- **Prior approval required** before changing critical constants (buffer sizes, array lengths, timeouts, protocol magic values, etc.).
+- State the reason and obtain **explicit written approval** from the user.
+- Do **not** change these unilaterally.
+
+---
+
+## 5. Issue & Backlog Management
+
+- Implementation leftovers → `docs/design/issue_backlog.md` as BL-xxx.
+- Do **not** dump implementation bugs into `要件定義.md`.
+- Review findings → BL entries; freeze detailed review archives under `phaseN/` if needed.
+
+---
+
+## 6. Minor / Niche Languages — Official Reference First
+
+When writing or modifying code in a **minor or niche language** (vendor DSL, macros, uncommon scripting, etc.):
+
+1. **Before naming APIs/commands:** fetch the **official reference** (web search / fetch) — not memory alone.
+2. **Cache locally:** save excerpts under `docs/refs/<tool>/` with source URL and fetch date.
+3. **Reuse the cache** on later turns unless the API is unclear or the manual may have changed.
+4. **Sync design docs** that name commands/APIs against the cached reference before coding.
+
+Prefer well-supported host languages (e.g. Python, C#) for tooling when a niche language repeatedly causes hallucination or validation cost.
+
+---
+
+## 7. Test / Dry-run Notes Placement
+
+| Content | Where |
+|---------|--------|
+| Pass/fail summary | `traceability.md` (T-*) |
+| Failures / next fixes | `issue_backlog.md` (BL-*) |
+| Procedure / environment detail | `phaseN/phaseN_dryrun.md` (create when needed) |
+| Raw logs | project-specific log directory (e.g. `artifacts/`, `drive/`) |
+
+---
+
+## 8. Writing the Summary (generated code)
+
+Place a short purpose comment / docstring immediately before generated functions, classes, or non-trivial blocks, appropriate to the language.
+
+## 9. Autocomplete & Inline Comment Generation Rules (CRITICAL)
 
 This section strictly governs **Autocomplete, Inline Suggestions (Cursor Tab), and Copilot Ghost Text**. 
 
@@ -168,13 +189,3 @@ When the user types the prefix on the left, you must autocomplete with the seman
   * **AI autocompletes:** `# Device firmware only accepts b'\\r\\n' endings; raw write() without endings will hang the parser`
 * **User types:** `def wait_and_drain_bytes(self, length, timeout_sec):` -> (presses Enter and types `# `)
   * **AI autocompletes:** `# Discard binary payload from buffer silently to prevent Tkinter rendering lag or memory exhaustion`
-
-### 3. Quick-Start Metadata Triggers
-Train your suggestions to proactively offer metadata tags (`[CONSTRAINT]`, `[SAFETY]`, `[REJECTED]`) as autocompletion options as soon as the user types `# [`.
-"""
-## Note
-
-**This repo — shipment host tool:** Primary is Python [`drive/mac_config_writer.py`](drive/mac_config_writer.py) ([D-010](docs/design/mac_addr_impl(<feature_name>)/decision_log.md)). Prefer Python/C# for new host-side factory tooling over niche macro languages.
-
-**This repo — TeraTerm TTL (archive only):** see `docs/refs/teraterm/`. Shipment macros are **not** the source of truth after D-010. If editing `*.ttl` for reference, still follow the official-reference cache rules above (`logmsg` does not exist; use `logopen`/`logwrite`/`logclose`).
-
