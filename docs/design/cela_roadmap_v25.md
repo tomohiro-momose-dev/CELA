@@ -1,5 +1,7 @@
 # 開発ロードマップ: CELA (Cognitive Experience Lineage-driven Agent)
-# 最終更新: 2026-07-17 (V24.0 既存プロトタイプ・リファクタリング前提版)
+# 最終更新: 2026-07-17 (V25.0 設計書との節番号対応・双方向紐づけ版)
+
+> **v24→v25での変更点**: 各R番号（R1〜R4）のタスク項目に、詳細設計書（`cela_phase1_design_v7.md`、`cela_phase2_design_R4.md`）の該当節番号を明記し、ロードマップと設計書の紐づけを明示化した。これにより「要件定義書→ロードマップ→設計書→実装」の各階層が節番号レベルで参照し合える状態にする。
 
 > **基本方針の変更点（v23→v24）**: v23は「ゼロから最小構成を新規構築する」MVP検証型ロードマップだったが、開発者が既に運用している既存プロトタイプ（`cela_main.py`）には、Detector・Reflection・Reviewer・Integrator・Arbiterを含む多くの機能がすでに実装・動作確認済みであることが判明した（要件定義書v26 付録B参照）。したがって本ロードマップは**新規構築ではなく既存プロトタイプのリファクタリング**として再編する。「作ってみた」で終わらせず、各フェーズの完了条件を数値的な比較実験（A/Bテスト）とする基本姿勢は維持する。
 
@@ -35,40 +37,47 @@ flowchart TD
 ---
 
 ## R1: SQLite永続化基盤（旧Phase 0〜1相当）
+**詳細設計**: `cela_phase1_design_v7.md`（またはそれ以降の最新版）§2, §3.6, §6を参照。
 **目的**: 既存プロトタイプの状態管理（Python list上の `decisions` / `agreements`）を、変更を最小限に留めたままSQLiteへ置き換える。ノード構成・グラフ構造（LangGraph）は一切変更しない。
 
-* **タスク**:
-    * `agreements`テーブル（要件定義書4.2フルスキーマ準拠。`decision_what`/`reason_why`だけでなく`evidence`, `phase_id`, `is_frozen`, `depends_on`, `resource_claims`を含む）をSQLiteに実装。
+* **タスク**（詳細は設計書§2, §3.6）:
+    * `agreements`テーブル（要件定義書4.2フルスキーマ準拠。`decision_what`/`reason_why`だけでなく`evidence`, `phase_id`, `is_frozen`, `depends_on`, `resource_claims`, `internal_thought_process`を含む）をSQLiteに実装。
     * `decisions`テーブル（4.1）を実装し、`make_decision()`関数の出力先をlist appendからSQLite INSERTへ置き換える。
-    * `whiteboard_drafts`（4.4）テーブルを追加するが、**この時点ではまだ書き込みロジックは実装しない**（テーブル定義のみ先行、R4で実装に着手）。
+    * `whiteboard_drafts`（4.4、`task_id`含む）テーブルを追加するが、**この時点ではまだ書き込みロジックは実装しない**（テーブル定義のみ先行、R4で実装に着手）。
     * WALモード・タイムアウト60秒（F-13）をこの段階で有効化しておく（後続フェーズでの並行書き込みに備える）。
-* **完了条件 (A/Bテスト)**:
-    * 既存の「Python list版」と「SQLite版」で同一タスクを走らせ、**`decisions`/`agreements`の中身が完全一致すること**（保存先を変えただけで挙動が変わっていないことの回帰確認）。
-    * プロセスを強制終了→再起動した場合に、SQLite版のみ`agreements`の内容が保持されていること。
+    * `system_prompt=[]`バグの修正（設計書§6）。
+* **完了条件 (A/Bテスト、詳細は設計書§3.6.2、impl_Plan.md §7)**:
+    * record & replay スタブ（キー=`(label, call_seq)`、ミス時は即例外）により、**`decisions`/`agreements`の件数・topic集合・status分布・登録順序が構造一致すること**（「完全一致」はLLMの非決定性により原理的に不可能なため撤回。詳細はimpl_Plan.md §7参照）。
+    * プロセスを強制終了後、`sqlite3 cela.db "SELECT count(*) FROM agreements WHERE run_id='<killしたrun_id>'"` で行が残存していること（レジューム機構はR1範囲外）。
 
 ## R2: ツール呼び出し基盤・機械的検算ゲート（旧Phase 4の一部を前倒し）
+**詳細設計**: `cela_phase1_design_v7.md` §3.4, §3.5を参照。
 **目的**: `query_AI`にFunction Calling / Tool Use対応を追加し、実証実験（要件定義書付録A.3〜A.5）で確認された「機械的検算ゲート（F-2.6）」を、既存の正規表現ベース`verify_budget_arithmetic`から置き換える。
 
-* **タスク**:
-    * `query_AI`にPython REPL実行ツールを追加。
+* **タスク**（詳細は設計書§3.5）:
+    * `query_AI`にPython REPL実行ツールを追加。既存の`response_format=json_object`固定指定との競合を解消する方式（設計書§3.5.1）でノードごとにモードを切り替える。
     * `call_detector`・`call_reviewer`のプロンプトに、agent.md実験で効果検証済みの「数値主張は必ずツールで検算せよ」ルールを追加（付録A.5の知見をそのまま反映）。
+    * Python REPLのサンドボックス仕様（設計書§3.5.3：タイムアウト5秒、許可モジュールのホワイトリスト化等）に従い実装。
     * `verify_budget_arithmetic`（固定パターンの正規表現マッチ）は、Python REPLベースの汎用検算に置き換え後、廃止するか併用するかをA/Bで判断する。
-* **完了条件**:
+* **完了条件（詳細は設計書§5の指標C・D）**:
     * 意図的に数値矛盾を仕込んだ成果物（`RETRY_BASE_DELAY`実験と同種のシナリオ）に対し、Detector/Reviewerが**5試行中5試行で矛盾を検出すること**（付録A.5の実測値を合格基準として流用）。
     * トークン消費量の増加が実測でき、非機能要件N-6（検証精度とコストのトレードオフ）の数値を本システムでも取得すること。
 
 ## R3: 自律的DB書き込みへの移行（旧Phase 1相当、v19設計転換の実装）
+**詳細設計**: `cela_phase1_design_v7.md` §3.2, §3.2.1, §3.3, §3.4.1を参照。
 **目的**: 現状の`decision_extractor_node`（事後抽出型）を、`write_agreement_tool`によるAI自身の能動的書き込み（F-3.1, F-3.2）に置き換える。要件定義書v19で宣言された設計転換を、実コードに反映する。
 
-* **タスク**:
-    * `write_agreement_tool`のJSONスキーマを、要件定義書4.2の`agreements`フルスキーマに準拠させる（Phase1設計書v1にあった簡略スキーマは使用しない。`entry_type`に`Deliverable`を含め、`abstraction_level`/`scope`/`time_axis`/`depends_on`/`resource_claims`もツール引数に含める）。
-    * システム最終フィルター（F-3.2、バリデーション・インターセプター）を実装。構造チェックと`depends_on`のリレーション整合性チェックを行う。
-    * `decision_extractor_node`は即時廃止せず、**`write_agreement_tool`による自律書き込みと並走させ、両者の抽出結果の一致率を計測する期間を設ける**。一致率が十分高いことを確認してから`decision_extractor_node`を段階的に縮小する。
-* **完了条件**:
+* **タスク**（詳細は設計書§3.2〜3.4.1）:
+    * `write_agreement_tool`のJSONスキーマを、要件定義書4.2の`agreements`フルスキーマに準拠させる（`entry_type`に`Deliverable`を含め、`abstraction_level`/`scope`/`time_axis`/`depends_on`/`resource_claims`もツール引数に含める。`status`に`Approved_with_Conditions`/`Implicitly_Accepted`、`action_type`に`SUPERSEDE`も含める）。
+    * システム最終フィルター（F-3.2、バリデーション・インターセプター）をツールラッパー関数として実装（LangGraphノードは追加しない）。構造チェックと`depends_on`のリレーション整合性チェック、および「呼び出し元ロール×要求status」のホワイトリスト方式の権限チェックを行う。
+    * `Rejected`の書き込み権限をUser AI・Detector・Reviewer・Arbiterの4ノードに実装する（`Approved`はUser AIのみ）。
+    * `decision_extractor_node`は撤廃せず、**「各役割のAIが自身でツールを呼び出すのが基本経路、書き漏れ時の予備的セーフティネット」として位置づける**（旧v23〜v24の「一致率90%による段階移行」方針は撤回。設計書§3.3参照）。
+* **完了条件（詳細は設計書§5の指標A・E・F）**:
     * 同じ制約に再度ぶつかったタスクで、AIが既に却下された案（Rejected）を再提案しないことをログで確認（旧Phase1の完了条件を踏襲）。
-    * `write_agreement_tool`による自律抽出と`decision_extractor_node`による事後抽出の一致率が事前に定めた閾値（例: 90%）を超えること。
+    * `write_agreement_tool`による自律書き込みのカバレッジが暫定閾値（80%）以上、`decision_extractor_node`による取りこぼし率が20%以下であること（設計書§5、指標E。**旧「一致率90%」という基準は撤回済み**）。
 
 ## R4: ホワイトボード差分パッチ化（旧Phase 0の核心仮説、既存コードへの適用）
+**詳細設計**: `cela_phase2_design_R4.md`を参照。
 **目的**: 既存の`integrator_node`（最後に全成果物を一括結合する方式）を、Expertが逐次差分パッチを当てる方式（F-7.2）へ移行する。
 
 * **タスク**:

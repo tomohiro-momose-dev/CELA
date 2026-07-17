@@ -50,8 +50,19 @@ mcp_codebase-memo_get_architecture({ "project": "<display_name>" })
 - `manage_adr(action)` — CRUD for Architecture Decision Records
 - `ingest_traces(traces)` — Ingest runtime traces to validate HTTP edges
 
+## 2. **Context7**: Before writing or investigating code that depends on an
+  external library or framework, always check Context7 for the current
+  documentation first. This is mandatory for libraries with frequent
+  version-dependent changes (e.g. React, Next.js).
 
-## 2. Documentation Model (Source of Truth)
+## 3.  **Sequential Thinking**: Use sequential-thinking to reason step-by-step
+  before implementing in these cases:
+  - Tasks involving architecture or design decisions
+  - When multiple implementation approaches are plausible
+  - Bugs whose root cause isn't obvious
+  Do not use it for trivial fixes or typo-level changes
+
+## 4. Documentation Model (Source of Truth)
 
 **MANDATORY for every request that changes requirements, design, or implementation tasks.**
 
@@ -59,7 +70,7 @@ mcp_codebase-memo_get_architecture({ "project": "<display_name>" })
 
 1. **Source of truth** for requirements and design is `docs/design`, **not** a GitHub Issue body (if any).
 2. **Starting point** for a greenfield project: `docs/要件定義.md`.
-3. **Before coding or design edits:** read `STATUS.md` → `要件定義.md` `cela_roadmap_vXX.md`→ `issue_backlog.md` → `phase_gates.md` (and the relevant `phaseN/` doc).
+3. **Before coding or design edits:** read `STATUS.md` → `要件定義.md` `cela_roadmap_vXX.md`→ `cela_phaseN_design_vX.md`->`cela_phase1_impl_Plan.md`->`issue_backlog.md` → `phase_gates.md` (and the relevant `phaseN/` doc).
 4. **Layers must not mix:**
    - Requirements narrative → `要件定義.md`
    - How / constraints / tests → `phaseN/`
@@ -72,29 +83,33 @@ mcp_codebase-memo_get_architecture({ "project": "<display_name>" })
    3. Add implementation follow-ups to `issue_backlog.md` (BL), not into the requirements narrative.
    4. Sync any GitHub Issue **summary only at milestones** — not on every edit.
 6. **End of each implementation turn:** append remaining work, edge cases, and known issues to `issue_backlog.md` as BL-xxx.
-   
-## 3 Coding, Thinking Analysing
+7. **Implemention Plan**
+  When creating an implementation plan in Plan mode, first save the plan data as `cela_phaseN_impl_Plan.md` in `/docs/design/phaseN` (N is Phase number) (do not summarize it under any circumstances).
+8. **Prohibition of unauthorized actions** 
+   Not autonomously perform implementation actions unless instructed by the user.
+
+## 5. Coding, Thinking Analysing
 1. **Calculations** 
 　　In principle, LLMs are incapable of performing calculations. 
     Whenever a task requires calculation—whether based on premises, constraints, code comments, or numerical values ​​embedded in the code—the model must invariably invoke a Python tool, generate mechanical calculation code, and perform both the calculation and verification, even for simple operations like addition.
 
-2. **Grounded Architecture & Verification**
+1. **Grounded Architecture & Verification**
    - **No Guessing/Fabricating:** NEVER assume or guess the existence of any API, library, or framework feature. Use official, up-to-date syntax. If you are unsure of a function signature or version-specific API, stop and ask the user or verify it using search/read tools first.
    - **Controlled Dependencies:** Do not arbitrarily import uninstalled packages. When a new library/dependency is required:
      1. Propose the specific package and explain why it is necessary.
      2. Ask for user approval, OR explicitly add it to the package configuration file (e.g., package.json, requirements.txt, go.mod) and run the install command before importing it in your code.
 
-3. **Design Before Implementation (For New Features)**
+2. **Design Before Implementation (For New Features)**
    - **Blueprint First:** Before creating new files or writing large blocks of new code, briefly present your plan:
      1. Proposed file structure and where the new code fits.
      2. Key architectural choices (e.g., state management, design patterns).
      3. Integration points with the existing code (if any).
    - **Style Consistency:** Follow the existing project's directory structure, naming conventions, and coding style.
 
-4.  **Code Quality & Completeness**
+3.  **Code Quality & Completeness**
     - **No Lazy Placeholders:** Never use placeholders like `// ... existing code ...` or `// TODO: implement` inside modified or newly created files. Always output complete, fully functional, and syntactically valid code blocks.
   
-5.  **Communication Preference**
+4.  **Communication Preference**
     - **Language:** Always explain your plans, logic, and reasoning in Japanese. Keep the actual code, variables, and technical terms in English.
 
 **Index:** `docs/design/README.md`
@@ -112,7 +127,7 @@ Optional GitHub Issue: summary + link to `docs/design/README.md` only. Do **not*
 
 ---
 
-## 3. Code Comments — "Why" Over "What"
+## 6. Code Comments — "Why" Over "What"
 
 - Never write comments that only paraphrase syntax.
 - Comments must explain **intent, constraints, rejected alternatives**.
@@ -123,7 +138,7 @@ Module / class / function docs should describe purpose and non-obvious assumptio
 
 ---
 
-## 4. Constant Modifications (Strict Control)
+## 7. Constant Modifications (Strict Control)
 
 - **Prior approval required** before changing critical constants (buffer sizes, array lengths, timeouts, protocol magic values, etc.).
 - State the reason and obtain **explicit written approval** from the user.
@@ -131,7 +146,7 @@ Module / class / function docs should describe purpose and non-obvious assumptio
 
 ---
 
-## 5. Issue & Backlog Management
+## 8. Issue & Backlog Management
 
 - Implementation leftovers → `docs/design/issue_backlog.md` as BL-xxx.
 - Do **not** dump implementation bugs into `要件定義.md`.
@@ -139,7 +154,7 @@ Module / class / function docs should describe purpose and non-obvious assumptio
 
 ---
 
-## 6. Minor / Niche Languages — Official Reference First
+## 9. Minor / Niche Languages — Official Reference First
 
 When writing or modifying code in a **minor or niche language** (vendor DSL, macros, uncommon scripting, etc.):
 
@@ -152,7 +167,7 @@ Prefer well-supported host languages (e.g. Python, C#) for tooling when a niche 
 
 ---
 
-## 7. Test / Dry-run Notes Placement
+## 10. Test / Dry-run Notes Placement
 
 | Content | Where |
 |---------|--------|
@@ -163,11 +178,11 @@ Prefer well-supported host languages (e.g. Python, C#) for tooling when a niche 
 
 ---
 
-## 8. Writing the Summary (generated code)
+## 11. Writing the Summary (generated code)
 
 Place a short purpose comment / docstring immediately before generated functions, classes, or non-trivial blocks, appropriate to the language.
 
-## 9. Autocomplete & Inline Comment Generation Rules (CRITICAL)
+## 12. Autocomplete & Inline Comment Generation Rules (CRITICAL)
 
 This section strictly governs **Autocomplete, Inline Suggestions (Cursor Tab), and Copilot Ghost Text**. 
 

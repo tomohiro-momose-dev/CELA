@@ -35,20 +35,20 @@
 
 ---
 
-## Phase 1 — （名称）
+## Phase 1 — R1: SQLite永続化基盤
 
-**目的:** （記入）
+**目的:** 既存プロトタイプの`state["decisions"]`/`state["agreements"]`（Python list）をSQLiteへ置き換える。グラフ構造・ノード構成は変更しない。
 
-**スコープ外:** （明示）
+**スコープ外:** ツール呼び出し・`write_agreement_tool`（R2/R3）、`whiteboard_drafts`書き込み（R4）
 
 | # | Exit 条件 | 検証方法 | 状態 |
 |---|-----------|----------|------|
-| P1-1 | 設計書が存在する | ドキュメント | ☐ |
-| P1-2 | 実装が設計に沿う | 照合 | ☐ |
-| P1-3 | 必須 BL が `done` または合意延期 | backlog | ☐ |
-| P1-4 | ドライラン / 試験合格 | T-* 記録 | ☐ |
+| P1-1 | 設計書が存在する | `cela_phase1_design_v7.md`, `cela_phase1_impl_Plan.md` | ☑ |
+| P1-2 | 実装が設計に沿う | 照合済み（DB層・LineageState・全ノードのDB経由化・system_prompt=[]バグ修正・Replayスタブ） | ☑ |
+| P1-3 | 必須 BL が `done` または合意延期 | BL-001（R2着手前判断で延期合意）、BL-004（P3のため延期） | ☑（延期合意） |
+| P1-4 | ドライラン / 試験合格 | スモークテスト・構文チェックはPass（T-3, T-4）。実データA/Bドライラン（設計書§5指標A・B・C）はBL-002として未達 | ☐ |
 
-**Phase 1 Done = 上記すべて ☑**
+**Phase 1 Done = 上記すべて ☑**（P1-4未達のため現時点でPhase 1は未Close）
 
 ---
 

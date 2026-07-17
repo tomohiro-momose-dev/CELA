@@ -12,6 +12,9 @@ import sys
 import os
 import datetime
 import traceback
+import sqlite3
+import uuid
+import hashlib
 from typing import Annotated, Literal, TypedDict
 
 def _take_latest(a, b):
@@ -234,18 +237,105 @@ def get_max_tokens(label: str) -> int:
     return 131072  # デフォルト
 
 
+# ---------------------------------------------------------------------------
+# Record & Replay スタブ（R1完了条件・回帰確認用、設計書§7.1準拠）
+# ---------------------------------------------------------------------------
+REPLAY_MODE = os.environ.get("CELA_REPLAY_MODE", "off")  # "off" / "record" / "replay"
+_REPLAY_FIXTURE_PATH = os.environ.get("CELA_REPLAY_FIXTURE_PATH", "")
+_call_seq_counter = 0
+_replay_fixtures: dict[str, dict] = {}
+
+
+def reset_call_seq() -> None:
+    """【SLM要約】
+    call_seqをrun単位でリセットする。Record時とReplay時のカウント開始位置のずれによる全件ミスを防ぐ。
+    """
+    global _call_seq_counter
+    _call_seq_counter = 0
+
+
+def _hash_messages_for_replay(messages: list[dict]) -> str:
+    """【SLM要約】
+    タイムスタンプ・run_id・連番等の揮発値を含まないメッセージ内容のみの正規化ハッシュを計算する（検証用のみ、一致判定はしない）。
+    """
+    normalized = "␟".join(f"{m.get('role', '')}:{m.get('content', '')}" for m in messages)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _load_replay_fixtures(path: str) -> dict:
+    """【SLM要約】
+    Replayモード起動時に、事前記録済みの(label, call_seq)キー付きフィクスチャをJSONファイルから読み込む。
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _save_replay_fixtures(path: str, fixtures: dict) -> None:
+    """【SLM要約】
+    Recordモードで蓄積したフィクスチャをJSONファイルへ都度保存し、途中終了時のデータ消失を防ぐ。
+    """
+    dirname = os.path.dirname(path)
+    if dirname:
+        os.makedirs(dirname, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(fixtures, f, ensure_ascii=False, indent=2)
+
+
 def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unknown Node") -> str:
+    """【SLM要約】
+    Orchestration of external AI API calls with Record/Replay stub support (keyed by (label, call_seq)),
+    delegating the actual retry/provider-selection logic to _query_AI_live.
+    """
+    global _call_seq_counter
+
+    call_seq = _call_seq_counter
+    _call_seq_counter += 1
+    fixture_key = f"{label}|{call_seq}"
+    msg_hash = _hash_messages_for_replay(messages)
+
+    if REPLAY_MODE == "replay":
+        if fixture_key not in _replay_fixtures:
+            raise RuntimeError(
+                f"REPLAY cache miss at (label={label}, seq={call_seq}). "
+                f"フィクスチャが揃っていないか、list版とSQLite版で呼び出し順序が異なります。"
+            )
+        cached = _replay_fixtures[fixture_key]
+        if cached.get("hash") != msg_hash:
+            print(
+                f"⚠️ [REPLAY] (label={label}, seq={call_seq}) のメッセージハッシュが記録時と不一致です。"
+                f"プロンプト内容が list版/SQLite版 で異なる可能性があります（再生は続行します）。"
+            )
+        return cached["content"]
+
+    if REPLAY_MODE == "record" and fixture_key in _replay_fixtures:
+        raise RuntimeError(
+            f"REPLAY record時に重複キー (label={label}, seq={call_seq}) を検出しました。呼び出し順序が非決定的です。"
+        )
+
+    content = _query_AI_live(messages, client, model, label)
+
+    if REPLAY_MODE == "record":
+        _replay_fixtures[fixture_key] = {"content": content, "hash": msg_hash}
+        if _REPLAY_FIXTURE_PATH:
+            _save_replay_fixtures(_REPLAY_FIXTURE_PATH, _replay_fixtures)
+
+    return content
+
+
+def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str = "Unknown Node") -> str:
     """【SLM要約】
     Orchestration of external AI API calls, managing retries, dynamic parameter tuning (temperature, JSON mode), and provider selection based on the requested task label.
     """
-    
-    
+
+
     # role連続チェック（デバッグ用、本番でも警告ログとして残す価値あり）
     for i in range(1, len(messages)):
         if messages[i]["role"] == messages[i-1]["role"]:
             print(f"⚠️ [{label}] role連続を検出: index {i-1},{i} = '{messages[i]['role']}'。APIエラーの原因になる可能性があります。")
 
-    
+
     # プロンプトはターミナルに表示せず、ログファイルのみに出力
     # MultiLoggerが有効な場合、set_prompt_modeで制御
     # MultiLoggerが無効な場合（通常は）、プロンプト出力はスキップ
@@ -365,6 +455,135 @@ def _safe_json_parse(raw: str | None, fallback: dict | list) -> dict | list:
         return fallback
 
 # ---------------------------------------------------------------------------
+# 0. SQLite永続化層（R1、設計書§2・§3.6、impl_Plan §2〜§5準拠）
+# ---------------------------------------------------------------------------
+
+_DB_CONN: sqlite3.Connection | None = None  # module-levelシングルトン。stateには持たせない（シリアライズ不可のため）
+
+
+def get_db_connection(db_path: str = "cela.db") -> sqlite3.Connection:
+    """【SLM要約】
+    WALモード・自動コミット（isolation_level=None）でSQLite接続を確立する（F-13準拠）。
+    """
+    conn = sqlite3.connect(db_path, timeout=60.0, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def get_active_conn() -> sqlite3.Connection:
+    """【SLM要約】
+    各ノード内からmodule-levelシングルトン接続を取得する。stateを経由しないためシリアライズ問題が生じない。
+    """
+    if _DB_CONN is None:
+        raise RuntimeError("DB connection is not initialized.")
+    return _DB_CONN
+
+
+def init_db(conn: sqlite3.Connection) -> None:
+    """【SLM要約】
+    R1で定義する全テーブルを、存在しない場合にのみ生成する。
+    """
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS decisions (
+        id TEXT, timestamp REAL, who TEXT, what TEXT, why TEXT,
+        reason_missing INTEGER DEFAULT 0, internal_thought_process TEXT,
+        run_id TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_decisions_run ON decisions(run_id);
+
+    CREATE TABLE IF NOT EXISTS agreements (
+        id TEXT, turn INTEGER, action_type TEXT, status TEXT, topic TEXT,
+        decision_what TEXT DEFAULT '', reason_why TEXT DEFAULT '',
+        proposed_by TEXT, entry_type TEXT, phase_id TEXT,
+        abstraction_level TEXT, scope TEXT, time_axis TEXT,
+        depends_on TEXT, resource_claims TEXT, timestamp REAL,
+        evidence TEXT, is_frozen INTEGER DEFAULT 0, internal_thought_process TEXT,
+        run_id TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agreements_run_topic ON agreements(run_id, topic);
+    CREATE INDEX IF NOT EXISTS idx_agreements_run_status ON agreements(run_id, status);
+
+    CREATE TABLE IF NOT EXISTS whiteboard_drafts (
+        draft_id TEXT, phase_id TEXT NOT NULL, task_id TEXT NOT NULL, version INTEGER,
+        content TEXT, author_role TEXT, edit_summary TEXT, timestamp REAL, run_id TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_wb_run ON whiteboard_drafts(run_id, phase_id, task_id);
+
+    CREATE TABLE IF NOT EXISTS chat_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, turn INTEGER, role TEXT, content TEXT, timestamp REAL, run_id TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS current_goal (
+        goal_id TEXT PRIMARY KEY, core_philosophy TEXT NOT NULL, absolute_constraints TEXT, updated_at REAL
+    );
+    """)
+
+
+def db_append_decision(d: dict, conn: sqlite3.Connection, run_id: str) -> None:
+    """【SLM要約】
+    Decisionレコードをdecisionsテーブルへ即時コミットする（state["decisions"].appendの置換先）。
+    """
+    conn.execute(
+        "INSERT INTO decisions (id, timestamp, who, what, why, reason_missing, internal_thought_process, run_id) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (d.get("id"), d.get("timestamp"), d.get("who"), d.get("what"), d.get("why"),
+         1 if d.get("reason_missing") else 0, d.get("internal_thought_process"), run_id)
+    )
+
+
+def db_append_agreement(a: dict, conn: sqlite3.Connection, run_id: str) -> None:
+    """【SLM要約】
+    Agreementレコードをagreementsテーブルへ即時コミットする（state["agreements"].appendの置換先）。
+    既存Agreementの content/rationale を decision_what/reason_why にマッピングする。
+    """
+    depends_on_val = json.dumps(a.get("depends_on", []), ensure_ascii=False) if isinstance(a.get("depends_on"), (list, dict)) else (a.get("depends_on") or "[]")
+    resource_claims_val = json.dumps(a.get("resource_claims", {}), ensure_ascii=False) if isinstance(a.get("resource_claims"), (list, dict)) else (a.get("resource_claims") or "{}")
+    conn.execute(
+        "INSERT INTO agreements (id, turn, action_type, status, topic, decision_what, reason_why, proposed_by, "
+        "entry_type, phase_id, abstraction_level, scope, time_axis, depends_on, resource_claims, timestamp, "
+        "evidence, is_frozen, internal_thought_process, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (a.get("id"), a.get("turn"), a.get("action_type"), a.get("status"), a.get("topic"),
+         a.get("content", ""), a.get("rationale", ""), a.get("proposed_by"), a.get("entry_type"),
+         a.get("phase_id"), a.get("abstraction_level"), a.get("scope"), a.get("time_axis"),
+         depends_on_val, resource_claims_val, a.get("timestamp"), None, 0, None, run_id)
+    )
+
+
+def db_supersede_agreement(agreement_id: str, conn: sqlite3.Connection, run_id: str) -> None:
+    """【SLM要約】
+    既存agreementレコードを、リスト内ミューテーションではなくUPDATE差分でstatus='Superseded'へ遷移させる。
+    """
+    conn.execute(
+        "UPDATE agreements SET status='Superseded' WHERE id=? AND run_id=?",
+        (agreement_id, run_id)
+    )
+
+
+def get_agreements_from_db(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    """【SLM要約】
+    指定run_idのagreementsをid昇順（登録順序保証）で全件取得する。
+    既存コードとの互換のため、decision_what/reason_why の content/rationale エイリアスを付与する。
+    """
+    rows = conn.execute("SELECT * FROM agreements WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["content"] = d.get("decision_what", "")
+        d["rationale"] = d.get("reason_why", "")
+        result.append(d)
+    return result
+
+
+def get_decisions_from_db(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    """【SLM要約】
+    指定run_idのdecisionsをid昇順（登録順序保証）で全件取得する。
+    """
+    rows = conn.execute("SELECT * FROM decisions WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+# ---------------------------------------------------------------------------
 # 1. 状態定義
 # ---------------------------------------------------------------------------
 
@@ -442,8 +661,8 @@ class LineageState(TypedDict):
     current_task_summary: str
     selected_expert: str
     expert_output: str
-    decisions: list[Decision]
-    agreements: list[Agreement] 
+    run_id: str
+    db_path: str
     chat_history: list[dict]
     turn_count: int
     max_turns: int
@@ -567,8 +786,22 @@ Filters out superseded or directive items and applies status-based formatting/la
             content_preview = content_preview[:150]
                 
         lines.append(f"{icon}{type_label} {clean_topic}: {content_preview}")
-        
+
     return "\n".join(lines)
+
+
+def _build_hydrate_context_from_db(conn: sqlite3.Connection, run_id: str, config: Appconfig) -> str:
+    """【SLM要約】
+    SQLiteからdecisionsを取得し、旧list版と同一のロジックでコンテキスト文字列化する（impl_Plan §5.2準拠）。
+    """
+    return _build_hydrate_context(get_decisions_from_db(conn, run_id), config)
+
+
+def _build_agreements_context_from_db(conn: sqlite3.Connection, run_id: str) -> str:
+    """【SLM要約】
+    SQLiteからagreementsを取得し、旧list版と同一のロジック（Rejectedも却下事項として含める既存挙動維持）でコンテキスト文字列化する。
+    """
+    return _build_agreements_context(get_agreements_from_db(conn, run_id))
 
 
 def call_task_planner(goal: str) -> list[dict]:
@@ -659,11 +892,12 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
     if not recent_text:
         recent_text = "(まだ履歴はありません)"
         
-    agreements_text = _build_agreements_context(state["agreements"])
+    _conn = get_active_conn()
+    agreements_text = _build_agreements_context_from_db(_conn, state["run_id"])
     print(f"【プロジェクトの合意・決定事項・検討状況DB】\n {agreements_text} \n\n")
-    
+
     if config["is_stateless_mode"]:
-        hydrate_context = _build_hydrate_context(state["decisions"], config)
+        hydrate_context = _build_hydrate_context_from_db(_conn, state["run_id"], config)
         history_text = f"【過去のシステム判断ログ】\n {hydrate_context} \n\n【直近の対話文脈】\n{recent_text}"
     else:
         all_text = "\n".join([f"{'User' if m['role']=='user' else 'AI'}: {m['content']}" for m in state["chat_history"]])
@@ -736,7 +970,8 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     agent_has_guardrail = config["agent_has_guardrail"]
     max_turns = config["initial_max_turnval"]
     turn_count = state["turn_count"]
-    agreements_text = _build_agreements_context(state["agreements"])
+    _conn = get_active_conn()
+    agreements_text = _build_agreements_context_from_db(_conn, state["run_id"])
     is_stateless_mode = config["is_stateless_mode"]
     user_input = state["user_input"]
     chat_history_window = config["chat_history_window"]
@@ -817,7 +1052,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     
     messages = []
     if is_stateless_mode:
-        hydrate_context = _build_hydrate_context(state["decisions"], config)
+        hydrate_context = _build_hydrate_context_from_db(_conn, state["run_id"], config)
         system_prompt += f"\n【過去の会話を圧縮したシステム判断ログ】\n{hydrate_context}\n"
         messages.append({"role": "system", "content": system_prompt})
         
@@ -851,7 +1086,7 @@ def call_detector(state: LineageState, target_role: str) -> dict:
     Determining the rigor of auditing criteria based on whether the input is a user instruction/review or an agent proposal, then using an LLM to assess both safety risks and constraint adherence in the conversation history.
     """
  
-    recent_decitions = json.dumps(state["decisions"][-2:], ensure_ascii=False)
+    recent_decitions = json.dumps(get_decisions_from_db(get_active_conn(), state["run_id"])[-2:], ensure_ascii=False)
     recent_history = state["chat_history"][-2:]
     history_text = "\n".join([f"{'[User]' if m['role']=='user' else '[AI]'}\n {m['content']}" for m in recent_history])
     goal = state["goal"]
@@ -1173,8 +1408,9 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
     Generation of a comprehensive audit prompt synthesizing past decisions, agreements, chat history, and risks to determine the overall project discussion status (completed, stagnant, or continuing).
     """
     
-    decisions = state["decisions"]
-    agreements = state["agreements"]
+    _conn = get_active_conn()
+    decisions = get_decisions_from_db(_conn, state["run_id"])
+    agreements = get_agreements_from_db(_conn, state["run_id"])
     chat_history = state["chat_history"]
     turn_count = state["turn_count"]
     max_turns = state["max_turns"]
@@ -1411,13 +1647,14 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     is_stateless_mode = config["is_stateless_mode"]
     user_always_remembers = config["user_always_remember"]
 
-    agreements_text = _build_agreements_context(state["agreements"])
-    
+    _conn = get_active_conn()
+    agreements_text = _build_agreements_context_from_db(_conn, state["run_id"])
+
     # タイムラインの構
     timeline = []
     timeline_str = []
-    system_prompt = []
-    for i, d in enumerate(state["decisions"]):
+    system_prompt = ""
+    for i, d in enumerate(get_decisions_from_db(_conn, state["run_id"])):
             why_short = (d["why"][:100] + "…") if len(d.get("why", "")) > 100 else d.get("why", "")
             ts_val = d.get("timestamp", 0)
             ts = datetime.datetime.fromtimestamp(ts_val).strftime("%H:%M:%S") if ts_val else "??:??:??"
@@ -1577,7 +1814,7 @@ def arbiter_node(state: LineageState) -> LineageState:
         what=f"リソース超過調停: {overrun['constraint']}", 
         why=result.get("rationale", "再配分案を提示")
     )
-    state["decisions"].append(decision)
+    db_append_decision(decision, get_active_conn(), state["run_id"])
     return state
 
 # ---------------------------------------------------------------------------
@@ -1641,7 +1878,7 @@ Sets the starting phase for subsequent execution steps within the lineage state.
         state["global_constraints"] = []
         decision = make_decision("task_planner", f"プロジェクトを {len(phases)} フェーズに分解", "初期計画策定")
         print(f"[task_planner]  プロジェクトを {len(phases)} フェーズに分解 初期計画策定)")
-        state["decisions"].append(decision)
+        db_append_decision(decision, get_active_conn(), state["run_id"])
     print("\n------ [task_planner] をパス ------\n")
     return state
 
@@ -1670,7 +1907,7 @@ def orchestrator_node(state: LineageState) -> LineageState:
           {decision}\n\n
           """)
     state["selected_expert"] = result["expert"]
-    state["decisions"].append(decision)
+    db_append_decision(decision, get_active_conn(), state["run_id"])
     return state
 
 
@@ -1700,8 +1937,8 @@ Updates system state with the expert's output, decisions, and conversational his
     print(f"\n--- ✨ Agent AI ({state['selected_expert']}) の返答 ---")
     print(state["expert_output"])
     state["current_task_summary"] = (output or "")[:200]
-    state["decisions"].append(decision)
-    
+    db_append_decision(decision, get_active_conn(), state["run_id"])
+
     #state["chat_history"].append({"role": "user", "content": state["user_input"]})
     state["chat_history"].append({"role": "assistant", "content": output})
     return state
@@ -1766,9 +2003,10 @@ Manages state updates including risk levels, constraint logging, and decision re
         what=f"risk={result['risk']}, constraint_issue={result['constraint_issue']}",
         why=result["comment"]
     )
-    state["decisions"].append(decision)
+    _conn = get_active_conn()
+    db_append_decision(decision, _conn, state["run_id"])
 
-    this_turn_decisions = state["decisions"][1:]
+    this_turn_decisions = get_decisions_from_db(_conn, state["run_id"])[1:]
 
     for d in this_turn_decisions:
         print(f"  [{d['who']}]")
@@ -1782,7 +2020,9 @@ def decision_extractor_node(state: LineageState) -> LineageState:
     Extraction and formalization of decisions, agreements, and deliverables from conversational history into the system state.
     """
     print(f"\n------ [decision_extractor] が思考中 ------")
-    
+    _conn = get_active_conn()
+    _run_id = state["run_id"]
+
     # 🌟 【ここを追加】直前の発言者が誰かを履歴の末尾から自動判定する
     target_role = "expert" # デフォルト
     if state["chat_history"]:
@@ -1790,7 +2030,7 @@ def decision_extractor_node(state: LineageState) -> LineageState:
         # APIの仕様上、"user"なら発注者(User AI)、"assistant"なら作業者(Expert AI)
         target_role = "user" if last_msg_role == "user" else "expert"
 
-    existing_topics = list({a["topic"] for a in state["agreements"] if a.get("status") != "Superseded"})
+    existing_topics = list({a["topic"] for a in get_agreements_from_db(_conn, _run_id) if a.get("status") != "Superseded"})
     extracted_items = call_decision_extractor(state["chat_history"], existing_topics, target_role)
     print(f"\n------ 完了 ------")
     
@@ -1840,10 +2080,10 @@ def decision_extractor_node(state: LineageState) -> LineageState:
         if action_type == "UPDATE" or status == "Approved_with_Conditions":
             target_topic = item.get("target_topic", topic)
             old_content = ""
-            for a in reversed(state["agreements"]):
+            for a in reversed(get_agreements_from_db(_conn, _run_id)):
                 if a["topic"] == target_topic and a.get("status") != "Superseded":
                     old_content = a["content"]
-                    a["status"] = "Superseded"
+                    db_supersede_agreement(a["id"], _conn, _run_id)
                     if proposed_by == "Unknown" or not proposed_by:
                         proposed_by = a.get("proposed_by", "Unknown")
                     break
@@ -1882,15 +2122,15 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                 "depends_on": depends_on,
                 "resource_claims": resource_claims
             }
-            state["agreements"].append(agreement)
-            
+            db_append_agreement(agreement, _conn, _run_id)
+
             decision_log = make_decision(
-                who="decision_extractor", 
-                what=f"合意更新[{status}]: {target_topic}", 
+                who="decision_extractor",
+                what=f"合意更新[{status}]: {target_topic}",
                 why=f"[{proposed_by}] {rationale}"
             )
-            state["decisions"].append(decision_log)
-                
+            db_append_decision(decision_log, _conn, _run_id)
+
         else:
             agreement: Agreement = {
                 "id": f"AG-{int(time.time() * 1000)}",
@@ -1909,14 +2149,14 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                 "depends_on": depends_on,
                 "resource_claims": resource_claims
             }
-            state["agreements"].append(agreement)
-            
+            db_append_agreement(agreement, _conn, _run_id)
+
             decision_log = make_decision(
-                who="decision_extractor", 
-                what=f"新規抽出[{status}]: {topic}", 
+                who="decision_extractor",
+                what=f"新規抽出[{status}]: {topic}",
                 why=f"[{proposed_by}] {rationale}"
             )
-            state["decisions"].append(decision_log)
+            db_append_decision(decision_log, _conn, _run_id)
         
         # 🌟 【ここが追加部分】 抽出結果をターミナルに綺麗にプリントする
         print(f"\n  📝 [Extract] {agreement['action_type']} - {agreement['entry_type']}: {agreement['topic']}")
@@ -1970,7 +2210,7 @@ It generates a formal decision based on reflection results, updating the overall
         what=f"内省監査実行: aligned={result['still_aligned']}, status={result['discussion_status']}",
         why=f"【判定: {stop_reason_label}】 {result['note']}",
     )
-    state["decisions"].append(decision)
+    db_append_decision(decision, get_active_conn(), state["run_id"])
     return state
 
 def facilitator_node(state: LineageState) -> LineageState:
@@ -1982,11 +2222,11 @@ def facilitator_node(state: LineageState) -> LineageState:
     if state["facilitation_count"] > 3:
         state["halt"] = True
         decision = make_decision("system", "強制停止", "ファシリテーションの上限回数(3回)を超えても議論が改善されませんでした。")
-        state["decisions"].append(decision)
+        db_append_decision(decision, get_active_conn(), state["run_id"])
         return state
-    
+
     print(f"\n------ [facilitator] が思考中 ------")
-    feedback = call_facilitator(state["goal"], state["chat_history"], state["decisions"])
+    feedback = call_facilitator(state["goal"], state["chat_history"], get_decisions_from_db(get_active_conn(), state["run_id"]))
     print(f"\n------ 完了 ------")
     
     if state["chat_history"] and state["chat_history"][-1]["role"] == "assistant":
@@ -2033,9 +2273,11 @@ def integrator_node(state: LineageState) -> LineageState:
     Aggregation and Lineage attribution of approved deliverables into a final master specification document, followed by contradiction checking.
     """
     print(f"\n------ [integrator] による成果物の物理結合と Lineage 付与 ------")
-    
+    _conn = get_active_conn()
+    _run_id = state["run_id"]
+
     # DBから承認済みの「成果物(Deliverable)」をすべて抽出
-    deliverables = [a for a in state["agreements"] if a["entry_type"] == "Deliverable" and a["status"] == "Approved"]
+    deliverables = [a for a in get_agreements_from_db(_conn, _run_id) if a["entry_type"] == "Deliverable" and a["status"] == "Approved"]
     
     if not deliverables:
         print("⚠️ 結合すべき成果物(Deliverable)が見つかりませんでした。")
@@ -2081,7 +2323,7 @@ def integrator_node(state: LineageState) -> LineageState:
         print(f"⚠️ [integrator] 成果物間に矛盾を検出しました: {result.get('details')}")
         state["needs_revision_phases"] = result.get("affected_phases", [])
         state["ready_for_review"] = False # 差し戻し
-        state["decisions"].append(make_decision("integrator", "矛盾検知", result.get("details")))
+        db_append_decision(make_decision("integrator", "矛盾検知", result.get("details")), _conn, _run_id)
     else:
         print("✅ [integrator] 成果物間の矛盾なし。統合要件定義書をファイル保存・DB登録します。")
         
@@ -2089,7 +2331,7 @@ def integrator_node(state: LineageState) -> LineageState:
         master_filepath = save_deliverable_to_file("★最終統合要件定義書（Lineage完全版）", final_text)
 
         # 矛盾がなければ、完成した統合ドキュメントをDBに登録
-        state["agreements"].append({
+        db_append_agreement({
             "id": f"AG-MASTER-{int(time.time() * 1000)}",
             "turn": state["turn_count"],
             "action_type": "CREATE",
@@ -2105,8 +2347,8 @@ def integrator_node(state: LineageState) -> LineageState:
             "time_axis": "current",
             "depends_on": [d["id"] for d in deliverables],
             "resource_claims": {}
-        })
-        state["decisions"].append(make_decision("integrator", "統合完了", f"全成果物を結合 (保存先: {master_filepath})"))
+        }, _conn, _run_id)
+        db_append_decision(make_decision("integrator", "統合完了", f"全成果物を結合 (保存先: {master_filepath})"), _conn, _run_id)
         state["discussion_status"] = "completed"
     
     return state
@@ -2116,7 +2358,9 @@ def reviewer_node(state: LineageState) -> LineageState:
     QA review and validation of the final integrated requirements document, incrementing review counts and managing subsequent approval or revision cycles.
     """
     state["review_count"] += 1
-    master_doc_data = next((a["content"] for a in reversed(state["agreements"]) if a["topic"] == "★最終統合要件定義書（Lineage完全版）"), "")
+    _conn = get_active_conn()
+    _run_id = state["run_id"]
+    master_doc_data = next((a["content"] for a in reversed(get_agreements_from_db(_conn, _run_id)) if a["topic"] == "★最終統合要件定義書（Lineage完全版）"), "")
     
     # ===== ファイルから内容を読み込む =====
     if master_doc_data.startswith("FILE_PATH:"):
@@ -2147,25 +2391,25 @@ def reviewer_node(state: LineageState) -> LineageState:
     if result["passed"]:
         state["is_completed"] = True
         decision = make_decision("reviewer", "最終成果物の承認 (Passed)", result.get("reasoning", "QA審査を通過しました。"))
-        state["decisions"].append(decision)
+        db_append_decision(decision, _conn, _run_id)
     else:
         if state["review_count"] > 3:
             state["halt"] = True
             decision = make_decision("system", "強制停止", "QAからの差し戻し上限回数(3回)に達しました。プロジェクトは失敗として終了します。")
-            state["decisions"].append(decision)
+            db_append_decision(decision, _conn, _run_id)
         else:
             state["ready_for_review"] = False
             feedback = result["feedback"]
             added_turns = 5
             state["max_turns"] += added_turns
             state["discussion_status"] = "continuing"
-            
+
             msg = f"🔥 【QA責任者からの差し戻し (リテイク {state['review_count']}/3) - 延長戦突入】\n{feedback}\n※仕様の矛盾やバグを修正してください。制限ターンが {added_turns} ターン延長されました。"
             state["chat_history"].append({"role": "user", "content": msg})
-            
+
             decision = make_decision("reviewer", f"成果物の差し戻し (Needs Fix) -> {added_turns}ターン延長", feedback)
-            state["decisions"].append(decision)
-            
+            db_append_decision(decision, _conn, _run_id)
+
     return state
 
 def halt_node(state: LineageState) -> LineageState:
@@ -2173,7 +2417,7 @@ def halt_node(state: LineageState) -> LineageState:
     System shutdown initiation by logging a definitive halt decision within the lineage state.
     """
     decision = make_decision(who="system", what="処理を完全停止", why="条件を満たしたためシステムをHaltします。")
-    state["decisions"].append(decision)
+    db_append_decision(decision, get_active_conn(), state["run_id"])
     return state
 
 
@@ -2433,14 +2677,25 @@ Otherwise, routing to "user_decision_extractor."
 # 6. AI vs AI 実行用ループ
 # ---------------------------------------------------------------------------
 
-def run_ai_vs_ai_loop(target_goal: str, config: Appconfig):
+def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.db"):
     """【SLM要約】
     Orchestration of an iterative, goal-driven dialogue loop where multiple AIs collaborate to refine a solution based on predefined constraints and state management.
+    SQLite接続（run単位のシングルトン）を初期化し、ループ終了時に必ずクローズする（R1、設計書§3.6.1準拠）。
     """
+    global _DB_CONN
+
     app = build_graph()
-    
+
     #user_always_remembers = pattern in (3, 4)
     #agent_has_guardrail = pattern in (2, 4)
+
+    run_id = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    reset_call_seq()
+    if REPLAY_MODE == "replay":
+        _replay_fixtures.update(_load_replay_fixtures(_REPLAY_FIXTURE_PATH))
+
+    _DB_CONN = get_db_connection(db_path)
+    init_db(_DB_CONN)
 
     state: LineageState = {
         "goal": target_goal,
@@ -2448,8 +2703,8 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig):
         "current_task_summary": "",
         "selected_expert": "",
         "expert_output": "",
-        "decisions": [],
-        "agreements": [], 
+        "run_id": run_id,
+        "db_path": db_path,
         "chat_history": [],
         "turn_count": 0,
         "max_turns":  config["initial_max_turnval"],
@@ -2483,71 +2738,74 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig):
 
     mode_str = "【ステートレス（決定事項DBによる知識永続化）】" if config["is_stateless_mode"] else "【ステートフル（生ログ全蓄積）】"
 
-    print("============================================================")
-    print(f"🚀 Lineage Orchestrator: シナリオ検証  - DB+QAレビュー＆介入強化版")
-    print(f"⚙️ 実行モード: {mode_str}")
-    print(f"🎯 共通目標:\n{target_goal}")
-    print(f"⏳ 初期設定ターン数: {config["initial_max_turnval"]} ターン制限")
-    print("============================================================")
+    try:
+        print("============================================================")
+        print(f"🚀 Lineage Orchestrator: シナリオ検証  - DB+QAレビュー＆介入強化版")
+        print(f"⚙️ 実行モード: {mode_str}")
+        print(f"🎯 共通目標:\n{target_goal}")
+        print(f"⏳ 初期設定ターン数: {config["initial_max_turnval"]} ターン制限")
+        print("============================================================")
 
-  
-    current_turn = 1
-    while current_turn <= state["max_turns"]:
-        print(f"\n\n{'='*60}")
-        print(f"🔷 [Turn {current_turn} / {state['max_turns']}]")
-        print(f"{'='*60}")
+        current_turn = 1
+        while current_turn <= state["max_turns"]:
+            print(f"\n\n{'='*60}")
+            print(f"🔷 [Turn {current_turn} / {state['max_turns']}]")
+            print(f"{'='*60}")
 
-        #print("\n👤 User AI が思考中...")
-        #user_input = generate_user_utterance(target_goal, state["chat_history"], state["agreements"], current_turn, user_always_remembers, state["max_turns"], is_stateless_mode)
-        #print(f"\n>>> 👤 User AIの発言:\n{user_input}")
-        
-        #state["user_input"] = user_input
-        state["turn_count"] = current_turn
-        prev_decision_count = len(state["decisions"])
+            #print("\n👤 User AI が思考中...")
+            #user_input = generate_user_utterance(target_goal, state["chat_history"], state["agreements"], current_turn, user_always_remembers, state["max_turns"], is_stateless_mode)
+            #print(f"\n>>> 👤 User AIの発言:\n{user_input}")
 
-        #print("\n🤖 Agent AI が思考中...")
-        state = app.invoke(state)
+            #state["user_input"] = user_input
+            state["turn_count"] = current_turn
+            prev_decision_count = len(get_decisions_from_db(_DB_CONN, run_id))
 
-        #print("\n--- 🧠 Agent AIの内部思考プロセス (Decision Lineage & Extracted Agreements) ---")
-        
-        this_turn_decisions = state["decisions"][prev_decision_count:]
-    
-        for d in this_turn_decisions:
-            if d["who"] == "orchestrator":
-                print(f"  [orchestrator]")
-                print(f"   -what: {d['what']}")
-                print(f"   -why: {d['why']}")
+            #print("\n🤖 Agent AI が思考中...")
+            state = app.invoke(state)
+
+            #print("\n--- 🧠 Agent AIの内部思考プロセス (Decision Lineage & Extracted Agreements) ---")
+
+            this_turn_decisions = get_decisions_from_db(_DB_CONN, run_id)[prev_decision_count:]
+
+            for d in this_turn_decisions:
+                if d["who"] == "orchestrator":
+                    print(f"  [orchestrator]")
+                    print(f"   -what: {d['what']}")
+                    print(f"   -why: {d['why']}")
+                    break
+
+            for d in this_turn_decisions:
+                if d['who'] == 'orchestrator':
+                    continue
+                elif d['who'] == 'decision_extractor':
+                    print(f"  ✨ [DB登録] {d['what']} ({d['why']})")
+                else:
+                    """
+                    print(f"  [{d['who']}]")
+                    print(f"    - what: {d['what']}")
+                    print(f"    - why: {d['why']}")
+                    """
+                if d['who'] == 'reviewer' and "差し戻し" in d['what']:
+                    print("\n🔥 ＞＞ QA責任者からの差し戻し（延長戦突入）が発動しました！ ＜＜")
+                elif d['who'] == 'facilitator':
+                    print("\n⚠️ ＞＞ ファシリテーターによる軌道修正の提案が発動しました！ ＜＜")
+
+            if state.get("is_completed"):
+                print("\n🎉 [SUCCESS] QAの最終審査を通過し、議論と成果物が承認されました！自律ループを終了します。")
                 break
-        
-        for d in this_turn_decisions:
-            if d['who'] == 'orchestrator':
-                continue
-            elif d['who'] == 'decision_extractor':
-                print(f"  ✨ [DB登録] {d['what']} ({d['why']})")
-            else:
-                """
-                print(f"  [{d['who']}]")
-                print(f"    - what: {d['what']}")
-                print(f"    - why: {d['why']}")
-                """
-            if d['who'] == 'reviewer' and "差し戻し" in d['what']:
-                print("\n🔥 ＞＞ QA責任者からの差し戻し（延長戦突入）が発動しました！ ＜＜")
-            elif d['who'] == 'facilitator':
-                print("\n⚠️ ＞＞ ファシリテーターによる軌道修正の提案が発動しました！ ＜＜")
 
-        if state.get("is_completed"):
-            print("\n🎉 [SUCCESS] QAの最終審査を通過し、議論と成果物が承認されました！自律ループを終了します。")
-            break
+            if state["halt"]:
+                print(f"\n🚨 [HALT] システム停止シグナルが送信されました。 (ステータス: {state['discussion_status']})")
+                break
 
-        if state["halt"]:
-            print(f"\n🚨 [HALT] システム停止シグナルが送信されました。 (ステータス: {state['discussion_status']})")
-            break
+            current_turn += 1
 
-        current_turn += 1
-
-    print("\n============================================================")
-    print(f"🏁 評価ループが終了しました。 {mode_str})")
-    print("============================================================")
+        print("\n============================================================")
+        print(f"🏁 評価ループが終了しました。 {mode_str})")
+        print("============================================================")
+    finally:
+        _DB_CONN.close()
+        _DB_CONN = None
 
 
 if __name__ == "__main__":
