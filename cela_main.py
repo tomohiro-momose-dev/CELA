@@ -1,7 +1,7 @@
 """
-Lineage Orchestrator — AI vs AI ゴールドリフト検証プロトタイプ
-【QAレビュー ＆ ファシリテーター介入 ＋ 意思決定抽出(Agreements DB) ＆ ファイル出力完全版（ファイル上書き保護機能付き）】
-"""
+# 要件定義書: CELA — 認知型経験系譜駆動マルチエージェントシステム
+# (Cognitive Experience Lineage-driven Agent System)
+# """
 
 from __future__ import annotations
 
