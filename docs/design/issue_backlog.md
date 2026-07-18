@@ -217,7 +217,7 @@ Python REPL サンドボックス（`_run_python_repl`）の AST 検査を、`as
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open` |
+| 状態 | `done` |
 | 優先度 | P2 |
 | 依存 | なし |
 | 関連 | [D-007](decision_log.md#d-007-python-repl許可モジュールからrandomを除去しdecimalfractionsは理由付きで維持する)、[decision_lineage.md 論点6](decision_lineage.md)、impl_Plan R2.2 |
@@ -226,10 +226,12 @@ Python REPL サンドボックス（`_run_python_repl`）の AST 検査を、`as
 
 `_ALLOWED_IMPORTS` から `random` を削除する（`random` は検算の決定性＝再現性を損なうため）。`decimal`/`fractions` は浮動小数点誤差回避の目的に合致するため理由を明記して維持。design v7 §3.5.3 の許可モジュールリストに `fractions`/`decimal` を追記し、`random` 除外の理由を ★v9 追記済み（2026-07-18 更新）。
 
+**2026-07-19完了**: `_ALLOWED_IMPORTS = {"math", "statistics", "datetime", "json", "fractions", "decimal"}`として実装。スモークテストで`import random`が拒否され、`decimal`/`fractions`は正常動作することを確認済み。
+
 **完了条件:**
 
-- `_ALLOWED_IMPORTS` が `math, statistics, datetime, json, fractions, decimal` のみである。
-- design v7 §3.5.3 の許可リストと実装が一致している。
+- `_ALLOWED_IMPORTS` が `math, statistics, datetime, json, fractions, decimal` のみである。（✅ 完了）
+- design v7 §3.5.3 の許可リストと実装が一致している。（✅ 完了）
 
 ---
 
