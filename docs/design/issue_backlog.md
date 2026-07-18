@@ -37,13 +37,13 @@
 | BL-003 | 中 | `cela_main.py` (Record&Replayスタブ) | ~~実LLM応答を使ったrecord→replay往復検証（impl_Plan §7.2合格基準1・2）未実施~~ → `done`（T-5） | P1 |
 | BL-004 | 低 | `cela_main.py` (死んだimport) | `from secrets import choice`、`from unittest import result` の未使用import除去 | P3 |
 | BL-005 | 中 | `cela_main.py` (`build_graph()`既存トポロジ) | `state["turn_count"]`が`app.invoke()`1回の間凍結され、外側ループの「Nターン目」表示・上限が実際の対話ラウンド数と一致しない | P2 |
-| BL-006 | 中 | `cela_main.py` (`query_AI`) | R2 ツール呼び出しループの`query_AI`集約実装（D-008） | P1 |
-| BL-007 | 高 | `cela_main.py` (`_run_python_repl`) | R2 Python REPL サンドボックスの多層防御・危険呼び出し AST 検査（D-006） | P1 |
-| BL-008 | 低 | `cela_main.py` (`_ALLOWED_IMPORTS`) | R2 許可モジュールから`random`を除去、`decimal`/`fractions`は理由付き維持（D-007） | P2 |
-| BL-009 | 低 | `cela_main.py` (`query_AI`ツールループ) | R2 ツールループのリトライ粒度（層1/層2）の粗さを許容する（D-004） | P3 |
-| BL-010 | 高 | `cela_main.py` (`_query_AI_live` ツールループ) | ツールループの例外（壊れたJSON引数・非収束・truncation）が既存の広い`except Exception`に飲み込まれ原因が隠蔽される（D-009） | P1 |
+| BL-006 | 中 | `cela_main.py` (`query_AI`) | ~~R2 ツール呼び出しループの`query_AI`集約実装（D-008）~~ → `done`（R2実装） | P1 |
+| BL-007 | 高 | `cela_main.py` (`_run_python_repl`) | ~~R2 Python REPL サンドボックスの多層防御・危険呼び出し AST 検査（D-006）~~ → `done`（R2実装） | P1 |
+| BL-008 | 低 | `cela_main.py` (`_ALLOWED_IMPORTS`) | ~~R2 許可モジュールから`random`を除去、`decimal`/`fractions`は理由付き維持（D-007）~~ → `done`（R2実装） | P2 |
+| BL-009 | 低 | `cela_main.py` (`query_AI`ツールループ) | ~~R2 ツールループのリトライ粒度（層1/層2）の粗さを許容する（D-004）~~ → `done`（`[CONSTRAINT]`コメントで明示済み） | P3 |
+| BL-010 | 高 | `cela_main.py` (`_query_AI_live` ツールループ) | ~~ツールループの例外（壊れたJSON引数・非収束・truncation）が既存の広い`except Exception`に飲み込まれ原因が隠蔽される（D-009）~~ → `done`（R2実装） | P1 |
 | BL-011 | 中 | `cela_main.py` (`_query_AI_live` プロバイダルーティング) | OpenRouter経由の複数バックエンドでのFunction Calling対応状況が未検証（D-010、MVPでは見送り） | P2 |
-| BL-012 | 高 | `tests/test_f26_detection.py` (R2) | B.5.1既知誤判定（Detectorの偽陽性）の非退行テストが指標Dと対で定義されていない（D-011） | P1 |
+| BL-012 | 高 | `tests/test_f26_detection.py` (R2) | ~~B.5.1既知誤判定（Detectorの偽陽性）の非退行テストが指標Dと対で定義されていない（D-011）~~ → `done`（テスト実装済み。実LLM呼び出しでの実行はユーザー指示待ち） | P1 |
 
 ---
 
