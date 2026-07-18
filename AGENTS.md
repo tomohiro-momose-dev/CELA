@@ -87,6 +87,10 @@ mcp_codebase-memo_get_architecture({ "project": "<display_name>" })
   When creating an implementation plan in Plan mode, first save the plan data as `cela_phaseN_impl_Plan.md` in `/docs/design/phaseN` (N is Phase number) (do not summarize it under any circumstances).
 8. **Prohibition of unauthorized actions** 
    Not autonomously perform implementation actions unless instructed by the user.
+9. **Decision Lineage (dialogue-level rationale)** — mirrors CELA's own core philosophy (Lineage-driven) in how the project itself is developed:
+   - Record the **dialogue** behind non-trivial decisions — not just the final ruling — in `decision_lineage.md`, one entry per review/discussion session.
+   - `decision_lineage.md` is a narrative companion to `decision_log.md`, not a replacement: `decision_log.md` keeps the concise, canonical `D-xxx` ruling (reason kept to 1-3 sentences); `decision_lineage.md` holds the fuller back-and-forth that produced it — who raised each point, who decided (explicitly attribute AI-originated proposals as such, even when the AI's reasoning is what ultimately won), and the causal wording ("because / so that / therefore") connecting fact to decision. Cross-link both directions via `D-xxx` / `BL-xxx` IDs.
+   - **Why this rule exists:** thin "why" records cause knowledge silos and tacit, person-dependent understanding (属人化) — a risk that compounds as AI takes a growing role in decisions. Preserving who argued what and why, including the AI's own reasoning trail, is treated as load-bearing, not optional documentation.
 
 ## 5. Coding, Thinking Analysing
 1. **Calculations** 
@@ -120,6 +124,7 @@ mcp_codebase-memo_get_architecture({ "project": "<display_name>" })
 | Phase design | `phaseN/` | How, constraints, tests |
 | Implementation tasks | `issue_backlog.md` | BL-xxx bugs and open items |
 | Decisions (why) | `decision_log.md` | Mandatory rationale |
+| Decision dialogue (fuller why, who argued/decided) | `decision_lineage.md` | Narrative trail behind D-xxx rulings, cross-linked by ID |
 | Progress | `STATUS.md`, `phase_gates.md`, `traceability.md` | Where we are / Done / coverage |
 | Optional epic entry | GitHub Issue (short) | Link to docs only |
 

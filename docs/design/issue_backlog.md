@@ -4,7 +4,7 @@
 
 | 種別 | 正しい参照先 |
 |------|-------------|
-| 要件・背景・完了条件 | [要件定義.md](要件定義.md) |
+| 要件・背景・完了条件 | [要件定義書_v35.md](要件定義書_v35.md) |
 | Phase 詳細設計 | [phase0/](phase0/) [phase1/](phase1/) |
 | 意思決定（なぜ） | [decision_log.md](decision_log.md) |
 | 索引 | [README.md](README.md) |
@@ -37,6 +37,13 @@
 | BL-003 | 中 | `cela_main.py` (Record&Replayスタブ) | ~~実LLM応答を使ったrecord→replay往復検証（impl_Plan §7.2合格基準1・2）未実施~~ → `done`（T-5） | P1 |
 | BL-004 | 低 | `cela_main.py` (死んだimport) | `from secrets import choice`、`from unittest import result` の未使用import除去 | P3 |
 | BL-005 | 中 | `cela_main.py` (`build_graph()`既存トポロジ) | `state["turn_count"]`が`app.invoke()`1回の間凍結され、外側ループの「Nターン目」表示・上限が実際の対話ラウンド数と一致しない | P2 |
+| BL-006 | 中 | `cela_main.py` (`query_AI`) | R2 ツール呼び出しループの`query_AI`集約実装（D-008） | P1 |
+| BL-007 | 高 | `cela_main.py` (`_run_python_repl`) | R2 Python REPL サンドボックスの多層防御・危険呼び出し AST 検査（D-006） | P1 |
+| BL-008 | 低 | `cela_main.py` (`_ALLOWED_IMPORTS`) | R2 許可モジュールから`random`を除去、`decimal`/`fractions`は理由付き維持（D-007） | P2 |
+| BL-009 | 低 | `cela_main.py` (`query_AI`ツールループ) | R2 ツールループのリトライ粒度（層1/層2）の粗さを許容する（D-004） | P3 |
+| BL-010 | 高 | `cela_main.py` (`_query_AI_live` ツールループ) | ツールループの例外（壊れたJSON引数・非収束・truncation）が既存の広い`except Exception`に飲み込まれ原因が隠蔽される（D-009） | P1 |
+| BL-011 | 中 | `cela_main.py` (`_query_AI_live` プロバイダルーティング) | OpenRouter経由の複数バックエンドでのFunction Calling対応状況が未検証（D-010、MVPでは見送り） | P2 |
+| BL-012 | 高 | `tests/test_f26_detection.py` (R2) | B.5.1既知誤判定（Detectorの偽陽性）の非退行テストが指標Dと対で定義されていない（D-011） | P1 |
 
 ---
 
@@ -158,8 +165,154 @@ R1では「壊さない」優先で、既存の`Agreement` TypedDict（`content`
 
 ---
 
+### BL-006: R2 ツール呼び出しループの`query_AI`集約実装
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P1 |
+| 依存 | BL-001（R2頭で実施） |
+| 関連 | [D-008](decision_log.md#d-008-r201ツール呼び出しループをquery_aiに集約する設計を承認)、[decision_lineage.md 論点7](decision_lineage.md)、impl_Plan R2.0.1 |
+
+**内容:**
+
+R2 実装計画（impl_Plan R2.0.1）の方針に基づき、ツール呼び出しループ（Function Calling / Tool Use）を各ノード関数ではなく共通層 `query_AI` に集約する。理由：①全ノードがすでに `query_AI` を呼んでおり1箇所追加が最小差分、②DRY、③Replay 境界の維持。ツール dispatch は `TOOL_DISPATCH` 辞書に分離し、R3 の `write_agreement_tool` 追加時にループ本体を変更せずに済むようする。この集約方式は Anthropic 公式 SDK の `tool_runner`、OpenAI Agents SDK の `Runner`、LangChain の `AgentExecutor` と同様の主流パターン（D-008 承認済み）。
+
+**完了条件:**
+
+- `query_AI` 内にツール呼び出しループ（MAX_TOOL_ITER=5、既存 `try/except` リトライブロック内）を実装。
+- `TOOL_DISPATCH` 辞書によるツール名→処理のマッピング分離を実装。
+- design v7 §3.5.2 の `call_expert_with_tools` 例は「説明用最小サンプル」である旨を ★v9 追記で明記済み（2026-07-18 更新）。
+
+---
+
+### BL-007: R2 Python REPL サンドボックスの多層防御・危険呼び出し AST 検査
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P1 |
+| 依存 | なし |
+| 関連 | [D-006](decision_log.md#d-006-python-replサンドボックスはビルトイン呼び出しのast検査多層防御を追加する)、[decision_lineage.md 論点5](decision_lineage.md)、impl_Plan R2.2 |
+
+**内容:**
+
+Python REPL サンドボックス（`_run_python_repl`）の AST 検査を、`ast.Import`/`ast.ImportFrom` のみのチェックから拡張する。`open`/`eval`/`exec`/`compile`/`__import__`/`globals`/`vars`/`getattr` 等の危険な名前を AST 上の `Name`/`Attribute`/`Call` 参照としてブロック（import 文なしで呼べるビルトインも対象）。加えて、AST blacklist の限界（`().__class__.__bases__` 経由等の既知の回避）を認め、実行プロセスを低権限ユーザー・書き込み不可ディレクトリで起動する多層防御とする。design v7 §3.5.3 に「危険呼び出し検査」「多層防御」として ★v9 追記済み（2026-07-18 更新）。
+
+**完了条件:**
+
+- `_run_python_repl` の AST 検査が `open`/`eval`/`exec`/`__import__` 等のビルトイン呼び出しをブロックする。
+- サブプロセス実行が低権限・書き込み不可ディレクトリで起動される。
+- design v7 §3.5.3 の記述と実装が整合している。
+
+---
+
+### BL-008: R2 許可モジュールから`random`を除去、`decimal`/`fractions`は理由付き維持
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P2 |
+| 依存 | なし |
+| 関連 | [D-007](decision_log.md#d-007-python-repl許可モジュールからrandomを除去しdecimalfractionsは理由付きで維持する)、[decision_lineage.md 論点6](decision_lineage.md)、impl_Plan R2.2 |
+
+**内容:**
+
+`_ALLOWED_IMPORTS` から `random` を削除する（`random` は検算の決定性＝再現性を損なうため）。`decimal`/`fractions` は浮動小数点誤差回避の目的に合致するため理由を明記して維持。design v7 §3.5.3 の許可モジュールリストに `fractions`/`decimal` を追記し、`random` 除外の理由を ★v9 追記済み（2026-07-18 更新）。
+
+**完了条件:**
+
+- `_ALLOWED_IMPORTS` が `math, statistics, datetime, json, fractions, decimal` のみである。
+- design v7 §3.5.3 の許可リストと実装が一致している。
+
+---
+
+### BL-009: R2 ツールループのリトライ粒度（層1/層2）の粗さを許容する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P3 |
+| 依存 | BL-006 |
+| 関連 | [D-004](decision_log.md#d-004-ツール呼び出しループは既存のtryexceptリトライブロック内に配置する)、[decision_lineage.md 論点3](decision_lineage.md)、impl_Plan R2.3 |
+
+**内容:**
+
+ツール呼び出しループを既存 `query_AI` の `try/except` リトライブロック内に配置する（D-004 承認）。この方式は「ツールループ全体を1単位」としてリトライするため粒度が粗く、1回失敗すると途中経過（`loop_messages`）を捨てて最初からやり直す。実害は軽微（MAX_TOOL_ITER=5、ローカル Python REPL は失敗しにくい）と判断し当面許容するが、将来の改善候補として BL に残す。
+
+**完了条件:**
+
+- 実装時にリトライ粒度の粗さをコードコメント（`[CONSTRAINT]` タグ推奨）で明示する。
+- 本番動作で致命的な再試行コストが確認された場合のみ、粒度細分化を再検討する。
+
+---
+
+### BL-010: R2ツールループの例外が既存の広い`except Exception`に飲み込まれ原因が隠蔽される
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P1 |
+| 依存 | BL-006 |
+| 関連 | [D-009](decision_log.md#d-009-r2ツールループの例外処理を一時的api障害とロジックエラーに区別する)、[decision_lineage.md 論点9](decision_lineage.md)、impl_Plan R2.3 |
+
+**内容:**
+
+別チャットのClaudeレビューにより、R2.3のツール呼び出しループを既存`try/except`（`except Exception as e:`、`cela_main.py:399-405`）の内側に配置する設計（D-004）が、「一時的なAPI障害」と「ロジックエラー」を区別しない副作用を持つことが判明した。壊れたtool_call引数JSON（`json.loads`失敗）や`MAX_TOOL_ITER`非収束の`RuntimeError`が、指数バックオフ（最大約248秒）を経て`"(サーバー高負荷によるAPIエラー)"`という誤った診断に丸められ、原因調査を著しく妨げる。加えて、ツールループには既存非ツールパスにある`finish_reason == "length"`（出力打ち切り）検出が欠落しており、`max_tokens`超過によるtool_call引数の途中切れが「壊れたJSON引数」として上記の隠蔽経路に混入する。
+
+**完了条件:**
+
+- `tc.function.arguments`の`json.loads`失敗は`json.JSONDecodeError`を個別に捕捉し、例外化せず`{"role": "tool", ...}`としてモデルに返して自己修正させる。
+- 外側`except Exception as e:`を`except (APIError, APIConnectionError, RateLimitError, APITimeoutError) as e:`に狭め、ロジックエラーはバックオフ無しで伝播させる。
+- ツールループ内、`tool_calls`判定前に`if choice.finish_reason == "length": raise ValueError(...)`を追加する。
+
+---
+
+### BL-011: OpenRouter経由の複数バックエンドでのFunction Calling対応状況が未検証
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P2 |
+| 依存 | なし |
+| 関連 | [D-010](decision_log.md#d-010-プロバイダ別function-calling対応の網羅検証はmvp段階では見送りblに留める)、[decision_lineage.md 論点10](decision_lineage.md)、要件定義書v35 付録B.5.3 |
+
+**内容:**
+
+要件定義書v35 付録B.5.3は、Function Calling/Tool Use導入時にプロバイダごとの対応状況を事前確認することを求めている。現状`_query_AI_live`はOpenRouter経由で複数の実バックエンド（`extra_body.provider.order=["baidu/fp8","siliconflow/fp8","wandb/fp8","morph"]`、`cela_main.py:383-390`）へ強制ルーティングしており、各バックエンドがOpenAI互換の`tools`/`tool_calls`スキーマをどこまで安定サポートするかは未検証。R2.9の指標D（数値矛盾検出率5/5）が「たまたま安定したプロバイダに当たっただけ」で通過している可能性がある。D-010によりMVP段階では網羅検証を見送り、リスクの可視化のみ本BLで行う。
+
+**完了条件（MVP後・P2以降）:**
+
+- `provider.order`の各バックエンド（baidu/fp8, siliconflow/fp8, wandb/fp8, morph）でtool callingが安定動作するか個別に検証する。
+- 不安定なバックエンドがあれば`provider.order`から除外するか、`allow_fallbacks`の扱いを見直す。
+
+---
+
+### BL-012: B.5.1既知誤判定（Detectorの偽陽性）の非退行テストが未定義
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P1 |
+| 依存 | なし |
+| 関連 | [D-011](decision_log.md#d-011-b51既知誤判定detectorの偽陽性の非退行テストを指標dと対で追加する)、[decision_lineage.md 論点11](decision_lineage.md)、impl_Plan R2.6・R2.9・R2.10 |
+
+**内容:**
+
+別チャットのClaudeレビューにより、R2.6が付録B.5.1の既知誤判定（Detectorが上限内の数値差を`major`と誤判定するバグ）を修正するプロンプトを復活させる一方、R2.9の完了条件（指標D）は「矛盾を仕込んだケースを5/5検出できること」という陽性検出のみを定義しており、「上限内の正当な数値差を誤って`major`と判定しない」という陰性側（偽陽性回避）の非退行テストが計画・`phase1_dryrun.md`のいずれにも存在しないことが判明した。R2.5のF-2.6検算指示とR2.6の上限内数値差の除外指示は将来調整され得るため、指標Dのテストのみではこのバグの再発を検知できない。
+
+**完了条件:**
+
+- `tests/test_f26_detection.py`に、上限内の正当な数値差（予算超過していない）を仕込んだ成果物のテストケースを追加し、「`none`または`minor`と判定され`major`にならないこと」を検証する。
+- `cela_phase1_impl_Plan.md` R2.9の完了条件表に、指標Dと対になる基準（B.5.1既知誤判定の非退行）を明記する。
+- R2.10のテスト格納先にも追記する。
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
+| 2026-07-18 | BL-010・BL-011を新規起票（別チャットClaudeのR2レビュー指摘、D-009・D-010準拠）。 |
+| 2026-07-18 | BL-012を新規起票（別チャットClaudeのR2レビュー指摘、D-011準拠）。 |

@@ -6,7 +6,7 @@
 |------|------|
 | [README.md](README.md) | ドキュメント運用 |
 | [phase_gates.md](phase_gates.md) | 技術完了の定義 |
-| [要件定義.md](要件定義.md) | 要件 |
+| [要件定義書_v35.md](要件定義書_v35.md) | 要件 |
 
 ---
 

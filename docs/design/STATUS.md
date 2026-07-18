@@ -10,7 +10,7 @@
 
 ## サマリー（1行）
 
-R1（SQLite永続化基盤）のコード実装が完了。実データA/Bドライランで構造的一致（BL-003）は確認済みだが、評価メトリクスA・B・Cの実測比較（BL-002本体）が未実施のためPhase 1はまだCloseしていない。
+Phase 1（R1: SQLite永続化基盤）はP1-1〜P1-4すべて☑でDone（2026-07-18サインオフ済み、D-002によりP1-4はR1スコープの構造的一致に再定義）。評価メトリクスA・B・Cの実測比較はBL-002としてP2-2（Phase 2）へ引き継ぎ。R2実装計画のレビューが完了し、BL-001（TypedDictリネーム）を頭に実装着手フェーズ。
 
 ---
 
@@ -18,9 +18,9 @@ R1（SQLite永続化基盤）のコード実装が完了。実データA/Bドラ
 
 | 項目 | 状態 |
 |------|------|
-| **アクティブ Phase** | Phase 1（R1: SQLite永続化基盤） |
-| **Phase 状態** | 実装完了・ドライラン待ち |
-| **次マイルストーン** | R1完了条件（指標A・B・C）の実データ検証 → [phase_gates.md](phase_gates.md) |
+| **アクティブ Phase** | Phase 2（R2: ツール呼び出し基盤・機械的検算ゲート） |
+| **Phase 状態** | 計画・設計・レビュー完了、実装未着手 |
+| **次マイルストーン** | BL-001（TypedDictリネーム）実施 → R2実装（BL-006〜BL-012） → [phase_gates.md](phase_gates.md) P2-1・P2-2 |
 
 ---
 
@@ -29,8 +29,8 @@ R1（SQLite永続化基盤）のコード実装が完了。実データA/Bドラ
 | Phase | 状態 | 備考 |
 |-------|------|------|
 | Phase 0 | 完了 | 既存プロトタイプのリバースエンジニアリング・要件定義 |
-| Phase 1 (R1) | 実装完了・検証待ち | `cela_main.py`をSQLite永続化に置換。スモークテスト・構文チェックはPass。実データA/Bドライランで構造的一致は確認済み（T-5、BL-003 done）。指標A・B・Cの実測比較は BL-002 |
-| Phase 2以降 (R2〜) | 未着手 | |
+| Phase 1 (R1) | **完了（Done、2026-07-18サインオフ）** | `cela_main.py`をSQLite永続化に置換。スモークテスト・構文チェックはPass。実データA/Bドライランで構造的一致は確認済み（T-5、BL-003 done）。指標A・B・Cの実測比較はD-002によりP2-2へ引き継ぎ（BL-002、`blocked`） |
+| Phase 2 (R2〜) | 計画・設計・レビュー完了、実装未着手 | R2実装計画を `cela_phase1_impl_Plan.md` に追記・レビュー済み（Function Calling / Python REPLサンドボックス / F-2.6検算ゲート）。design v7 §3.5.2/§3.5.3 を ★v9 で更新。decision_log D-002〜D-011・issue_backlog BL-001, BL-006〜BL-012 を起票・相互リンク済み。実装はBL-001（TypedDictリネーム）を最初のステップとして着手する（D-003）。 |
 
 詳細な完了定義: [phase_gates.md](phase_gates.md)
 
@@ -62,9 +62,15 @@ R1（SQLite永続化基盤）のコード実装が完了。実データA/Bドラ
 
 ## 直近アクション（Next Actions）
 
-1. [ ] BL-002: 評価メトリクスA（却下案の回避率）・B（制約の維持率）・C（収束性とコストのトレードオフ）の実測比較（構造的一致はT-5で確認済み）
-2. [x] BL-003: Record&Replayスタブの実LLM応答による往復検証（T-5、2026-07-18完了）
-3. [ ] BL-001: Agreement TypedDictの`content`/`rationale`リネーム判断（R2着手前）
+1. [ ] BL-001: Agreement TypedDictの`content`/`rationale`リネーム実施（R2の頭、D-003）
+2. [ ] BL-006: R2ツール呼び出しループの`query_AI`集約実装
+3. [ ] BL-007: Python REPLサンドボックスの多層防御・危険呼び出しAST検査
+4. [ ] BL-008: 許可モジュールから`random`除去（`decimal`/`fractions`維持）
+5. [ ] BL-010: ツールループの例外処理を一時的API障害とロジックエラーに区別（D-009）
+6. [ ] BL-012: B.5.1既知誤判定の非退行テストを`test_f26_detection.py`に追加（D-011）
+7. [ ] BL-002: 評価メトリクスA・B・Cの実測比較（R2実装完了後、P2-2）
+8. [x] BL-003: Record&Replayスタブの実LLM応答による往復検証（T-5、2026-07-18完了）
+9. [ ] BL-009・BL-011: 当面許容/見送りのため優先度低（それぞれP3・P2）
 
 ---
 
@@ -82,4 +88,5 @@ R1（SQLite永続化基盤）のコード実装が完了。実データA/Bドラ
 
 | 日付 | 内容 |
 |------|------|
-| YYYY-MM-DD | 初版 |
+| 2026-07-18 | R2実装計画（impl_Plan R2.0〜R2.12）を `cela_phase1_impl_Plan.md` に追記。design v7 §3.5.2/§3.5.3 を ★v9 で更新（query_AI集約・random除外・decimal/fractions維持・危険呼び出しAST検査・多層防御）。decision_log D-004〜D-008・decision_lineage 論点3〜8・issue_backlog BL-006〜BL-009 を起票・相互リンク。R2は「計画・設計完了・実装待ち」に更新。 |
+| 2026-07-18 | R2実装計画レビュー完了。ツールループの例外処理（D-009、BL-010）、プロバイダ別Function Calling対応の見送り（D-010、BL-011）、B.5.1非退行テスト未定義（D-011、BL-012）を追加起票。`phase_gates.md`のPhase 1サインオフを記入（完了日2026-07-18、判定者t-momose）。Phase 1 Done（P1-4はD-002によりR1スコープの構造的一致で達成）を反映し、アクティブPhaseをPhase 2へ更新。直近アクションをBL-001（R2の頭で実施）起点に並べ替え。 |

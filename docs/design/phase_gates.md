@@ -7,7 +7,7 @@
 | 本書 | Phase / プロジェクト全体の完了判定 |
 | [phaseN/](phase0/) | 実装詳細・How |
 | [issue_backlog.md](issue_backlog.md) | 残タスク（BL） |
-| [要件定義.md](要件定義.md) | 要件マスター |
+| [要件定義書_v35.md](要件定義書_v35.md) | 要件マスター |
 
 関連: [STATUS.md](STATUS.md) | [traceability.md](traceability.md) | [README.md](README.md)
 
@@ -68,5 +68,5 @@
 | Phase | 完了日 | 判定者 | 備考 |
 |-------|--------|--------|------|
 | Phase 0 | | | |
-| Phase 1 | | | |
+| Phase 1 | 2026-07-18 | t-momose | P1-1〜P1-4すべて☑。指標A・B・C実測はD-002によりP2-2へ引き継ぎ済み |
 | Project Close | | | |

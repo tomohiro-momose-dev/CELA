@@ -11,11 +11,12 @@
 
 | レイヤ | 置き場 | 役割 |
 |--------|--------|------|
-| **要件の出発点・作業用マスター** | [要件定義.md](要件定義.md) | 背景・タスク・完了条件・調査結果。**設計フェーズの正** |
-| **実装ロードマップ・Phase** | [cela_roadmap_vXX.md](cela_roadmap_vXX.md) | Phase分解・完了条件 |
+| **要件の出発点・作業用マスター** | [要件定義書_v35.md](要件定義書_v35.md) | 背景・タスク・完了条件・調査結果。**設計フェーズの正** |
+| **実装ロードマップ・Phase** | [cela_roadmap_v25.md](cela_roadmap_v25.md) | Phase分解・完了条件 |
 | **詳細設計・実装仕様** | `phase0/` `phase1/` … | Phase ごとの How・制約・テスト観点 |
 | **未決・実装タスク** | [issue_backlog.md](issue_backlog.md) | BL-xxx（バグ、未実装、未確定） |
 | **意思決定** | [decision_log.md](decision_log.md) | **決定理由必須**（Why。BL の「何を直すか」とは分離） |
+| **意思決定の系譜（対話）** | [decision_lineage.md](decision_lineage.md) | `decision_log.md` の D-xxx を導いた議論の経緯（誰が何を主張し、誰が決めたか。AI起点の提案も明記）。D-xxx/BL-xxx と相互リンク |
 | **進捗・完了判定** | [STATUS.md](STATUS.md) / [phase_gates.md](phase_gates.md) / [traceability.md](traceability.md) | 今どこか、いつ Done か、要件カバレッジ |
 | **展開** | [rollout_plan.md](rollout_plan.md) | 本番導入（不要なら削除） |
 | **任意: エピック入口** | GitHub Issue（短文） | 外部向け要約 + 本 README へのリンクのみ |
@@ -46,7 +47,7 @@ flowchart TB
 | 優先 | ファイル | 用途 |
 |------|---------|------|
 | 1 | **[STATUS.md](STATUS.md)** | 今のフェーズ・ブロッカー・次アクション |
-| 2 | **[要件定義.md](要件定義.md)** | 要件マスター |
+| 2 | **[要件定義書_v35.md](要件定義書_v35.md)** | 要件マスター |
 | 3 | **[issue_backlog.md](issue_backlog.md)** | 実装タスク・未確定（BL-xxx） |
 | 4 | **[phase_gates.md](phase_gates.md)** | Phase / プロジェクト完了の定義 |
 

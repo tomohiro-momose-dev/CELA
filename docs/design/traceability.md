@@ -4,7 +4,7 @@
 
 | 種別 | 参照先 |
 |------|--------|
-| 要件マスター | [要件定義.md](要件定義.md) |
+| 要件マスター | [要件定義書_v35.md](要件定義書_v35.md) |
 | 完了定義 | [phase_gates.md](phase_gates.md) |
 | 実装タスク | [issue_backlog.md](issue_backlog.md) |
 

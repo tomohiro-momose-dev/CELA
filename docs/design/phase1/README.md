@@ -1,7 +1,7 @@
 # Phase 1 — （名称）（FEATURE_NAME）
 
 > **役割:** Phase 1 の詳細設計（How）。  
-> 要件: [要件定義.md](../要件定義.md) / ロードマップ:[cela_roadmap_vXX.md](../cela_roadmap_vXX.md.md)   / 完了定義: [phase_gates.md](../phase_gates.md)
+> 要件: [要件定義書_v35.md](../要件定義書_v35.md) / ロードマップ:[cela_roadmap_v25.md](../cela_roadmap_v25.md)   / 完了定義: [phase_gates.md](../phase_gates.md)
 
 ## 目的
 

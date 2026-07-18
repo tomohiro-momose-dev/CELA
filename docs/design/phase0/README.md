@@ -1,7 +1,7 @@
 # Phase 0 — 方針・調査（FEATURE_NAME）
 
 > **役割:** Phase 0 の詳細設計（How）・調査メモ。  
-> 要件の正は [要件定義.md](../要件定義.md)。決定は [decision_log.md](../decision_log.md)。
+> 要件の正は [要件定義書_v35.md](../要件定義書_v35.md)。決定は [decision_log.md](../decision_log.md)。
 
 ## 目的
 

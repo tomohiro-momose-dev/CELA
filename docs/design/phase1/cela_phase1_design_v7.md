@@ -351,15 +351,21 @@ def call_expert_with_tools(expert_name: str, state: LineageState, config: Appcon
 
 `bind_tools`（LangChain系のラッパー）は使用せず、既存コードが素のOpenAI SDK（`OpenAI`クライアント）を直接使っている構成に合わせ、`tools`/`tool_calls`をSDKレベルで直接扱う。これにより既存の`query_AI`関数からの変更差分を最小化する。
 
+**★v9（R2実装計画レビュー反映）**: 上記の `call_expert_with_tools` 例は説明用の最小例であり、実際の R2 実装ではツール呼び出しループを共通層 `query_AI` に**集約**する（R2 実装計画 §R2.0.1 参照）。理由は、(1) 全ノードがすでに `query_AI` を呼んでおり1箇所追加が最小差分、(2) DRY、(3) Replay 境界の維持。この集約方式は Anthropic 公式 SDK の tool_runner、OpenAI Agents SDK の Runner、LangChain の AgentExecutor と同様の主流パターンである。ツール dispatch は `TOOL_DISPATCH` 辞書に分離し、R3 で `write_agreement_tool` を追加する際にループ本体を変更せずに済む。
+
 ### 3.5.3 Python REPLのサンドボックス仕様
 
 F-2.6・F-5.1で言及されるPython REPLは、任意のコード実行を許すと安全性・安定性のリスクがあるため、以下の制約を課す。
 
+**★v9（R2実装計画レビュー反映）**: 許可モジュールから `random` を除外（検算の決定性＝再現性を損なうため）。`decimal`/`fractions` は浮動小数点誤差回避の目的に合致する拡張として追加。AST 検査は import 文だけでなく `open`/`eval`/`exec`/`__import__` 等の危険呼び出し（Name/Attribute/Call 参照）にも拡張。AST blacklist の限界を認め、プロセス側の権限絞り込み（低権限実行・書き込み不可ディレクトリ）との多層防御とする。
+
 | 項目 | 仕様 |
 | :--- | :--- |
-| 実行方式 | サブプロセス（`subprocess.run`）による分離実行。既存プロセスの名前空間・状態を汚染しない |
+| 実行方式 | サブプロセス（`subprocess.run`、Python `-I` isolated mode）による分離実行。既存プロセスの名前空間・状態を汚染しない |
 | タイムアウト | 5秒（検算・簡易シミュレーション用途であり、長時間計算は想定しない） |
-| 許可モジュール | 標準ライブラリの`math`, `statistics`, `datetime`, `json`のみをホワイトリスト化。`os`, `sys`, `subprocess`, `socket`等のI/O・システム制御系モジュールは`import`をブロックする（静的解析またはAST検査で事前フィルタ） |
+| 許可モジュール | `math`, `statistics`, `datetime`, `json`, `fractions`, `decimal` のみをホワイトリスト化（**`random` は除外：検算の決定性リスク**）。`os`, `sys`, `subprocess`, `socket` 等の I/O・システム制御系モジュールは `import` をブロック |
+| 危険呼び出し検査 | import 文だけでなく、`open`/`eval`/`exec`/`compile`/`__import__`/`getattr` 等の危険な名前を AST 上の Name/Attribute/Call 参照として検査しブロック（import 文なしで呼べるビルトインも対象） |
+| 多層防御 | AST blacklist だけでは `().__class__.__bases__` 経由等の既知の回避を完全には防げないため、実行プロセスを低権限ユーザー・書き込み不可ディレクトリで起動し権限を絞る（絶対に破れないサンドボックスではなく多層防御であることが設計上の限界） |
 | 出力サイズ制限 | 標準出力を10KB程度に制限（長大な出力によるコンテキスト圧迫を防止） |
 | ネットワークアクセス | 不可（検算・シミュレーション用途のためネットワークI/Oは不要） |
 

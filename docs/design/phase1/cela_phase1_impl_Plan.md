@@ -252,18 +252,32 @@ def get_decisions_from_db(conn, run_id):
 
 ## R2.0 目的・基本方針
 
+> **設計書（v7）との整合:** 本 R2 計画は `cela_phase1_design_v7.md` §3.5.2（ツール呼び出し実装方式）・§3.5.3（Python REPL サンドボックス）に準拠。§3.5.2/§3.5.3 は 2026-07-18 に ★v9 追記で本計画内容（query_AI 集約・random 除外・decimal/fractions 維持・危険呼び出し AST 検査・多層防御）を反映済み。関連決定: `decision_log.md` D-004〜D-008、`decision_lineage.md` 論点3〜8、`issue_backlog.md` BL-006〜BL-009。
+
 `query_AI`（および内部の `_query_AI_live`）に **Function Calling / Tool Use** 対応を追加し、Python REPL 実行ツールを実装する。実証実験（要件定義書付録A.3〜A.5）で確認された「機械的検算ゲート（F-2.6）」を、既存の正規表現ベース `verify_budget_arithmetic` から Python REPL ベースに置き換える。
 
 R1 と同じ「壊さない」原則:
 - グラフ構造（ノード・エッジ・トポロジ）は一切変更しない（設計書§3.1）。
 - `query_AI` の既存シグネチャ（文字列返却）は維持し、ツール付与は**オプション引数 `tools`** で後方互換的に追加する。
-- ツール呼び出しループは各ノード関数内で SDK レベルの `tool_calls` を直接扱い、LangGraph の `ToolNode` は新設しない（設計書§3.5.2）。
+- ツール呼び出しループは **`query_AI` 内に集約**し、SDK レベルの `tool_calls` を直接扱う。LangGraph の `ToolNode` は新設しない（設計書§3.5.2 の意図を `query_AI` 集中化で満たす。逸脱理由は R2.0.1 参照）。
 - Replay スタブ（`(label, call_seq)` キー・最終 content キャッシュ）の契約を維持する。
+
+## R2.0.1 設計書 §3.5.2 の `call_expert_with_tools` 例からの逸脱とその理由
+
+設計書 §3.5.2 は「各既存ノード関数内で `tools` パラメータを渡し、`tool_calls` が返った場合はループ内で実行する」という `call_expert_with_tools` 相当のラッパー例を示していた。本計画はこれと異なり、**ツール呼び出しループを共通層 `query_AI` に集約**する。逸脱の理由は以下の通り。
+
+1. **既存コードでは `query_AI` が事実上の共通 API 層である**: 全ノード（call_expert / call_detector / call_reviewer / call_resource_arbiter / generate_user_utterance 等）がすでに `query_AI(messages, client, model, label)` を呼んでいる。ここに `tools` 引数を1箇所追加する方が、各ノード関数ごとに `call_expert_with_tools` のような個別ラッパーを5つ作るより変更箇所が少なく、「壊さない」原則（R1 の差分最小化方針）に合致する。
+2. **DRY と保守性**: 設計書例は Expert 用のみだったが、実際には Detector / Reviewer / Arbiter / User AI も同様のループが必要。5ノードすべてに個別ラッパーを作るより、`query_AI` に集約する方が重複を避けられる。
+3. **Replay 境界の維持**: Replay スタブの `(label, call_seq)` キーと最終 content キャッシュは `query_AI` 内にあり、ツール実行（Python REPL）はローカル・決定的である。ループを `query_AI` 内に置くことで「1ノード呼び出し＝1フィクスチャ」の境界がそのまま保たれ、replay 時はキャッシュされた最終 content を返すだけで済む。
+4. **`bind_tools` 不使用は踏襲**: 設計書が求めていた「`bind_tools`（LangChain 系ラッパー）を使わず、素の OpenAI SDK の `tools`/`tool_calls` を直接扱う」という制約は、集中化しても満たされる（単に `create_kwargs["tools"] = tools` を渡し `msg.tool_calls` を処理するだけ）。
+
+**5. 集約方式の妥当性（Claude との合意）**: 本集中化方式は Anthropic 公式 SDK の tool_runner、OpenAI Agents SDK の Runner、LangChain の AgentExecutor と同様の一般的な主流パターンである。設計書 §3.5.2 の `call_expert_with_tools` 例は説明用の最小例だったと解釈できるため、本計画の `query_AI` 集約方針をそのまま採用する。ツール dispatch の辞書化（R2.3 の `TOOL_DISPATCH`）は、R3 で `write_agreement_tool` を追加する際にループ本体を変更せずに済む任意の改善提案として既に反映済み。
 
 ## R2.1 実装ステップ概要
 
 | Step | 内容 | 変更対象 |
 | :--- | :--- | :--- |
+| 0 | **BL-001 実施（R2の頭）**: `Agreement` TypedDict の `content`/`rationale` を `decision_what`/`reason_why` にリネーム。R1ラッパー（`db_append_agreement`/`get_agreements_from_db`）のエイリアス変換コードを除去し、呼び出し側を新キー名に統一する | `Agreement` TypedDict, `db_append_agreement`, 全呼び出し側 |
 | 1 | Python REPL 実行ツール（サンドボックス）の実装 | 新規関数 `_run_python_repl` |
 | 2 | `query_AI` / `_query_AI_live` に `tools` 引数とツール呼び出しループを追加 | `query_AI` シグネチャ拡張 |
 | 3 | `response_format=json_object` との競合解消（ツール付与時は json_mode 無効化） | `_query_AI_live` 内 |
@@ -275,27 +289,35 @@ R1 と同じ「壊さない」原則:
 
 ## R2.2 Step 1: Python REPL 実行ツール（サンドボックス）
 
-設計書§3.5.3 の仕様に従い、サブプロセス分離＋AST 許可リストで実装する。
+設計書§3.5.3 の仕様に従い、サブプロセス分離＋AST 許可リスト＋多層防御で実装する。
 
 ```python
 import ast
 import subprocess
 
-# 許可モジュール（ホワイトリスト）
-_ALLOWED_IMPORTS = {"math", "statistics", "datetime", "json", "fractions", "decimal", "random"}
+# 許可モジュール（ホワイトリスト）。random は除外（検算の決定性を損なう再現性リスク）。
+# decimal/fractions は浮動小数点誤差回避の目的に合致する拡張として維持（設計書§3.5.3追記・AGENTS.md§7承認済み変更）。
+_ALLOWED_IMPORTS = {"math", "statistics", "datetime", "json", "fractions", "decimal"}
+
+# 危険な名前（import文なしで呼べるビルトイン・組み込み関数）。AST上の Name/Attribute/Call 参照として検査。
+_DANGEROUS_NAMES = {
+    "open", "eval", "exec", "compile", "__import__", "globals", "locals",
+    "vars", "getattr", "setattr", "delattr", "memoryview", "breakpoint",
+}
 
 def _run_python_repl(code: str, timeout: float = 5.0, max_output_bytes: int = 10240) -> str:
     """Sandboxed Python execution for mechanical arithmetic/verification (F-2.6 / F-5.1).
 
-    Only math/statistics/datetime/json and pure stdlib arithmetic are allowed.
-    Network/IO/system modules (os, sys, subprocess, socket, etc.) are rejected at AST level.
+    Only math/statistics/datetime/json/fractions/decimal allowed.
+    Network/IO/system modules and dangerous builtins (open/eval/exec/__import__ etc.) are rejected at AST level.
     """
-    # [CONSTRAINT] Reject dangerous imports before execution to prevent sandbox escape.
+    # [CONSTRAINT] Reject dangerous imports/calls before execution to prevent sandbox escape.
     try:
         tree = ast.parse(code)
     except SyntaxError as e:
         return f"[REPL Error] SyntaxError: {e}"
     for node in ast.walk(tree):
+        # import 文のチェック
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name.split(".")[0] not in _ALLOWED_IMPORTS:
@@ -303,10 +325,23 @@ def _run_python_repl(code: str, timeout: float = 5.0, max_output_bytes: int = 10
         elif isinstance(node, ast.ImportFrom):
             if node.module and node.module.split(".")[0] not in _ALLOWED_IMPORTS:
                 return f"[REPL Error] import from '{node.module}' is not allowed"
+        # 危険な名前の参照チェック（import文なしで呼べるもの）
+        elif isinstance(node, ast.Name) and node.id in _DANGEROUS_NAMES:
+            return f"[REPL Error] use of '{node.id}' is not allowed"
+        elif isinstance(node, ast.Attribute) and node.attr in _DANGEROUS_NAMES:
+            return f"[REPL Error] use of '.{node.attr}' is not allowed"
+        elif isinstance(node, ast.Call):
+            # __import__('os') 等の Call 形も捕捉
+            if isinstance(node.func, ast.Name) and node.func.id in _DANGEROUS_NAMES:
+                return f"[REPL Error] call to '{node.func.id}' is not allowed"
     try:
+        # [SAFETY] 多層防御: 作業ディレクトリを書き込み不可にし、低権限ユーザーで実行。
+        # AST blacklist だけでは ().__class__.__bases__ 経由等の既知の回避を完全には防げないため、
+        # プロセス側の権限絞り込みと併用する（絶対に破れないサンドボックスではなく多層防御であることが設計上の限界）。
         proc = subprocess.run(
             ["python", "-I", "-c", code],  # -I: isolated mode (no env/site)
             capture_output=True, text=True, timeout=timeout,
+            # user=低権限ユーザー, cwd=書き込み不可ディレクトリ を本番環境では指定
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         if len(out.encode("utf-8")) > max_output_bytes:
@@ -316,7 +351,7 @@ def _run_python_repl(code: str, timeout: float = 5.0, max_output_bytes: int = 10
         return f"[REPL Error] execution exceeded {timeout}s timeout"
 ```
 
-**設計判断**: サブプロセスは `python -I`（isolated mode）で起動し、ネットワーク/ファイル I/O 系モジュールを AST で事前ブロック。タイムアウト 5 秒、出力 10KB 制限（設計書§3.5.3 準拠）。
+**設計判断**: サブプロセスは `python -I`（isolated mode）で起動。AST 検査は import 文だけでなく呼び出し式全体（open/eval/exec/__import__ 等の Name/Attribute/Call 参照）を見る。タイムアウト 5 秒、出力 10KB 制限（設計書§3.5.3 準拠）。`random` は検算の決定性（再現性）を損なうため許可リストから除外。`decimal`/`fractions` は浮動小数点誤差回避の目的に合致する拡張として維持し、設計書§3.5.3 の許可リストに理由付きで追記、AGENTS.md§7（定数変更の厳格管理）に沿って承認済み変更として扱う。
 
 ## R2.3 Step 2 & 3: `query_AI` のツール対応と json_mode 競合解消
 
@@ -326,10 +361,15 @@ def _run_python_repl(code: str, timeout: float = 5.0, max_output_bytes: int = 10
 - `_query_AI_live` シグネチャ拡張: `tools=None` を追加。
 - `use_json_mode = any(kw in label_lower for kw in STRUCTURED_OUTPUT_LABEL_KEYWORDS)` の直後に `if tools is not None: use_json_mode = False` を入れる（設計書§3.5.1：ツール付与時は json_object と排他）。
 - `create_kwargs` 構築時に `if tools is not None: create_kwargs["tools"] = tools` を追加。
-- ツール付与時は以下のループを追加（非ツール時は既存ロジックのまま）:
+- **ツールループは既存の `try/except`（指数バックオフ `delays=[8,16,32,64,128]`）の「内側」で回す**。外側に置くと一時的な API エラーでツールループ全体が未捕捉例外としてクラッシュする。
 
 ```python
-    # ツール呼び出しループ（tools 付与時のみ）
+    # ツール名 → 実処理のマッピング（差し替え可能な対応表。R3 で write_agreement_tool 等を追加予定）
+    TOOL_DISPATCH = {
+        "python_repl": _run_python_repl,
+    }
+
+    # ツール呼び出しループ（tools 付与時のみ。既存 try/except リトライの内側で回す）
     MAX_TOOL_ITER = 5
     loop_messages = list(messages)
     create_kwargs["messages"] = loop_messages
@@ -337,24 +377,53 @@ def _run_python_repl(code: str, timeout: float = 5.0, max_output_bytes: int = 10
         response = client.chat.completions.create(**create_kwargs)
         choice = response.choices[0]
         msg = choice.message
+        # [CONSTRAINT] 出力打ち切り検出: 既存非ツールパスと同様に、max_tokens 超過で
+        # tool_calls の引数 JSON が途中で切れた場合を明示的に検出する。
+        # この ValueError は APIError 系ではないため、外側の except に飲み込まれず
+        # ログに「トークン予算不足が原因」と一目でわかる形で伝播する（後述の層1リトライ絞り込みと組み合わせ）。
+        if choice.finish_reason == "length":
+            raise ValueError("Tool call output truncated due to max_tokens limit")
         if not getattr(msg, "tool_calls", None):
             content = msg.content
             return content if content is not None else "(APIから空の応答が返されました)"
         loop_messages.append(msg.model_dump())
         for tc in msg.tool_calls:
-            if tc.function.name == "python_repl":
-                result = _run_python_repl(json.loads(tc.function.arguments).get("code", ""))
-            else:
+            handler = TOOL_DISPATCH.get(tc.function.name)
+            if handler is None:
                 result = f"[REPL Error] unknown tool: {tc.function.name}"
+            else:
+                # [SAFETY] LLM が壊れた引数 JSON を返した場合、例外を外に投げるのではなく
+                # ツール結果としてモデルに返し、MAX_TOOL_ITER の予算内で自己修復させる。
+                # （クラッシュさせると既存リトライに飲み込まれ原因が隠蔽されるため）
+                try:
+                    args = json.loads(tc.function.arguments)
+                except json.JSONDecodeError as e:
+                    loop_messages.append({
+                        "role": "tool", "tool_call_id": tc.id,
+                        "content": json.dumps({"error": f"invalid arguments JSON: {e}"}, ensure_ascii=False),
+                    })
+                    continue
+                result = handler(args.get("code", ""))
             loop_messages.append({
                 "role": "tool", "tool_call_id": tc.id,
                 "content": json.dumps(result, ensure_ascii=False),
             })
         create_kwargs["messages"] = loop_messages
+    # [CONSTRAINT] 非収束は一時的な API 障害ではなく設計上の異常事態。
+    # 外側の except を APIError 系に絞ることで、この RuntimeError は握りつぶされず
+    # ログに「ツールループが収束しなかった」と一目でわかる形で伝播する。
     raise RuntimeError(f"ツール呼び出しが{MAX_TOOL_ITER}回を超えて収束しませんでした")
 ```
 
 **注意**: 非ツール呼び出し（`tools=None`）は既存の `if choice.finish_reason == "length"` 以降の分岐を通る。両者を `tools is None` で分岐させ、既存ロジックを壊さない。
+
+**ツール dispatch の分離（設計上の定石）**: ループ本体（call→tool_calls 判定→実行→結果追加→再 call）は `query_AI` 内に1箇所集約し、ツール名→実処理のマッピングは `TOOL_DISPATCH` 辞書に分離した。現状は `python_repl` 1個のみだが、R3 で `write_agreement_tool` が加わることを見越し、辞書に `{"python_repl": _run_python_repl, "write_agreement_tool": ...}` を追加するだけでループ本体に触れずにツールを拡張できる。
+
+**層1リトライの絞り込み（例外の隠蔽防止）**: 既存の `except Exception as e:`（指数バックオフ `delays=[8,16,32,64,128]`、合計約248秒）は「一時的なAPI障害（レート制限・タイムアウト等）」と「ロジックエラー（LLMの壊れた引数・ツールループ非収束）」を区別せず、両方に同じバックオフをかけた上で最終的に `(サーバー高負荷によるAPIエラー)` という誤った診断メッセージに丸めてしまう。後者は再試行しても直る見込みが薄いため、外側の `except` を OpenAI SDK の API 関連例外に絞り込む：`from openai import APIError, APIConnectionError, RateLimitError, APITimeoutError` を import し、`except (APIError, APIConnectionError, RateLimitError, APITimeoutError) as e:` とする。これにより、上記の `ValueError`（max_tokens 打ち切り）・`RuntimeError`（非収束）・`json.JSONDecodeError`（ただし本計画ではツール結果として返すため発生しない）等のロジック起因例外はそのまま伝播し、ログ上で原因が一目でわかる。
+
+**リトライ粒度の留意点（層1＝API呼び出し失敗リトライ）**: ツールループは既存 `try/except`（指数バックオフ、ただし対象をAPIError系に絞り込み済み）の内側にあるため、1回の `create()` が一時APIエラーならそのブロック内で再試行される。ただしこの方式はリトライ単位が「ツールループ全体」と粗く、ループ途中で `create()` が失敗すると `loop_messages`（途中経過）ごと最初からやり直しになる。実害は軽微（MAX_TOOL_ITER=5、Python REPL はローカルで失敗しにくい）と判断し当面許容。将来的に改善する場合は BL 起票で対応（R2.12 参照）。
+
+**層2リトライ（JSON パース失敗時のフェイルクローズ）**: ツール付与により `use_json_mode=False` となり、Detector/Reviewer の JSON 抽出安定性が下がる。そのため `_safe_json_parse` が失敗（fallback 相当を返した）場合は、それを例外として扱いノード呼び出し自体を再試行する「層2リトライ」を追加する（層1＝API呼び出し失敗リトライとは別レイヤー）。層2リトライの上限（例: 2〜3回）を使い切った場合の fallback は、現状の `{"constraint_issue": "none"}`（フェイルオープン）ではなく、**major 側に倒す（フェイルクローズ）**こと。F-2.6 検算ゲート導入の目的（暗算を信用しない）を損なわないため。
 
 ## R2.4 Step 4: ツール定義定数
 
@@ -448,3 +517,5 @@ f"「上限内の数値差」や「予算の上下関係」を正確に計算し
 
 - `issue_backlog.md` に BL 起票：「`verify_budget_arithmetic`（正規表現）の廃止判断（A/B テスト結果に基づく）」。
 - `issue_backlog.md` に BL 起票（継続確認）：「R2 でプロンプトを変更したノードの replay フィクスチャを R2 用に再取得・保管」。
+- `issue_backlog.md` に BL 起票（将来の改善）：「ツール呼び出しループのリトライ粒度を `create()` 単位に細分化する」。現状は既存の `try/except`（指数バックオフ）ブロック内側でループを回すため、ループ途中の1回の `create()` 失敗時に `loop_messages` ごと破棄して最初からやり直す。ツール往復が長くなるノードが増えた段階で、公式 SDK のように `create()` 単体のリトライ（ループ途中経過の保持）へ改善する。
+- `issue_backlog.md` に BL 起票（設計書追記）：「設計書 §3.5.3 の許可モジュールリストに `decimal`/`fractions` を理由付きで追記（浮動小数点誤差回避の目的に合致する拡張）。`random` は検算の決定性リスクにより除外。AGENTS.md§7 の厳格管理に沿り承認済み変更として扱う」。
