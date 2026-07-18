@@ -32,7 +32,7 @@
 
 | ID | 重要度 | 対象 | 概要 | 優先度 |
 |----|--------|------|------|--------|
-| BL-001 | 中 | `cela_main.py` (Agreement TypedDict) | `content`/`rationale`を`decision_what`/`reason_why`にリネームし、R1ラッパーのマッピングを除去 | P1 |
+| BL-001 | 中 | `cela_main.py` (Agreement TypedDict) | ~~`content`/`rationale`を`decision_what`/`reason_why`にリネームし、R1ラッパーのマッピングを除去~~ → `done`（R2実装） | P1 |
 | BL-002 | 高 | `cela_main.py` (R1全体) | 構造的一致は確認済み（T-5）。評価メトリクスA・B・C（設計書§5）の実測比較はR2（検算ゲート）実装待ち（D-002） | P0 |
 | BL-003 | 中 | `cela_main.py` (Record&Replayスタブ) | ~~実LLM応答を使ったrecord→replay往復検証（impl_Plan §7.2合格基準1・2）未実施~~ → `done`（T-5） | P1 |
 | BL-004 | 低 | `cela_main.py` (死んだimport) | `from secrets import choice`、`from unittest import result` の未使用import除去 | P3 |
