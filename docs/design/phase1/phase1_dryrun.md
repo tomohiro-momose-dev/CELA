@@ -200,7 +200,16 @@ sqlite3 cela.db "SELECT count(*) FROM decisions  WHERE run_id='<killしたrun_id
 
 ## 6. 指標D（数値矛盾の検出率）
 
-指標Dは本書の対象外。設計書§5.1の定義通り`pytest`による専用フィクスチャ（`tests/test_f26_detection.py`、新規作成）で検証する方式であり、シナリオベースのドライランではない。別途のissue_backlogエントリとして扱う。
+指標Dは本書の対象外。設計書§5.1の定義通り`pytest`による専用フィクスチャ（`tests/test_f26_detection.py`）で検証する方式であり、シナリオベースのドライランではない。
+
+**2026-07-19時点の状態**: `tests/test_f26_detection.py`は実装済み（[BL-012](../issue_backlog.md#bl-012-b51既知誤判定detectorの偽陽性の非退行テストが未定義)）。`DSEEK_V4_FLASH_USER_KEY`が未設定の環境では自動スキップする。実行コマンド:
+
+```powershell
+$env:DSEEK_V4_FLASH_USER_KEY = "<APIキー>"
+python -m pytest tests/test_f26_detection.py -v
+```
+
+実LLM API呼び出し（課金・実行時間を伴う）を伴うため、このセッションでは実行していない。実行後の結果は`../traceability.md`のT-*へ記録し、失敗があれば`../issue_backlog.md`にBL起票すること。
 
 ---
 
