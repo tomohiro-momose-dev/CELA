@@ -149,8 +149,8 @@ deepseek = "deepseek-r1-0528:8b"
 gemini_2_5 = "gemini-2.5-flash-lite"
 gemini_3_1 = "gemini-3.1-flash-lite"
 gemma_local = "gemma4-it:e4b"
+#deepseek_v4_flash = "deepseek-v4-flash"
 deepseek_v4_flash = "deepseek-v4-flash"
-
 _gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
 _gemini_auditor_key = os.environ.get("GEMINI_API_KEY_AUDITOR", "")
 _deepseek_v4_flash_auditor_key = os.environ.get("DSEEK_V4_FLASH_AUDITOR_KEY", "")
@@ -356,7 +356,7 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
 
     provider_preferences = {
         "provider": {
-            "order": ["Fireworks", "DeepInfra", "Together", "Novita", "DeepSeek"],
+            "order": ["Fireworks", "nextbit/fp8", "novita/fp8", "parasail/fp8","siliconflow/fp8"],
             "allow_fallbacks": True # リストのプロバイダーが全滅した場合は他を使う
         }
     }
@@ -1155,8 +1155,9 @@ def call_detector(state: LineageState, target_role: str) -> dict:
         f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由"}}'
     )
     res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Detector")
+    print(f"【Detectorの判定結果】\n{res}\n")
     parsed = _safe_json_parse(res, fallback={"risk": "low", "constraint_issue": "none", "comment": ""})
-    
+    print(f"【Detectorの判定結果(JSONパース後)】\n{parsed}\n")
     risk = parsed.get("risk", "low")
     if risk not in ("low", "medium", "high"):
         risk = "low"
@@ -2693,6 +2694,11 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
     reset_call_seq()
     if REPLAY_MODE == "replay":
         _replay_fixtures.update(_load_replay_fixtures(_REPLAY_FIXTURE_PATH))
+    elif REPLAY_MODE == "record" and _REPLAY_FIXTURE_PATH and os.path.exists(_REPLAY_FIXTURE_PATH):
+        # 強制終了後の再起動はrun全体を最初から再実行するため、前回分をマージせず退避してから新規に記録する
+        backup_path = f"{_REPLAY_FIXTURE_PATH}.bak-{int(time.time())}"
+        os.replace(_REPLAY_FIXTURE_PATH, backup_path)
+        print(f"⚠️ [RECORD] 既存のfixtureファイルを {backup_path} に退避しました（前回記録の上書き消失を防止）。")
 
     _DB_CONN = get_db_connection(db_path)
     init_db(_DB_CONN)
