@@ -58,8 +58,8 @@
 
 | # | Exit 条件 | 検証方法 | 状態 |
 |---|-----------|----------|------|
-| P2-1 | F-2.6機械的検算ゲート（Python REPL）実装 | `cela_phase1_design_v7.md §3.5.3` | ☐ |
-| P2-2 | 評価メトリクスA（却下案の回避率）・B（制約の維持率）・C（収束性とコストのトレードオフ、最低5試行）の実測比較（[BL-002](issue_backlog.md)、[D-002](decision_log.md)） | `traceability.md` T-* | ☐ |
+| P2-1 | F-2.6機械的検算ゲート（Python REPL）実装 | `cela_phase1_design_v7.md §3.5.3` | ☑ |
+| P2-2 | 評価メトリクスA（却下案の回避率）・B（制約の維持率）・C（収束性とコストのトレードオフ、最低5試行）の実測比較（[BL-002](issue_backlog.md)、[D-002](decision_log.md)） | `traceability.md` T-* | ☐（指標D実測はT-7で完了。A・B・Cは未実施） |
 
 ---
 
