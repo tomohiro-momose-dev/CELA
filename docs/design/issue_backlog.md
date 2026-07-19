@@ -473,7 +473,7 @@ BL-014（A・B・C）修正後の本番ドライランで、`Expert:requirement_
 | 状態 | `open`（構想段階、設計要） |
 | 優先度 | P2 |
 | 依存 | なし |
-| 関連 | [BL-016](issue_backlog.md#bl-016-detectorの完全性判定の硬直性により探索的タスクでツールループが非収束クラッシュする)、[decision_lineage.md 論点16](decision_lineage.md) |
+| 関連 | [BL-016](issue_backlog.md#bl-016-detectorの完全性判定の硬直性により探索的タスクでツールループが非収束クラッシュする)、[decision_lineage.md 論点16](decision_lineage.md)、[decision_lineage.md 論点20](decision_lineage.md)、要件定義書_v35.md F-9・F-10.2〜F-10.6（本Issueの上位互換にあたる既存仕様、下記追記参照） |
 
 **内容:**
 
