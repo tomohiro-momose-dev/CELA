@@ -300,6 +300,21 @@
 
 ---
 
+### D-019: `_query_AI_live`の例外捕捉に`json.JSONDecodeError`を追加する（D-009の考慮漏れの是正）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-19 |
+| 状態 | `decided` |
+| 決定者 | t-momose |
+| **決定理由** | 継続中の本番ドライランが、ユーザー提供の完全なトレースバックにより`openai`SDK内部（`response.json()`、httpx経由）での生`json.JSONDecodeError`未捕捉クラッシュと判明した。OpenRouter経由の一部プロバイダが途中で切れた/壊れたレスポンスを返したことが原因で、`_query_AI_live`の`client.chat.completions.create(...)`呼び出しを包む`except (APIError, APIConnectionError, RateLimitError, APITimeoutError)`（D-009）に含まれておらず素通りしていた。D-009の本来の狙いは「一時的なAPI障害はリトライ、ロジックエラーは即座に伝播」という区別であり、壊れたレスポンスはこの意図に照らせば明確に前者に該当する。D-009の判断自体の見直しではなく、絞り込み時の考慮漏れと判断した。 |
+| 決定内容 | `_query_AI_live`のexceptタプルに`json.JSONDecodeError`を追加：`except (APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError) as e:`。`tc.function.arguments`のパース失敗は既存の別のローカルtry/exceptで個別処理済みのため、この追加による誤握りつぶしの懸念はない。 |
+| 影響 | `cela_main.py` `_query_AI_live`の外側except節 |
+| 関連 BL | [BL-022](issue_backlog.md#bl-022-openrouterの壊れたレスポンスによる生jsonjsondecodeerrorがd-009の絞り込んだexceptを素通りしクラッシュ) |
+| 参照 | 本番ドライランの完全トレースバック（`detector`ノード、`f4e09709-3300-d8d4-3dd2-81ba45905a42`、2026-07-19） |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
