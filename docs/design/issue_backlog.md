@@ -332,7 +332,7 @@ Python REPL サンドボックス（`_run_python_repl`）の AST 検査を、`as
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `done`（プロンプト側の修正のみ実施。サンドボックス側のフォールバックは見送り、下記参照） |
+| 状態 | `done`（プロンプト側の修正のみ実施。サンドボックス側のフォールバックは見送り、下記参照。修正効果は再実行で確認済み、T-7） |
 | 優先度 | P1 |
 | 依存 | なし |
 | 関連 | `cela_main.py` `PYTHON_REPL_TOOL`、`_run_python_repl`、`tests/test_f26_detection.py` |
