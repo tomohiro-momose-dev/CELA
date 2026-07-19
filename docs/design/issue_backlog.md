@@ -432,10 +432,10 @@ Python REPL サンドボックス（`_run_python_repl`）の AST 検査を、`as
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（原因特定済み、対応方針は設計相談中） |
+| 状態 | `done`（2点とも実装・オフライン確認済み。実LLMでの本番再ドライランは未実施） |
 | 優先度 | P0 |
 | 依存 | なし |
-| 関連 | [decision_lineage.md 論点16](decision_lineage.md)、`cela_main.py` `_query_AI_live`・`detector_node`、`log/2026-07-19/1012/log_no_prompt.md`（実ログ） |
+| 関連 | [D-016](decision_log.md#d-016-bl-016探索的タスクでの10回ツール呼び出し非収束へ2点の対応を実施する)、[decision_lineage.md 論点16](decision_lineage.md)、`cela_main.py` `_query_AI_live`・`call_detector`、`log/2026-07-19/1012/log_no_prompt.md`（実ログ） |
 
 **内容:**
 
