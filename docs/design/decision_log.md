@@ -270,6 +270,21 @@
 
 ---
 
+### D-017: OpenRouterのreasoningパラメータ形式を修正し、ツール付与ノードにも思考ログを追加する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-19 |
+| 状態 | `decided` |
+| 決定者 | t-momose |
+| **決定理由** | ユーザーから「ログに自己会話のつぶやきを出したい」という要望があり調査したところ、`query_AI`/`_query_AI_live`がOpenRouterへ送っていた`create_kwargs["reasoning_effort"] = "low"/"medium"`はOpenRouter公式ドキュメント（ネスト形式`reasoning: {"effort": ...}`が正）に照らして無効なキーであることが判明。実機検証（`deepseek-v4-flash`）で、旧形式では`message.reasoning`が常に`null`、正しい形式では実際の思考テキストが返ることを確認した。つまりDetector/decision extractor/Reflection/Reviewのreasoning_effort設定はこれまで一切効果を発揮していなかった。加えて、ツール呼び出し前後の「なぜこのツールを呼ぶか」「結果をどう解釈したか」という思考は`message.content`ではなく`message.reasoning`に現れることも実機確認したため、ツール付与ノード（Expert/User AI/Resource Arbiter等）にもこれを付与しログ出力する方が、ユーザーが要望した「ツールループ中のつぶやきの可視化」に直接応える。 |
+| 決定内容 | `query_AI`/`_query_AI_live`の`reasoning_effort`設定をネストした`extra_body["reasoning"]["effort"]`形式に修正（OpenRouter利用時のみ、既存のプロバイダ優先順位指定と同じ`extra_body`にマージ）。対象ノードをDetector/decision extractor（low）、Reflection/Review（medium、従来通り）に加え、ツールが付与されている全ノード（Expert/User AI/Resource Arbiter等、low）に拡張。非ツールパス・ツールループパスの両方で、レスポンスの`reasoning`フィールドが非空の場合に`💭 [{label}] 思考:`としてログ出力する。 |
+| 影響 | `cela_main.py` `query_AI`/`_query_AI_live`のreasoning_effort決定ロジックとextra_body構築、非ツールパス・ツールループパスの思考ログ出力 |
+| 関連 BL | [BL-019](issue_backlog.md#bl-019-openrouterのreasoningパラメータが無効な形式で送られており一切発火していなかった) |
+| 参照 | [decision_lineage.md 論点18](decision_lineage.md)、[OpenRouter Reasoning Tokens公式ドキュメント](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
