@@ -357,7 +357,7 @@ Python REPL サンドボックス（`_run_python_repl`）の AST 検査を、`as
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（原因A: 未着手・設計相談中。原因B・C: `done`） |
+| 状態 | `done`（A・B・Cすべて実装・オフライン確認済み。実LLMでの本番再ドライランは未実施） |
 | 優先度 | P0 |
 | 依存 | なし |
 | 関連 | [D-014](decision_log.md#d-014-max_tool_iterを5から10へ引き上げる暫定挙動を見て調整)、`cela_main.py` `_run_python_repl`・`_query_AI_live` |
