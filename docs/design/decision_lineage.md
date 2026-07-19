@@ -177,6 +177,19 @@
 
 ---
 
+### 論点18: 「自己会話のつぶやき」ログ化の調査で発覚したOpenRouter reasoningパラメータの無効化バグ
+
+- **ユーザー確認依頼:** 「現時点の実装は思考モード（ステップバイステップの自己会話）はツール部分（python_repl呼び出し）のみという認識でよいか」という確認。「ログに自己会話のつぶやきを出せばエージェントの行動理解が上がる」という動機を共有。
+- **AI調査（コード確認）:** `_query_AI_live`のツールループで`python_repl`のコード・結果は印字されているが、`reasoning_effort`（Detector/decision extractor/Reflection/Review向け）で得られるはずの思考トレースは一切キャプチャ・印字されていないこと、DBスキーマの`internal_thought_process`列がどのプロンプトからも出力されず常にNULLの死んだフィールドであることを確認。ユーザーの認識は正しいと回答。
+- **ユーザー決定:** 「まず1（reasoning_effortの実際の可用性調査）をやる。加えて現状のツール呼び出し時、ツールループ中にも何らかのつぶやきがあるはずなので、その部分もログに出したい」と依頼。
+- **AI調査（外部ドキュメント、AGENTS.md §2/§5.1準拠）:** WebSearch/WebFetchでOpenRouter公式ドキュメント（Reasoning Tokens）を確認。正しいreasoning要求形式はネストした`reasoning: {"effort": ...}`オブジェクトであり、現行コードの`create_kwargs["reasoning_effort"] = "low"/"medium"`という**フラットなキーはOpenRouterの認識しない無効な形式**であることが判明。
+- **AI検証（実機、実APIコール）:** `deepseek-v4-flash`（本プロジェクトの実運用モデル）に対し、(A)現行コードの形式、(B)ドキュメント通りの正しい形式、(C)ツール呼び出しを伴うターンでの正しい形式、の3パターンを実際にAPI呼び出しして比較。(A)では`message.reasoning`が常に`null`（=これまで一切効果を発揮していなかった）、(B)では実際の思考テキストが返る、(C)ではツール呼び出し前後の「なぜこのツールを呼ぶか」という思考が`message.content`ではなく`message.reasoning`フィールドに現れることを確認。これにより、Detector等の既存reasoning_effort設定が無駄なコードだったこと、およびツール呼び出し時の「つぶやき」を可視化する手段（reasoningフィールドの捕捉）が既に存在することの両方が同時に判明した。
+- **AI提案・実装:** 上記の実機検証結果を提示し、(1)reasoningパラメータをネスト形式に修正、(2)Detector/decision extractor（low）・Reflection/Review（medium、従来通り）に加えツール付与ノード全般（Expert/User AI/Resource Arbiter、low）にも付与、(3)非ツールパス・ツールループパスの両方でreasoningフィールドを`💭`として印字、を実装。実機での最終確認（`query_AI`経由のE2Eテスト）で、Detector（非ツールパス）とExpert（ツールループ、ツール呼び出し前後両方）の思考ログが実際に出力されることを確認。
+- **決定者:** t-momose（調査方針の指示、実装内容はAI調査結果に基づき暗黙に承認・実行）
+- **関連:** [D-017](decision_log.md#d-017-openrouterのreasoningパラメータ形式を修正しツール付与ノードにも思考ログを追加する)、[BL-019](issue_backlog.md#bl-019-openrouterのreasoningパラメータが無効な形式で送られており一切発火していなかった)、[OpenRouter Reasoning Tokens公式ドキュメント](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
