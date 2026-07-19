@@ -186,6 +186,8 @@
 - **AI検証（実機、実APIコール）:** `deepseek-v4-flash`（本プロジェクトの実運用モデル）に対し、(A)現行コードの形式、(B)ドキュメント通りの正しい形式、(C)ツール呼び出しを伴うターンでの正しい形式、の3パターンを実際にAPI呼び出しして比較。(A)では`message.reasoning`が常に`null`（=これまで一切効果を発揮していなかった）、(B)では実際の思考テキストが返る、(C)ではツール呼び出し前後の「なぜこのツールを呼ぶか」という思考が`message.content`ではなく`message.reasoning`フィールドに現れることを確認。これにより、Detector等の既存reasoning_effort設定が無駄なコードだったこと、およびツール呼び出し時の「つぶやき」を可視化する手段（reasoningフィールドの捕捉）が既に存在することの両方が同時に判明した。
 - **AI提案・実装:** 上記の実機検証結果を提示し、(1)reasoningパラメータをネスト形式に修正、(2)Detector/decision extractor（low）・Reflection/Review（medium、従来通り）に加えツール付与ノード全般（Expert/User AI/Resource Arbiter、low）にも付与、(3)非ツールパス・ツールループパスの両方でreasoningフィールドを`💭`として印字、を実装。実機での最終確認（`query_AI`経由のE2Eテスト）で、Detector（非ツールパス）とExpert（ツールループ、ツール呼び出し前後両方）の思考ログが実際に出力されることを確認。
 - **決定者:** t-momose（調査方針の指示、実装内容はAI調査結果に基づき暗黙に承認・実行）
+- **ユーザー追加指摘:** 「思考モデルでなくても、`_query_AI_live`のレスポンス内に『ツールで計算する必要がある』的な発言が`content`側に入っているのではないか。それを表示すれば非思考モデルでも実質的にステップバイステップの思考になるはず」と追加指摘。
+- **AI再検証:** 実機で`reasoning`要求を外した状態でも再度確認したところ、現行モデル（`deepseek-v4-flash`）は常に`reasoning`フィールドへ思考を返し、`tool_calls`同梱時の`content`は常に`null`であることを確認（＝この指摘は現行モデルに対しては直接のギャップではなかった）。ただし、ツールループが`tool_calls`存在時の`content`を無条件に読み捨てる実装だったため、モデル・プロバイダが変わった場合の将来的な取りこぼしを防ぐ防御的コードとして追加する価値があると判断し、`content`が非空かつ`tool_calls`も存在する場合にログ出力する処理を追加した。
 - **関連:** [D-017](decision_log.md#d-017-openrouterのreasoningパラメータ形式を修正しツール付与ノードにも思考ログを追加する)、[BL-019](issue_backlog.md#bl-019-openrouterのreasoningパラメータが無効な形式で送られており一切発火していなかった)、[OpenRouter Reasoning Tokens公式ドキュメント](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)
 
 ---
