@@ -10,7 +10,7 @@
 
 ## サマリー（1行）
 
-Phase 1（R1: SQLite永続化基盤）はDone。Phase 2（R2: ツール呼び出し基盤・機械的検算ゲート）はコード実装完了（BL-001, BL-006〜BL-010, BL-012 done）。オフラインスモークテスト（実LLM呼び出しなし）はPassだが、実LLM呼び出しを伴うR2版ドライラン（指標C・D、`tests/test_f26_detection.py`実行）はユーザーの明示的な指示待ちで未実施。
+Phase 1（R1: SQLite永続化基盤）はDone。Phase 2（R2: ツール呼び出し基盤・機械的検算ゲート）はコード実装完了、指標D（数値矛盾検出率）は実LLM実行で5/5達成済み（T-7、BL-012・BL-013 done）。残るは指標C（収束性とコストのトレードオフ、変更前後比較）およびBL-002の指標A・B・C実測。
 
 ---
 
@@ -19,8 +19,8 @@ Phase 1（R1: SQLite永続化基盤）はDone。Phase 2（R2: ツール呼び出
 | 項目 | 状態 |
 |------|------|
 | **アクティブ Phase** | Phase 2（R2: ツール呼び出し基盤・機械的検算ゲート） |
-| **Phase 状態** | コード実装完了、実LLM呼び出しを伴うドライラン（指標C・D）が未実施 |
-| **次マイルストーン** | R2ドライラン実施（ユーザー指示待ち） → 指標C・D実測値を`traceability.md`/`impl_Plan.md` R2.9へ記録 → R3着手判断 |
+| **Phase 状態** | コード実装完了、指標D実測済み（Pass）、指標C（変更前後比較）が未実施 |
+| **次マイルストーン** | 指標C実測（R1版/R2版の複数試行比較） → `traceability.md`/`impl_Plan.md` R2.9へ記録 → BL-002（指標A・B・C）完了 → R3着手判断 |
 
 ---
 
@@ -30,7 +30,7 @@ Phase 1（R1: SQLite永続化基盤）はDone。Phase 2（R2: ツール呼び出
 |-------|------|------|
 | Phase 0 | 完了 | 既存プロトタイプのリバースエンジニアリング・要件定義 |
 | Phase 1 (R1) | **完了（Done、2026-07-18サインオフ）** | `cela_main.py`をSQLite永続化に置換。スモークテスト・構文チェックはPass。実データA/Bドライランで構造的一致は確認済み（T-5、BL-003 done）。指標A・B・Cの実測比較はD-002によりP2-2へ引き継ぎ（BL-002、`blocked`） |
-| Phase 2 (R2〜) | **コード実装完了（2026-07-19）、ドライラン未実施** | BL-001（TypedDictリネーム）実施済み。`query_AI`/`_query_AI_live`へのFunction Callingループ集約（BL-006）、Python REPLサンドボックス（BL-007・BL-008）、ツールループの例外分離（BL-010、D-009）、Detector/Reviewer/Arbiter/Expert/User AIへのtools付与とF-2.6プロンプト追記、B.5.1既知誤判定プロンプトの復活（R2.6）、JSON解析失敗時の層2リトライ＋フェイルクローズ（D-005）をすべて実装。`tests/test_f26_detection.py`新規作成（BL-012、指標D陽性検出5/5＋B.5.1非退行）。`python -m py_compile`合格、フェイククライアント/ダミーデータによるオフラインスモークテスト（`_run_python_repl`単体・`query_AI`ツールループ・BL-001 DB往復）はすべてPass。**実LLM呼び出しを伴う指標C・D・D-002積み残しの実測（BL-002続き）は未実施** — 課金・実行時間を伴うためユーザーの明示的な指示を待って実施する。 |
+| Phase 2 (R2〜) | **コード実装完了・指標D達成（2026-07-19）、指標Cが未実施** | BL-001（TypedDictリネーム）実施済み。`query_AI`/`_query_AI_live`へのFunction Callingループ集約（BL-006）、Python REPLサンドボックス（BL-007・BL-008）、ツールループの例外分離（BL-010、D-009）、Detector/Reviewer/Arbiter/Expert/User AIへのtools付与とF-2.6プロンプト追記、B.5.1既知誤判定プロンプトの復活（R2.6）、JSON解析失敗時の層2リトライ＋フェイルクローズ（D-005）をすべて実装。`tests/test_f26_detection.py`を実LLM実行し、指標D（5/5検出）・B.5.1非退行（3/3）を達成（T-7、BL-012 done）。初回実行でBL-013（`python_repl`の`print()`忘れによる無出力→非収束）を検出・修正し、再実行で解消を確認。**指標C（収束性とコストのトレードオフ、R1版/R2版の複数試行比較）およびBL-002本体の指標A・B・C実測は未実施** — `run_ai_vs_ai_loop`本体のE2Eドライランが必要。 |
 
 詳細な完了定義: [phase_gates.md](phase_gates.md)
 
