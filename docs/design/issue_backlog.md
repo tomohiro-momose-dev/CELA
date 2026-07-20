@@ -56,6 +56,7 @@
 | BL-022 | 高 | `cela_main.py` (`_query_AI_live`) | ~~OpenRouter経由の一部プロバイダが壊れた/途中で切れたレスポンスを返すと、openai SDK内部の`response.json()`が生の`json.JSONDecodeError`を送出し、D-009の絞り込んだexceptに含まれず未捕捉クラッシュ（実機ドライランで発生）~~ → `done`（exceptタプルに`json.JSONDecodeError`を追加、オフライン確認済み） | P0 |
 | BL-023 | 高 | `cela_main.py` (`call_task_planner`, `generate_user_utterance`)、`要件定義書_v35.md`関連 | task_plannerの分解粒度が粗く、独立検証可能な複数の主張（車両台数・初期費用・ランニングコスト・感度分析等）が1タスクに束ねられ、R4未実装（差分パッチなし）と相まって検証コストが乗算的に増大。Phase A（task_planner/User AIのスコープ是正）は`done`、Phase C（予算カスケード）は未着手 | P1 |
 | BL-024 | 高 | `cela_main.py` (`LineageState["current_phase"]`, `decision_extractor_node`) | ~~`current_phase`が初期化時（`phases[0]`）に一度セットされたきり以降更新されず、`task_id`単位の状態追跡も存在しない（BL-005と同型の初期化後フリーズ）~~ → `done`（`decision_extractor_node`を唯一の書き手とし、フェイルクローズ検証つきで実装） | P1 |
+| BL-025 | 高 | `cela_main.py` (`call_expert`, `query_AI`/`_query_AI_live`) | 実ドライラン（`log/2026-07-20/1204`）で、`generate_user_utterance`はtask_1_1のacceptance_criteria範囲を守れていたのに対し、Expertは他タスク（task_2_2/task_4_1）が`owns_variables`として所有する車両台数・予算内訳・サイクルタイムまで自発的に計算し、ツールループが10回で非収束クラッシュ。①Expertへのスコープガードレール注入、②ツールループ2周目以降のsystem_promptを現在タスクのみに軽量化、の2案を実装 | P1 |
 
 ---
 
@@ -749,6 +750,40 @@ BL-023 Phase A（「User AIの発話を現在のタスクのacceptance_criteria�
 - ~~LLMが返すphase_id/task_idがtask_planner確定済みの`phases`/`tasks`に実在しない場合は書き込みを拒否するフェイルクローズ検証を実装する。~~ → `done`
 - ~~オフラインスモークテストで、不正なIDが与えられた場合に状態が変化しないことを確認する。~~ → `done`（不正phase_id/task_idで状態不変、正当なIDでのみ更新されることを確認）
 - 実LLM実行での再ドライラン確認が残タスク。
+
+---
+
+### BL-025: Expertがタスク境界を越えて他タスクのowns_variablesまで回答し、ツールループが非収束クラッシュする
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（実装中） |
+| 優先度 | P1 |
+| 依存 | BL-023 Phase A（`Task`型・`acceptance_criteria`/`owns_variables`スキーマ、`_get_current_task`）が前提 |
+| 関連 | [BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、`log/2026-07-20/1204/log_no_prompt.md` |
+
+**内容:**
+
+BL-023 Phase Aの実ドライラン（`log/2026-07-20/1204`）で、`generate_user_utterance`（User AI）はtask_1_1のacceptance_criteria範囲を守れていたことを確認した一方、`call_expert`（Expert）側にはタスク境界を守るガードレールが存在しないことが判明した。
+
+具体的には、task_1_1（需要モデル・地理的制約・予算の**文書化のみ**が範囲）への差し戻し後の再試行で、Expertはtask_2_2（車両選定）が`owns_variables`として所有すべき「必要車両台数（2台 vs 3台の比較）」「システム費用の内訳配分」を独自に計算し（iter=9、`log_no_prompt.md:2290-2377`）、さらにtask_2_2の前提データである「主要拠点間の移動時間・サイクルタイム」まで計算した（iter=10、`log_no_prompt.md:2379-2416`）。これによりMAX_TOOL_ITER=10を使い切り非収束クラッシュした（`log_no_prompt.md:2428`）。
+
+原因は2つ複合していると分析：
+1. **ガードレール不在**: `call_expert`には`generate_user_utterance`のような「現在タスクのacceptance_criteria/owns_variablesの範囲に限定し、他タスクの領域まで答えない」という明示的な指示がない。
+2. **コンテキストの持続的な誘惑**: `_query_AI_live`のツールループは、iter=1〜10まで同一の`system_prompt`（5フェーズ全部の`tasks` JSON、全DB agreements）を毎回再送信する。Expertが自問自答している最中も、他タスクの詳細情報が常に視界に入り続けるため、関連性から踏み込みたくなる構造的誘因がある。
+
+さらに、Detectorが指摘したのは予算内訳の矛盾1点のみだったにもかかわらず、差し戻し後のExpert（iter=1〜10）は需要モデル・地理的制約など既に問題なかった箇所も含めてレポート全体を再検算しており（R4未実装＝差分パッチなしによる全文書き直しコスト）、これがBL-023の「バンドルの大きさに比例した検証コスト乗算」を、task_planner粒度ではなく「Expertの全文書き直し」という別経路で再現していることも確認した（この点はR4のスコープであり、本Issueでは対応しない）。
+
+**採用する2案（ユーザー承認、両方実装）:**
+
+- **①（言って聞かせる）**: `call_expert`のsystem_promptに、現在タスクの`acceptance_criteria`/`owns_variables`のJSONを注入し、「他タスクの`owns_variables`に該当する内容は新たに算出・提案しないこと」という明示的なガードレールを追加する（`generate_user_utterance`と対称的な設計）。
+- **②（見せない）**: `_query_AI_live`のツールループに`light_system_prompt`引数を追加し、iter=1完了後（iter=2以降）は`loop_messages[0]`（system message）を、現在タスクの情報のみに絞った軽量版に差し替える。`call_expert`が軽量版system_promptを構築して渡す。全体計画の把握はiter=1で完了しているため、以降の自問自答フェーズでは不要という考えに基づく。
+
+**完了条件:**
+
+- ①②とも実装し、`python -m py_compile`・オフラインスモークテストで動作確認する。
+- 実機再ドライランで、Expertが他タスクの`owns_variables`領域に踏み込まなくなることを確認する（未実施）。
+- ②の軽量化がRecord/Replayのフィクスチャキー整合性に影響しないことを確認する（`_inject_japanese_output_directive`と同様、ハッシュ計算対象外の位置での差し替えとする）。
 
 ---
 
