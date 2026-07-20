@@ -699,12 +699,13 @@ D-009の本来の狙いは「一時的なAPI障害はリトライ、ロジック
 
 実ログで直接実証された直接原因（Phase A）と、ユーザーが強く懸念する将来リスク（Phase C）を優先し、確度の低い間接要因（Phase B＝BL-005）は非ブロッカーとして後回しにする。実装はPhase A（影響範囲小・確度の高い原因への対応）を先行させ、動作確認後にPhase C（新規機構・影響範囲大）に着手する。
 
-**完了条件（Phase A、着手対象）:**
+**完了条件（Phase A、`done`——2026-07-20実装、実機再ドライラン待ち）:**
 
-- task_plannerのプロンプト・出力スキーマを見直し、各タスクに`acceptance_criteria`（独立検証可能な主張を上限個数で列挙）・`depends_on`/`owns_variables`（他タスクとの変数依存）を持たせる設計を検討する。
-- `generate_user_utterance`のsystem promptを見直す。単なるガードレール文の追加ではなく、「質・厳密さへの非妥協性」（維持）と「スコープの広さへの非妥協性」（1回の発話はtask_plannerが定義した当該タスクの`acceptance_criteria`の範囲に厳密に限定し、他タスクの依存項目の前倒し要求を禁止）を明確に分離した書き換えを行う。
-- 細分化のしすぎ（タスク数増大によるorchestrator/User AIのオーバーヘッド増加、タスク間依存関係の複雑化）とのバランスを検討する。
-- 対応後、同種のタスク（task_1.2相当）で差し戻しラウンド数・ツール呼び出し回数が実際に減ることをオフライン・実機の両方で確認する。
+- ~~task_plannerのプロンプト・出力スキーマを見直し、各タスクに`acceptance_criteria`（独立検証可能な主張を上限個数で列挙）・`depends_on`/`owns_variables`（他タスクとの変数依存）を持たせる設計を検討する。~~ → `done`（`call_task_planner`のプロンプト・`fallback_phase`を拡張、`Task`型新設）
+- ~~`generate_user_utterance`のsystem promptを見直す。単なるガードレール文の追加ではなく、「質・厳密さへの非妥協性」（維持）と「スコープの広さへの非妥協性」（1回の発話はtask_plannerが定義した当該タスクの`acceptance_criteria`の範囲に厳密に限定し、他タスクの依存項目の前倒し要求を禁止）を明確に分離した書き換えを行う。~~ → `done`（現在タスクJSON・依存確定値・未充足criteriaを注入する形に再設計）
+- BL-024（`current_task_id`の一元管理）、`verified_facts`共有ストア（owns_variables実現）、Detectorの`criteria_status`充足チェック、Agreementの`Deferred`ステータスもあわせて実装済み（詳細設計`cela_phase2_design_BL023_task_state.md`）。
+- 細分化のしすぎ（タスク数増大によるorchestrator/User AIのオーバーヘッド増加、タスク間依存関係の複雑化）とのバランスは、実機ドライランでの観測により検証する（未実施）。
+- 対応後、同種のタスク（task_1.2相当）で差し戻しラウンド数・ツール呼び出し回数が実際に減ることをオフライン・実機の両方で確認する。オフラインスモークテスト（DBマイグレーション・`verified_facts` upsert・`_get_current_task`・`_resolve_task_transition`のフェイルクローズ）は合格。**実機での確認は未実施**。
 
 **完了条件（Phase C、Phase A完了・動作確認後に着手）:**
 
