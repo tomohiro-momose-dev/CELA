@@ -358,6 +358,21 @@
 
 ---
 
+### D-023: Expertのタスク境界逸脱に対し、①スコープガードレール注入と②ツールループのコンテキスト軽量化の両方を実装する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-20 |
+| 状態 | `decided` |
+| 決定者 | t-momose |
+| **決定理由** | BL-023 Phase Aの実ドライラン（`log/2026-07-20/1204`）で、`generate_user_utterance`はtask_1_1のacceptance_criteria範囲を守れていた一方、`call_expert`にはタスク境界を守るガードレールが存在せず、Expertが他タスク（task_2_2）が`owns_variables`として所有する車両台数・システム費内訳・サイクルタイムまで自発的に計算し、MAX_TOOL_ITER=10を使い切り非収束クラッシュしたことが判明した（iter=9-10、`log_no_prompt.md:2290-2416`）。ユーザーは「自問自答しているときはAIに渡すプロンプトやコンテキストはも少し小さいものでもよいかもしれない」と指摘。これを受けAIが分析したところ、`_query_AI_live`のツールループはiter=1〜10まで同一の巨大なsystem_prompt（5フェーズ全部のtasks JSON、全DB agreements）を毎回再送信しており、Expertが自問自答している最中も他タスクの詳細情報が常に視界に入り続ける構造的誘因があると特定した。「言って聞かせる」（プロンプト文言でのガードレール）と「見せない」（ツールループ中のコンテキスト縮小）は異なる作用機序であり、片方だけでは不十分な可能性があるため、両方を実装する方針とした。 |
+| 決定内容 | ①`call_expert`のsystem_promptに現在タスクの`acceptance_criteria`/`owns_variables`と「他タスクの領域に踏み込まない」ガードレールを注入する。②`query_AI`/`_query_AI_live`に`light_system_prompt`引数を追加し、ツールループのiter=1完了後（iter=2以降）は`loop_messages[0]`を軽量版system_promptに差し替える。`call_expert`が軽量版を構築して渡す。 |
+| 影響 | `cela_main.py`（`call_expert`、`query_AI`、`_query_AI_live`のツールループ） |
+| 関連 BL | [BL-025](issue_backlog.md#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする)、[BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する) |
+| 参照 | `log/2026-07-20/1204/log_no_prompt.md:2290-2428`、[decision_lineage.md 論点26](decision_lineage.md) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
