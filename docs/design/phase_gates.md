@@ -59,7 +59,7 @@
 | # | Exit 条件 | 検証方法 | 状態 |
 |---|-----------|----------|------|
 | P2-1 | F-2.6機械的検算ゲート（Python REPL）実装 | `cela_phase1_design_v7.md §3.5.3` | ☑ |
-| P2-2 | 評価メトリクスA（却下案の回避率）・B（制約の維持率）・C（収束性とコストのトレードオフ、最低5試行）の実測比較（[BL-002](issue_backlog.md)、[D-002](decision_log.md)） | `traceability.md` T-* | ☐（指標D実測はT-7・T-8で完了。A・B・Cは未実施。**指標Cは[BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する) Phase A完了後に着手する方針、2026-07-19。設計完了・実装未着手（[BL-024](issue_backlog.md#bl-024-current_phaseが初期化後フリーズしtask_id単位の状態追跡が存在しない)含む、`cela_phase2_design_BL023_task_state.md`）、2026-07-20**） |
+| P2-2 | 評価メトリクスA（却下案の回避率）・B（制約の維持率）・C（収束性とコストのトレードオフ、最低5試行）の実測比較（[BL-002](issue_backlog.md)、[D-002](decision_log.md)） | `traceability.md` T-* | ☐（指標D実測はT-7・T-8で完了。A・B・Cは未実施。**指標Cは[BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する) Phase A完了後に着手する方針、2026-07-19。設計完了・実装済み（[BL-024](issue_backlog.md#bl-024-current_phaseが初期化後フリーズしtask_id単位の状態追跡が存在しない)含む、`cela_phase2_design_BL023_task_state.md`）。2026-07-20、BL-023 Phase A適用後の全18タスク・全6フェーズ完走を実ドライランで確認（[traceability.md T-10](traceability.md)、Pass）。ただし比較対象となるBL-023適用前のベースライン試行がなく、指標Cの定量比較（変更前後）はまだ未達成**） |
 
 **注記（2026-07-19、本番ハードニング）**: P2-1のコード実装完了後、本番ドライランでBL-014（`python_repl`状態非保持による非収束）・BL-016（探索的タスクのツールループ非収束）・BL-019（reasoningパラメータ無効化）・BL-020（言語逸脱）・BL-022（OpenRouter壊れたレスポンスによる未捕捉クラッシュ）が発見・修正された（[STATUS.md](STATUS.md)、`decision_log.md` D-014〜D-019参照）。P2-1自体の判定に変更はないが、R3着手前の前提条件として位置づけていたBL-016が解消したことにより、**ロードマップ上はR3（`write_agreement_tool`）着手が可能な状態**（BL-005・BL-015・BL-017・BL-018・BL-021はR4着手時にまとめて対応する方針で合意済み、R3の非ブロッカー）。
 
