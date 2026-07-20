@@ -57,6 +57,7 @@
 | BL-023 | 高 | `cela_main.py` (`call_task_planner`, `generate_user_utterance`)、`要件定義書_v35.md`関連 | task_plannerの分解粒度が粗く、独立検証可能な複数の主張（車両台数・初期費用・ランニングコスト・感度分析等）が1タスクに束ねられ、R4未実装（差分パッチなし）と相まって検証コストが乗算的に増大。Phase A（task_planner/User AIのスコープ是正）は`done`、Phase C（予算カスケード）は未着手 | P1 |
 | BL-024 | 高 | `cela_main.py` (`LineageState["current_phase"]`, `decision_extractor_node`) | ~~`current_phase`が初期化時（`phases[0]`）に一度セットされたきり以降更新されず、`task_id`単位の状態追跡も存在しない（BL-005と同型の初期化後フリーズ）~~ → `done`（`decision_extractor_node`を唯一の書き手とし、フェイルクローズ検証つきで実装） | P1 |
 | BL-025 | 高 | `cela_main.py` (`call_expert`, `query_AI`/`_query_AI_live`) | 実ドライラン（`log/2026-07-20/1204`）で、`generate_user_utterance`はtask_1_1のacceptance_criteria範囲を守れていたのに対し、Expertは他タスク（task_2_2/task_4_1）が`owns_variables`として所有する車両台数・予算内訳・サイクルタイムまで自発的に計算し、ツールループが10回で非収束クラッシュ。①Expertへのスコープガードレール注入、②ツールループ2周目以降のsystem_promptを現在タスクのみに軽量化、の2案を実装 | P1 |
+| BL-026 | 低 | `cela_main.py` (`call_orchestrator`) | 専門家名を固定16種の配列（`valid_experts`）に限定していたが、グラフ・`call_expert`のどちらも具体的な専門家名で分岐しておらず、単なるプロンプト埋め込みラベルに過ぎないことが判明。無用な足かせと判断し、orchestratorがタスクに即した専門家の肩書きを自由記述で生成する方式に変更 | P3 |
 
 ---
 
@@ -784,6 +785,34 @@ BL-023 Phase Aの実ドライラン（`log/2026-07-20/1204`）で、`generate_us
 - ~~①②とも実装し、`python -m py_compile`・オフラインスモークテストで動作確認する。~~ → `done`（`_build_task_scope_context`ヘルパーを`generate_user_utterance`と共通化し`call_expert`にも適用。`_query_AI_live`に`light_system_prompt`引数を追加し、`_JAPANESE_OUTPUT_DIRECTIVE`を定数化。フェイククライアントによるオフラインスモークテスト2件（①system_promptへのガードレール注入確認、②iter=1はフル文脈・iter=2以降は軽量文脈に差し替わることの確認）はすべてPass）
 - 実機再ドライランで、Expertが他タスクの`owns_variables`領域に踏み込まなくなることを確認する（未実施）。
 - ~~②の軽量化がRecord/Replayのフィクスチャキー整合性に影響しないことを確認する~~ → `done`（`_hash_messages_for_replay`は呼び出し時点の`messages`引数を使用し、軽量化はツールループ内部iter=2以降でのみ発生するため、フィクスチャキーに影響しない設計であることをコードレベルで確認）。
+
+---
+
+### BL-026: 専門家名の固定配列（valid_experts）を撤廃し、orchestratorの自由記述に変更
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P3 |
+| 依存 | なし |
+| 関連 | [D-024](decision_log.md#d-024-orchestratorの専門家選択を固定16種配列から自由記述に変更する) |
+
+**内容:**
+
+ユーザーが「オーケストレーターノードで専門家を選び、専門家ごとに個別のグラフを作るべきかと思っていたが、現在の動きではその必要もない？」と提起したのを受け、`call_orchestrator`/`call_expert`/グラフのルーティングを確認したところ、以下が判明した。
+
+- `state["selected_expert"]`は`call_expert`の`expert_name`引数としてプロンプトに埋め込まれる（「あなたは有能な{expert_name}の分野の専門家です」）だけで、`call_expert`内部で`expert_name`により処理が分岐する箇所は一切ない。
+- グラフの`add_conditional_edges`も`selected_expert`の値では分岐しておらず、専門家ごとの個別ノード・個別グラフは最初から存在しない（単一の汎用`expert_node`のみ）。
+- つまり固定16種配列（`valid_experts`）は、実際には何のアーキテクチャ上の役割も果たしておらず、orchestratorの選択肢を不必要に狭めていただけだった。実ドライランのログでも、リストのどれにも綺麗に当てはまらないタスクで選定に無駄な思考コストが発生していた（「requirement_engineerかboundary_checkerかnumerical_allocatorか」の長い逡巡）。
+
+ユーザーは「なぜ固定配列にしたか忘れてしまったが、v10以前に情報を構造化していなかったツケ。現状謎の足かせになり得ているので自由記述にし、フォールバックは仕込む。専門家ごとのノード構造は必要が生じたらそうする（まだMVPも一通り動いていない）」と判断した。
+
+**完了条件:**
+
+- ~~`call_orchestrator`のプロンプトから固定16種配列を削除し、タスクに即した専門家の肩書きを自由記述で生成させる。~~ → `done`
+- ~~`valid_experts`による検証を撤廃し、空文字・空白のみの場合のみ汎用フォールバック（「プロジェクト全般アドバイザー」）にする軽量フォールバックに置き換える。~~ → `done`
+- ~~オフラインスモークテストで、自由記述の専門家名がそのまま通ること、空・不正JSON時にフォールバックすることを確認する。~~ → `done`（フェイククライアントで3ケース確認）
+- 専門家ごとの個別ノード・個別グラフ構造は、実際にその必要が生じた時点で再検討する（現時点では非対応、MVP未完成のため時期尚早と判断）。
 
 ---
 
