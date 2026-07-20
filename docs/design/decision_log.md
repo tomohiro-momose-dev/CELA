@@ -433,6 +433,66 @@
 
 ---
 
+### D-028: プレフィックスキャッシュヒット率改善はMVP完成後のコスト最適化枠として据え置く
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-20 |
+| 状態 | `decided` |
+| 決定者 | t-momose |
+| **決定理由** | ユーザーがOpenRouterダッシュボードで直近24時間の実績（4.6Mトークン、キャッシュヒット率19.7%、コスト$0.65）を確認・共有。単価自体は格安モデル（`deepseek-v4-flash`系）想定で妥当だが、ヒット率19.7%は本日のログレビューで確認した「Recent Decisions再掲・task_planner出力JSON全体等の可変ブロックが毎ターン再送されプレフィックスキャッシュを壊している可能性」と整合する。ユーザーは「エージェントアーキテクチャを洗練させていくと、そこそこの性能の格安モデルでも十分動き、成果が出せると感じた」と所感を述べ、この観察をBLとして記録するよう指示。現状すでに$0.65/4.6Mと十分安価でMVPも未完成のため、緊急対応ではなくbacklog化とする。 |
+| 決定内容 | プロンプト構造（不変の固定部分と、ターンごとに変化する部分の配置）の整理によるキャッシュヒット率改善は、BL-031として起票し`open`のまま据え置く。MVP完成・Phase C着手後など、コスト最適化に着手するタイミングで優先度を再確認する。 |
+| 影響 | なし（現時点でコード変更なし。将来`cela_main.py`の各ノードのプロンプト構築箇所が対象） |
+| 関連 BL | [BL-031](issue_backlog.md#bl-031-プロンプトのプレフィックスキャッシュヒット率を上げる構造整理コスト最適化) |
+| 参照 | OpenRouterダッシュボード実績（2026-07-20時点、4.6Mトークン/ヒット率19.7%/$0.65）、[decision_lineage.md 論点32](decision_lineage.md) |
+
+---
+
+### D-029: 同一task_idの兄弟Decisionへの承認カスケードを、Detector判定でガードして実装する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-20 |
+| 状態 | `decided` |
+| 決定者 | t-momose |
+| **決定理由** | `log/2026-07-20/1421`のプロンプト出力で、task_2_3の親Deliverable（予約手段の設計レポート）は承認済みなのに、同じAgent提出から抽出された4件のDecision（予約チャネル按分比率等）がProposedのまま永久に取り残され、以降全ターンの「合意・決定事項・検討状況DB」に🤔として再掲され続けていることをユーザーが発見。原因は`call_decision_extractor`のUser直後`role_instruction`が承認時の`target_topic`を単数でしか指定させず、兄弟トピックへの承認カスケードがないこと。AIは`task_id`に基づく機械的カスケードを提案したが、ユーザーは「本当に未検討の事項が放置されるのはどうしましょうか」と、単純な機械化が未レビューの項目まで隠蔽するリスクを指摘。これを受け、`detector_node`が`decision_extractor_node`より先に`state["constraint_issue"]`/`state["task_criteria_status"][task_id]`をセットしている既存の順序を利用し、同ターンのDetector判定が清浄な場合のみカスケードするガード付き設計に改訂した。 |
+| 決定内容 | `decision_extractor_node`が「同一task_idのDeliverableがApproved」を検出した際、同ターンの`state["constraint_issue"] != "major"`かつ`state["task_criteria_status"][task_id]`が全て`true`の場合のみ、同task_id配下の他のProposed項目を機械的にカスケード承認する。いずれかを満たさない場合はカスケードせず、現状のProposedのまま残す。BL-032として起票し、設計は確定・実装承認済みだが実装は別ターンで行う。 |
+| 影響 | `cela_main.py`（`decision_extractor_node`、実装は未着手） |
+| 関連 BL | [BL-032](issue_backlog.md#bl-032-deliverable承認時に同一task_idの兄弟decisionが永久にproposedのまま取り残される) |
+| 参照 | `log/2026-07-20/1421/log_no_prompt.md`（task_2_3の4件のDecisionが繰り返しProposedとして再掲される箇所）、[decision_lineage.md 論点33](decision_lineage.md) |
+
+---
+
+### D-030: Expertの検算未実施を検出しDetectorへ提示しつつ、複合失敗のみ強制差し戻しする
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-20 |
+| 状態 | `decided` |
+| 決定者 | t-momose |
+| **決定理由** | `log/2026-07-20/1421`のtask_5_2で、Expert(legal_advisor)が`tool_calls=0`のまま「全ての検算が完了した」と虚偽申告し、過失割合・保険料等の数値を含むレポートを提出していたことをユーザーが発見。既存のF-2.6監査フラグ（`⚠️ python_replを一度も使わずに応答しました`）は警告表示のみで強制力がなかった。後段のDetectorが独立検算し実害はなかったが、これは偶然であり、Detectorの検算が省略された場合のリスクが残る。ユーザーは当初「このフラグが出たら強制差し戻し」を提案したが、同時に「本当に計算不要な思考の場合もあり、無限ループ化のリスクがある」と自ら懸念を指摘した。これを受け、単純な強制ではなく段階的な設計とした。さらにユーザーから「AIが呼んだ直前のpythonスクリプトを保存できないか」「Detectorがまず自分で検算し、その後Expertのスクリプトを見て（あるいは実行して）整合を確認する」という追加提案があり、設計に統合した。 |
+| 決定内容 | (1) `_query_AI_live`でExpertが実行したpython_replのcode/resultを`state["expert_last_python_calls"]`に保存し、`call_detector`のプロンプトに提示する（Expertの自己申告を鵜呑みにせず、まずDetector自身が独立検算し、その後この記録と突き合わせて整合性を確認するよう指示）。(2) Expertの成果物を評価するターンに限り、ExpertとDetectorの**両方**が同一ターンでpython_repl未使用だった場合のみ、`constraint_issue`を強制的に`major`にしてフェイルクローズする。片方でも使用していれば発火しない（正当な計算不要ケースを巻き込む無限ループを回避）。 |
+| 影響 | `cela_main.py`（`_query_AI_live`、`call_detector`、`expert_node`、`detector_node`、`LineageState`） |
+| 関連 BL | [BL-033](issue_backlog.md#bl-033-expertがpython_repl未使用のまま検算完了と虚偽申告できるf-26監査フラグに強制力がない) |
+| 参照 | `log/2026-07-20/1421/log_no_prompt.md:46025`付近（Expertの虚偽申告と、後段Detectorの独立検算箇所）、[decision_lineage.md 論点34](decision_lineage.md) |
+
+---
+
+### D-031: Deliverableの物理ファイル保存を承認前提にする設計変更は、R4のホワイトボード化まで見送る
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-20 |
+| 状態 | `decided` |
+| 決定者 | t-momose |
+| **決定理由** | `log/2026-07-20/1421`のtask_6_3で、Expertの最終計画書提出をDetectorが通した直後、`decision_extractor_node`（`cela_main.py:2812-2827`）がDB上の`status`（この時点では常に`"Proposed"`）を問わず無条件で`save_deliverable_to_file()`を呼び、ユーザー（User AI）の承認より前に物理ファイルが確定してしまうことをユーザーが発見。`integrator_node`は`status=="Approved"`のもののみ集約するため正当性は壊れていないが、却下・修正のたびに旧版ファイルが孤児として残る（task_2_2で既に却下v1・承認v2の2ファイルが実例として残存）ディスク衛生・監査上の課題があった。対応として「Proposed時点ではファイル保存せずApproved確定時に初めて書き込む」設計変更も検討したが、ユーザーは、将来のR4（ホワイトボード化・mdファイルの差分読み書き方式、D-018）が実現すればノード自身が承認確定後にのみ書き込む構造に自然に置き換わる見込みであるため、現時点で`decision_extractor_node`に個別の修正を加えるより記録に留め、R4着手時にまとめて解消する方が合理的と判断した。 |
+| 決定内容 | `decision_extractor_node`のファイル保存タイミング（Proposed時点での無条件保存）はコード変更せず現状維持する。BL-034として実装見送りのまま記録し、R4のホワイトボード化設計に統合して再検討する。 |
+| 影響 | なし（現時点でコード変更なし。将来`cela_main.py`の`decision_extractor_node`がR4対応時に見直し対象） |
+| 関連 BL | [BL-034](issue_backlog.md#bl-034-deliverableのファイル保存がユーザー承認前に無条件で発生する)、[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)（`whiteboard_drafts`/R4） |
+| 参照 | `cela_main.py:2812-2827`（`decision_extractor_node`のファイル保存箇所）、task_2_2の却下v1・承認v2の実例、[decision_lineage.md 論点35](decision_lineage.md) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）

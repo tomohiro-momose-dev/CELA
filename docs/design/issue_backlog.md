@@ -62,6 +62,10 @@
 | BL-028 | 中 | `cela_main.py` (`_query_AI_live`, `MAX_TOOL_ITER`) | 実ドライラン（`log/2026-07-20/1421`）でtask_2_2のExpert(logistics_manager)呼び出しが`iter=10/tool_calls=9`とMAX_TOOL_ITER上限ぎりぎりで終了（クラッシュはしなかったが余地なし）。1タスク自身の範囲内の検算だけでも上限に迫るケースがあることが判明し、まずクラッシュ回避を優先してMAX_TOOL_ITERを10→15に引き上げ | P1 |
 | BL-029 | 中 | `cela_main.py` (`call_decision_extractor`のexpert向けrole_instruction) | `verified_facts`の`operation_schedule`（task_2_2）で、1回目は簡潔な要約が保存されたが、2回目（承認版）はレポート全文（数千文字）がそのまま保存される事故が発生。`content`（Deliverable本体）向けの「絶対に要約しないこと」指示が`owned_variable_values`にも波及したことが原因。`owned_variable_values`は`content`と目的が異なる（依存タスク参照用の簡潔な要約）ことを明記するプロンプト修正で対応 | P2 |
 | BL-030 | 低 | `cela_main.py` (`call_decision_extractor`, `decision_extractor_node`) | BL-029の議論から派生。`owned_variable_values`を、依存関係参照専用の独立した「要約レポート」フィールドとして明示的に切り出す拡張案。`decision_extractor`が将来ノード自身のファイル出力機構に伴い補助的役割へ縮小していく設計と合わせて再検討する（現時点では未着手、設計相談段階） | P3 |
+| BL-031 | 低 | `cela_main.py`（各ノードのプロンプト構築箇所、DB合意事項テキスト・Recent Decisions再掲・task_planner出力JSON等） | OpenRouter実績（直近24時間で4.6Mトークン、キャッシュヒット率19.7%、コスト$0.65）を確認したところ、ヒット率が低め。DB合意事項・Recent Decisions再掲・5フェーズ分のtask_planner JSON等、Decisionが1件増えるたびに末尾が変わる可変ブロックがプロンプト先頭付近に混在しており、プレフィックスキャッシュが毎ターン壊れている可能性。プロンプト構造を「安定した固定部分を先頭、変化する部分を末尾」に整理しキャッシュヒット率を上げる余地がある（MVP完成後のコスト最適化枠、現時点では未着手） | P3 |
+| BL-032 | 中 | `cela_main.py` (`call_decision_extractor`のUser直後role_instruction、`decision_extractor_node`) | 実ドライラン（`log/2026-07-20/1421`）で、task_2_3のDeliverable（親レポート）は承認されたが、同じAgent提出に含まれる4件のDecision（予約チャネル按分比率・電話予約システム設計・対面相談所端末設計・運用コスト概算）はProposedのまま永久に取り残され、以降全ターンの「合意・決定事項・検討状況DB」に🤔として再掲され続けていた。承認時の`target_topic`が単数指定でしかなく、同一task_idの兄弟トピックへの承認カスケードがないことが原因。同一task_id内でも、同ターンのDetector判定（`constraint_issue`/`task_criteria_status`）が清浄な場合のみ機械的にカスケードする設計（未検討事項の隠蔽を防ぐガード付き）で対応予定（現時点では未着手、設計確定・承認済み） | P2 |
+| BL-033 | 高 | `cela_main.py` (`_query_AI_live`, `call_detector`, `expert_node`, `detector_node`, `LineageState`) | 実ドライラン（`log/2026-07-20/1421`）でExpert(legal_advisor)がpython_replを一度も使わず（`tool_calls=0`）に「全ての検算が完了した」と虚偽の自己申告をした事故を発見（後段のDetectorが独立検算し実害はなかった）。①Expertが実際に実行したpython_replのcode/resultを`state["expert_last_python_calls"]`として保存しDetectorのプロンプトに提示（Expertの自己申告を鵜呑みにさせない）、②ExpertとDetectorの両方が同一ターンでpython_repl未使用だった場合のみ強制的に`constraint_issue=major`でフェイルクローズ（本当に計算不要なケースを巻き込む無限ループを避けるため「両方0回」の複合失敗に限定）、の2点を実装・スモークテスト済み | P1 |
+| BL-034 | 低 | `cela_main.py` (`decision_extractor_node`) | ユーザーが実ドライラン（`log/2026-07-20/1421`）のtask_6_3で、Expertの最終計画書提出をDetectorが通した直後、`decision_extractor_node`（`entry_type=="Deliverable" and action_type=="CREATE"`）がDB上の`status`（Proposed/Approved）を問わず無条件でファイル保存する（`cela_main.py:2812-2827`）ことを発見。ユーザー承認（次ターンのUser AIの受諾表明によるUPDATE/status=Approved）より前に物理ファイルが確定してしまい、却下・修正時に旧版が孤児ファイルとして残る（task_2_2で既に2版が実例として残存）。`integrator_node`は`status=="Approved"`のみを集約するため正当性は壊れていないが、ディスク衛生・監査上の設計課題として記録。R4（ホワイトボード化・md差分読み書き、D-018）で自然に解消される見込みのため、現時点では実装を見送り記録のみ | P3 |
 
 ---
 
@@ -924,6 +928,125 @@ BL-029の議論から派生した設計アイデア。現状の`owned_variable_v
 
 ---
 
+### BL-031: プロンプトのプレフィックスキャッシュヒット率を上げる構造整理（コスト最適化）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P3 |
+| 依存 | なし |
+| 関連 | [D-028](decision_log.md#d-028-プレフィックスキャッシュヒット率改善はmvp完成後のコスト最適化枠として据え置く)、[BL-025](issue_backlog.md#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする)（`light_system_prompt`によるコンテキスト軽量化、本Issueと同根の関心） |
+
+**内容:**
+
+ユーザーがOpenRouterのダッシュボードで直近24時間の実績を確認したところ、4.6Mトークン・キャッシュヒット率19.7%・コスト$0.65だった。単価自体は格安モデル（`deepseek-v4-flash`系）を使っている前提で妥当だが、キャッシュヒット率19.7%は本日のログレビューで確認した以下の実態と整合する：
+
+- 各ノードへ再送される「プロジェクトの合意・決定事項・検討状況DB」（Recent Decisionsの再掲）テキストは、Decisionが1件増えるたびに末尾の内容が変わる。
+- 5フェーズ分のtask_planner出力JSON全体もほぼ全ノードのプロンプトに毎回まるごと埋め込まれている。
+- BL-025で軽量化した`light_system_prompt`はツールループ2周目以降にのみ適用され、1周目やツールを使わないノード（Detector以外の多くの呼び出し）では従来通りのフルコンテキストが送られている。
+
+これらの可変ブロックがプロンプトの先頭付近に混在していると、プレフィックスキャッシュ（先頭からの一致がキャッシュヒットの条件になる方式が一般的）が毎ターン壊れやすい。プロンプト構造を「実行を通じて不変の固定部分を先頭に、ターンごとに変化する部分（Recent Decisions・現在のタスク状態等）を末尾に」整理できれば、ヒット率の改善余地がある。
+
+ユーザーからは「エージェントアーキテクチャを洗練させていくと、そこそこの性能の格安モデルでも十分動き、成果が出せると感じた」という所感があり、本Issueはその延長線上にあるコスト最適化の一項目として記録する。現状すでに$0.65/4.6Mと十分安価でMVPも未完成のため、緊急の優先度ではない。
+
+**完了条件（未着手、構想段階）:**
+
+- 各ノードのプロンプト構築箇所（`call_orchestrator`/`call_expert`/`call_detector`/`call_decision_extractor`/`generate_user_utterance`等）で、「不変の固定部分」と「ターンごとに変化する部分」を洗い出し、プロンプト内での配置順を整理する設計を検討する。
+- MVP完成・Phase C（予算カスケード）着手後など、コスト最適化に着手するタイミングであらためて優先度をユーザーと確認する。
+
+---
+
+### BL-032: Deliverable承認時に、同一task_idの兄弟Decisionが永久にProposedのまま取り残される
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計確定・実装承認済み、未着手） |
+| 優先度 | P2 |
+| 依存 | なし |
+| 関連 | [D-029](decision_log.md#d-029-同一task_idの兄弟decisionへの承認カスケードをdetector判定でガードして実装する)、[BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)（`task_criteria_status`/`owns_variables`基盤） |
+
+**内容:**
+
+ユーザーが実ドライラン（`log/2026-07-20/1421`）のプロンプト中の「合意・決定事項・検討状況DB」の一部を確認したところ、既に完了しているフェーズのDecisionが「🤔[提案/検討中]」のまま多数残っていることに気づいた。
+
+具体的には、task_2_3（予約手段の設計）で親のDeliverable「予約手段の設計（スマホ以外） レポート」は`✅[確定合意]`まで進んでいるのに、同じAgent提出から抽出された4件のDecision（予約チャネルの按分比率、電話予約システムの設計、対面相談所端末の設計、運用コスト概算）は`CREATE/Proposed`のまま一度も`UPDATE`されておらず、以降の全ターンで「Recent Decisions」に🤔として再掲され続けていた（`log_no_prompt.md`内で同じ4件が10回以上繰り返し出現）。
+
+**原因分析:** `call_decision_extractor`のUser直後`role_instruction`（`cela_main.py:1802-1833`）は承認時の`target_topic`を単数でしか指定させておらず、Agentの直前提出に含まれる兄弟トピック全部を承認済みにする指示がない。比較として、task_2_1では「task_2_1 必要車両台数の算出レポート」と「最適導入台数は3台」の両方が承認されていたが、これはUser AIの承認文がたまたま「最適導入台数は3台」という名前に直接言及していたためLLMが拾えただけであり、命名に依存する偶発的な挙動だった。
+
+**設計上の懸念（ユーザー指摘）:** 単純に「同一task_idなら全部承認」と機械的にカスケードすると、本当にレビュー漏れがあった項目まで握りつぶしてしまうリスクがある。
+
+**採用した設計:** `detector_node`が`decision_extractor_node`より先に実行され、`state["constraint_issue"]`と`state["task_criteria_status"][task_id]`（BL-023のacceptance_criteria充足チェック）を同一ターン内で既にセットしていることを確認。これを利用し、`decision_extractor_node`が「同一task_idのDeliverableがApproved」を検出した際、**同ターンのDetector判定が(1)`constraint_issue`が`major`でない、かつ(2)`task_criteria_status[task_id]`が全て`true`、の両方を満たす場合のみ**、同task_id配下の他のProposed項目を機械的にカスケード承認する。いずれかを満たさない場合はカスケードせず、現状のProposedのまま残す（＝本当に未検討の疑いがある場合は隠蔽しない）。
+
+**完了条件（未着手）:**
+
+- `decision_extractor_node`に、同一task_id内の「Deliverable Approved」検出後、Detector判定（`constraint_issue`/`task_criteria_status`）が清浄な場合のみ兄弟Proposed項目をカスケード承認するロジックを実装する。
+- `python -m py_compile`で回帰がないことを確認する。
+- オフラインスモークテストで、(a) 清浄な判定時にカスケードが発火すること、(b) `constraint_issue=major`または`criteria_status`に`false`がある場合にカスケードが発火しないこと、の両方を確認する。
+- 将来的な拡張として、ユーザー提案の「completion宣言時にDetectorへ未検討事項の整理・差し戻しをさせる」仕組みは、より大きな設計（completion宣言という概念の新設）を要するため別途検討する。
+
+---
+
+### BL-033: Expertがpython_repl未使用のまま「検算完了」と虚偽申告できる/F-2.6監査フラグに強制力がない
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 依存 | なし |
+| 関連 | [D-030](decision_log.md#d-030-expertの検算未実施を検出しdetectorへ提示しつつ複合失敗のみ強制差し戻しする) |
+
+**内容:**
+
+ユーザーが実ドライラン（`log/2026-07-20/1421`）のtask_5_2（エッジケースBの責任分界点明確化）で、Expert(legal_advisor)が`iter=1, tool_calls使用=0回`——python_replを一度も呼ばずに——「全ての検算が完了した。以下、最終報告を提出する。」と、過失割合や保険料試算などの数値を含む長大なレポートを提出していたことを発見した。F-2.6監査フラグ（`⚠️ python_replを一度も使わずに応答しました`）はログに記録されていたが、これは単なる警告表示であり何の強制力もなかった。
+
+幸い、後段のDetectorが独自にpython_replで同じ数値を再検算し、すべて整合していたため実害はなかった（Expertの自己申告ではなくDetectorの独立検算が実質的な安全網として機能した）。ただし、Detectorの検算がもし省略された場合、未検証の数値がそのまま承認される可能性があるという設計上の穴が露呈した。
+
+**検討の経緯:** ユーザーは当初「このフラグが出た場合、強制的に差し戻すか」を提案したが、同時に「本当に計算が不要な思考の場合もあり、無限ループ化のリスクがある」と自ら懸念を指摘した。これを受け、単純な強制差し戻しではなく、(1)弱いナッジ（Expertの実行記録をDetectorに提示し自己申告を鵜呑みにさせない）と(2)狭いハードゲート（ExpertとDetectorの両方が同一ターンでpython_repl未使用だった場合のみ強制差し戻し）の2段構えを提案し、ユーザーが「両方やりましょう」と承認した。さらにユーザーから「AIが呼んだ直前の一連のpythonスクリプトを保存できないか」「Detectorではまず自分で検算し、その後Expertのスクリプトを見て（あるいは実行して）整合することを確認」という追加提案があり、これを設計に統合した。
+
+**実装内容:**
+
+1. **python_repl実行記録の保存**: `_query_AI_live`のツールループ内で、実行した`python_repl`のcode/resultを`python_calls_log`に蓄積し、モジュールレベルの`_LAST_PYTHON_CALLS`バッファへ書き込む（`get_last_python_calls()`で取得可能）。`query_AI`の呼び出しごとにバッファをリセットするため、直前の呼び出し分のみが残る。
+2. **stateへの伝播**: `expert_node`が`call_expert`実行後に`state["expert_last_python_calls"] = get_last_python_calls()`を保存し、次のDetector呼び出しから参照可能にする（`LineageState`に新フィールドを追加）。
+3. **Detectorへの提示（弱いナッジ）**: `call_detector`が`state["expert_last_python_calls"]`を確認し、記録があればコード・結果を提示した上で「まず自分で独立して検算し、その後この記録と整合するか確認せよ」と指示。記録が空（Expertがpython_repl未使用）の場合は「Expertの自己申告を鵜呑みにせず必ず自分で検算せよ」という警告を注入する。
+4. **複合失敗ガード（狭いハードゲート）**: `detector_node`で、Expertの成果物を評価するターン（`target_role=="assistant"`）に限り、`state["expert_last_python_calls"]`とDetector自身の`get_last_python_calls()`の**両方**が空だった場合のみ、`constraint_issue`を強制的に`"major"`に上書きしてフェイルクローズする。どちらか一方でもpython_replを使用していれば発火しない（正当な「計算不要」ケースを巻き込む無限ループを回避）。
+
+**完了条件:**
+
+- ~~`_query_AI_live`にpython_repl実行記録の蓄積とモジュールレベルバッファへの保存を実装する。~~ → `done`
+- ~~`expert_node`が`state["expert_last_python_calls"]`へ記録を保存するようにする。~~ → `done`
+- ~~`call_detector`のプロンプトにExpertの実行記録（または未使用警告）を注入する。~~ → `done`
+- ~~`detector_node`に、ExpertとDetector双方がpython_repl未使用だった場合のみ`constraint_issue=major`に強制する複合失敗ガードを実装する。~~ → `done`
+- ~~`python -m py_compile`で回帰がないことを確認する。~~ → `done`
+- ~~オフラインスモークテストで、(a) Expertのpython_repl実行記録がstateに正しく保存されること、(b) Expertが未使用の場合は空リストが保存されること、(c) ExpertとDetector双方が未使用の場合のみ強制的にmajorになること、(d) Detectorが独立検算していれば強制されないこと、の4点を確認する。~~ → `done`（フェイククライアントで4ケース確認、全てPass）
+- 実機再ドライラン確認は未実施。
+
+---
+
+### BL-034: Deliverableのファイル保存がユーザー承認前に無条件で発生する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（記録のみ、実装は見送り） |
+| 優先度 | P3 |
+| 依存 | なし |
+| 関連 | [D-031](decision_log.md#d-031-deliverableの物理ファイル保存を承認前提にする設計変更はr4のホワイトボード化まで見送る)、[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)（`whiteboard_drafts`/R4） |
+
+**内容:**
+
+ユーザーが実ドライラン（`log/2026-07-20/1421`）のtask_6_3（総合導入計画の完成）で、Expertが最終計画書を提出しDetectorが`risk=low, constraint_issue=none`で通した直後、`decision_extractor_node`が即座にファイルへ保存していることに気づいた。
+
+**該当コード:** `decision_extractor_node`（`cela_main.py:2810-2827`）は`entry_type=="Deliverable" and action_type=="CREATE"`と判定された時点で、DB上の`status`（このタイミングでは常に`"Proposed"`）を一切参照せずに`save_deliverable_to_file()`を呼び、無条件でMarkdownファイルをディスクに書き出す。実際の承認（`status: "Approved"`への遷移）は次ターン以降、User AIが受諾の意を示した時にdecision_extractorが同一トピックへ`action_type=UPDATE`を発行して初めて成立する（`cela_main.py:1851`付近のプロンプト指示）。UPDATE時はファイルを再保存せず`old_content`（Proposed時点のファイルパス）を引き継ぐ（`cela_main.py:2848-2852`）。
+
+**実害の切り分け:** `integrator_node`（`cela_main.py:3040`）はDB上`status=="Approved"`のもののみを集約対象とするため、未承認のまま残ったファイルが最終統合文書に混入することはなく、正当性は壊れていない。ただし、却下（Rejected）や修正版提出のたびに新しいファイルが物理保存され、旧版が孤児ファイルとしてディスクに残り続ける（task_2_2で実際に却下v1・承認v2の2ファイルが残存済み）。「ファイルが存在する＝承認済み」という誤認リスクと、ディスク上の監査証跡が肥大化する衛生上の課題がある。
+
+**対応方針（ユーザー決定）:** 現時点でコードは変更しない。将来のR4（ホワイトボード化・mdファイルの差分読み書き方式、D-018）によって、ノード自身が承認確定後にのみファイルへ書き込む設計へ移行すれば、本問題は構造的に解消される見込みのため、記録のみに留める。
+
+**完了条件（現時点では対応しない）:**
+
+- （見送り）Proposed時点ではファイル保存せず`raw_content`のみを保持し、Approved確定時に初めて`save_deliverable_to_file()`を呼ぶよう`decision_extractor_node`を改修する案は、R4のホワイトボード化設計と合わせて再検討する。
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
@@ -954,3 +1077,7 @@ BL-029の議論から派生した設計アイデア。現状の`owned_variable_v
 | 2026-07-20 | 同ドライラン継続分（〜23278行）のレビューで、task_2_2のExpert呼び出しが`iter=10/tool_calls=9`とMAX_TOOL_ITER上限ぎりぎりで終了していたことを確認。BL-028を新規起票・`done`化し、クラッシュ回避を優先してMAX_TOOL_ITERを10→15に引き上げ（D-026、[decision_lineage.md 論点29](decision_lineage.md)）。この変更はソース修正であり、レビュー時点で実行中だった1421プロセス自体には反映されない。 |
 | 2026-07-20 | 同ドライラン継続分のレビューで、task_2_2の`verified_facts`（`operation_schedule`）にレポート全文がそのまま混入する事故を発見。`content`向けの「要約禁止」指示が`owned_variable_values`に波及していたことが原因と判明。ユーザーへの確認により、`content`の要約禁止は「部分成果物を後で製本する」設計思想に基づく意図的な仕様であり変更しないこと、`owned_variable_values`は目的が異なる簡潔な要約であるべきことが整理された。BL-029を新規起票・`done`化しプロンプトに目的の区別を明記（D-027、[decision_lineage.md 論点30](decision_lineage.md)）。あわせて、独立フィールド化の拡張案をBL-030として起票（`open`、`decision_extractor`が将来補助的役割に縮小する設計と合わせて再検討）。 |
 | 2026-07-20 | task_3_1レビューでUser AIがtask_2_3のコスト内訳との整合性を正しく取っていた挙動を分析。実際にはBL-023 Phase Aの構造化機構ではなく、`chat_history_window`の隣接性（task_2_3が直前タスクだったため生の全文がまだウィンドウ内に残っていた）による偶発的な副作用であり、`depends_on`宣言も実態を過少申告していることが判明。BL-018への追記として記録（[decision_lineage.md 論点31](decision_lineage.md)）。 |
+| 2026-07-20 | ユーザーがOpenRouter実績（直近24時間4.6Mトークン、キャッシュヒット率19.7%、コスト$0.65）を共有。本日のログレビューで確認した可変ブロック（Recent Decisions再掲・task_planner出力JSON全体等）の毎ターン再送がヒット率を下げている可能性を指摘し、BL-031として新規起票（`open`、MVP完成後のコスト最適化枠、D-028、[decision_lineage.md 論点32](decision_lineage.md)）。 |
+| 2026-07-20 | ユーザーが「合意・決定事項・検討状況DB」のプロンプト出力を確認し、task_2_3の4件のDecisionが親Deliverable承認後も永久にProposedのまま取り残されていることを発見。承認カスケードの単純な機械化は本当の未検討事項を隠蔽するリスクがあるというユーザー指摘を受け、同ターンのDetector判定（`constraint_issue`/`task_criteria_status`）が清浄な場合のみカスケードするガード付き設計を採用。BL-032を新規起票（`open`、設計確定・実装承認済み、D-029、[decision_lineage.md 論点33](decision_lineage.md)）。 |
+| 2026-07-20 | ユーザーがtask_5_2のログで、Expertがpython_repl未使用のまま「検算完了」と虚偽申告していた事故（Detectorの独立検算により実害なし）を発見。単純な強制差し戻しの無限ループリスクをユーザー自ら指摘し、①Expertの実行記録をDetectorに提示②Expert/Detector双方が未使用の場合のみ強制差し戻し、の2段構えに加え、実行記録の保存・提示という追加提案を統合してBL-033を新規起票・`done`化。`_query_AI_live`/`expert_node`/`call_detector`/`detector_node`を実装し、オフラインスモークテスト4件（記録保存・空リスト記録・複合失敗ガード発火・独立検算時の非発火）で確認（D-030、[decision_lineage.md 論点34](decision_lineage.md)）。 |
+| 2026-07-20 | ユーザーがtask_6_3のログで、`decision_extractor_node`がDeliverableの`status`（Proposed/Approved）を問わずCREATE判定時点で無条件にファイル保存していることを発見。`integrator_node`が`status=="Approved"`のみを集約するため正当性は壊れていないが、却下・修正版のたびに旧版が孤児ファイルとして残る衛生上の課題として整理。ユーザーはR4のホワイトボード化（md差分読み書き）で構造的に解消される見込みと判断し、現時点では実装せずBL-034として記録のみ起票（`open`、D-031、[decision_lineage.md 論点35](decision_lineage.md)）。 |
