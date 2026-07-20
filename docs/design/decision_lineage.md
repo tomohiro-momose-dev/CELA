@@ -336,6 +336,17 @@
 
 ---
 
+### 論点31: クロスタスク数値整合性チェックが`depends_on`ではなく`chat_history_window`の隣接性に支えられていた発見（BL-018追記）
+
+- **ユーザー観察:** `log/2026-07-20/1421`のtask_3_1レビューで、User AIがtask_2_3の個別コスト（初年度110万円）とtask_3_1の初期費用計上（85万円）の差異を「経常費用の除外」として正しく整理していたことに着目し、「この挙動はたまたまではなく、システムとして必然か？」と問うた。
+- **AI分析:** `chat_history`の積み上げ方（`generate_user_utterance_node`/`expert_node`で`{user: 指示}`→`{assistant: 回答}`の交互ペア、`cela_main.py:2492`/`2594`）と`config["chat_history_window"]`（デフォルト4 = 直近2サイクル分、`cela_main.py:2402`/`3581`）を確認。task_3_1の`depends_on`はtask_planner出力上`["task_2_1"]`のみでtask_2_2・task_2_3を含まず、task_2_3の`owns_variables`（`reservation_methods`）が`verified_facts`に保存した値もチャネル比率のみでコスト内訳は含まれていないことを確認。したがって今回の照合は、BL-023 Phase Aの構造化された確定値参照ではなく、task_2_3がtask_3_1の直前タスクだったために`chat_history_window`内に生の全文がたまたま残っていたことによる、と結論づけた。あわせて、task_planner側の`depends_on`宣言がExpertの実際の情報利用範囲（task_2_2のオペレーター数、task_2_3の端末・電話コスト）より狭く、依存関係グラフ自体が実態を過少申告している点も指摘した。
+- **ユーザー決定:** 「記録してください」と、この発見をドキュメントに残すよう指示。
+- **AI対応:** 既存の[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)（タスク間依存関係の構造化不足）に、本発見を実ドライランの具体的な証拠として追記。BL-018はもともと`open`（構想段階）のため、新規D-xxx（決定）は起こさず、発見事実の記録として本論点を追加した。
+- **決定者:** t-momose（記録の指示）、Claude Sonnet 5（メカニズムの特定と分析）
+- **関連:** [BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)、`log/2026-07-20/1421/log_no_prompt.md`（task_3_1レビュー箇所）
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
