@@ -328,6 +328,21 @@
 
 ---
 
+### D-021: BL-023の設計を、本プロジェクト自身の統治構造に対応する情報構造としてLineageStateに統合する（`decision_extractor_node`を状態遷移の唯一の書き手とする）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-20 |
+| 状態 | `decided` |
+| 決定者 | t-momose |
+| **決定理由** | ユーザーから「このプロジェクト自身が使っているロードマップ／phaseN詳細設計／issue_backlog／decision_lineage／phase_gate／STATUS／traceability／確定値の再利用、という情報構造をエージェントにも持たせればよいのでは」という指摘があった。調査の結果、CELAには「決定の系譜」（`decisions`テーブル）に相当するものは既に存在するが、「今どのフェーズ・タスクが進行中か」（STATUS相当）は`state["current_phase"]`が初期化時に一度セットされたきり凍結（BL-024、BL-005と同型）しており、「先送り記録」（issue_backlog相当）「完了条件」（phase_gate相当）「充足チェック」（traceability相当）「確定値の共有」（BL-015と重複）はいずれも構造として存在しないことが判明した。これらを個別のBLに分割することも検討したが、ユーザーが「結局目指すところは一緒」と判断したため、BL-023の統合設計として1つの設計書にまとめることにした。状態遷移（`current_phase`/`current_task_id`の更新）の書き手をどのノードにするかについては、新規LLM呼び出しを増やさず、既存の`decision_extractor`が持つ`Directive`抽出パターンを拡張することで実現できるため、`decision_extractor_node`を唯一の書き手とし、書き込み前にtask_planner確定済みの`phases`/`tasks`と照合するフェイルクローズ検証を挟む設計とした（本プロジェクトの`check_docs_consistency.py`が果たす役割と同型）。過去に`generate_user_utterance`側の強制JSON出力（`phase_id`/`task_id`）が試みられ無効化された形跡があるが、無効化理由がドキュメントに残っておらず、AGENTS.mdの「no guessing」原則によりこの方式は採用しない。 |
+| 決定内容 | `LineageState`に`current_task_id`/`verified_facts`/`task_criteria_status`を追加し、`Phase`/`Agreement`型を拡張（`Task`型新設、`Agreement.task_id`・`status: "Deferred"`追加）。`decision_extractor`の出力スキーマに`advances_to_phase_id`/`advances_to_task_id`を追加し、`decision_extractor_node`内でtask_planner確定済みのIDと照合した上でのみ`state["current_phase"]`/`current_task_id`を更新する。詳細は`docs/design/phase2/cela_phase2_design_BL023_task_state.md`を参照。 |
+| 影響 | `cela_main.py`（`LineageState`/`Phase`/`Agreement`/`Task`型、`decision_extractor`/`decision_extractor_node`、DBスキーマに`agreements.task_id`列・`verified_facts`テーブル追加） |
+| 関連 BL | [BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、[BL-024](issue_backlog.md#bl-024-current_phaseが初期化後フリーズしtask_id単位の状態追跡が存在しない)、[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)、[BL-015](issue_backlog.md) |
+| 参照 | `docs/design/phase2/cela_phase2_design_BL023_task_state.md`、[decision_lineage.md 論点24](decision_lineage.md) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
