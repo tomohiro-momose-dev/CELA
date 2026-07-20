@@ -325,6 +325,17 @@
 
 ---
 
+### 論点30: `owned_variable_values`への`content`全文混入と、「部分成果物→製本」設計思想の確認（BL-029/BL-030、D-027）
+
+- **AI報告:** `log/2026-07-20/1421`のtask_2_2で`verified_facts`の`operation_schedule`を検証したところ、1回目（却下版）は簡潔な要約だったのに対し、2回目（承認版）はレポート全文がそのまま保存されていたことを発見。原因は`Deliverable`の`content`向け「絶対に要約しないこと」指示が、目的の異なる`owned_variable_values`にも波及していたためと分析し、プロンプトで両者の目的を明記する修正案（A）と、独立フィールド化する拡張案（B）の2案を提示した。
+- **ユーザー説明（設計思想の共有）:** 「要約禁止にしたのには、成果物として出したものの情報を削ぎたくないという側面があります。最終的に部分ごとの成果物をまとめなおし、製本するため。（AIがすべての要素を含んだ長大な成果物を太らしていくのではなく、部分成果物を生成し後で合成する）」と、`content`の要約禁止が意図的な設計であることを説明。また「承認や合意、成果物はこの実装フェーズを進めていくと、ノード自身にファイルに出力させる設計なので、decision_extractorは将来的に補助として残すことになります」と、decision_extractorの将来的な役割縮小の見通しを共有。さらに「依存間関係で参照するように、要約レポートを別途作ってもよいかもしれません」と、独立要約フィールドの構想を提案した。
+- **ユーザー決定:** 「OKですAは実装、BはBL起票」。プロンプトへの目的明記（A）は即座に実装し、独立フィールド化（B）はdecision_extractorの将来縮小設計と合わせて検討するbacklogとして起票する方針を決定。
+- **AI対応:** `call_decision_extractor`のexpert向け`role_instruction`に「BL-029: owned_variable_valuesはcontentと目的が異なります」ブロックを追加し、`owned_variable_values`は依存タスク参照用の簡潔な要約であり全文コピー禁止であることを明記。`python -m py_compile`で回帰なしを確認。BL-029を新規起票・`done`化、BL-030を新規起票・`open`のまま（decision_extractorの将来縮小設計待ち）とし、D-027として決定を記録。
+- **決定者:** t-momose（A実装・B起票の判断、`content`要約禁止の設計思想とdecision_extractorの将来像の共有）、Claude Sonnet 5（原因分析と2案の提示、実装）
+- **関連:** [D-027](decision_log.md#d-027-owned_variable_valuesはcontentと目的が異なることをプロンプトで明記する)、[BL-029](issue_backlog.md#bl-029-owned_variable_valuesにcontentの全文がそのまま混入する事故を修正)、[BL-030](issue_backlog.md#bl-030-owned_variable_valuesを依存関係参照専用の要約レポートとして独立フィールド化する拡張案)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
