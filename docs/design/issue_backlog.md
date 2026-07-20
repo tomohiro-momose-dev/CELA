@@ -742,9 +742,10 @@ BL-023 Phase A（「User AIの発話を現在のタスクのacceptance_criteria�
 
 **完了条件:**
 
-- `decision_extractor_node`を`state["current_phase"]`/新設`state["current_task_id"]`の唯一の書き手とする（詳細設計は`cela_phase2_design_BL023_task_state.md` 2.3節）。
-- LLMが返すphase_id/task_idがtask_planner確定済みの`phases`/`tasks`に実在しない場合は書き込みを拒否するフェイルクローズ検証を実装する。
-- オフラインスモークテストで、不正なIDが与えられた場合に状態が変化しないことを確認する。
+- ~~`decision_extractor_node`を`state["current_phase"]`/新設`state["current_task_id"]`の唯一の書き手とする（詳細設計は`cela_phase2_design_BL023_task_state.md` 2.3節）。~~ → `done`（`_resolve_task_transition`実装、`decision_extractor`に`advances_to_phase_id`/`advances_to_task_id`を追加）
+- ~~LLMが返すphase_id/task_idがtask_planner確定済みの`phases`/`tasks`に実在しない場合は書き込みを拒否するフェイルクローズ検証を実装する。~~ → `done`
+- ~~オフラインスモークテストで、不正なIDが与えられた場合に状態が変化しないことを確認する。~~ → `done`（不正phase_id/task_idで状態不変、正当なIDでのみ更新されることを確認）
+- 実LLM実行での再ドライラン確認が残タスク。
 
 ---
 
