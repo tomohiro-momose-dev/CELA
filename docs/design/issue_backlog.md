@@ -60,6 +60,8 @@
 | BL-026 | 低 | `cela_main.py` (`call_orchestrator`) | 専門家名を固定16種の配列（`valid_experts`）に限定していたが、グラフ・`call_expert`のどちらも具体的な専門家名で分岐しておらず、単なるプロンプト埋め込みラベルに過ぎないことが判明。無用な足かせと判断し、orchestratorがタスクに即した専門家の肩書きを自由記述で生成する方式に変更 | P3 |
 | BL-027 | 低 | `cela_main.py`（モジュールトップレベル、`MultiLogger`起動箇所） | `sys.stdout = MultiLogger()`がモジュールのトップレベルにあり、`import cela_main`するだけで本番`log/`配下に新規タイムスタンプディレクトリが作成される事故（実ドライラン中にセッション内のオフラインスモークテストが1455・1458を誤生成）。`if __name__ == "__main__":`ブロック内に移動して修正 | P3 |
 | BL-028 | 中 | `cela_main.py` (`_query_AI_live`, `MAX_TOOL_ITER`) | 実ドライラン（`log/2026-07-20/1421`）でtask_2_2のExpert(logistics_manager)呼び出しが`iter=10/tool_calls=9`とMAX_TOOL_ITER上限ぎりぎりで終了（クラッシュはしなかったが余地なし）。1タスク自身の範囲内の検算だけでも上限に迫るケースがあることが判明し、まずクラッシュ回避を優先してMAX_TOOL_ITERを10→15に引き上げ | P1 |
+| BL-029 | 中 | `cela_main.py` (`call_decision_extractor`のexpert向けrole_instruction) | `verified_facts`の`operation_schedule`（task_2_2）で、1回目は簡潔な要約が保存されたが、2回目（承認版）はレポート全文（数千文字）がそのまま保存される事故が発生。`content`（Deliverable本体）向けの「絶対に要約しないこと」指示が`owned_variable_values`にも波及したことが原因。`owned_variable_values`は`content`と目的が異なる（依存タスク参照用の簡潔な要約）ことを明記するプロンプト修正で対応 | P2 |
+| BL-030 | 低 | `cela_main.py` (`call_decision_extractor`, `decision_extractor_node`) | BL-029の議論から派生。`owned_variable_values`を、依存関係参照専用の独立した「要約レポート」フィールドとして明示的に切り出す拡張案。`decision_extractor`が将来ノード自身のファイル出力機構に伴い補助的役割へ縮小していく設計と合わせて再検討する（現時点では未着手、設計相談段階） | P3 |
 
 ---
 
@@ -867,6 +869,53 @@ BL-025/BL-026の検証用にこのセッション内で実行したオフライ�
 
 ---
 
+### BL-029: `owned_variable_values`に`content`の全文がそのまま混入する事故を修正
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| 依存 | [BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)（`owned_variable_values`/`verified_facts`の導入元） |
+| 関連 | [D-027](decision_log.md#d-027-owned_variable_valuesはcontentと目的が異なることをプロンプトで明記する)、[BL-030](issue_backlog.md#bl-030-owned_variable_valuesを依存関係参照専用の要約レポートとして独立フィールド化する拡張案) |
+
+**内容:**
+
+`log/2026-07-20/1421`ドライランのtask_2_2で、`verified_facts`の`operation_schedule`が2回保存されているのを発見。1回目（却下された旧版）は`3台体制、運行時間8:00-20:00、ピーク時山間部27分ヘッドウェイ、中心部15分以内配車、オフピーク2台運用、夜間1台運用`という狙い通りの簡潔な確定値だったが、2回目（承認された修正版）は**レポート全文（数千文字のMarkdown）** がそのまま`owned_variable_values`の値として保存されていた。
+
+原因を`call_decision_extractor`のexpert向け`role_instruction`で確認したところ、`Deliverable`の`content`フィールドには「絶対に要約しないこと」という明示指示がある一方、`owned_variable_values`側にはその区別がなかった。実際のログ内のDecision Extractorの思考でも「レポートの要約ではなく...値としてレポート全文を入れるのは冗長だが、他に適切な表現がない」と、`content`向けの「要約禁止」指示が`owned_variable_values`側に誤って波及していたことが確認できた。
+
+ユーザーに確認したところ、`content`の「要約禁止」は意図的な設計（部分成果物を後で製本・合成するため、情報を削がない）であり、この方針自体は変更しない。一方`owned_variable_values`は本来、他タスクが`depends_on`を通じて参照する際に読む簡潔な要約であるべきで、`content`とは目的が異なる。ユーザーは「Aは実装」と、プロンプトへの目的明記による修正を承認した。
+
+**完了条件:**
+
+- ~~`call_decision_extractor`のexpert向け`role_instruction`に、`owned_variable_values`は`content`とは別物であり簡潔な要約（全文コピー禁止）にすべきことを明記する。~~ → `done`
+- ~~`python -m py_compile`で回帰がないことを確認する。~~ → `done`
+- 実機再ドライラン確認は未実施（次回以降のtask実行で、`owned_variable_values`が簡潔に保たれるか要観察）。
+
+---
+
+### BL-030: `owned_variable_values`を依存関係参照専用の「要約レポート」として独立フィールド化する拡張案
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P3 |
+| 依存 | [BL-029](issue_backlog.md#bl-029-owned_variable_valuesにcontentの全文がそのまま混入する事故を修正) |
+| 関連 | [D-027](decision_log.md#d-027-owned_variable_valuesはcontentと目的が異なることをプロンプトで明記する) |
+
+**内容:**
+
+BL-029の議論から派生した設計アイデア。現状の`owned_variable_values`はDeliverable抽出と同一の`call_decision_extractor`呼び出し内で、プロンプト指示のみによって簡潔さを担保している（BL-029で修正）。ユーザーからは「依存関係で参照するように、要約レポートを別途作ってもよいかもしれません」との提案があった。
+
+また、ユーザーによれば、実装フェーズが進むと承認・合意・成果物は各ノード自身がファイルに直接出力する設計に移行する予定であり、`decision_extractor`は将来的に補助的な役割に縮小していく。したがって`owned_variable_values`を独立スキーマフィールドとして切り出す設計は、その将来のノード自身のファイル出力機構の設計と合わせて検討するのが望ましく、現時点では単体で先行実装しない。
+
+**完了条件（未着手）:**
+
+- ノード自身がファイル出力する設計（将来）の検討時に、依存関係参照専用の要約フィールド（`owned_variable_values`ないし後継の仕組み）の設計をあわせて見直す。
+- 現時点ではBL-029のプロンプト修正で当面の実害を止めており、本Issueはブロッカーではない。
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
@@ -895,3 +944,4 @@ BL-025/BL-026の検証用にこのセッション内で実行したオフライ�
 | 2026-07-20 | ユーザーの設計問い直しを受け、専門家選択の固定16種配列（`valid_experts`）がグラフ・`call_expert`のどちらでも分岐に使われておらず無用な足かせだったと判明。BL-026を新規起票・`done`化し、`call_orchestrator`を自由記述の専門家肩書き生成＋軽量フォールバックに変更（D-024、[decision_lineage.md 論点27](decision_lineage.md)）。専門家ごとの個別ノード・個別グラフ構造はMVP未完成の現時点では見送り。 |
 | 2026-07-20 | 実ドライラン（`log/2026-07-20/1421`）レビュー中に、同時刻帯の不自然な小ログフォルダ（`1455`・`1458`）を発見。原因は`cela_main.py`の`sys.stdout = MultiLogger()`がモジュールのトップレベルにあり、`import cela_main`するだけで本番`log/`配下に新規ディレクトリが作られる構造だったこと（このセッションのオフラインスモークテストが誤って混入させていた）。BL-027を新規起票・`done`化し、`__main__`ガード内への移動で修正、誤生成ログを削除（D-025、[decision_lineage.md 論点28](decision_lineage.md)）。 |
 | 2026-07-20 | 同ドライラン継続分（〜23278行）のレビューで、task_2_2のExpert呼び出しが`iter=10/tool_calls=9`とMAX_TOOL_ITER上限ぎりぎりで終了していたことを確認。BL-028を新規起票・`done`化し、クラッシュ回避を優先してMAX_TOOL_ITERを10→15に引き上げ（D-026、[decision_lineage.md 論点29](decision_lineage.md)）。この変更はソース修正であり、レビュー時点で実行中だった1421プロセス自体には反映されない。 |
+| 2026-07-20 | 同ドライラン継続分のレビューで、task_2_2の`verified_facts`（`operation_schedule`）にレポート全文がそのまま混入する事故を発見。`content`向けの「要約禁止」指示が`owned_variable_values`に波及していたことが原因と判明。ユーザーへの確認により、`content`の要約禁止は「部分成果物を後で製本する」設計思想に基づく意図的な仕様であり変更しないこと、`owned_variable_values`は目的が異なる簡潔な要約であるべきことが整理された。BL-029を新規起票・`done`化しプロンプトに目的の区別を明記（D-027、[decision_lineage.md 論点30](decision_lineage.md)）。あわせて、独立フィールド化の拡張案をBL-030として起票（`open`、`decision_extractor`が将来補助的役割に縮小する設計と合わせて再検討）。 |

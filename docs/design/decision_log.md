@@ -418,6 +418,21 @@
 
 ---
 
+### D-027: `owned_variable_values`は`content`と目的が異なることをプロンプトで明記する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-20 |
+| 状態 | `decided` |
+| 決定者 | t-momose |
+| **決定理由** | `log/2026-07-20/1421`ドライランのtask_2_2で、`verified_facts`の`operation_schedule`が1回目は簡潔な要約で保存されたが、2回目（承認版）はレポート全文（数千文字）がそのまま保存される事故を発見。原因は`call_decision_extractor`のexpert向け`role_instruction`で、`Deliverable`の`content`フィールド向けの「絶対に要約しないこと」指示が、目的の異なる`owned_variable_values`にも波及していたこと。ユーザーに確認したところ、`content`の要約禁止は「AIが全要素を含む長大な成果物を太らせるのではなく、部分成果物を生成し後で製本（合成）する」という意図的な設計であり、この方針自体は変更しない。一方`owned_variable_values`は、他タスクが`depends_on`を通じて参照する際に読む簡潔な要約であるべきで、`content`とは目的が異なる。ユーザーは「Aは実装」（プロンプトへの目的明記）を承認し、「Bはbacklog起票」（独立フィールド化の拡張は将来のノード自身のファイル出力設計と合わせて検討）とした。 |
+| 決定内容 | `call_decision_extractor`のexpert向け`role_instruction`に、`owned_variable_values`は`content`とは別物であり、依存タスク参照用の簡潔な要約（全文コピー禁止）にすべきことを明記する。`owned_variable_values`を独立スキーマフィールドとして切り出す拡張（BL-030）は、`decision_extractor`が将来ノード自身のファイル出力機構に伴い補助的役割へ縮小していく設計と合わせて再検討し、今回は着手しない。 |
+| 影響 | `cela_main.py`（`call_decision_extractor`のexpert向け`role_instruction`） |
+| 関連 BL | [BL-029](issue_backlog.md#bl-029-owned_variable_valuesにcontentの全文がそのまま混入する事故を修正)、[BL-030](issue_backlog.md#bl-030-owned_variable_valuesを依存関係参照専用の要約レポートとして独立フィールド化する拡張案) |
+| 参照 | `log/2026-07-20/1421/log_no_prompt.md:17768`（1回目の正しい簡潔保存）、`log/2026-07-20/1421/log_no_prompt.md:22235`（2回目の全文混入）、[decision_lineage.md 論点30](decision_lineage.md) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
