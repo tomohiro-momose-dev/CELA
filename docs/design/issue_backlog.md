@@ -58,6 +58,7 @@
 | BL-024 | 高 | `cela_main.py` (`LineageState["current_phase"]`, `decision_extractor_node`) | ~~`current_phase`が初期化時（`phases[0]`）に一度セットされたきり以降更新されず、`task_id`単位の状態追跡も存在しない（BL-005と同型の初期化後フリーズ）~~ → `done`（`decision_extractor_node`を唯一の書き手とし、フェイルクローズ検証つきで実装） | P1 |
 | BL-025 | 高 | `cela_main.py` (`call_expert`, `query_AI`/`_query_AI_live`) | 実ドライラン（`log/2026-07-20/1204`）で、`generate_user_utterance`はtask_1_1のacceptance_criteria範囲を守れていたのに対し、Expertは他タスク（task_2_2/task_4_1）が`owns_variables`として所有する車両台数・予算内訳・サイクルタイムまで自発的に計算し、ツールループが10回で非収束クラッシュ。①Expertへのスコープガードレール注入、②ツールループ2周目以降のsystem_promptを現在タスクのみに軽量化、の2案を実装 | P1 |
 | BL-026 | 低 | `cela_main.py` (`call_orchestrator`) | 専門家名を固定16種の配列（`valid_experts`）に限定していたが、グラフ・`call_expert`のどちらも具体的な専門家名で分岐しておらず、単なるプロンプト埋め込みラベルに過ぎないことが判明。無用な足かせと判断し、orchestratorがタスクに即した専門家の肩書きを自由記述で生成する方式に変更 | P3 |
+| BL-027 | 低 | `cela_main.py`（モジュールトップレベル、`MultiLogger`起動箇所） | `sys.stdout = MultiLogger()`がモジュールのトップレベルにあり、`import cela_main`するだけで本番`log/`配下に新規タイムスタンプディレクトリが作成される事故（実ドライラン中にセッション内のオフラインスモークテストが1455・1458を誤生成）。`if __name__ == "__main__":`ブロック内に移動して修正 | P3 |
 
 ---
 
@@ -816,6 +817,32 @@ BL-023 Phase Aの実ドライラン（`log/2026-07-20/1204`）で、`generate_us
 
 ---
 
+### BL-027: `cela_main.py`のロガーがimport時点で無条件起動し、本番`log/`配下にテスト実行の痕跡が混入する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P3 |
+| 依存 | なし |
+| 関連 | [D-025](decision_log.md#d-025-multiloggerの起動を__main__ガード内に限定する) |
+
+**内容:**
+
+ユーザーから実ドライラン中のログ（`log/2026-07-20/1421`）のレビューを依頼された際、同時刻帯に`log/2026-07-20/1455`・`1458`という不自然な小さいログフォルダが作られていることを発見。
+
+原因は`cela_main.py:116`（修正前）の`sys.stdout = MultiLogger()`が、`if __name__ == "__main__":`の外＝モジュールのトップレベルに置かれていたこと。これにより`import cela_main`するだけで即座に`log/日付/HHMM/`が新規作成され、プロセスの標準出力が丸ごとそこにリダイレクトされる。
+
+BL-025/BL-026の検証用にこのセッション内で実行したオフラインスモークテスト（`smoke_orchestrator_freeform.py`ほか、いずれも`import cela_main as m`で始まる）が、まさにこの経路で1455・1458を生成していた。1421の実ドライランが進行中の裏で、無関係なテスト出力（フェイク専門家名・`goal="テスト目標"`のダミープロンプト）が本番`log/`に混入する事故となった。
+
+**完了条件:**
+
+- ~~`sys.stdout = MultiLogger()`を`if __name__ == "__main__":`ブロック内（`TARGET_GOAL`定義の直前）に移動し、importのみでは発火しないようにする。~~ → `done`
+- ~~修正後、`import cela_main`のみを行っても`log/`配下に新規ディレクトリが作られないことを確認する。~~ → `done`（`os.listdir`差分で新規ディレクトリ0件を確認）
+- ~~`python -m py_compile cela_main.py`で回帰がないことを確認する。~~ → `done`
+- ~~誤って作成された`log/2026-07-20/1455`・`1458`を削除する。~~ → `done`
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
@@ -842,3 +869,4 @@ BL-023 Phase Aの実ドライラン（`log/2026-07-20/1204`）で、`generate_us
 | 2026-07-20 | 同ドライランでExpertが他タスク（task_2_2）のowns_variables（車両台数・システム費内訳・サイクルタイム）まで自発的に計算しツールループが10回で非収束クラッシュしたことを発見。BL-025を新規起票し、①call_expertへのスコープガードレール注入、②ツールループ2周目以降のsystem_prompt軽量化（`light_system_prompt`）の2案をユーザー承認のもと実装着手（D-023、[decision_lineage.md 論点26](decision_lineage.md)）。 |
 | 2026-07-20 | BL-025を実装し`done`化。`_build_task_scope_context`ヘルパーを新設し`generate_user_utterance`/`call_expert`で共通化。`call_expert`にスコープガードレール（①）を注入。`query_AI`/`_query_AI_live`に`light_system_prompt`引数を追加し、`_JAPANESE_OUTPUT_DIRECTIVE`を定数化した上でツールループiter=2以降のsystem_promptを軽量版に差し替え（②）。`python -m py_compile`合格、フェイククライアントによるオフラインスモークテスト2件（ガードレール注入確認、iter=1フル文脈/iter=2以降軽量文脈への切替確認）はすべてPass。実機再ドライラン確認は未実施。 |
 | 2026-07-20 | ユーザーの設計問い直しを受け、専門家選択の固定16種配列（`valid_experts`）がグラフ・`call_expert`のどちらでも分岐に使われておらず無用な足かせだったと判明。BL-026を新規起票・`done`化し、`call_orchestrator`を自由記述の専門家肩書き生成＋軽量フォールバックに変更（D-024、[decision_lineage.md 論点27](decision_lineage.md)）。専門家ごとの個別ノード・個別グラフ構造はMVP未完成の現時点では見送り。 |
+| 2026-07-20 | 実ドライラン（`log/2026-07-20/1421`）レビュー中に、同時刻帯の不自然な小ログフォルダ（`1455`・`1458`）を発見。原因は`cela_main.py`の`sys.stdout = MultiLogger()`がモジュールのトップレベルにあり、`import cela_main`するだけで本番`log/`配下に新規ディレクトリが作られる構造だったこと（このセッションのオフラインスモークテストが誤って混入させていた）。BL-027を新規起票・`done`化し、`__main__`ガード内への移動で修正、誤生成ログを削除（D-025、[decision_lineage.md 論点28](decision_lineage.md)）。 |
