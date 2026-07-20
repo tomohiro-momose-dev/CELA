@@ -15,6 +15,9 @@ import traceback
 import sqlite3
 import uuid
 import hashlib
+import ast
+import subprocess
+import threading
 from typing import Annotated, Literal, TypedDict
 
 def _take_latest(a, b):
@@ -27,6 +30,7 @@ from unittest import result
 
 from langgraph.graph import StateGraph, END
 from openai import OpenAI
+from openai import APIError, APIConnectionError, RateLimitError, APITimeoutError
 
 
 # ===========================================================================
@@ -283,7 +287,227 @@ def _save_replay_fixtures(path: str, fixtures: dict) -> None:
         json.dump(fixtures, f, ensure_ascii=False, indent=2)
 
 
-def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unknown Node") -> str:
+# ---------------------------------------------------------------------------
+# R2: ツール呼び出し基盤・機械的検算ゲート（設計書§3.5.3、impl_Plan R2.2〜R2.4準拠）
+# ---------------------------------------------------------------------------
+
+# 許可モジュール（ホワイトリスト）。random は除外（検算の決定性＝再現性を損なうため、D-007）。
+# decimal/fractions は浮動小数点誤差回避の目的に合致する拡張として維持（D-007、AGENTS.md§7承認済み変更）。
+_ALLOWED_IMPORTS = {"math", "statistics", "datetime", "json", "fractions", "decimal"}
+
+# 危険な名前（import文なしで呼べるビルトイン・組み込み関数）。AST上のName/Attribute/Call参照として検査（D-006）。
+_DANGEROUS_NAMES = {
+    "open", "eval", "exec", "compile", "__import__", "globals", "locals",
+    "vars", "getattr", "setattr", "delattr", "memoryview", "breakpoint",
+}
+
+
+def _check_repl_code_safety(code: str) -> str | None:
+    """【SLM要約】
+    python_repl用ASTセキュリティ検査。許可モジュール外のimport・危険なビルトイン呼び出し
+    （open/eval/exec/__import__等）を拒否する（設計書§3.5.3、D-006）。安全なら None を返す。
+    """
+    # [CONSTRAINT] サンドボックスエスケープを防ぐため、実行前にASTレベルで危険なimport/呼び出しを拒否する。
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return f"[REPL Error] SyntaxError: {e}"
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] not in _ALLOWED_IMPORTS:
+                    return f"[REPL Error] import of '{alias.name}' is not allowed"
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and node.module.split(".")[0] not in _ALLOWED_IMPORTS:
+                return f"[REPL Error] import from '{node.module}' is not allowed"
+        elif isinstance(node, ast.Name) and node.id in _DANGEROUS_NAMES:
+            return f"[REPL Error] use of '{node.id}' is not allowed"
+        elif isinstance(node, ast.Attribute) and node.attr in _DANGEROUS_NAMES:
+            return f"[REPL Error] use of '.{node.attr}' is not allowed"
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in _DANGEROUS_NAMES:
+                return f"[REPL Error] call to '{node.func.id}' is not allowed"
+    return None
+
+
+def _run_python_repl(code: str, timeout: float = 5.0, max_output_bytes: int = 10240) -> str:
+    """【SLM要約】
+    F-2.6/F-5.1向けの機械的検算用サンドボックス実行（ステートレス・単発版）。math/statistics/datetime/
+    json/fractions/decimalのみ許可し、危険な呼び出しをASTレベルで検査・拒否した上でサブプロセス分離実行
+    する（設計書§3.5.3）。呼び出しごとに独立プロセスなので状態は保持しない。単体テスト・将来の単発検算
+    用途向けに維持（対話セッションでの実運用は`_PythonReplSession`を使う、BL-014原因A）。
+    """
+    safety_error = _check_repl_code_safety(code)
+    if safety_error is not None:
+        return safety_error
+    try:
+        # [SAFETY] 多層防御: AST blacklistだけでは().__class__.__bases__経由等の既知の回避を完全には
+        # 防げないため、サブプロセス分離＋isolated modeを併用する（絶対に破れないサンドボックスではなく
+        # 多層防御であることが設計上の限界、設計書§3.5.3）。
+        # [CONSTRAINT] -I（isolated mode）はPYTHONIOENCODING等のPYTHON*環境変数を無視するため、
+        # 子プロセスがcp932ロケール（Windows既定）で絵文字等をprint()すると子プロセス自身が
+        # UnicodeEncodeErrorでクラッシュする。-X utf8は-Iと共存でき、子プロセスの標準入出力を
+        # UTF-8に固定できる（実機確認済み）。親側のcapture_outputも同様にUTF-8を明示する。
+        proc = subprocess.run(
+            ["python", "-I", "-X", "utf8", "-c", code],
+            capture_output=True, encoding="utf-8", errors="replace", timeout=timeout,
+        )
+        out = (proc.stdout or "") + (proc.stderr or "")
+        if len(out.encode("utf-8")) > max_output_bytes:
+            out = out[:max_output_bytes] + "\n[REPL Output truncated]"
+        return out.strip() or "[REPL] (no output)"
+    except subprocess.TimeoutExpired:
+        return f"[REPL Error] execution exceeded {timeout}s timeout"
+
+
+_REPL_SESSION_SENTINEL = "\x00CELA_REPL_END\x00"
+_REPL_SESSION_BOOTSTRAP = f"""
+import sys, json, traceback
+ns = {{}}
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    try:
+        code = json.loads(line)
+    except Exception:
+        code = ""
+    try:
+        exec(code, ns)
+    except Exception:
+        traceback.print_exc()
+    print({_REPL_SESSION_SENTINEL!r}, flush=True)
+"""
+
+
+class _PythonReplSession:
+    """【SLM要約】
+    F-2.6用の対話的（状態保持）python_replセッション（BL-014原因A対応）。ツールループ1回分
+    （1回の_query_AI_live呼び出し）の間だけ、1つの子プロセスを使い回し変数を保持する。
+    ノードをまたぐ・リトライをまたぐ状態共有はしない（各回で新規インスタンス）。
+    [SAFETY] コード自体のAST安全検査は毎回の送信ごとに実施する（状態保持は変数の値のみで、
+    サンドボックス境界自体は既存の許可モジュール・危険ビルトイン検査をそのまま適用する）。
+    """
+
+    def __init__(self, timeout: float = 5.0, max_output_bytes: int = 10240):
+        self._timeout = timeout
+        self._max_output_bytes = max_output_bytes
+        self._proc: subprocess.Popen | None = None
+
+    def _ensure_started(self) -> None:
+        if self._proc is not None:
+            return
+        self._proc = subprocess.Popen(
+            ["python", "-I", "-X", "utf8", "-c", _REPL_SESSION_BOOTSTRAP],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            encoding="utf-8", errors="replace", bufsize=1,
+        )
+
+    def run(self, code: str) -> str:
+        safety_error = _check_repl_code_safety(code)
+        if safety_error is not None:
+            return safety_error
+
+        self._ensure_started()
+        proc = self._proc
+        assert proc is not None and proc.stdin is not None and proc.stdout is not None
+
+        try:
+            proc.stdin.write(json.dumps(code) + "\n")
+            proc.stdin.flush()
+        except (BrokenPipeError, OSError) as e:
+            self.close()
+            return f"[REPL Error] session process unavailable: {e}"
+
+        result_holder: dict[str, str] = {}
+
+        def _reader() -> None:
+            lines: list[str] = []
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                if line.rstrip("\n") == _REPL_SESSION_SENTINEL:
+                    break
+                lines.append(line)
+            result_holder["out"] = "".join(lines)
+
+        reader_thread = threading.Thread(target=_reader, daemon=True)
+        reader_thread.start()
+        reader_thread.join(self._timeout)
+        if reader_thread.is_alive():
+            # [CONSTRAINT] ハングした子プロセスは復旧不能なので終了させ、次回呼び出しで新規
+            # プロセスを立て直す（＝状態は失われる）。この回のエラーメッセージでその旨を
+            # モデルに明示し、無言で状態が消えて混乱するのを防ぐ（D-009と同じ思想）。
+            self.close()
+            return (
+                f"[REPL Error] execution exceeded {self._timeout}s timeout. "
+                "The REPL session has been reset — variables defined in earlier "
+                "calls no longer exist; redefine what you need in your next call."
+            )
+
+        if proc.poll() is not None:
+            # 子プロセスが応答なく終了していた場合も同様にセッションを再構築する。
+            self.close()
+
+        out = result_holder.get("out", "")
+        if len(out.encode("utf-8")) > self._max_output_bytes:
+            out = out[: self._max_output_bytes] + "\n[REPL Output truncated]"
+        return out.strip() or "[REPL] (no output)"
+
+    def close(self) -> None:
+        if self._proc is None:
+            return
+        proc, self._proc = self._proc, None
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+PYTHON_REPL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "python_repl",
+        "description": (
+            "Execute a Python snippet for mechanical arithmetic/verification (e.g. sum, ratio, "
+            "threshold comparison). Sandboxed: only math/statistics/datetime/json/fractions/decimal allowed, "
+            "no network/IO. Use this to VERIFY any numeric claim before asserting correctness. "
+            "STATEFUL within this turn: variables/imports from your earlier python_repl calls in this "
+            "same turn remain available in later calls (like a persistent REPL/notebook cell) — you do "
+            "NOT need to redefine them each time. This state is reset at the start of your next turn. "
+            "IMPORTANT: each call still only shows output you explicitly print — a bare expression like "
+            "'2500 + 300 + 800' alone produces NO output. You MUST wrap it in print(...), e.g. "
+            "'print(2500 + 300 + 800)'. If a previous call returned '[REPL] (no output)', you forgot "
+            "print() — retry with print() instead of repeating the same bare expression."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Python code to execute. Must call print(...) to produce visible output "
+                        "(e.g. 'print(100+50*3)') — bare expressions are silently discarded."
+                    ),
+                }
+            },
+            "required": ["code"],
+        },
+    },
+}
+
+TOOL_DISPATCH = {
+    "python_repl": _run_python_repl,
+}
+
+
+def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unknown Node", tools: list[dict] | None = None,
+             light_system_prompt: str | None = None) -> str:
     """【SLM要約】
     Orchestration of external AI API calls with Record/Replay stub support (keyed by (label, call_seq)),
     delegating the actual retry/provider-selection logic to _query_AI_live.
@@ -314,7 +538,7 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
             f"REPLAY record時に重複キー (label={label}, seq={call_seq}) を検出しました。呼び出し順序が非決定的です。"
         )
 
-    content = _query_AI_live(messages, client, model, label)
+    content = _query_AI_live(messages, client, model, label, tools=tools, light_system_prompt=light_system_prompt)
 
     if REPLAY_MODE == "record":
         _replay_fixtures[fixture_key] = {"content": content, "hash": msg_hash}
@@ -324,11 +548,28 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
     return content
 
 
-def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str = "Unknown Node") -> str:
+_JAPANESE_OUTPUT_DIRECTIVE = "【重要】あなたは必ず日本語で出力してください。中国語・英語での出力は一切禁止します。"
+
+
+def _inject_japanese_output_directive(messages: list[dict]) -> list[dict]:
+    """[CONSTRAINT] 中国語系モデル(DeepSeek)経由のため、まれに中国語（まれに英語）で出力される
+    ことがある。既存のsystem messageがあれば追記し、なければ新規system messageとして先頭に挿入する
+    （新規追加時に既存messages[0]もsystemだと連続role警告を誘発するため、あくまで「なければ追加」）。
+    """
+    if messages and messages[0].get("role") == "system":
+        patched_first = dict(messages[0])
+        patched_first["content"] = f"{patched_first['content']}\n\n{_JAPANESE_OUTPUT_DIRECTIVE}"
+        return [patched_first, *messages[1:]]
+    return [{"role": "system", "content": _JAPANESE_OUTPUT_DIRECTIVE}, *messages]
+
+
+def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str = "Unknown Node", tools: list[dict] | None = None,
+                    light_system_prompt: str | None = None) -> str:
     """【SLM要約】
     Orchestration of external AI API calls, managing retries, dynamic parameter tuning (temperature, JSON mode), and provider selection based on the requested task label.
+    tools付与時はツール呼び出しループ（R2.3、query_AI集約方式、D-008）をリトライブロック内側で実行する（D-004）。
     """
-
+    messages = _inject_japanese_output_directive(messages)
 
     # role連続チェック（デバッグ用、本番でも警告ログとして残す価値あり）
     for i in range(1, len(messages)):
@@ -351,6 +592,10 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
     label_lower = label.lower()
     temperature = 0.2 if any(kw in label_lower for kw in LOW_TEMP_LABEL_KEYWORDS) else 0.7
     use_json_mode = any(kw in label_lower for kw in STRUCTURED_OUTPUT_LABEL_KEYWORDS)
+    # [CONSTRAINT] response_format=json_objectとtools(Function Calling)は多くのプロバイダで排他的に
+    # 動作するため、tools付与時はjson_modeを無効化する（設計書§3.5.1、R2.3）。
+    if tools is not None:
+        use_json_mode = False
 
     delays = [8, 16, 32, 64, 128]
 
@@ -371,32 +616,162 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
             )
             if use_json_mode:
                 create_kwargs["response_format"] = {"type": "json_object"}
+            if tools is not None:
+                create_kwargs["tools"] = tools
+                print(f"🧰 [{label}] tools attached: {[t['function']['name'] for t in tools]}")
 
+            # [CONSTRAINT] BL-019: OpenRouterのreasoning要求はフラットな`reasoning_effort`キーではなく
+            # ネストした`reasoning: {"effort": ...}`が正しい形式（公式ドキュメント・実機検証で確認済み）。
+            # 旧実装は`create_kwargs["reasoning_effort"]`という無効なキーを送っており、
+            # OpenRouterにサイレントに無視されてreasoningが一切発火していなかった（response.reasoningが
+            # 常にnull）。判定系ノードに加え、ツール付与ノード（Expert/User AI/Resource Arbiter等）にも
+            # ツール呼び出し前後の「つぶやき」をログで可視化する目的でlow reasoningを付与する。
+            reasoning_effort_level = None
             if label_lower == "detector" or label_lower == "decision extractor":
-                create_kwargs["reasoning_effort"] = "low"
-            
+                reasoning_effort_level = "low"
             elif label_lower == "reflection" or label_lower == "review":
-                create_kwargs["reasoning_effort"] = "medium"
-            
+                reasoning_effort_level = "medium"
+            elif tools is not None:
+                reasoning_effort_level = "low"
+
             create_kwargs["max_tokens"] = get_max_tokens(label_lower)
             # 🌟 【追加部分】OpenRouter使用時のみ、高速プロバイダーを強制指定する
             if "openrouter" in str(client.base_url):
-                create_kwargs["extra_body"] = {
+                extra_body = {
                     "provider": {
                         # 推論速度が速いプロバイダーを左から順に優先して接続させる
                         "order": ["baidu/fp8", "siliconflow/fp8","wandb/fp8","morph"],
                         "allow_fallbacks": False # 全滅した場合は空いている他プロバイダーへ迂回
                     }
                 }
+                if reasoning_effort_level is not None:
+                    extra_body["reasoning"] = {"effort": reasoning_effort_level}
+                create_kwargs["extra_body"] = extra_body
 
-            response = client.chat.completions.create(**create_kwargs)
-            choice = response.choices[0]
-            if choice.finish_reason == "length":
-                print(f" [{label_lower}] ⚠️ max_tokens超過により出力が打ち切られました")
-                raise ValueError("Output truncated due to max_tokens limit")
-            content = response.choices[0].message.content
-            return content if content is not None else "(APIから空の応答が返されました)"
-        except Exception as e:
+            if tools is None:
+                response = client.chat.completions.create(**create_kwargs)
+                choice = response.choices[0]
+                if choice.finish_reason == "length":
+                    print(f" [{label_lower}] ⚠️ max_tokens超過により出力が打ち切られました")
+                    raise ValueError("Output truncated due to max_tokens limit")
+                reasoning_text = getattr(choice.message, "reasoning", None)
+                if reasoning_text:
+                    print(f"💭 [{label}] 思考:\n{reasoning_text}\n")
+                content = response.choices[0].message.content
+                return content if content is not None else "(APIから空の応答が返されました)"
+
+            # --- R2.3: ツール呼び出しループ（query_AI集約方式、D-008準拠） ---
+            # [CONSTRAINT] 既存try/exceptリトライブロックの内側で回す（D-004）。1回のcreate()が
+            # 一時的なAPI障害で失敗した場合、loop_messagesごと破棄し最初からやり直す
+            # （リトライ粒度が粗いことは許容済み、BL-009）。
+            # [CONSTRAINT] MAX_TOOL_ITERは「ツール呼び出しの往復回数」の上限であり、全回がtool_calls
+            # を返すと最終テキスト回答を送る余地が残らず非収束になる（実機ドライランで確認、BL-014）。
+            # ユーザー承認によりAGENTS.md §7準拠で5→10へ変更。挙動を見て今後絞る可能性あり。
+            MAX_TOOL_ITER = 10
+            loop_messages = list(messages)
+            create_kwargs["messages"] = loop_messages
+            tool_calls_used = 0
+            # [CONSTRAINT] BL-014原因A: python_replは1回のツールループの間だけ状態を保持する
+            # 対話セッションとする（ノード・リトライをまたいだ状態共有はしない、毎回新規生成）。
+            # try/finallyで、成功・非収束・例外いずれの終了経路でも子プロセスを確実に終了させる。
+            repl_session = _PythonReplSession()
+            try:
+                for iteration in range(1, MAX_TOOL_ITER + 1):
+                    response = client.chat.completions.create(**create_kwargs)
+                    choice = response.choices[0]
+                    msg = choice.message
+                    # [CONSTRAINT] max_tokens超過によるtool_call引数の途中切れをここで検出する（D-009）。
+                    # ValueErrorはAPIError系ではないため下記exceptに飲み込まれず、原因が伝播する。
+                    if choice.finish_reason == "length":
+                        print(f"⚠️ [{label}] ツールループ内でmax_tokens超過により出力が打ち切られました（iter={iteration}）")
+                        raise ValueError("Tool call output truncated due to max_tokens limit")
+                    # BL-019: ツール呼び出しの前後でモデルが何を考えているか（なぜこのツールを呼ぶか、
+                    # 前回の結果をどう解釈したか）をログに出す。reasoning_effort_levelが設定されて
+                    # いるノードのみ非空になる（未設定ノードはgetattrがNone/空文字を返すだけで無害）。
+                    reasoning_text = getattr(msg, "reasoning", None)
+                    if reasoning_text:
+                        print(f"💭 [{label}] 思考（iter={iteration}）:\n{reasoning_text}\n")
+                    # BL-019追記: 「思考モデル」でなくとも、tool_calls付きの応答にcontentが
+                    # 同梱されるモデル/プロバイダも存在しうる（実機確認では現行モデルは常にnull だが、
+                    # モデル・プロバイダが変わった場合の取りこぼしを防ぐため無条件でチェックする）。
+                    if msg.content and msg.content.strip() and getattr(msg, "tool_calls", None):
+                        print(f"💬 [{label}] 発言（iter={iteration}, tool_calls同梱）:\n{msg.content}\n")
+                    if not getattr(msg, "tool_calls", None):
+                        print(f"✅ [{label}] ツールループ終了（iter={iteration}, tool_calls使用={tool_calls_used}回）")
+                        if tool_calls_used == 0:
+                            print(f"⚠️ [{label}] python_replを一度も使わずに応答しました（F-2.6監査対象）")
+                        content = msg.content
+                        return content if content is not None else "(APIから空の応答が返されました)"
+                    loop_messages.append(msg.model_dump())
+                    for tc in msg.tool_calls:
+                        tool_calls_used += 1
+                        handler = TOOL_DISPATCH.get(tc.function.name)
+                        if handler is None:
+                            result = f"[REPL Error] unknown tool: {tc.function.name}"
+                            print(f"⚠️ [{label}] 未知のツール呼び出し（iter={iteration}）: {tc.function.name}")
+                        else:
+                            # [SAFETY] LLMが壊れた引数JSONを返した場合、例外を外に投げるのではなく
+                            # ツール結果としてモデルに返し、MAX_TOOL_ITERの予算内で自己修復させる（D-009）。
+                            try:
+                                args = json.loads(tc.function.arguments)
+                            except json.JSONDecodeError as e:
+                                print(f"⚠️ [{label}] tool_call引数のJSONパース失敗（iter={iteration}）: {e}")
+                                loop_messages.append({
+                                    "role": "tool", "tool_call_id": tc.id,
+                                    "content": json.dumps({"error": f"invalid arguments JSON: {e}"}, ensure_ascii=False),
+                                })
+                                continue
+                            if tc.function.name == "python_repl":
+                                result = repl_session.run(args.get("code", ""))
+                            else:
+                                result = handler(args.get("code", ""))
+                            print(f"🔧 [{label}] python_repl 実行（iter={iteration}）:\n{args.get('code','')}\n→ {result}\n")
+
+                        loop_messages.append({
+                            "role": "tool", "tool_call_id": tc.id,
+                            "content": json.dumps(result, ensure_ascii=False),
+                        })
+                    # [CONSTRAINT] BL-025 ②: 全フェーズ・全DB agreementsを含む巨大なsystem_promptは、
+                    # 初回（全体計画の把握）にのみ必要と考え、iter=1完了後（iter=2以降の自問自答フェーズ）は
+                    # 現在タスクの情報のみに絞った軽量版に差し替える。他タスクの詳細が常に視界に入り続けることで
+                    # Expertが他タスクのowns_variables領域まで踏み込んでしまう構造的誘因を減らす狙い（実機
+                    # ドライランで観測、log/2026-07-20/1204）。Record/Replayのハッシュ計算（呼び出し時点の
+                    # 引数`messages`）より後段での差し替えのため、フィクスチャキーには影響しない。
+                    if light_system_prompt is not None and iteration == 1 and loop_messages[0].get("role") == "system":
+                        loop_messages[0] = {
+                            "role": "system",
+                            "content": f"{light_system_prompt}\n\n{_JAPANESE_OUTPUT_DIRECTIVE}",
+                        }
+                    # [CONSTRAINT] BL-016: モデルは自分が残りあと何回ツールを呼べるか知らないため、
+                    # 検算を続けられる余地が残っていると誤認したままMAX_TOOL_ITERを使い切り、
+                    # テキスト最終回答を一度も返せずに非収束クラッシュする事例が実機ドライランで確認された
+                    # （組合せ最適化的なタスクでiter=9に妥当な結論が出ていたのにiter=10で無駄な再検算をした事例）。
+                    # 残り回数が僅少になった時点で明示的に知らせ、次の応答で打ち切るよう促す。
+                    remaining_iters = MAX_TOOL_ITER - iteration
+                    if 0 < remaining_iters <= 2:
+                        loop_messages.append({
+                            "role": "user",
+                            "content": (
+                                f"[SYSTEM NOTICE] ツール呼び出しの残り回数はあと{remaining_iters}回です。"
+                                f"検算がすでに完了しているなら、次の応答はツールを呼ばずテキストで最終回答を出力してください。"
+                                f"まだ検算が必要な場合も、残り{remaining_iters}回以内に収まるよう要点を絞ってください。"
+                            ),
+                        })
+                    create_kwargs["messages"] = loop_messages
+                # [CONSTRAINT] 非収束は一時的なAPI障害ではなく設計上の異常事態。下記exceptをAPIError系に
+                # 絞ることで、このRuntimeErrorは握りつぶされずログに原因が一目でわかる形で伝播する（D-009）。
+                print(f"❌ [{label}] ツールループが{MAX_TOOL_ITER}回を超えて非収束（tool_calls使用={tool_calls_used}回）")
+                raise RuntimeError(f"ツール呼び出しが{MAX_TOOL_ITER}回を超えて収束しませんでした")
+            finally:
+                repl_session.close()
+        # [CONSTRAINT] BL-022: OpenRouter経由の一部プロバイダが途中で切れた/壊れたレスポンスボディを
+        # 返すことがあり、openai SDK内部の response.json()（httpx）がその場で生の
+        # json.JSONDecodeError を送出する。これはD-009の意図（一時的なAPI障害はリトライ、
+        # ロジックエラーは即座に伝播）に照らせば明確に前者だが、絞り込んだ例外タプルに
+        # 含まれておらず素通りしていた（実機ドライランで確認）。tc.function.argumentsの
+        # パース失敗は既にローカルなtry/exceptで個別処理済み（L711-719）のため、ここに
+        # json.JSONDecodeErrorを加えても他のロジックエラーを誤って握りつぶす心配はない。
+        except (APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError) as e:
 
             if attempt < len(delays):
                 time.sleep(delays[attempt])
@@ -453,6 +828,27 @@ def _safe_json_parse(raw: str | None, fallback: dict | list) -> dict | list:
         except (json.JSONDecodeError, Exception):
             pass
         return fallback
+
+
+def _query_and_parse_with_retry(
+    prompt: str, client: OpenAI, model: str, label: str,
+    tools: list[dict] | None, fallback: dict, max_retries: int = 2,
+) -> tuple[dict, bool]:
+    """【SLM要約】
+    D-005: ツール付与によりuse_json_mode=Falseとなるノード向けの層2リトライ。
+    _safe_json_parseがfallback（同一オブジェクト）をそのまま返した場合をパース失敗とみなし、
+    ノード呼び出し自体を再試行する（既存のAPI呼び出し失敗リトライ＝層1とは独立）。
+    戻り値: (parsed_or_fallback, parse_failed)。parse_failed=Trueは上限を使い切ったことを示す
+    （呼び出し元でフェイルクローズ処理を行うこと）。
+    """
+    for attempt in range(max_retries + 1):
+        res = query_AI([{"role": "user", "content": prompt}], client=client, model=model, label=label, tools=tools)
+        parsed = _safe_json_parse(res, fallback=fallback)
+        if parsed is not fallback:
+            return parsed, False
+        if attempt < max_retries:
+            print(f"⚠️ [{label}] JSON判定パース失敗を検知。層2リトライ {attempt + 1}/{max_retries}...")
+    return fallback, True
 
 # ---------------------------------------------------------------------------
 # 0. SQLite永続化層（R1、設計書§2・§3.6、impl_Plan §2〜§5準拠）
@@ -518,7 +914,24 @@ def init_db(conn: sqlite3.Connection) -> None:
     CREATE TABLE IF NOT EXISTS current_goal (
         goal_id TEXT PRIMARY KEY, core_philosophy TEXT NOT NULL, absolute_constraints TEXT, updated_at REAL
     );
+
+    CREATE TABLE IF NOT EXISTS verified_facts (
+        variable_name TEXT NOT NULL, value TEXT NOT NULL, unit TEXT DEFAULT '',
+        source_task_id TEXT, source_phase_id TEXT, confirmed_by TEXT, confirmed_at REAL,
+        run_id TEXT NOT NULL,
+        PRIMARY KEY (run_id, variable_name)
+    );
     """)
+    _ensure_agreements_task_id_column(conn)
+
+
+def _ensure_agreements_task_id_column(conn: sqlite3.Connection) -> None:
+    """[CONSTRAINT] BL-023/BL-024: SQLiteはADD COLUMN IF NOT EXISTSを持たないため、
+    既存DB（cela.db）との後方互換のため存在確認してから追加する。"""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(agreements)").fetchall()}
+    if "task_id" not in cols:
+        conn.execute("ALTER TABLE agreements ADD COLUMN task_id TEXT DEFAULT ''")
+        conn.commit()
 
 
 def db_append_decision(d: dict, conn: sqlite3.Connection, run_id: str) -> None:
@@ -536,17 +949,17 @@ def db_append_decision(d: dict, conn: sqlite3.Connection, run_id: str) -> None:
 def db_append_agreement(a: dict, conn: sqlite3.Connection, run_id: str) -> None:
     """【SLM要約】
     Agreementレコードをagreementsテーブルへ即時コミットする（state["agreements"].appendの置換先）。
-    既存Agreementの content/rationale を decision_what/reason_why にマッピングする。
+    BL-001によりAgreementは decision_what/reason_why をネイティブに保持するため、エイリアス変換は行わない。
     """
     depends_on_val = json.dumps(a.get("depends_on", []), ensure_ascii=False) if isinstance(a.get("depends_on"), (list, dict)) else (a.get("depends_on") or "[]")
     resource_claims_val = json.dumps(a.get("resource_claims", {}), ensure_ascii=False) if isinstance(a.get("resource_claims"), (list, dict)) else (a.get("resource_claims") or "{}")
     conn.execute(
         "INSERT INTO agreements (id, turn, action_type, status, topic, decision_what, reason_why, proposed_by, "
-        "entry_type, phase_id, abstraction_level, scope, time_axis, depends_on, resource_claims, timestamp, "
-        "evidence, is_frozen, internal_thought_process, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "entry_type, phase_id, task_id, abstraction_level, scope, time_axis, depends_on, resource_claims, timestamp, "
+        "evidence, is_frozen, internal_thought_process, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (a.get("id"), a.get("turn"), a.get("action_type"), a.get("status"), a.get("topic"),
-         a.get("content", ""), a.get("rationale", ""), a.get("proposed_by"), a.get("entry_type"),
-         a.get("phase_id"), a.get("abstraction_level"), a.get("scope"), a.get("time_axis"),
+         a.get("decision_what", ""), a.get("reason_why", ""), a.get("proposed_by"), a.get("entry_type"),
+         a.get("phase_id"), a.get("task_id", ""), a.get("abstraction_level"), a.get("scope"), a.get("time_axis"),
          depends_on_val, resource_claims_val, a.get("timestamp"), None, 0, None, run_id)
     )
 
@@ -564,16 +977,10 @@ def db_supersede_agreement(agreement_id: str, conn: sqlite3.Connection, run_id: 
 def get_agreements_from_db(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     """【SLM要約】
     指定run_idのagreementsをid昇順（登録順序保証）で全件取得する。
-    既存コードとの互換のため、decision_what/reason_why の content/rationale エイリアスを付与する。
+    BL-001によりcontent/rationaleエイリアスは付与しない（decision_what/reason_whyをそのまま返す）。
     """
     rows = conn.execute("SELECT * FROM agreements WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
-    result = []
-    for r in rows:
-        d = dict(r)
-        d["content"] = d.get("decision_what", "")
-        d["rationale"] = d.get("reason_why", "")
-        result.append(d)
-    return result
+    return [dict(r) for r in rows]
 
 
 def get_decisions_from_db(conn: sqlite3.Connection, run_id: str) -> list[dict]:
@@ -581,6 +988,38 @@ def get_decisions_from_db(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     指定run_idのdecisionsをid昇順（登録順序保証）で全件取得する。
     """
     rows = conn.execute("SELECT * FROM decisions WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_verified_fact(conn: sqlite3.Connection, run_id: str, variable_name: str, value,
+                          unit: str, source_task_id: str, source_phase_id: str, confirmed_by: str) -> None:
+    """[CONSTRAINT] BL-023 2.6節: owns_variablesで宣言された共有変数の確定値を保存する。
+    下流タスクはこの値を再導出せず、確定済みの定数として参照する前提。
+    """
+    conn.execute(
+        "INSERT INTO verified_facts (run_id, variable_name, value, unit, source_task_id, "
+        "source_phase_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(run_id, variable_name) DO UPDATE SET value=excluded.value, "
+        "unit=excluded.unit, source_task_id=excluded.source_task_id, "
+        "source_phase_id=excluded.source_phase_id, confirmed_by=excluded.confirmed_by, "
+        "confirmed_at=excluded.confirmed_at",
+        (run_id, variable_name, str(value), unit, source_task_id, source_phase_id,
+         confirmed_by, time.time())
+    )
+
+
+def get_verified_facts_from_db(conn: sqlite3.Connection, run_id: str, variable_names: list[str]) -> list[dict]:
+    """【SLM要約】
+    指定されたvariable_names（通常は現在タスクのdepends_on先タスクのowns_variables）に限定して
+    確定値を取得する。無関係な変数を注入しないための絞り込み。
+    """
+    if not variable_names:
+        return []
+    placeholders = ",".join("?" for _ in variable_names)
+    rows = conn.execute(
+        f"SELECT * FROM verified_facts WHERE run_id=? AND variable_name IN ({placeholders})",
+        (run_id, *variable_names)
+    ).fetchall()
     return [dict(r) for r in rows]
 
 # ---------------------------------------------------------------------------
@@ -595,6 +1034,16 @@ class Decision(TypedDict):
     why: str
     reason_missing: bool
 
+class Task(TypedDict):
+    """[CONSTRAINT] BL-023: acceptance_criteriaは最大3個。超える場合はtask_planner側でタスクを分割する。"""
+    task_id: str
+    title: str
+    description: str
+    acceptance_criteria: list[str]   # 独立検証可能な主張を列挙（最大3個）
+    depends_on: list[str]            # 前提として使う他タスクのtask_id
+    owns_variables: list[str]        # このタスクで初めて確定させる共有変数名
+    status: str                      # "pending" / "in_progress" / "completed" / "deferred"
+
 class Phase(TypedDict):
     phase_id: str
     title: str
@@ -602,6 +1051,8 @@ class Phase(TypedDict):
     allowed_abstraction_levels: list[str]  # このフェーズで扱う視座の範囲
     focus_scope: str                        # このフェーズのスコープ
     expected_time_axis: str                 # このフェーズで主に扱う時間軸
+    tasks: list[Task]                       # BL-018/BL-023: 従来は無型のdictキーとしてのみ存在
+    budget_hint: dict[str, float]            # BL-023 Phase C: 仮説であり絶対制約ではないサブ予算枠
 
 class Agreement(TypedDict):
     id: str
@@ -609,8 +1060,8 @@ class Agreement(TypedDict):
     action_type: str
     status: str
     topic: str
-    content: str
-    rationale: str
+    decision_what: str
+    reason_why: str
     proposed_by: str
     resource_claims: dict[str, float]  # 追加: {"初期導入予算": 75000000}
     
@@ -636,6 +1087,9 @@ class Agreement(TypedDict):
     depends_on: list[str]   #"Decision"（合意・結論） / "Directive"（指示・タスク発行） / "Deliverable"（成果物本体）
     entry_type: str
     phase_id: str
+    task_id: str   # BL-023/BL-024: どのタスクに紐づく合意・成果物・先送りか
+    # statusに"Deferred"を追加（既存: Proposed/Approved/Approved_with_Conditions/Rejected/Implicitly_Accepted）
+    # "Deferred"の場合、topicは先送りされた論点名、reason_whyに「どのタスクで扱うか」を含める
 
 class RiskRegister(TypedDict):
     """3次元構造とは独立した、致命的リスクの専用台帳"""
@@ -685,6 +1139,9 @@ class LineageState(TypedDict):
     global_constraints: list[GlobalConstraint]
     phases: list[Phase]
     current_phase: Phase
+    current_task_id: str                          # BL-024: decision_extractor_nodeのみが書き込む
+    verified_facts: dict[str, dict]                # BL-023: {"vehicle_count": {"value": ..., "unit": ..., "source_task_id": ..., "confirmed_at": ...}}
+    task_criteria_status: dict[str, list[bool]]    # BL-023: {"task_1_2": [True, False]}（acceptance_criteriaのインデックス対応）
     risk_register: list[RiskRegister]
     needs_revision_phases: list[str]
     phases_to_revise: list[str]
@@ -777,8 +1234,8 @@ Filters out superseded or directive items and applies status-based formatting/la
             else:
                 type_label = f"[{status}]"
                 
-        # contentがファイルパスの場合はその旨を表示する
-        content_preview = a.get('content', '')
+        # decision_whatがファイルパスの場合はその旨を表示する
+        content_preview = a.get('decision_what', '')
         if content_preview.startswith("FILE_PATH:"):
             file_path = content_preview.split("FILE_PATH:")[1]
             content_preview = f"(ファイルに出力済み: {file_path})"
@@ -804,6 +1261,50 @@ def _build_agreements_context_from_db(conn: sqlite3.Connection, run_id: str) -> 
     return _build_agreements_context(get_agreements_from_db(conn, run_id))
 
 
+def _get_current_task(state: LineageState) -> dict:
+    """[CONSTRAINT] BL-023: current_task_id（BL-024でdecision_extractor_nodeのみが書き込む）から
+    現在のTaskを検索する。未設定（初回ターン等）の場合はcurrent_phaseの先頭タスクにフォールバックする。
+    """
+    current_phase = state.get("current_phase", {})
+    tasks = current_phase.get("tasks", [])
+    current_task_id = state.get("current_task_id", "")
+    for t in tasks:
+        if t.get("task_id") == current_task_id:
+            return t
+    return tasks[0] if tasks else {}
+
+
+def _build_task_scope_context(state: LineageState, conn: sqlite3.Connection) -> dict:
+    """[CONSTRAINT] BL-023/BL-025: 現在タスクのスコープ情報（acceptance_criteria・依存タスクの確定値・
+    未充足項目）を`generate_user_utterance`と`call_expert`の両方で共有するためのヘルパー。
+    """
+    current_task = _get_current_task(state)
+    current_task_json = json.dumps(current_task, ensure_ascii=False, indent=2) if current_task else "(タスク未確定)"
+
+    depends_on_task_ids = current_task.get("depends_on", [])
+    dependency_variable_names: list[str] = []
+    for t in state.get("current_phase", {}).get("tasks", []):
+        if t.get("task_id") in depends_on_task_ids:
+            dependency_variable_names.extend(t.get("owns_variables", []))
+    verified_facts_rows = get_verified_facts_from_db(conn, state["run_id"], dependency_variable_names) if dependency_variable_names else []
+    verified_facts_json = json.dumps(verified_facts_rows, ensure_ascii=False, indent=2) if verified_facts_rows else "(依存タスクの確定値はまだありません)"
+
+    acceptance_criteria = current_task.get("acceptance_criteria", [])
+    criteria_status = state.get("task_criteria_status", {}).get(current_task.get("task_id", ""), [])
+    remaining_criteria = [
+        c for i, c in enumerate(acceptance_criteria)
+        if not (i < len(criteria_status) and criteria_status[i])
+    ]
+    remaining_criteria_text = "\n".join(f"- {c}" for c in remaining_criteria) or "(未充足の項目はありません、または未判定です)"
+
+    return {
+        "current_task": current_task,
+        "current_task_json": current_task_json,
+        "verified_facts_json": verified_facts_json,
+        "remaining_criteria_text": remaining_criteria_text,
+    }
+
+
 def call_task_planner(goal: str) -> list[dict]:
     """【SLM要約】
     Decomposition of a high-level goal into structured, actionable phases and detailed tasks by querying an AI planner.
@@ -820,52 +1321,69 @@ It serves as the initial planning layer for breaking down complex objectives acr
        - focus_scope: "global" / "phase" / "local" のいずれか。
        - expected_time_axis: "assumption" / "current" / "risk" / "validated" のいずれか。
     2. 各フェーズには、具体的な作業ステップを示す `tasks` 配列を必ず含めてください。
+    3. 【BL-023】各タスクには以下も必ず含めてください:
+       - acceptance_criteria: このタスクで検証されるべき独立した主張を配列で列挙してください。
+         **最大3個まで**とし、3個を超える場合はタスク自体を分割してください
+         （例: 「車両台数の算出」「初期費用の内訳」「年間ランニングコストの内訳」「感度分析」を
+         1タスクに束ねてはいけません。それぞれ独立したタスクにするか、密接に関連する場合でも
+         acceptance_criteriaの数を3以内に抑える粒度まで分割してください）。
+       - depends_on: このタスクが前提として使う他タスクのtask_idを配列で指定してください
+         （前提がなければ空配列）。
+       - owns_variables: このタスクで初めて確定させる共有変数名を配列で指定してください
+         （例: "vehicle_count"）。同じ変数を必要とする他タスクは、depends_onでこのタスクを
+         指定し、値を再導出せず参照する前提とします（前提がなければ空配列）。
 
     ■ 絶対目標: {goal}
 
     Return ONLY JSON array (必ず複数のフェーズとタスクに分割すること):
     [
         {{
-            "phase_id": "phase_1", 
-            "title": "フェーズ1のタイトル", 
-            "description": "フェーズ1の詳細な説明...", 
-            "allowed_abstraction_levels": ["concept", "constraint"], 
-            "focus_scope": "global", 
+            "phase_id": "phase_1",
+            "title": "フェーズ1のタイトル",
+            "description": "フェーズ1の詳細な説明...",
+            "allowed_abstraction_levels": ["concept", "constraint"],
+            "focus_scope": "global",
             "expected_time_axis": "assumption",
             "tasks": [
                 {{
                     "task_id": "task_1_1",
                     "title": "タスク1-1のタイトル",
-                    "description": "具体的な作業内容..."
+                    "description": "具体的な作業内容...",
+                    "acceptance_criteria": ["独立検証可能な主張1", "独立検証可能な主張2"],
+                    "depends_on": [],
+                    "owns_variables": []
                 }},
                 {{
                     "task_id": "task_1_2",
                     "title": "タスク1-2のタイトル",
-                    "description": "具体的な作業内容..."
+                    "description": "具体的な作業内容...",
+                    "acceptance_criteria": ["独立検証可能な主張1"],
+                    "depends_on": ["task_1_1"],
+                    "owns_variables": []
                 }}
             ]
         }},
         {{
-            "phase_id": "phase_2", 
-            "title": "フェーズ2のタイトル", 
-            "description": "フェーズ2の詳細な説明...", 
-            "allowed_abstraction_levels": ["design", "impl"], 
-            "focus_scope": "phase", 
+            "phase_id": "phase_2",
+            "title": "フェーズ2のタイトル",
+            "description": "フェーズ2の詳細な説明...",
+            "allowed_abstraction_levels": ["design", "impl"],
+            "focus_scope": "phase",
             "expected_time_axis": "current",
             "tasks": [
-                // ... (フェーズ2に必要なタスクを複数列挙)
+                // ... (フェーズ2に必要なタスクを複数列挙、各タスクにacceptance_criteria/depends_on/owns_variablesを含める)
             ]
         }}
         // ... (目標達成に必要な数だけフェーズを続けること)
     ]
     """
-    res = query_AI([{"role": "user", "content": prompt}], 
-                   client=client_auditor, model=model_auditor, 
+    res = query_AI([{"role": "user", "content": prompt}],
+                   client=client_auditor, model=model_auditor,
                    label="Task Planner")
-    
+
     fallback_phase= [{
-        "phase_id": "phase_1", 
-        "title": "全体", 
+        "phase_id": "phase_1",
+        "title": "全体",
         "description": goal,
         "allowed_abstraction_levels": ["concept", "constraint", "design", "impl"],
         "focus_scope": "global",
@@ -874,11 +1392,14 @@ It serves as the initial planning layer for breaking down complex objectives acr
             {
                 "task_id": "task_1_1",
                 "title": "初期タスク",
-                "description": "目標達成に向けた要件定義と最初の分析を行う"
+                "description": "目標達成に向けた要件定義と最初の分析を行う",
+                "acceptance_criteria": ["目標達成に向けた要件定義と最初の分析結果を提示する"],
+                "depends_on": [],
+                "owns_variables": []
             }
         ]
     }]
-    
+
     return _safe_json_parse(res, fallback=fallback_phase)
 
 def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
@@ -1018,7 +1539,12 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "\n返答は正確かつ明確でなければならない\n"
         "JSON形式での回答は不要です。実務担当者として、根拠や懸念点、検討した代替案も含め、"
         "自然な文章で冗長な表現を避けつつ具体的かつ、論理的に詳細に回答してください。\n"
-       
+
+    )
+
+    system_prompt += (
+        "\n【F-2.6 機械的検算ゲート（必須）】\n"
+        "数値的根拠を提示する際は python_repl ツールで計算を実行し、結果を明示すること。暗算での提示は禁止します。\n"
     )
 
     system_prompt += (f"""
@@ -1027,6 +1553,28 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     {phases_json}\n\n
     指示があったフェーズ、タスクに関しては、必ずこの計画を参照し、逸脱や矛盾がないよう思考してください\n
     \n
+    """)
+
+    # BL-025: Expertが他タスクのowns_variables領域まで踏み込むことを防ぐスコープガードレール
+    _scope_ctx = _build_task_scope_context(state, _conn)
+    current_task_json = _scope_ctx["current_task_json"]
+    verified_facts_json = _scope_ctx["verified_facts_json"]
+    remaining_criteria_text = _scope_ctx["remaining_criteria_text"]
+
+    system_prompt += (f"""
+    \n📏 【回答のスコープについて（厳守）】\n
+    あなたの回答で扱ってよい内容は、以下の「現在のタスク」の acceptance_criteria の範囲に厳密に限定してください。\n
+    他タスクが owns_variables として所有する値（例：他タスクで算出すべき数値）は、たとえ関連性が高く見えても\n
+    新たに算出・提案しないでください。それは当該タスクの役目です。\n
+
+    【現在のタスク】\n
+    {current_task_json}\n
+
+    【この値は確定済みです。再導出しないでください】\n
+    {verified_facts_json}\n
+
+    【未充足の要求項目（これ以外を新たに追加提案しないこと）】\n
+    {remaining_criteria_text}\n
     """)
 
     # 履歴からは消えた「前回の自分のNG発言」をStateから復元して突きつける
@@ -1077,7 +1625,19 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         """
 
 
-    return query_AI(messages, client=client_agent, model=model_agent, label=f"Expert:{expert_name}")
+    # BL-025 ②: ツールループの自問自答フェーズ（iter=2以降）では、全フェーズ・全DB agreementsを含む
+    # 巨大なsystem_promptではなく、現在タスクの情報のみに絞った軽量版に差し替える。
+    light_system_prompt = (
+        f"あなたは有能な{expert_name}の分野の専門家です。\n\n"
+        f"【現在のタスク】\n{current_task_json}\n\n"
+        f"【この値は確定済みです。再導出しないでください】\n{verified_facts_json}\n\n"
+        f"【未充足の要求項目】\n{remaining_criteria_text}\n\n"
+        "他タスクのowns_variablesに該当する内容は新たに算出・提案しないでください。\n"
+        "数値的根拠は python_repl ツールで検算し、暗算での提示は禁止します。\n"
+    )
+
+    return query_AI(messages, client=client_agent, model=model_agent, label=f"Expert:{expert_name}",
+                     tools=[PYTHON_REPL_TOOL], light_system_prompt=light_system_prompt)
 
 
 #def call_detector(goal: str, user_input: str, expert_output: str, decisions: list[Decision], current_phase: dict) -> dict:
@@ -1090,6 +1650,9 @@ def call_detector(state: LineageState, target_role: str) -> dict:
     recent_history = state["chat_history"][-2:]
     history_text = "\n".join([f"{'[User]' if m['role']=='user' else '[AI]'}\n {m['content']}" for m in recent_history])
     goal = state["goal"]
+    current_task = _get_current_task(state)
+    acceptance_criteria = current_task.get("acceptance_criteria", [])
+    criteria_text = "\n".join(f"{i}. {c}" for i, c in enumerate(acceptance_criteria)) or "(現在のタスクにacceptance_criteriaが定義されていません)"
 
 # 評価する対象（UserかExpertか）によって、チェック基準の厳しさを変える
     if target_role == "user":
@@ -1108,8 +1671,17 @@ def call_detector(state: LineageState, target_role: str) -> dict:
         role_specific_instruction = (f"""
             【評価対象：Agent(作業者)の発言】\n
             今回の発言は作業者からの『提案・成果物』です。\n
-            「最終確定」「これで承認」等、議論が完了したかのように扱っているにも関わらず、
-            明白な数値矛盾や計算ミス、要求された成果物項目の欠落が残っている場合は major としてください。\n
+            以下の場合は major としてください：\n
+            - 検算の結果、明白な数値矛盾や計算ミスが確認された場合（検算必須、下記参照）。\n
+            - 要求された成果物項目が欠落しているにもかかわらずそれに一切触れず、
+              あたかも全項目に対応済みであるかのように「最終確定」「これで承認」等の
+              言葉で議論を打ち切ろうとしている場合。\n
+            一方、以下の場合はそれだけでは major にせず、minor としてください：\n
+            - 一部の項目には応えているが、残りについて「〇〇は次タスクで扱う」
+              「〇〇は別途詳細化する」等、何が未着手かを具体的に名指しした上で、
+              次のステップとして明示している場合（複数ラウンドにわたり段階的に
+              成果物を仕上げるのは正常なプロセスであり、1ターンで全指摘に
+              完全に応えることまでは要求しない）。\n
             数値や数式は鵜吞みにせず、必ず根拠を追跡し、すべて検算してください。\n
             検算の結果数字、数式に疑義がある場合は major を出力してください。\n
         """)
@@ -1129,19 +1701,30 @@ def call_detector(state: LineageState, target_role: str) -> dict:
         f"- minor: 議論の途中段階として許容範囲の試算・未完成な提案"
         f"（例：初期の叩き台が制約条件を満たしていない等）。"
         f"これは議論を通じて改善されることが想定されるため、致命的な問題ではない。\n"
-        f"- major: 「最終確定」「これで承認」等、議論が完了したかのように扱っているにも関わらず、"
-        f"明白な数値矛盾や計算ミス、要求された成果物項目の欠落が残っている場合。\n"
-        f"ユーザーAIの提案が不足や矛盾があるにも関わらずユーザーAIがエージェントAIの提案に安易に、同意し承認してしまっている場合\n\n"
+        f"- major: 検算により明白な数値矛盾や計算ミスが確認された場合。または、"
+        f"要求された成果物項目が欠落しているにもかかわらずそれに触れず、"
+        f"あたかも全項目対応済みであるかのように「最終確定」等の言葉で議論を打ち切ろうとしている場合。\n"
+        f"ユーザーAIの提案が不足や矛盾があるにも関わらずユーザーAIがエージェントAIの提案に安易に、同意し承認してしまっている場合\n"
+        f"- 未対応項目が残っていても、何が未着手かを具体的に名指しした上で「次タスクで扱う」等、"
+        f"明示的な申し送りとして次に進めている場合は、それだけでは major にしない（minor とする）。\n\n"
         f"**重要: constraint_issueがmajorであっても、riskをhighにしてはいけません。riskは安全性専用です。**\n\n"
 
         f"{role_specific_instruction}\n\n" # ★ここで切り替える
 
-       #f"**追加の重要指示: 上限値（例:「上限1億円」「上限3,000万円」）を超えていない場合、"
-       #f"あるいは上限値に近い値であっても、それは矛盾とは見なさないでください。"
-       #f"「上限内の数値差」や「予算の上下関係」を正確に計算し、上限を超えていない場合はnoneまたはminorと判定してください。\n\n"
-       #f"数値や数式は鵜吞みにせず、必ず根拠を追跡し、すべて検算してください。検算の結果数字、数式に疑義がある場合はmajorを出力してください\n"
+        f"**追加の重要指示: 上限値（例:「上限1億円」「上限3,000万円」）を超えていない場合、"
+        f"あるいは上限値に近い値であっても、それは矛盾とは見なさないでください。"
+        f"「上限内の数値差」や「予算の上下関係」を正確に計算し、上限を超えていない場合はnoneまたはminorと判定してください。\n\n"
+        f"数値や数式は鵜吞みにせず、必ず根拠を追跡し、すべて検算してください。検算の結果数字、数式に疑義がある場合はmajorを出力してください\n"
+        f"【F-2.6 機械的検算ゲート（必須）】数値主張（合計・比率・閾値比較等）を含む場合、"
+        f"必ず python_repl ツールで機械的に再計算し、一致を確認してからでなければ constraint_issue=\"major\" としないでください。"
+        f"暗算での承認・却下判定は禁止します。\n\n"
         f"System Goal: {goal}\n"
         f"Recent Decisions（参考程度）: {recent_decitions}\n\n"
+        f"【BL-023: 現在タスクのacceptance_criteria充足チェック】\n"
+        f"以下は現在のタスクで検証されるべき独立した主張の一覧です（インデックス0始まり）。\n"
+        f"{criteria_text}\n"
+        f"今回のAgentの発言が、それぞれの項目に応えている（充足している）かをbool配列で判定してください。\n"
+        f"配列の長さ・順序は上記の一覧と対応させてください。\n\n"
         f"【今回評価するターンのやり取り】\n"
         f"{history_text}\n"
         #f"User Input: {user_input}\n"
@@ -1152,11 +1735,17 @@ def call_detector(state: LineageState, target_role: str) -> dict:
         #f"■ 視座の逸脱チェック:\n"
         #f"- 上記の視座を超えた詳細（例: 概念フェーズなのに実装の話）が出た場合は drift=True\n"
         #f"- 上記の視座より抽象的な話（例: 設計フェーズなのに目的論を繰り返す）が出た場合も drift=True\n"
-        f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由"}}'
+        f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由", "criteria_status": [true/false, ...]}}'
     )
-    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Detector")
-    print(f"【Detectorの判定結果】\n{res}\n")
-    parsed = _safe_json_parse(res, fallback={"risk": "low", "constraint_issue": "none", "comment": ""})
+    parsed, parse_failed = _query_and_parse_with_retry(
+        prompt, client=client_auditor, model=model_auditor, label="Detector",
+        tools=[PYTHON_REPL_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": []},
+    )
+    if parse_failed:
+        # [SAFETY] D-005: 層2リトライを使い切った場合はフェイルオープン（none）ではなくフェイルクローズ（major）に倒す。
+        # F-2.6検算ゲート導入の目的（暗算を信用しない）と、判定データ欠落時のフェイルオープンは相容れないため。
+        print("🚨 [Detector] 層2リトライを使い切ってもJSON判定を取得できませんでした。フェイルクローズ(major)します。")
+        return {"risk": "low", "constraint_issue": "major", "comment": "(判定JSON解析失敗のためフェイルクローズしました)", "criteria_status": []}
     print(f"【Detectorの判定結果(JSONパース後)】\n{parsed}\n")
     risk = parsed.get("risk", "low")
     if risk not in ("low", "medium", "high"):
@@ -1164,10 +1753,14 @@ def call_detector(state: LineageState, target_role: str) -> dict:
     constraint_issue = parsed.get("constraint_issue", "none")
     if constraint_issue not in ("none", "minor", "major"):
         constraint_issue = "none"
-    
-    return {"risk": risk, "constraint_issue": constraint_issue, "comment": parsed.get("comment", "")}
+    criteria_status = parsed.get("criteria_status", [])
+    if not isinstance(criteria_status, list):
+        criteria_status = []
 
-def call_decision_extractor(chat_history: list[dict], existing_topics: list[str], target_role: str) -> list[dict]:
+    return {"risk": risk, "constraint_issue": constraint_issue, "comment": parsed.get("comment", ""), "criteria_status": criteria_status}
+
+def call_decision_extractor(chat_history: list[dict], existing_topics: list[str], target_role: str,
+                             owns_variables: list[str] | None = None) -> tuple[list[dict], dict]:
     """【SLM要約】
     Extracting structured records of proposed decisions or evaluating user acceptance/rejection from recent conversation history based on the system's current context and interaction role.
     """
@@ -1176,10 +1769,15 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
     """
     recent_history = chat_history[-3:]
     if not recent_history:
-        return []
-        
+        return [], {}
+
+    owns_variables = owns_variables or []
     text = "\n".join([f"{'User' if m['role']=='user' else 'AI'}: {m['content']}" for m in recent_history])
     topics_list = "\n".join(f"- {t}" for t in existing_topics) or "(まだ既存トピックはありません)"
+    owns_variables_text = (
+        "\n".join(f"- {v}" for v in owns_variables)
+        if owns_variables else "(現在のタスクが確定させるべき共有変数はありません)"
+    )
     if target_role == "expert":
         # ==========================================
         # 【Expert直後】提案・成果物の「抽出（CREATE）」に特化
@@ -1197,9 +1795,19 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
         
         - "Deliverable": 成果物本体（仕様書や計画書のテキスト全文。絶対に要約しないこと）\n
         - "Decision": 今回Agentが提案した新たなルールや計算結果\n
-        
+
         【重要】既存トピック一覧にある話題をAgentが「修正・更新」して再提示してきた場合でも、\n
         システム上は新しい成果物として上書きするため `action_type: "UPDATE"`, `status: "Proposed"` としてください。
+
+        【BL-023: 先送りの検出】Agentが「〇〇は次タスク（task_id）で扱う」「〇〇は別途詳細化する」のように
+        既存トピックとは別の新しい論点を明示的に先送りした場合、`action_type: "CREATE"`, `entry_type: "Directive"`,
+        `status: "Deferred"` として抽出してください。`content` には先送りされた論点、`rationale` にはどのタスクで
+        扱うかを記載してください。
+
+        【BL-023: 共有変数の確定値検出】現在のタスクが確定させるべき共有変数（owns_variables）は以下の通りです:
+        {owns_variables_text}
+        Agentが今回、これらの変数のいずれかについて具体的な数値を確定させた場合（python_replでの検算結果を含む）、
+        `owned_variable_values` に {{変数名: 値}} の形で出力してください。該当がなければ空オブジェクト `{{}}` としてください。
         """
     else:
         # ==========================================
@@ -1232,6 +1840,10 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
                 → `action_type: "UPDATE"`, `target_topic`: 過去のトピック名, `status: "Implicitly_Accepted"`
             - User自身が新しい制約を提示した場合は `action_type: "CREATE"`, `status: "Proposed"`, `proposed_by: "User"` で抽出してください。
 
+            【BL-024: フェーズ・タスク遷移の検出】Userが「次のタスク（task_1_2）に移行する」のように
+            明示的に次のフェーズ・タスクへの移行を指示した場合のみ、トップレベルの`advances_to_phase_id`/
+            `advances_to_task_id`にその移行先のIDを設定してください。移行の指示がない場合は両方とも
+            `null`にしてください（前のタスクへの言及や単なるレビューは移行に該当しません）。
         """
 
         prompt_old = f"""
@@ -1345,29 +1957,40 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
             "action_type": "CREATE または UPDATE",
             "entry_type": "Decision / Directive / Deliverable",
             "target_topic": "UPDATEの場合のみ必須",
-            "status": "Proposed / Approved / Rejected 等", 
+            "status": "Proposed / Approved / Rejected / Deferred 等",
             "topic": "話題の簡潔なタイトル",
             "content": "提案内容(DeliverableのUPDATE時は必ず空文字に)",
             "rationale": "抽出または判定の理由",
             "proposed_by": "Agent または User",
             "phase_id": "現在のフェーズID",
+            "task_id": "現在のタスクID（分からなければ空文字）",
             "abstraction_level": "concept/constraint/design/impl",
             "scope": "global/phase/local",
-            "time_axis": "assumption/current/risk/validated"
+            "time_axis": "assumption/current/risk/validated",
+            "owned_variable_values": {{"変数名": "値（該当なければ空オブジェクト{{}}）"}}
             }}
-        ]
+        ],
+        "advances_to_phase_id": "Userが明示的に次のフェーズへの移行を指示した場合のみそのphase_id。なければnull",
+        "advances_to_task_id": "Userが明示的に次のタスクへの移行を指示した場合のみそのtask_id。なければnull"
         }}
     """
 
 
     res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Decision Extractor")
     parsed = _safe_json_parse(res, fallback={"extracted_events": []})
-    
+
+    transition = {}
+    if isinstance(parsed, dict):
+        transition = {
+            "advances_to_phase_id": parsed.get("advances_to_phase_id"),
+            "advances_to_task_id": parsed.get("advances_to_task_id"),
+        }
+
     if isinstance(parsed, dict) and "extracted_events" in parsed:
-        return parsed["extracted_events"]
+        return parsed["extracted_events"], transition
     elif isinstance(parsed, list):
-        return parsed
-    return []
+        return parsed, transition
+    return [], transition
 
 def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict]) -> dict:
     """【SLM要約】
@@ -1392,6 +2015,8 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict]) -> 
     - 優先度の低いフェーズの成果を縮小・簡素化する
     - 優先度の高いフェーズに資源を多く配分し直す
 
+    【F-2.6 機械的検算ゲート（必須）】予算超過判定は python_repl ツールで機械的に合計・比較してから行うこと。
+
     Return ONLY JSON:
     {{
         "priority_ranking": ["phase_id順に重要な順"],
@@ -1400,7 +2025,7 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict]) -> 
         "rationale": "判断理由"
     }}
     """
-    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Resource Arbiter")
+    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Resource Arbiter", tools=[PYTHON_REPL_TOOL])
     return _safe_json_parse(res, fallback={})
 
 
@@ -1445,7 +2070,7 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
     # ドメイン固有キーワードに頼らず、Proposedのまま残っている項目を全件提示する
     unresolved_critical = [a for a in agreements if a["status"] == "Proposed"]
     unresolved_text = "\n".join(
-        f"- {a['topic']}: {a.get('content', '')[:80]}" for a in unresolved_critical
+        f"- {a['topic']}: {a.get('decision_what', '')[:80]}" for a in unresolved_critical
     ) or "(なし)"
     
     prompt = f"""
@@ -1612,6 +2237,9 @@ def call_reviewer(goal: str, deliverable_text: str) -> dict:
     確率的な達成率（例: 92%、95%等）の提示だけでは要件を満たしたとみなさず、残存リスクへの
     対応策が「すべてのケースをカバーする」設計になっているかを厳密に確認してください。
 
+    【F-2.6 機械的検算ゲート（必須）】成果物中の数値的主張（予算・数量・比率等）について、
+    承認（passed:true）前に python_repl ツールで再計算し、矛盾がないことを確認すること。
+
     ■ 達成すべき【絶対目標(Goal)】:
     {goal}
 
@@ -1625,9 +2253,19 @@ def call_reviewer(goal: str, deliverable_text: str) -> dict:
         "reasoning": "判定の根拠（成果物のどの部分が目標に達していないのか、要求された成果物のうち何が欠落しているのかを具体的に明示すること）"
     }}
     """
-    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Reviewer QA")
-    parsed = _safe_json_parse(res, fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"})
-    
+    parsed, parse_failed = _query_and_parse_with_retry(
+        prompt, client=client_auditor, model=model_auditor, label="Reviewer QA",
+        tools=[PYTHON_REPL_TOOL], fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"},
+    )
+    if parse_failed:
+        # [SAFETY] D-005: 層2リトライを使い切った場合はフェイルクローズ（passed=False、差し戻し）に倒す。
+        print("🚨 [Reviewer QA] 層2リトライを使い切ってもJSON判定を取得できませんでした。フェイルクローズ(passed=False)します。")
+        return {
+            "passed": False,
+            "feedback": "判定JSON解析に繰り返し失敗したため、機械的にフェイルクローズ（差し戻し）しました。再度ご確認ください。",
+            "reasoning": "(判定JSON解析失敗のためフェイルクローズ)",
+        }
+
     passed_val = parsed.get("passed", False)
     return {
         "passed": str(passed_val).lower() == "true" if isinstance(passed_val, str) else bool(passed_val),
@@ -1690,22 +2328,48 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
 
     phases_json = json.dumps(state.get("phases", []), ensure_ascii=False, indent=2)
 
+    # BL-023: 現在タスクの範囲・依存確定値・充足状況を明示し、指示のスコープを限定する
+    _scope_ctx = _build_task_scope_context(state, _conn)
+    current_task_json = _scope_ctx["current_task_json"]
+    verified_facts_json = _scope_ctx["verified_facts_json"]
+    remaining_criteria_text = _scope_ctx["remaining_criteria_text"]
+
     #Task Plannerが作成したフェーズとタスクを明示する
     system_prompt += (f"""
         \n📊 [プロジェクト進行計画]
         目標達成への道しるべとして、Task Plannerが作成したフェーズとタスクの一覧を以下に示します。\n
         {phases_json}\n\n
-                      
+
         あなたの役割は、上記の計画に従ってエージェントAIに**1度に1つずつ**タスクを指示し、成果物をレビューして着実に進捗させることです。\n
         （※一気に複数のタスクを指示すると相手が混乱するため、絶対に避けてください）\n
-        \n              
-         🔥 【発注者としての絶対的なスタンス】\n"
+        \n
+         🔥 【発注者としての絶対的なスタンス（質について）】\n"
          あなたは妥協を許さないプロジェクトオーナーです。相手（Agent AI）が「制約が厳しい」
         「要件を満たせない」と泣き言を言ってきても、絶対に【絶対目標】のハードルを下げないでください。\n
         「制約緩和の検討」や「重要要件の放棄」を提案された場合は、それを却下し、
         『プロとして制約内に収めるための別の技術的アプローチや代替案を考え直せ』と厳しく突き返してください。\n
          <あなたの発話や指示の根拠や参考にした情報、思考過程を示してください。>\n
+
+        📏 【指示のスコープについて（厳守・質への非妥協性とは別軸、BL-023）】\n
+        1回の指示で要求してよい内容は、以下の「現在のタスク」の acceptance_criteria の範囲に厳密に限定してください。\n
+        範囲外の追加要求（他タスクの依存項目の前倒し要求、まだ指示していない後続タスクの内容の混入など）は、\n
+        たとえ関連性が高く見えても行わないでください。それは次のタスクの役目です。\n
+
+        【現在のタスク】\n
+        {current_task_json}\n
+
+        【この値は確定済みです。再導出を指示・要求しないでください】\n
+        {verified_facts_json}\n
+
+        【現在のタスクで未充足の要求項目（これ以外を新たに追加要求しないこと）】\n
+        {remaining_criteria_text}\n
     """)
+
+    system_prompt += (
+        "\n【F-2.6 機械的検算ゲート（必須）】\n"
+        "Expertの数値主張を批判的に監査する際、暗算に頼らず python_repl ツールで再計算し、"
+        "矛盾（計算ミス・ごまかし）を看破してください。\n"
+    )
 
     previous_user_input = state.get("user_input", "(取得不可)")
 
@@ -1767,12 +2431,12 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         messages.append({"role": "user", "content": "(会話を開始してください。要件を伝えて作業を指示してください)"})
         print("---NO chat_history---\n")
 
-    content = query_AI(messages, client=client_user, model=model_user, label="User AI")
-    
+    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL])
+
     if content is None or content.strip() == "" or content == "(APIから空の応答が返されました)":
         for retry in range(3):
             print(f"⚠️ [User AI] 空応答を検知。リトライ {retry+1}/3...")
-            content = query_AI(messages, client=client_user, model=model_user, label="User AI")
+            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL])
             if content and content.strip() and content != "(APIから空の応答が返されました)":
                 break
         else:
@@ -1983,6 +2647,11 @@ Manages state updates including risk levels, constraint logging, and decision re
     state["risk_flag"] = result["risk"]
     state["constraint_issue"] = result["constraint_issue"]
 
+    criteria_status = result.get("criteria_status", [])
+    current_task_id = state.get("current_task_id", "")
+    if criteria_status and current_task_id:
+        state.setdefault("task_criteria_status", {})[current_task_id] = criteria_status
+
     if result["constraint_issue"] in ("minor", "major"):
         state["constraint_issue_log"].append({
             "turn": state["turn_count"],
@@ -2016,6 +2685,36 @@ Manages state updates including risk levels, constraint logging, and decision re
 
     return state
 
+def _resolve_task_transition(state: LineageState, transition: dict) -> None:
+    """[CONSTRAINT] BL-024: current_phase/current_task_idの唯一の書き手。
+    LLMが返したphase_id/task_idがtask_planner確定済みのphases/tasksに実在しない場合は
+    書き込みを拒否し、直前の値を維持する（check_docs_consistency.pyが存在しないリンクを
+    機械的に検出するのと同型のフェイルクローズ）。
+    """
+    next_phase_id = transition.get("advances_to_phase_id")
+    next_task_id = transition.get("advances_to_task_id")
+    if not next_phase_id and not next_task_id:
+        return
+
+    phase_lookup = {p["phase_id"]: p for p in state.get("phases", [])}
+    target_phase = phase_lookup.get(next_phase_id) if next_phase_id else state.get("current_phase")
+    if not target_phase:
+        print(f"  ⚠️ [decision_extractor] 存在しないphase_id '{next_phase_id}' への遷移要求を無視しました。")
+        return
+
+    if next_task_id:
+        valid_task_ids = {t["task_id"] for t in target_phase.get("tasks", [])}
+        if next_task_id not in valid_task_ids:
+            print(f"  ⚠️ [decision_extractor] 存在しないtask_id '{next_task_id}' への遷移要求を無視しました。")
+            return
+        state["current_task_id"] = next_task_id
+        print(f"  ➡️ [decision_extractor] current_task_id を '{next_task_id}' に更新しました。")
+
+    if next_phase_id:
+        state["current_phase"] = target_phase
+        print(f"  ➡️ [decision_extractor] current_phase を '{next_phase_id}' に更新しました。")
+
+
 def decision_extractor_node(state: LineageState) -> LineageState:
     """【SLM要約】
     Extraction and formalization of decisions, agreements, and deliverables from conversational history into the system state.
@@ -2032,9 +2731,11 @@ def decision_extractor_node(state: LineageState) -> LineageState:
         target_role = "user" if last_msg_role == "user" else "expert"
 
     existing_topics = list({a["topic"] for a in get_agreements_from_db(_conn, _run_id) if a.get("status") != "Superseded"})
-    extracted_items = call_decision_extractor(state["chat_history"], existing_topics, target_role)
+    current_task_for_extraction = _get_current_task(state)
+    owns_variables = current_task_for_extraction.get("owns_variables", [])
+    extracted_items, transition = call_decision_extractor(state["chat_history"], existing_topics, target_role, owns_variables)
     print(f"\n------ 完了 ------")
-    
+
     for item in extracted_items:
         action_type = item.get("action_type", "CREATE")
         entry_type = item.get("entry_type", "Decision") 
@@ -2046,11 +2747,24 @@ def decision_extractor_node(state: LineageState) -> LineageState:
         
         current_phase = state.get("current_phase", {})
         phase_id = item.get("phase_id", current_phase.get("phase_id", "unknown"))
+        task_id = item.get("task_id") or state.get("current_task_id", "")
         abstraction_level = item.get("abstraction_level", "design")
         scope = item.get("scope", "local")
         time_axis = item.get("time_axis", "assumption")
         depends_on = item.get("depends_on", [])
         resource_claims = item.get("resource_claims", {})
+
+        # BL-023 2.6節: owns_variablesに含まれる変数のみをverified_factsへ確定保存する
+        owned_variable_values = item.get("owned_variable_values", {})
+        if isinstance(owned_variable_values, dict):
+            for var_name, var_value in owned_variable_values.items():
+                if var_name in owns_variables:
+                    upsert_verified_fact(
+                        _conn, _run_id, var_name, var_value, unit="",
+                        source_task_id=task_id, source_phase_id=phase_id,
+                        confirmed_by=proposed_by
+                    )
+                    print(f"  🔒 [verified_facts] '{var_name}' = {var_value} を確定値として保存しました（source: {task_id}）。")
 
         # ===== 成果物のファイル書き出し処理 (バックアップ処理付き) =====
         content = "" # 初期化
@@ -2083,7 +2797,7 @@ def decision_extractor_node(state: LineageState) -> LineageState:
             old_content = ""
             for a in reversed(get_agreements_from_db(_conn, _run_id)):
                 if a["topic"] == target_topic and a.get("status") != "Superseded":
-                    old_content = a["content"]
+                    old_content = a["decision_what"]
                     db_supersede_agreement(a["id"], _conn, _run_id)
                     if proposed_by == "Unknown" or not proposed_by:
                         proposed_by = a.get("proposed_by", "Unknown")
@@ -2113,10 +2827,11 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                 "entry_type": entry_type,
                 "status": status,
                 "topic": target_topic,
-                "content": new_content,
-                "rationale": rationale,
+                "decision_what": new_content,
+                "reason_why": rationale,
                 "proposed_by": proposed_by,
                 "phase_id": phase_id,
+                "task_id": task_id,
                 "abstraction_level": abstraction_level,
                 "scope": scope,
                 "time_axis": time_axis,
@@ -2140,10 +2855,11 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                 "entry_type": entry_type,
                 "status": status,
                 "topic": topic,
-                "content": content,
-                "rationale": rationale,
+                "decision_what": content,
+                "reason_why": rationale,
                 "proposed_by": proposed_by,
                 "phase_id": phase_id,
+                "task_id": task_id,
                 "abstraction_level": abstraction_level,
                 "scope": scope,
                 "time_axis": time_axis,
@@ -2163,8 +2879,10 @@ def decision_extractor_node(state: LineageState) -> LineageState:
         print(f"\n  📝 [Extract] {agreement['action_type']} - {agreement['entry_type']}: {agreement['topic']}")
         print(f"     ├ Status: {agreement['status']} | By: {agreement['proposed_by']}")
         print(f"     ├ Meta  : Phase={agreement['phase_id']} | Level={agreement['abstraction_level']} | Scope={agreement['scope']} | Time={agreement['time_axis']}")
-        print(f"     ├ Reason: {agreement['rationale']}")         
-    
+        print(f"     ├ Reason: {agreement['reason_why']}")
+
+    _resolve_task_transition(state, transition)
+
     if state["chat_history"]:
         last_user_msg = next((m["content"] for m in reversed(state["chat_history"]) if m["role"] == "user"), "")
         if "[PROJECT_COMPLETE]" in last_user_msg:
@@ -2292,7 +3010,7 @@ def integrator_node(state: LineageState) -> LineageState:
 
     for d in deliverables:
         # ===== ファイルから内容を読み込む =====
-        content_data = d['content']
+        content_data = d['decision_what']
         if content_data.startswith("FILE_PATH:"):
             filepath = content_data.split("FILE_PATH:")[1]
             if os.path.exists(filepath):
@@ -2310,7 +3028,7 @@ def integrator_node(state: LineageState) -> LineageState:
         # Lineage (意思決定の由来) データの挿入
         master_document.append("\n### 💡 意思決定の由来 (Decision Lineage)\n")
         master_document.append(f"- **合意ID**: `{d['id']}` (Turn {d['turn']} に確定)")
-        master_document.append(f"- **検討の背景と根拠**: {d.get('rationale', '記載なし')}")
+        master_document.append(f"- **検討の背景と根拠**: {d.get('reason_why', '記載なし')}")
         if d.get("resource_claims"):
             master_document.append(f"- **関連リソース・制約**: {json.dumps(d['resource_claims'], ensure_ascii=False)}")
         master_document.append("\n---\n")
@@ -2339,8 +3057,8 @@ def integrator_node(state: LineageState) -> LineageState:
             "entry_type": "Deliverable",
             "status": "Proposed", # Reviewerの審査待ち
             "topic": "★最終統合要件定義書（Lineage完全版）",
-            "content": f"FILE_PATH:{master_filepath}", # パスを保存
-            "rationale": "全タスクの承認済み成果物を自動結合",
+            "decision_what": f"FILE_PATH:{master_filepath}", # パスを保存
+            "reason_why": "全タスクの承認済み成果物を自動結合",
             "proposed_by": "System Integrator",
             "phase_id": "All",
             "abstraction_level": "constraint",
@@ -2361,7 +3079,7 @@ def reviewer_node(state: LineageState) -> LineageState:
     state["review_count"] += 1
     _conn = get_active_conn()
     _run_id = state["run_id"]
-    master_doc_data = next((a["content"] for a in reversed(get_agreements_from_db(_conn, _run_id)) if a["topic"] == "★最終統合要件定義書（Lineage完全版）"), "")
+    master_doc_data = next((a["decision_what"] for a in reversed(get_agreements_from_db(_conn, _run_id)) if a["topic"] == "★最終統合要件定義書（Lineage完全版）"), "")
     
     # ===== ファイルから内容を読み込む =====
     if master_doc_data.startswith("FILE_PATH:"):
@@ -2730,13 +3448,18 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
         "global_constraints": [],
         "phases": [],
         "current_phase": {
-            "phase_id": "phase_0", 
-            "title": "初期化待ち", 
-            "description": "", 
-            "allowed_abstraction_levels": ["concept", "constraint", "design", "impl"], 
-            "focus_scope": "global", 
-            "expected_time_axis": "assumption"
+            "phase_id": "phase_0",
+            "title": "初期化待ち",
+            "description": "",
+            "allowed_abstraction_levels": ["concept", "constraint", "design", "impl"],
+            "focus_scope": "global",
+            "expected_time_axis": "assumption",
+            "tasks": [],
+            "budget_hint": {}
         },
+        "current_task_id": "",
+        "verified_facts": {},
+        "task_criteria_status": {},
         "risk_register": [],
         "needs_revision_phases": [],
         "phases_to_revise": []
