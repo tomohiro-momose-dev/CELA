@@ -729,7 +729,7 @@ D-009の本来の狙いは「一時的なAPI障害はリトライ、ロジック
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（設計完了、実装未着手。BL-023 Phase Aと同時に着手） |
+| 状態 | `done`（BL-023 Phase Aと同時に実装。オフラインスモークテスト合格、実LLM再ドライラン待ち） |
 | 優先度 | P1 |
 | 依存 | なし（BL-005の`turn_count`凍結とは独立した別のフリーズバグ） |
 | 関連 | [BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)（本Issueの前提）、[BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)（同型の凍結バグ、別変数）、[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)、`docs/design/phase2/cela_phase2_design_BL023_task_state.md` |
