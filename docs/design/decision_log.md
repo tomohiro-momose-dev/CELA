@@ -313,6 +313,19 @@
 | 関連 BL | [BL-022](issue_backlog.md#bl-022-openrouterの壊れたレスポンスによる生jsonjsondecodeerrorがd-009の絞り込んだexceptを素通りしクラッシュ) |
 | 参照 | 本番ドライランの完全トレースバック（`detector`ノード、`f4e09709-3300-d8d4-3dd2-81ba45905a42`、2026-07-19） |
 
+### D-020: BL-023の対応をPhase A（task_planner/User AIのスコープ是正）・Phase C（予算カスケードの仮説化）から着手し、Phase B（BL-005 reflection/facilitator復旧）は後回しにする
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-20 |
+| 状態 | `decided` |
+| 決定者 | t-momose |
+| **決定理由** | BL-023の対応案はPhase A（task_plannerの出力スキーマ拡張＋`generate_user_utterance`のスコープ境界明確化）、Phase B（BL-005修正が前提の、reflection/facilitatorへの森レベル整合性の委譲）、Phase C（予算のトップダウン・カスケードとフィージビリティ・エスカレーション経路）の3段構成として提示した。実ドライラン（`log/2026-07-19/2056`）で直接観測された「検算の嵐」（task_1.2で3ラウンド以上の差し戻し、各ラウンドでExpert 5〜8回・Detector 3〜7回のpython_repl呼び出し）は、task_planner／User AIによる1タスクへの複数独立検証可能主張の束ね込みが直接原因であることがログで実証されている。一方、reflection/facilitatorの不在（BL-005）が現在の検算の嵐を悪化させているという説明はAIによる構造的推論であり、ログで直接実証された事実ではない。したがって、確度の高い直接原因（Phase A）と、ユーザーが強く懸念する将来リスク（現場への無理な予算押し付け、Phase C）を優先し、確度の低い間接要因（Phase B）は非ブロッカーとして後回しにするのが合理的と判断した。なお、Phase Aの`depends_on`/`owns_variables`フィールドは、reflection/facilitatorが本来担うはずだった「共有変数の一貫性チェック」の一部を構造的に代替するため、Phase B先送りによる悪影響は限定的である。 |
+| 決定内容 | BL-023の実装はPhase A→Phase Cの順で着手する。Phase B（BL-005修正）は「必要だが今回のスコープ是正の直接要因ではない」と位置づけ、非ブロッカーのまま別途対応する。実装順序はPhase A（task_planner/generate_user_utterance、影響範囲が小さくログで確度の高い原因に対応）を先行させ、動作確認後にPhase C（予算カスケード、新規機構で影響範囲が大きい）を着手する。 |
+| 影響 | `docs/design/issue_backlog.md`（BL-023の対応順序）、今後の`cela_main.py`実装範囲（`call_task_planner`／`generate_user_utterance`／予算配分・`resource_arbiter`まわり） |
+| 関連 BL | [BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、[BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)（非ブロッカーとして後回し）、[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない) |
+| 参照 | `log/2026-07-19/2056/log_no_prompt.md:1517-1545`、[decision_lineage.md 論点23](decision_lineage.md) |
+
 ---
 
 ## 未決定（pending）
