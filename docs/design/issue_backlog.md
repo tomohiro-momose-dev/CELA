@@ -781,9 +781,9 @@ BL-023 Phase Aの実ドライラン（`log/2026-07-20/1204`）で、`generate_us
 
 **完了条件:**
 
-- ①②とも実装し、`python -m py_compile`・オフラインスモークテストで動作確認する。
+- ~~①②とも実装し、`python -m py_compile`・オフラインスモークテストで動作確認する。~~ → `done`（`_build_task_scope_context`ヘルパーを`generate_user_utterance`と共通化し`call_expert`にも適用。`_query_AI_live`に`light_system_prompt`引数を追加し、`_JAPANESE_OUTPUT_DIRECTIVE`を定数化。フェイククライアントによるオフラインスモークテスト2件（①system_promptへのガードレール注入確認、②iter=1はフル文脈・iter=2以降は軽量文脈に差し替わることの確認）はすべてPass）
 - 実機再ドライランで、Expertが他タスクの`owns_variables`領域に踏み込まなくなることを確認する（未実施）。
-- ②の軽量化がRecord/Replayのフィクスチャキー整合性に影響しないことを確認する（`_inject_japanese_output_directive`と同様、ハッシュ計算対象外の位置での差し替えとする）。
+- ~~②の軽量化がRecord/Replayのフィクスチャキー整合性に影響しないことを確認する~~ → `done`（`_hash_messages_for_replay`は呼び出し時点の`messages`引数を使用し、軽量化はツールループ内部iter=2以降でのみ発生するため、フィクスチャキーに影響しない設計であることをコードレベルで確認）。
 
 ---
 
