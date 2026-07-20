@@ -257,6 +257,17 @@
 
 ---
 
+### 論点24: 本プロジェクト自身の統治構造をエージェントのstate設計に写す（BL-023統合設計、BL-024・D-021）
+
+- **ユーザー提起:** Phase Aの設計を詰める過程でAIが「current_phaseが初期化後フリーズしている」ことを発見し報告したのに対し、「phase, taskは概念から少し実装にはいったまま、中途半端になっていました」と経緯を補足。その上で「要するに、この開発プロジェクトでやっているような情報構造をエージェントに持たせればよいわけですね」と、ロードマップ／phaseNのより詳細な分解／issue_backlog／decision_lineage（既存）／phase_gate／STATUS（一部既存）／traceability／確定した数値の保存・参照（DB検索ツール未実装）という本プロジェクト自身の統治構造を列挙し、「この中で、フェーズ・タスク状態を誰がどう管理するか？」と設計の中核を問うた。
+- **AI分析（対応表の整理）:** 本プロジェクトの各ドキュメントとCELA内部の対応物を突き合わせ、`decisions`テーブル（decision_lineage相当）は既存だが、`current_phase`の凍結（BL-024）、issue_backlog相当の「先送り記録」、phase_gate相当の「完了条件」、traceability相当の「充足チェック」、確定値共有ストア（BL-015と重複）はいずれも構造として存在しないと整理。「フェーズ・タスク状態を誰が管理するか」については、本プロジェクトでSTATUS.md/phase_gates.mdを更新する運用（気づいた側が更新し、リンタが機械的に整合性を検証し、最終的にユーザーがレビューする）を参考に、`decision_extractor_node`を唯一の書き手とし、task_planner確定済みのphases/tasksとの照合によるフェイルクローズ検証を挟む設計を提案した。
+- **ユーザー決定:** 「設計書に含めましょう。分解すのもよいのですが、結局目指すところは一緒なので」と、issue_backlog相当・phase_gate相当・traceability相当・確定値共有ストアのすべてを個別BLに分割せず、BL-023の統合設計として1つの設計書にまとめる方針を決定。
+- **AI対応:** `docs/design/phase2/cela_phase2_design_BL023_task_state.md`を新規作成し、`Task`型・`Phase`/`Agreement`型拡張・`LineageState`拡張（`current_task_id`/`verified_facts`/`task_criteria_status`）・DBスキーマ変更・`decision_extractor`拡張・acceptance_criteria充足チェック・Agreementの`Deferred`ステータス・共有変数ストア・`generate_user_utterance`/Expert system promptの改修・予算カスケードを1つの設計書として統合。BL-024を新規起票し、D-021として`decision_extractor_node`を唯一の書き手とする決定を記録。
+- **決定者:** t-momose（統合設計として1つにまとめる決定）、Claude Sonnet 5（対応表の整理、`decision_extractor_node`を唯一の書き手とする設計の提案）
+- **関連:** [D-021](decision_log.md#d-021-bl-023の設計を本プロジェクト自身の統治構造に対応する情報構造としてlineagestateに統合するdecision_extractor_nodeを状態遷移の唯一の書き手とする)、[BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、[BL-024](issue_backlog.md#bl-024-current_phaseが初期化後フリーズしtask_id単位の状態追跡が存在しない)、`docs/design/phase2/cela_phase2_design_BL023_task_state.md`
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
