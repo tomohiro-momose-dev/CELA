@@ -757,7 +757,7 @@ BL-023 Phase A（「User AIの発話を現在のタスクのacceptance_criteria�
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（実装中） |
+| 状態 | `done`（①②とも実装。オフラインスモークテスト合格、実LLM再ドライラン待ち） |
 | 優先度 | P1 |
 | 依存 | BL-023 Phase A（`Task`型・`acceptance_criteria`/`owns_variables`スキーマ、`_get_current_task`）が前提 |
 | 関連 | [BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、`log/2026-07-20/1204/log_no_prompt.md` |
