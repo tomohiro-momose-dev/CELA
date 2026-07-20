@@ -66,6 +66,7 @@
 | BL-032 | 中 | `cela_main.py` (`call_decision_extractor`のUser直後role_instruction、`decision_extractor_node`) | 実ドライラン（`log/2026-07-20/1421`）で、task_2_3のDeliverable（親レポート）は承認されたが、同じAgent提出に含まれる4件のDecision（予約チャネル按分比率・電話予約システム設計・対面相談所端末設計・運用コスト概算）はProposedのまま永久に取り残され、以降全ターンの「合意・決定事項・検討状況DB」に🤔として再掲され続けていた。承認時の`target_topic`が単数指定でしかなく、同一task_idの兄弟トピックへの承認カスケードがないことが原因。同一task_id内でも、同ターンのDetector判定（`constraint_issue`/`task_criteria_status`）が清浄な場合のみ機械的にカスケードする設計（未検討事項の隠蔽を防ぐガード付き）で対応予定（現時点では未着手、設計確定・承認済み） | P2 |
 | BL-033 | 高 | `cela_main.py` (`_query_AI_live`, `call_detector`, `expert_node`, `detector_node`, `LineageState`) | 実ドライラン（`log/2026-07-20/1421`）でExpert(legal_advisor)がpython_replを一度も使わず（`tool_calls=0`）に「全ての検算が完了した」と虚偽の自己申告をした事故を発見（後段のDetectorが独立検算し実害はなかった）。①Expertが実際に実行したpython_replのcode/resultを`state["expert_last_python_calls"]`として保存しDetectorのプロンプトに提示（Expertの自己申告を鵜呑みにさせない）、②ExpertとDetectorの両方が同一ターンでpython_repl未使用だった場合のみ強制的に`constraint_issue=major`でフェイルクローズ（本当に計算不要なケースを巻き込む無限ループを避けるため「両方0回」の複合失敗に限定）、の2点を実装・スモークテスト済み | P1 |
 | BL-034 | 低 | `cela_main.py` (`decision_extractor_node`) | ユーザーが実ドライラン（`log/2026-07-20/1421`）のtask_6_3で、Expertの最終計画書提出をDetectorが通した直後、`decision_extractor_node`（`entry_type=="Deliverable" and action_type=="CREATE"`）がDB上の`status`（Proposed/Approved）を問わず無条件でファイル保存する（`cela_main.py:2812-2827`）ことを発見。ユーザー承認（次ターンのUser AIの受諾表明によるUPDATE/status=Approved）より前に物理ファイルが確定してしまい、却下・修正時に旧版が孤児ファイルとして残る（task_2_2で既に2版が実例として残存）。`integrator_node`は`status=="Approved"`のみを集約するため正当性は壊れていないが、ディスク衛生・監査上の設計課題として記録。R4（ホワイトボード化・md差分読み書き、D-018）で自然に解消される見込みのため、現時点では実装を見送り記録のみ | P3 |
+| BL-035 | 高 | `cela_main.py` (`_build_task_scope_context`) | 実ドライラン（`log/2026-07-20/1421`）のtask_6_3（総合導入計画の完成）で、Expertがピーク輸送力を誤計算（60÷13.8×9×3=117人/時と主張、正しくは60/13.8×9=39.1人/時でピーク需要66.7人/時を下回る）しDetectorに差し戻された事例をユーザーが発見。検算の結果、これは別フェーズ（task_2_1）確定済みの車両台数がピーク需要を満たせていないという根深い問題だったが、`_build_task_scope_context`（`cela_main.py:1306-1311`）が`state["current_phase"]["tasks"]`のみを走査するため、フェーズをまたぐ`depends_on`参照（task_6_3→task_2_1）が構造的に解決不能で、Expertは根拠の確定値にアクセスできないまま差し戻しを繰り返すリスクがある。`expert_retry_count>=3`で`reflection`に丸投げされるが収束は保証されない。即応パッチ（`state["phases"]`全体を走査するよう修正）ではなく、F-3.8（自律的DB/ファイル読み取りツール、要件定義書v35.1新規）実装時にまとめて解消する方針（D-032）。現時点では実装せず記録のみ | P2 |
 
 ---
 
@@ -1044,6 +1045,40 @@ BL-029の議論から派生した設計アイデア。現状の`owned_variable_v
 **完了条件（現時点では対応しない）:**
 
 - （見送り）Proposed時点ではファイル保存せず`raw_content`のみを保持し、Approved確定時に初めて`save_deliverable_to_file()`を呼ぶよう`decision_extractor_node`を改修する案は、R4のホワイトボード化設計と合わせて再検討する。
+
+---
+
+### BL-035: `_build_task_scope_context`がフェーズ横断の`depends_on`参照を解決できない
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（記録のみ、実装はF-3.8実装時に統合） |
+| 優先度 | P2 |
+| 依存 | [F-3.8](要件定義書_v35.md)（自律的DB/ファイル読み取りツール、未実装） |
+| 関連 | [D-032](decision_log.md#d-032-フェーズ横断の確定値成果物アクセスはエージェント自律の読み取りツールf-38を新規追加して解決する) |
+
+**内容:**
+
+ユーザーが実ドライラン（`log/2026-07-20/1421`）のtask_6_3（総合導入計画の完成）で、Expertがピーク輸送力を「60÷13.8×9×3=117人/時」と提出し、Detectorが「ヘッドウェイ13.8分は3台合成の間隔であり、正しくは60/13.8×9=39.1人/時。ピーク需要66.7人/時（200人÷3時間）を下回る」として`constraint_issue=major`で差し戻したログを共有した。Python検算でDetectorの指摘が正しいことを確認した（正しい輸送力39.13人/時 < ピーク需要66.67人/時、不足27.54人/時）。これは表面的な計算ミスではなく、**別フェーズ（task_2_1「必要車両台数の算出」）で確定済みの車両台数（3台）そのものがピーク需要を満たせていない**という、より根深い設計上の問題である。
+
+**原因分析:** `_build_task_scope_context`（`cela_main.py:1306-1311`）の依存変数解決ループ：
+
+```python
+for t in state.get("current_phase", {}).get("tasks", []):
+    if t.get("task_id") in depends_on_task_ids:
+        dependency_variable_names.extend(t.get("owns_variables", []))
+```
+
+は`state["current_phase"]`（**現在のフェーズ単体**の`tasks`リスト）のみを走査している。task_planner側でtask_6_3の`depends_on`にtask_2_1が正しく宣言されていたとしても、task_2_1はPhase 2のタスクであり`current_phase`（Phase 6）の`tasks`には存在しないため、このループは絶対にヒットせず、`verified_facts_json`は空（「依存タスクの確定値はまだありません」）のまま返る。全フェーズを保持する`state["phases"]`（`cela_main.py:1497`/`2356`行目で使用）を見ていないことが原因であり、既知のBL-018（`depends_on`宣言自体の粗さ）とは別種の、**宣言が正しくても解決できない**実装上のギャップである。
+
+**実害:** Expertは差し戻しのたびにDetectorの直近の指摘文（`constraint_issue_log[-1:]`）は`generate_user_utterance`経由で受け取るものの、「なぜ3台という前提なのか」という根拠の確定値にはアクセスできないまま、場当たり的に同じタスクの範囲内で修正を試みる可能性が高い。`expert_retry_count>=3`で`route_after_expert_detector`が`reflection`にエスカレーションするが、`reflection_node`のLLM判定（`discussion_status`）が「継続中」であれば何も解決せずそのターンを終える（`route_after_reflection`→`end_turn`）。クラッシュはしないが、収束せずにターン数を浪費し続けるリスクがある。
+
+**対応方針（ユーザー決定）:** `_build_task_scope_context`のループを`state["phases"]`全体（またはフラット化したタスク一覧）を走査するよう修正する即応パッチも検討したが、ユーザーは、将来的にエージェント自身にファイルI/O・DB I/Oの読み取りツールを持たせる設計（F-3.8として要件定義書v35.1に新規追加）に統合すれば、この種のクロスフェーズ参照問題は構造的に解消される見込みであると判断。単体の応急パッチは実施せず、F-3.8実装時にまとめて解消する方針とした。
+
+**完了条件（F-3.8実装時に統合、現時点では対応しない）:**
+
+- （見送り）`_build_task_scope_context`の依存変数解決ループを`state["phases"]`全体走査に修正する即応パッチは、F-3.8の設計と重複するため単体では実施しない。
+- F-3.8（自律的DB/ファイル読み取りツール）実装時に、フェーズ横断の`verified_facts`検索・Deliverableファイル取得の両方を満たす設計として統合する。
 
 ---
 
