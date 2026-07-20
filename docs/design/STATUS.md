@@ -82,6 +82,7 @@ Phase 1（R1: SQLite永続化基盤）はDone。Phase 2（R2: ツール呼び出
 18. [ ] BL-005・BL-015・BL-017・BL-018・BL-021: いずれも`open`。R4（ホワイトボード化・スコープ制御）着手時にまとめて対応する方針（ユーザー方針、2026-07-19合意）。R3着手のブロッカーではない
 19. [x] **BL-023 Phase A**: task_planner/User AIの分解粒度・スコープ肥大化を是正（acceptance_criteria/depends_on/owns_variables、generate_user_utteranceのペルソナ分離＋スコープ限定）。2026-07-20実装完了、オフライン確認済み・実機再ドライラン待ち。Phase C（予算カスケード）は未着手（`open`、P1、D-020）
 20. [x] **BL-024**: `current_phase`初期化後フリーズ・`task_id`単位の状態追跡不在を、`decision_extractor_node`を状態遷移の唯一の書き手とするフェイルクローズ検証つき設計で解消（D-021、2026-07-20完了、オフライン確認済み）
+21. [x] **BL-025**: Expertが他タスクのowns_variables領域まで自発的に計算しツールループが非収束クラッシュする問題を、①call_expertへのスコープガードレール注入、②ツールループiter=2以降のsystem_prompt軽量化（`light_system_prompt`）の両方で解消（D-023、2026-07-20完了、オフライン確認済み・実機再ドライラン待ち）
 
 ---
 
