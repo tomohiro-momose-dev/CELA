@@ -80,7 +80,8 @@ Phase 1（R1: SQLite永続化基盤）はDone。Phase 2（R2: ツール呼び出
 16. [x] BL-020: 中国語系モデル経由の言語逸脱を`query_AI`集約点で日本語出力強制により修正（2026-07-19完了）
 17. [x] BL-022: OpenRouterの壊れたレスポンスによる生`json.JSONDecodeError`未捕捉クラッシュを、exceptタプル拡張で修正（D-019、2026-07-19完了、オフライン確認済み・実機再ドライラン待ち）
 18. [ ] BL-005・BL-015・BL-017・BL-018・BL-021: いずれも`open`。R4（ホワイトボード化・スコープ制御）着手時にまとめて対応する方針（ユーザー方針、2026-07-19合意）。R3着手のブロッカーではない
-19. [ ] **BL-023（新規、最優先）**: task_plannerの分解粒度が粗く検証コストが乗算的に増大（`open`、P1）。指標C実測（BL-002）はBL-023完了後に着手する方針
+19. [ ] **BL-023（最優先）**: task_planner/User AIの分解粒度・スコープ肥大化により検証コストが乗算的に増大（`open`、P1）。設計完了、実装はPhase A→Phase Cの順で着手（D-020、詳細設計`docs/design/phase2/cela_phase2_design_BL023_task_state.md`）。指標C実測（BL-002）はBL-023 Phase A完了後に着手する方針
+20. [ ] **BL-024（新規、BL-023 Phase Aと同時着手）**: `current_phase`が初期化後フリーズし`task_id`単位の状態追跡が存在しない（`open`、P1）。`decision_extractor_node`を状態遷移の唯一の書き手とする設計で解消予定（D-021）
 
 ---
 
