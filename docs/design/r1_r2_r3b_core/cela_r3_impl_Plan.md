@@ -404,8 +404,8 @@ WRITE_AGREEMENT_TOOL = {
 `write_agreement_tool`のツール呼び出し実装自体にバリデーションを埋め込む（設計書v7 §3.2.1準拠）。独立LangGraphノードは追加しない。
 
 ```python
-def _write_agreement_impl(args: dict, conn, run_id: str, caller_role: str) -> dict:
-    """[F-3.2] write_agreement_toolの実体。バリデーション→権限チェック→SQLiteコミット"""
+def _write_agreement_impl(args: dict, conn, run_id: str, caller_role: str, task_id: str = "") -> dict:
+    """[F-3.2] write_agreement_toolの実体。バリデーション→権限チェック→SQLiteコミット→確定値反映"""
     # 1. 構造チェック
     required = ["action_type", "status", "topic", "decision_what", "reason_why", "entry_type"]
     missing = [f for f in required if not args.get(f)]
@@ -423,12 +423,15 @@ def _write_agreement_impl(args: dict, conn, run_id: str, caller_role: str) -> di
     if args["entry_type"] not in valid_entries:
         return {"success": False, "error": f"不正なentry_type: {args['entry_type']}"}
 
-    # 3. 権限チェック（呼び出し元ロール×要求statusのホワイトリスト）
+    # 3. 権限チェック（呼び出し元ロール×要求statusのホワイトリスト、★修正: 全status×全ロールを網羅）
     perm_error = _check_write_permission(args, caller_role)
     if perm_error:
         return {"success": False, "error": perm_error}
 
     # 4. depends_onリレーション整合性チェック
+    #    ★注意（レビュー指摘⑤）: ここで検証するIDは_build_agreements_context側で
+    #    LLMに露出済みであることが前提（§3.2.1参照）。露出していないID空間を検証しても
+    #    LLMは正しい値を書けない。
     if args.get("depends_on"):
         for dep_id in args["depends_on"]:
             exists = conn.execute(
@@ -439,20 +442,52 @@ def _write_agreement_impl(args: dict, conn, run_id: str, caller_role: str) -> di
 
     # 5. コミット
     _commit_agreement_from_tool(args, conn, run_id, caller_role)
+
+    # 6. ★新規（レビュー指摘②の修正）: confirmed_variablesをverified_factsへ反映。
+    #    decision_extractor_nodeのowned_variable_values抽出（cela_main.py:2798-2808）が
+    #    「write_agreementが呼ばれなかったターンのみ」発火する予備的セーフティネットに
+    #    なる（§3.5）以上、write_agreementの側にも同等の確定値保存経路がなければ、
+    #    R3bの採用が進むほどverified_factsが更新されなくなりR3aの効果が消える（致命的②）。
+    #    write_agreementが呼ばれた場合は、ここが確定値保存の一次経路になる。
+    for cv in args.get("confirmed_variables", []) or []:
+        var_name = cv.get("variable_name")
+        if not var_name:
+            continue
+        upsert_verified_fact(
+            conn, run_id, var_name, cv.get("value"), unit=cv.get("unit", ""),
+            source_task_id=task_id, source_phase_id=args.get("phase_id", ""),
+            confirmed_by=caller_role,
+            reason=args.get("reason_why", ""),
+            citations=[args.get("topic", "")],
+            confidence=cv.get("confidence", "confirmed"),
+        )
+
     return {"success": True, "message": "DB update successful"}
 
 def _check_write_permission(args, caller_role):
-    """[F-3.2] 権限チェック: ApprovedはUser AIのみ、Rejectedは差し戻し権限4ノード"""
+    """[F-3.2] 権限チェック: ロール×status許可表を全組み合わせで判定する（★修正）。
+
+    旧実装はApproved/Rejectedの2値しか判定しておらず、例えばExpertが
+    Approved_with_Conditions/Implicitly_Acceptedで書き込んでも、Detector/Reviewer/
+    Arbiter/IntegratorがProposedで書き込んでもブロックされない欠陥があった
+    （レビュー指摘④）。全5 statusについて、ロールごとの許可集合を明示する。
+    """
+    ALLOWED_STATUS_BY_ROLE = {
+        "expert": {"Proposed"},
+        "user": {"Proposed", "Approved", "Approved_with_Conditions", "Rejected", "Implicitly_Accepted"},
+        "detector": {"Rejected"},
+        "reviewer": {"Rejected"},
+        "arbiter": {"Rejected"},
+        "integrator": {"Rejected"},  # ★追加: R3bでIntegratorにもwrite_agreementを付与するため
+    }
     status = args.get("status")
-    if status == "Approved":
-        if caller_role != "user":
-            return f"ApprovedはUser AIのみ書き込めます（呼び出し元: {caller_role}）"
-    elif status == "Rejected":
-        allowed = {"user", "detector", "reviewer", "arbiter"}
-        if caller_role not in allowed:
-            return f"Rejectedは{allowed}のいずれかのみ書き込めます（呼び出し元: {caller_role}）"
+    allowed = ALLOWED_STATUS_BY_ROLE.get(caller_role, set())
+    if status not in allowed:
+        return f"{caller_role}はstatus='{status}'を書き込めません（許可: {sorted(allowed)}）"
     return None
 ```
+
+**注記（Integratorの許可statusについて）**: Integratorは既存コードでは`decisions`テーブルへ「矛盾検知」を直接ログする専用経路（`cela_main.py:3086`、`make_decision`＋`db_append_decision`）を持ち、`agreements`への書き込み経路は今回のR3bで初めて持つことになる。役割上はDetector/Reviewer/Arbiterと同じ「横断的な矛盾の指摘」であるため、他の3ロールと同様`Rejected`のみを許可する設計とした。Integratorに他のstatusを許可する具体的なユースケースが出てきた場合は、この許可表を個別に見直す。
 
 ### 3.3 ツールループへの統合
 
