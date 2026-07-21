@@ -35,6 +35,43 @@ R3は**R3a（自律的DB/ファイル読み取り、F-3.8/F-3.9、先行実装�
 
 ---
 
+## 1.5 共通前提修正（★Step 0扱い、R3a着手前に必須）
+
+### 1.5.1 `TOOL_DISPATCH`ディスパッチ処理の引数渡し修正
+
+**問題（致命的）**: 現行の`_query_AI_live`内ツールループ（`cela_main.py:744-748`）は以下のようになっている。
+
+```python
+if tc.function.name == "python_repl":
+    result = repl_session.run(args.get("code", ""))
+    python_calls_log.append({"code": args.get("code", ""), "result": result})
+else:
+    result = handler(args.get("code", ""))
+```
+
+`python_repl`以外のツールは`handler(args.get("code", ""))`という**単一文字列**（新ツールの引数には`"code"`キーが存在しないため常に空文字列）で呼び出される。現状`TOOL_DISPATCH`には`python_repl`しか登録がなく、この`else`分岐は一度も実行されたことがない未検証コードである。R3a/R3bで追加する`read_verified_fact`・`read_deliverable_file`・`write_agreement`はすべて`args: dict`（構造化された複数フィールド）を前提としているため、**この行を修正しない限り新ツールは全滅する**。
+
+**修正内容**（R3a Step 0として最優先で実施）:
+
+```python
+if tc.function.name == "python_repl":
+    result = repl_session.run(args.get("code", ""))
+    python_calls_log.append({"code": args.get("code", ""), "result": result})
+else:
+    result = handler(args)   # ★修正: 構造化されたargs辞書全体を渡す
+```
+
+`TOOL_DISPATCH`に登録する各ハンドラ（`_read_verified_fact`等）は、`args`のみを受け取るシグネチャに統一する（`conn`/`run_id`/`caller_role`はクロージャ経由で束縛し、`TOOL_DISPATCH`辞書自体には`(args: dict) -> str`という単一シグネチャのみを登録する。§2.5・§3.3参照）。
+
+### 1.5.2 完了条件
+
+| # | 条件 | 検証方法 |
+|---|------|----------|
+| R0-T1 | `handler(args)`修正後も`python_repl`の既存動作（オフラインスモークテスト）が回帰しないこと | 既存テスト再実行 |
+| R0-T2 | ダミーの2引数ツールを`TOOL_DISPATCH`に一時登録し、`args`辞書がそのまま渡ることを確認 | オフラインスモークテスト（新規） |
+
+---
+
 ## 2. R3a: 自律的DB/ファイル読み取り（F-3.8/F-3.9）
 
 ### 2.1 スキーマ変更: `verified_facts`テーブルの拡張（F-3.9）
