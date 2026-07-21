@@ -277,14 +277,17 @@ TOOL_DISPATCH = {
 
 R3aでは読み取りツールを**全ノードに付与する**。ただしPython REPLと同様に、ツール呼び出しループ内で処理されるため、既存の`query_AI`の`tools`パラメータに追加するだけでよい。
 
-**付与対象**:
+**付与対象**（★レビュー反映: Resource Arbiterを追加し、R3bの書き込みツール付与対象と一致させた。読み書き両方が必要なノードに非対称な付与をしない方針、§0参照）:
 - Expert（F-3.8: フェーズ横断の確定値参照、BL-035解消）
 - User AI（F-3.8: 承認済み根拠の確認、BL-036解消）
 - Detector（F-3.8: 過去の決定の理由を遡って検証、BL-037解消）
 - Reviewer（F-3.8: 最終成果物の根拠確認）
 - Integrator（F-3.8: 統合時の横断矛盾チェック）
+- Resource Arbiter（F-3.8: 予算・資源判断の際にフェーズ横断の確定値を参照、★追加）
 
-**呼び出し側の変更**: 各ノード関数（`call_expert`、`generate_user_utterance`、`call_detector`、`call_reviewer`、`call_integrator`）で、既存の`tools=[PYTHON_REPL_TOOL]`を`tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL]`に拡張する。
+**呼び出し側の変更**:
+- Expert（`call_expert`）・User AI（`generate_user_utterance`）・Detector（`call_detector`）・Reviewer（`call_reviewer`）・Resource Arbiter（`call_resource_arbiter`）は、既存の`tools=[PYTHON_REPL_TOOL]`を`tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL]`に拡張する（この5ノードは現状すでに`tools=[PYTHON_REPL_TOOL]`を持つ、`cela_main.py:1638,1763,2055,2285,2461/2466`）。
+- **Integrator（`call_integrator`、`cela_main.py:2190`）は現状`tools`パラメータ自体を持たない**唯一のノードである。「既存リストの拡張」ではなく、`query_AI`呼び出しに`tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL]`を新規追加する（Integratorにpython_replも同時に付与することになるが、既存ノードとの一貫性を優先しF-2.6検算ゲートの対象に含める）。
 
 ### 2.7 `_build_task_scope_context`の修正（BL-035直接対応）
 
