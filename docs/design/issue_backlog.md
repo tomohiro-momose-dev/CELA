@@ -70,7 +70,9 @@
 | BL-036 | 中 | `cela_main.py`（`decision_extractor_node`の統合パス、task_6_3系ペルソナ） | ユーザー依頼により`log/2026-07-20/1421`の全21成果物ファイルを内容面でレビューしたところ、「最終計画書」の財務・需要数値が統合パスのたびに再ドリフトしていることを発見。年間ランニングコストがPhase 3承認値（task_3_2、2,541万円・補助金使用率4.70%）に対し、Ver.1.0/1.1（3,000万円・20.00%）、logic_verifierの完了報告（2,980万円・19.33%）と、統合の都度異なる数値になっており、赤字額は最大4.26倍の開きがある。需要側も同様にtask_1_1確定値（総人口5,000人・1日総需要400人/日）から、最終盤で「人口5,200人・1日総需要200トリップ/日」へ根拠なくドリフトしていた（Detector自身がこの乖離を検出し`minor`判定で通過させていた）。原因はBL-035と同一（統合パス担当ペルソナが承認済み根拠ファイルを実際に読み返す手段を持たず、その場で数値を再構成している）で、独立した新規欠陥ではなくBL-035／F-3.8の射程がコスト・需要計算にも及ぶことを裏付ける実例。ユーザー判断により、これは既知の根本原因（読み取りツール欠如）から予想される結果であるため参考記録に留め、F-3.8実装後に読み取りアクセスを持った状態で再度Phase 6を走らせて初めて実効性を評価する方針とし、現時点では独立の緊急対応は行わない | P2 |
 | BL-037 | 中 | `cela_main.py`（`call_decision_extractor`のDecision/Agreement抽出プロンプト） | ユーザーが「decisionなどある程度記憶の外部化ができているが、理由の記載が甘い」と指摘し、`log/2026-07-20/1421`のDetector自身の思考ログに、後から確認しようとした数値の根拠を辿れず「根拠が不明」「以前のタスクで設定された数値かもしれないが根拠が不明」と繰り返し書かれている箇所（対象人口5,200人vs5,000人、1周回15分、80km/ルート、電話対応所要時間7.5時間/日等）を確認。原因は2種類：①`80km/ルート`等の中間的な計算仮定はExpertの自由記述レポート内に埋め込まれるのみで、そもそも`decision_extractor`が個別のDecision/owns_variableとして抽出しておらず`reason_why`欄自体が存在しない、②`最適導入台数は3台`のように実際にDecision化された項目でも`reason_why`が結論の言い換え程度に留まり、前提・出典・棄却した代替案までは記録されないケースがある。根本原因はBL-034〜036と同系統（後から参照可能な情報の粒度不足）だが、対象がファイル読み取りではなく`reason_why`欄の記載品質・抽出粒度自体である点で異なる。ユーザー判断により、まずBL記載のみに留め、F-3.1〜F-3.7（エージェント自身の自律書き込みツールへの移行、`decision_extractor_node`の縮小・撤廃）着手時にあわせて理由記載の強制粒度を再設計する方針とし、現時点ではプロンプトの単体強化は行わない | P2 |
 | BL-038 | 高 | `cela_main.py` (`decision_extractor_node`、`expert_node`、`_query_AI_live`の`_LAST_WRITE_AGREEMENT_SUCCEEDED`伝播) | R3b実装後の実ドライラン（`log/2026-07-21/2248`）で、Expertの`write_agreement`成功（task_1.1、`vehicle_count`確定、`entry_type="Decision"`）後も`decision_extractor_node`のAgreement抽出がスキップされず、同一トピック「必要車両台数の算出結果」で`entry_type="Deliverable"`の別エントリが二重に書き込まれた。オフライン再現テストでは`expert_node`単体の状態伝播は正常動作したため、原因は実グラフ実行中の状態伝播バグか、`write_agreement`の部分的カバレッジ（Decisionのみ書きDeliverableは書かない）を想定できていない設計の粒度不足のいずれか未確定。次回ドライラン前に`decision_extractor_node`内に診断ログを追加し原因を確定させる方針 | P1 |
-| BL-039 | 高 | `cela_main.py` (`_resolve_task_transition`, `_get_current_task`, `call_decision_extractor`) | 実ドライラン（`log/2026-07-21/2248`）で、`decision_extractor`が出力する`advances_to_task_id`がドット表記（`task_1.1`等）である一方、`call_task_planner`が生成する実際の`task_id`はアンダースコア表記（`task_1_1`等）であるため、`_resolve_task_transition`の存在チェックに毎回失敗し、ログ全体（task_1.2〜task_2.2、8箇所）で**タスク遷移が1回も成功していない**ことが判明。`current_task_id`が初期値のまま更新されず、`_get_current_task`のフォールバックにより`call_detector`・`call_expert`（`light_system_prompt`）・`decision_extractor_node`（`owns_variables`スコープ）が終始phase 1先頭タスクのスコープ情報を参照し続けており、BL-023/BL-025のスコープガードレール機構がドライラン開始直後から実質的に無効化されていた | P0 |
+| BL-039 | 高 | `cela_main.py` (`_resolve_task_transition`, `_get_current_task`, `call_decision_extractor`) | ~~実ドライラン（`log/2026-07-21/2248`）で、`decision_extractor`が出力する`advances_to_task_id`がドット表記（`task_1.1`等）である一方、`call_task_planner`が生成する実際の`task_id`はアンダースコア表記（`task_1_1`等）であるため、`_resolve_task_transition`の存在チェックに毎回失敗し、タスク遷移が1回も成功していなかった~~ → `done`（`_resolve_task_transition`にドット→アンダースコア正規化を追加、`call_decision_extractor`に全task_id一覧を提示してLLMに正確な表記をコピーさせる誘導を追加） | P0 |
+| BL-040 | 高 | `cela_main.py` (`read_deliverable_file`, `_read_deliverable_file_handler`, `_commit_agreement_from_tool`) | ~~実ドライラン（`log/2026-07-21/2248`）で`read_deliverable_file`呼び出し31回中21回（約68%）が`not_found`。ファイル名がトピック文字列＋Unixタイムスタンプで一意に決まりAIが予測できないため、`file_path`直接指定への依存が実質的な発見不能性を招いていた~~ → `done`（`task_id`/`topic_keyword`引数を追加し、agreements DBの`FILE_PATH:`ポインタから実際のパスを逆引きする方式に変更。あわせてagreements.task_id列が`args.get("task_id")`のみに依存し、LLMが省略すると逆引きできない問題も`_CURRENT_TASK_ID`フォールバックで修正） | P1 |
+| BL-041 | 高 | `cela_main.py` (`arbiter_node`, `check_global_constraint_overrun`, `global_constraints`) | ユーザーが「task_1.1で車両台数4台を決定し予算1億円を使い果たした後、システム開発費等の算出でこの決定をどう覆すか」と問いかけたことを契機に調査。`state["global_constraints"]`は`task_planner_node`での初期化（`[]`）以外に実際のクレームデータを書き込む箇所がコードベース中に一切なく、`check_global_constraint_overrun`は常に空リストを走査するため超過を検出できない。実ドライラン全文検索でも`[Resource Arbiter]`・`[facilitator]`・`[reflection]`・`phases_to_revise`はいずれも0件で、この調停機構は設計上は存在するが**実際には一度も発火し得ない死んだコードパス**であることを確認した。今回のドライランでは幸い、task_1.2が自タスクのacceptance_criteria（「予算超過時の調整案が検討されている」）内で帳尻を合わせた（残額わずか42万円）ため実害はなかったが、これは偶然であり、一度確定した決定（`vehicle_count=4`等）を後続タスクの発見（コスト不足等）を根拠に体系的に再検討させる自動メカニズムは現状存在しない。`write_agreement`のSUPERSEDE機構自体はあるが、BL-025のスコープガードレールによりExpertは自タスク外の合意を書き換えない設計のため、これも自動トリガーにはならない。設計判断が必要な項目（`global_constraints`への`resource_claims`集約タイミング、`reflection_interval`とarbiter発火条件の関係）のため、現時点では記録のみで実装は見送り | P1 |
 
 ---
 
@@ -1200,7 +1202,7 @@ R3b実装後の実ドライラン（`log/2026-07-21/2248`）で発見。task_1.1
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open` |
+| 状態 | `done`（オフラインスモークテスト済み、実LLM再ドライラン未実施） |
 | 優先度 | P0 |
 | 依存 | [BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)（`_get_current_task`によるスコープ限定機構）、[BL-024](issue_backlog.md#bl-024-current_phaseが初期化後フリーズしtask_id単位の状態追跡が存在しない)（`current_phase`/`current_task_id`の状態管理）、[BL-025](issue_backlog.md#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする)（Expertスコープガードレール） |
 | 関連 | [decision_lineage.md 論点24・26](decision_lineage.md)（BL-023/BL-025設計時の議論） |
@@ -1227,10 +1229,67 @@ task_1.4 → task_1.5 遷移時 / task_1.5 → task_2.1 遷移時 / task_2.1 →
 
 **完了条件:**
 
-- `_resolve_task_transition`内で、LLMが返す`next_task_id`/`next_phase_id`を実在ID集合と照合する前に正規化（ドット→アンダースコア変換、または`task_id`の数字部分のみを抽出したファジーマッチ）を行い、表記ゆれを吸収する。
-- 併せて、`call_decision_extractor`のプロンプトに現在フェーズの正確な`task_id`一覧（`state["phases"]`から動的に列挙）を明示し、LLMがコピー元を持てるようにする。
-- 修正後、オフラインスモークテスト（`tests/test_r3_smoke.py`等）に、ドット表記を含む`advances_to_task_id`が正しく正規化されて遷移が成立することを検証するケースを追加する。
-- 修正後の再ドライランで、`_get_current_task`が実際に想定タスクを返し続けていること（Detectorのcriteria_textが各タスク固有のACになっていること）をログで確認する。
+- ~~`_resolve_task_transition`内で、LLMが返す`next_task_id`/`next_phase_id`を実在ID集合と照合する前に正規化~~ → `_resolve_task_transition`（`cela_main.py`）にドット→アンダースコア正規化を実装（一致しなければ従来通り拒否、フェイルクローズは維持）。
+- ~~`call_decision_extractor`のプロンプトに正確なtask_id一覧を明示~~ → `call_decision_extractor`に`valid_task_ids`引数を追加し、`decision_extractor_node`から`state["phases"]`全体のtask_idをフラット化して渡すよう実装。プロンプトに一覧を提示し「一字一句コピー」を指示。
+- ~~オフラインスモークテストの追加~~ → `tests/test_r3_smoke.py`に`test_bl039_task_transition_normalizes_dot_notation_task_id`（ドット表記の正規化確認）・`test_bl039_task_transition_still_rejects_truly_unknown_task_id`（フェイルクローズの非退行確認）を追加、全49件Pass。
+- 修正後の再ドライランで、`_get_current_task`が実際に想定タスクを返し続けていること（Detectorのcriteria_textが各タスク固有のACになっていること）をログで確認する（**未実施、次回ドライラン待ち**）。
+
+### BL-040: `read_deliverable_file`がfile_path直接指定に依存し、実質的に発見不能だった問題
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（オフラインスモークテスト済み、実LLM再ドライラン未実施） |
+| 優先度 | P1 |
+| 依存 | F-3.8（自律的DB/ファイル読み取りツール、[decision_log.md D-036](decision_log.md)） |
+| 関連 | [BL-035](issue_backlog.md#bl-035-_build_task_scope_contextがフェーズ横断のdepends_on参照を解決できない)・[BL-036](issue_backlog.md#bl-036-最終計画書の財務需要数値が統合パスのたびに再ドリフトするbl-035f-38の射程がコスト計算にも及ぶ実例)（F-3.8導入の動機となった読み取りアクセス欠如の系譜） |
+
+**内容:**
+
+実ドライラン（`log/2026-07-21/2248`、`log_no_prompt.md`）レビュー中に発見。`read_deliverable_file`の呼び出しを全件集計したところ、**31回中21回（約68%）が`not_found`で失敗**していた。原因は`save_deliverable_to_file`が生成するファイル名がトピック文字列＋Unixタイムスタンプ（例: `必要車両台数の算出結果_1784643517.md`）で一意に決まり、AIがタイムスタンプ部分を事前に予測できないため。成功した10回はいずれも、DBの`agreements`コンテキストに既に`FILE_PATH:...`の正確な文字列が表示されていて、それをそのままコピーできたケースのみだった。以下は実際に観測された当てずっぽうの試行例：
+
+```
+task_1_1_vehicle_count.md → not_found
+task_1_1_vehicle_count_1784646438.md → not_found
+task_1_1_vehicle_count_1784641716-3a065da7.md → not_found
+task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め複数回）
+```
+
+つまり「パスを知らない限り読めない」ツールになっており、F-3.8の設計意図（自律的な事実確認）を実質的に果たせていなかった。
+
+**実害:** クラッシュ・データ破損はない。AIが数回無駄なツール呼び出しを消費した上で断念する、またはコンテキストに既に出ている情報に頼らざるを得なくなる（F-3.8導入前の状態への実質的な後退）程度。
+
+**完了条件:**
+
+- ~~`read_deliverable_file`に`task_id`/`topic_keyword`引数を追加し、agreements DBの`FILE_PATH:`ポインタから実際のパスを逆引きする~~ → `READ_DELIVERABLE_FILE_TOOL`のスキーマに`task_id`/`topic_keyword`を追加（`file_path`は既知の場合のみのフォールバックに降格）。`_resolve_deliverable_file_path`ヘルパーを新設し、`entry_type=="Deliverable"`かつ`decision_what`が`FILE_PATH:`で始まるagreementsをtask_id/topic_keywordで絞り込み、複数該当時は最新（id最大）を採用。
+- ~~agreements.task_id列がLLMのargs依存で欠落しがちな問題の修正~~ → `_commit_agreement_from_tool`に`task_id`引数を追加し、`args.get("task_id")`が空の場合は`_write_agreement_impl`経由で伝播される`_CURRENT_TASK_ID`をフォールバックとして使用するよう修正（従来はLLMがwrite_agreement呼び出し時に`task_id`を明示的に含めない限りDB上のtask_id列が空になり、本修正の逆引きも機能しなかった）。
+- ~~オフラインスモークテストの追加~~ → `tests/test_r3_smoke.py`に`test_bl040_read_deliverable_file_lookup_by_task_id`（task_id/topic_keywordによる逆引き成功、該当なしのnot_found確認）を追加、全49件Pass。
+- 修正後の再ドライランで、`read_deliverable_file`のnot_found率が実際に低下することをログで確認する（**未実施、次回ドライラン待ち**）。
+
+### BL-041: 一度確定した決定（例: 車両台数）を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しない（Resource Arbiter機構が死んだコードパスになっている）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計判断待ち、実装は見送り） |
+| 優先度 | P1 |
+| 関連 | [BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)（reflection/facilitatorが同様に発火不能という既知の系譜）、[BL-017](issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)（facilitatorの調停行動そのものの設計不足） |
+
+**内容:**
+
+ユーザーが「task_1.1で車両台数4台を決定し、これで初期予算1億円を使い果たしている。この後システム開発費等の算出に入るとき、この決定をどう覆すか見ものだ」と問いかけたことを契機に調査。
+
+`cela_main.py`の`arbiter_node`/`check_global_constraint_overrun`は、`state["global_constraints"]`（各フェーズの予算取り分の合計と上限を突き合わせる構造）を見て資源超過を検出し、`call_resource_arbiter`で再配分案を調停する設計になっている。しかし`global_constraints`への書き込み箇所を全文検索したところ、`task_planner_node`での初期化（`state["global_constraints"] = []`）以外に**実際のクレームデータ（agreementsの`resource_claims`フィールド等）をこのリストに集約する処理がコードベース中に一切存在しない**ことを確認した。したがって`check_global_constraint_overrun`は常に空リストを走査するだけで超過を検出できず、`arbiter_node`は常に`phases_to_revise=[]`で早期returnする。
+
+実ドライラン（`log/2026-07-21/2248`）全文を検索しても、`[Resource Arbiter]`・`[facilitator]`・`[reflection]`・`phases_to_revise`はいずれも0件であり、この調停機構が**設計上は存在するが実際には一度も発火し得ない死んだコードパス**であることを実行ログでも確認した。
+
+今回のドライランでは、task_1.2（初期費用の内訳算出）自身のacceptance_criteria（「予算超過時の調整案（台数減・システム簡略化等）が検討されている」）にAgentが応える形で、システム構築費・予備費等を積算した結果9,958万円（残額わずか42万円、1億円の0.42%）に収まり、Resource Arbiterに頼らずタスク内で帳尻が合った。しかしこれは偶然のタスク設計上の救済であり、**一度確定した決定（`vehicle_count=4`等）を、後続タスクで発覚した制約違反を根拠に体系的に再検討させる自動メカニズムは現状存在しない**。`write_agreement`のSUPERSEDE機構自体はあるが、BL-025のスコープガードレールによりExpertは自タスク外のトピックを書き換えない設計であるため、これも自動トリガーとしては機能しない（Expertが自発的に「task_1.1の決定を見直すべき」と提案しない限り、誰も介入しない）。
+
+**実害:** 今回は顕在化しなかったが、タスク分解の粒度やタスク自身のacceptance_criteriaの書き方次第では、後続タスクが解決不能な制約矛盾に陥ったまま`expert_retry_count>=3`で`reflection`に丸投げされ、そこでも収束が保証されない（BL-005/BL-017参照）ため、無限の差し戻しループやフェイルオープンでの通過につながるリスクがある。
+
+**完了条件（設計判断が必要なため、現時点では実装しない）:**
+
+- `agreements.resource_claims`（write_agreementのスキーマに既存）を、いつ・どのタイミングで`state["global_constraints"]`に集約するか（ターンごとか、フェーズ確定時か）を設計する。
+- `arbiter_node`の発火条件（`reflection_interval`同様の周期トリガーか、`check_global_constraint_overrun`の即時トリガーか）を、BL-005/BL-017のreflection/facilitator復旧方針とあわせて整理する。
+- 上記が固まるまでは、少なくとも「後続タスクが前段タスクの確定値と矛盾する制約違反を検出した場合にDetectorがmajorとして扱い、Userに明示的なSUPERSEDE判断を仰ぐ」という現行のconstraint_issue経由の間接的な安全網で代替する（ただし今回のドライランのようにタスク自身のACで吸収されてしまうと、この安全網も発動しない点に留意）。
 
 | 日付 | 内容 |
 |------|------|
@@ -1270,3 +1329,4 @@ task_1.4 → task_1.5 遷移時 / task_1.5 → task_2.1 遷移時 / task_2.1 →
 | 2026-07-21 | ユーザーがCELAの前身プロジェクトNPU-Context-Saverでの実運用実績（時間減衰RAG検索＋決定/否決ターンの自動セイリエンス固定、タイムスタンプ順の時系列復元読み、値・理由・引用元の三つ組をトピック検索できるファクトストア）を共有し、これらをBL-036/BL-037の解決方針として要件化するよう提案。理由（reason）は絶対的な正しさを要求せず「暫定値として進めた」こと自体を正当な理由として認め、暫定/確定の区別を後の再検討トリガーとして機能させる設計を追加提起。要件定義書にF-8.4・F-3.9を新規追加（v35.2、D-035）し、BL-036・BL-037にこの解決方針への参照を追記した（[decision_lineage.md 論点39](decision_lineage.md)）。 |
 | 2026-07-21 | R3b実装後の実ドライラン（`log/2026-07-21/2248`）レビュー中に、Expertの`write_agreement`成功（task_1.1、`vehicle_count`確定）後も`decision_extractor_node`のAgreement抽出がスキップされず、同一トピックでDecision/Deliverableの二重書き込みが発生していることを発見。オフライン再現テストでは`expert_node`単体の状態伝播（`state["expert_wrote_agreement"]`）は正常動作したため、原因は実グラフ実行中の状態伝播バグか、`write_agreement`の部分的カバレッジ（Decisionのみ、Deliverableは別経路）を想定できていない設計の粒度不足のいずれかに絞り込んだ。原因未確定のためBL-038として新規起票、次回ドライラン前に診断ログの追加を推奨する内容を記録した。 |
 | 2026-07-22 | 同ドライラン（`log/2026-07-21/2248`、`log_no_prompt.md`）を`log_with_prompt.md`に続けてレビューし、`decision_extractor`が出力する`advances_to_task_id`のドット表記（`task_1.1`）と実際の`task_id`のアンダースコア表記（`task_1_1`）の不一致により、ログ全体8箇所すべてでタスク遷移が失敗し、`current_task_id`が一度も更新されないままドライラン全体を通じてBL-023/BL-025のスコープガードレールが実質無効化されていたことを発見。`call_detector`・`call_expert`・`decision_extractor_node`のスコープ限定機構すべてに波及する広範なバグと判断し、BL-039として新規起票（`open`、P0）。 |
+| 2026-07-22 | 同ドライラン継続分（〜52569行、停止時点まで）のレビューで2件追加発見。①`read_deliverable_file`呼び出し31回中21回（約68%）が、ファイル名のタイムスタンプ部分を予測できずnot_foundになっていたことを発見しBL-040として起票。②ユーザーからの「車両台数4台の決定をどう覆すか」という問いかけを受けて`arbiter_node`/`global_constraints`を再調査し、資源超過を集約する処理がコードベース中に存在せず、実ドライラン全文検索でもResource Arbiter/facilitator/reflectionが1件も発火していないことを確認、一度確定した決定を後続タスクの発見から自動的に再検討させる仕組みが現状存在しないことをBL-041として起票（設計判断待ちのため実装は見送り）。ユーザー指示によりBL-039・BL-040は`cela_main.py`を直接修正（task_id表記のドット→アンダースコア正規化＋LLMへのtask_id一覧提示、`read_deliverable_file`のtask_id/topic_keywordによるDB逆引き＋agreements.task_id列の`_CURRENT_TASK_ID`フォールバック）、`tests/test_r3_smoke.py`にオフラインスモークテスト4件を追加し全49件Pass、`python -m py_compile`合格を確認。両BLとも`done`化（実LLM再ドライランでの効果確認は次回待ち）。 |
