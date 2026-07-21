@@ -504,6 +504,86 @@ lines.append(f"[{a.get('id', '?')}] {icon}{type_label} {clean_topic}: {content_p
 
 既存の呼び出し元（Hydrateコンテキスト等）は文字列をそのまま人間可読なプロンプトとして使っているだけで、`id`プレフィックスの追加によって既存の解析ロジックが壊れる箇所はない（`_build_agreements_context`の戻り値をパースして再利用している箇所は現状なし、要件定義書4.2のAgreement表示仕様にも反しない）。
 
+### 3.2.2 ツール結果の二重JSONエンコード（★新規、R3b実装レビューで発見。R3aにも遡って影響）
+
+**問題**: `_query_AI_live`のツールループ末尾（`cela_main.py:1056-1059`）は、`python_repl`を含む全ツールの結果を無条件で`json.dumps(result, ensure_ascii=False)`してから`loop_messages`（LLMへの`role: "tool"`メッセージ）に積む。
+
+```python
+loop_messages.append({
+    "role": "tool", "tool_call_id": tc.id,
+    "content": json.dumps(result, ensure_ascii=False),
+})
+```
+
+`python_repl`の`result`は`repl_session.run(...)`が返す**素の文字列**なので、ここで1回だけJSONエンコードされ問題ない。しかし、`_read_verified_fact_handler`・`_write_agreement_impl`・`_read_deliverable_file_handler`のエラー/not_found分岐は、ハンドラ自身の内部で**既に`json.dumps(...)`された文字列**を返している。その結果、末尾の`json.dumps(result, ...)`が**二重にJSONエンコード**してしまい、LLMに渡る`content`は以下のように、本来のJSONオブジェクトではなく「JSON文字列を表すJSON文字列」というエスケープまみれの値になる。
+
+```python
+>>> handler_result = '{"success": true, "message": "DB update successful"}'  # ハンドラの戻り値（既にjson.dumps済み）
+>>> json.dumps(handler_result, ensure_ascii=False)  # 末尾でさらにエンコード
+'"{\\"success\\": true, \\"message\\": \\"DB update successful\\"}"'
+```
+
+実機で`read_verified_fact`・`write_agreement`を呼び出して確認したところ、この二重エンコードを再現した（本セッションでのオフライン検証）。LLMが誤読する可能性は低くないが、少なくとも意図通りのクリーンなJSON構造ではなく、ツールの`description`が約束する形と食い違う。**R3aの`read_verified_fact`/`read_deliverable_file`にも既に存在する不具合**であり、R3aレビュー時点（本ドキュメントの§2.4.3レビュー）ではハンドラの戻り値を直接呼び出すオフラインテストしか行っておらず、`_query_AI_live`の末尾処理まで通した検証をしていなかったため見落としていた。
+
+**修正方針**: 各ハンドラは`json.dumps(...)`済みの文字列ではなく、**素のPythonオブジェクト（dict、または`read_deliverable_file`成功時のようなプレーン文字列）を返す**ように統一する。JSONへの変換は`_query_AI_live`末尾の1箇所（`json.dumps(result, ...)`）だけで行う。
+
+- `_read_verified_fact_handler`: `return {"status": "not_found", "message": "..."}` / `return results`（すでにdictのリスト。`json.dumps`しない）
+- `_write_agreement_impl`: 全ての`return json.dumps({...}, ...)`を`return {...}`（生dict）に変更
+- `_read_deliverable_file_handler`: エラー/not_found分岐を`return {"status": "error", "message": "..."}`に変更（成功時の`return content[:10000]`はプレーン文字列のままでよい、変更不要）
+- `_query_AI_live`内、`write_agreement`成功判定（§3.5.1）も単純化できる: `result`が既に生dictになるため、`_safe_json_parse(result, fallback={})`を挟まず`if isinstance(result, dict) and result.get("success"):`で直接判定してよい
+
+### 3.2.3 `write_agreement`経由のDeliverable保存処理の欠落（★新規、R3b実装レビューで発見。本計画書§3.1〜3.2自体の記述漏れ）
+
+**問題**: `decision_extractor_node`（既存コード、`cela_main.py`旧2810-2860行目付近）には、`entry_type=="Deliverable"`の場合に本文を`save_deliverable_to_file`でファイル保存し`decision_what`に`FILE_PATH:{filepath}`というポインタを格納する処理と、UPDATE時に短い要約でファイルパスを上書きしないための保護処理（「🛡️ ファイル上書き防止の鉄壁の保護」ブロック）が存在する。
+
+しかし、本計画書§3.1（`WRITE_AGREEMENT_TOOL`定義）・§3.2（`_write_agreement_impl`/`_commit_agreement_from_tool`）は、Deliverableのファイル保存について**一度も言及していなかった**。実装（`_commit_agreement_from_tool`）はこの欠落をそのまま反映し、`args.get("decision_what", "")`を無条件でそのまま`agreements.decision_what`列にINSERTしている。実機検証の結果、`write_agreement`で`entry_type="Deliverable"`・`action_type="CREATE"`・500文字の本文を送信したところ、**ファイルには一切保存されず、生の本文がSQLiteの`decision_what`列に直接格納される**ことを確認した。
+
+これはBL-034（Deliverableがユーザー承認前にファイル保存される問題）とは別の、むしろ逆方向の問題である。R3bの目的は「Expert自身が能動的にAgreement DBへ書き込む」ことであり、Expertは`write_agreement`で`status="Proposed"`かつ`entry_type="Deliverable"`を書ける唯一のロールなので、**R3b運用開始後、Deliverableの大半がこの未対応の経路を通ることになる**。放置すると、(a) 成果物本文がファイルではなくDBに直接蓄積されデータベース肥大化・既存のファイルベース運用との不整合を招く、(b) `_build_agreements_context`の`FILE_PATH:`判定（「(ファイルに出力済み: ...)」表示）が機能せず生本文がそのままプレビュー表示される、という実害が出る。
+
+**修正方針**: `_commit_agreement_from_tool`に、`decision_extractor_node`の既存ロジックと同等のDeliverable処理を追加する。
+
+```python
+def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str) -> None:
+    entry_type = args.get("entry_type", "Decision")
+    action_type = args.get("action_type", "CREATE")
+    topic = args.get("topic", "")
+    raw_content = args.get("decision_what", "")
+    content = raw_content
+
+    # ★新規: Deliverableのファイル保存（decision_extractor_nodeの既存ロジックを移植）
+    if entry_type == "Deliverable" and action_type == "CREATE":
+        if len(raw_content) > 200:
+            filepath = save_deliverable_to_file(topic, raw_content)
+            content = f"FILE_PATH:{filepath}"
+        # 200文字未満はそのまま短文として保存（decision_extractor_node同様、
+        # write_agreementの場合はstate["expert_output"]のような代替バックアップ元がないため
+        # raw_contentをそのまま使う。Expertは本文をdecision_whatに直接渡す前提のため
+        # 極端に短い成果物は想定薄いが、念のためraw_contentへのフォールバックとする）
+
+    if action_type == "SUPERSEDE":
+        ...  # 既存のまま
+
+    if action_type == "UPDATE":
+        target_topic = args.get("target_topic", topic)
+        old_content = ""
+        for a in reversed(get_agreements_from_db(conn, run_id)):
+            if a["topic"] == target_topic and a.get("status") != "Superseded":
+                old_content = a["decision_what"]
+                db_supersede_agreement(a["id"], conn, run_id)
+                break
+        # ★新規: ファイル上書き防止（decision_extractor_nodeの既存ロジックを移植）
+        if entry_type == "Deliverable" and old_content.startswith("FILE_PATH:"):
+            if not content or (not content.startswith("FILE_PATH:") and len(content) < 200):
+                content = old_content
+            elif not content.startswith("FILE_PATH:") and len(content) >= 200:
+                filepath = save_deliverable_to_file(target_topic, content)
+                content = f"FILE_PATH:{filepath}"
+
+    # 以降、INSERT INTO agreements ... は content（raw_contentではない）を使う
+```
+
+**完了条件（追加）**: `write_agreement`で`entry_type="Deliverable"`・200文字超の`decision_what`を送信した際、`log/.../deliverables/`配下にファイルが生成され、`agreements.decision_what`が`FILE_PATH:`で始まることをオフラインスモークテストで確認する。
+
 ### 3.3 ツールループへの統合
 
 R2で確立した`TOOL_DISPATCH`パターンに従い、`write_agreement`を追加する。`_write_agreement_impl`は§3.2の修正で`task_id`引数を追加したため、`_CURRENT_TASK_ID`もモジュールレベル変数として束縛する。
