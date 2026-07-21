@@ -112,8 +112,10 @@ class MultiLogger:
         """
         self.is_prompt_mode = mode
 
-# カスタムロガーを標準出力に設定（有効化する場合は以下のコメントを外す）
-sys.stdout = MultiLogger()
+# [CONSTRAINT] BL-027: importするだけでログディレクトリ作成/stdout差し替えが
+# 走ると、smoke test等がcela_mainをimportするたびに本番log/配下へ
+# タイムスタンプ付きディレクトリを無断作成してしまう（実際に発生した事故）。
+# 実行時（__main__としての起動時）にのみ有効化する。
 
 # ===========================================================================
 # ファイル出力用ユーティリティ
@@ -505,6 +507,18 @@ TOOL_DISPATCH = {
     "python_repl": _run_python_repl,
 }
 
+# BL-033: 直前のquery_AI呼び出しでLLMが実際に実行したpython_replの(code, result)記録。
+# ノードをまたいでも参照できるよう、呼び出し元(expert_node等)がstateへコピーする前提の
+# 一時バッファ（stateにはシリアライズ不要な生実行ログを持たせない方針、_DB_CONNと同様）。
+_LAST_PYTHON_CALLS: list[dict] = []
+
+
+def get_last_python_calls() -> list[dict]:
+    """【SLM要約】
+    直前のquery_AI呼び出しで実際に実行されたpython_replのcode/result記録のコピーを返す。
+    """
+    return list(_LAST_PYTHON_CALLS)
+
 
 def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unknown Node", tools: list[dict] | None = None,
              light_system_prompt: str | None = None) -> str:
@@ -512,7 +526,8 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
     Orchestration of external AI API calls with Record/Replay stub support (keyed by (label, call_seq)),
     delegating the actual retry/provider-selection logic to _query_AI_live.
     """
-    global _call_seq_counter
+    global _call_seq_counter, _LAST_PYTHON_CALLS
+    _LAST_PYTHON_CALLS = []
 
     call_seq = _call_seq_counter
     _call_seq_counter += 1
@@ -667,10 +682,13 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
             # [CONSTRAINT] MAX_TOOL_ITERは「ツール呼び出しの往復回数」の上限であり、全回がtool_calls
             # を返すと最終テキスト回答を送る余地が残らず非収束になる（実機ドライランで確認、BL-014）。
             # ユーザー承認によりAGENTS.md §7準拠で5→10へ変更。挙動を見て今後絞る可能性あり。
-            MAX_TOOL_ITER = 10
+            # ユーザー承認によりAGENTS.md §7準拠で10→15へ変更（BL-028）。1タスク自身の範囲内の
+            # 検算だけでも上限に迫るケースが実ドライランで確認されたため、まずクラッシュ回避を優先。
+            MAX_TOOL_ITER = 15
             loop_messages = list(messages)
             create_kwargs["messages"] = loop_messages
             tool_calls_used = 0
+            python_calls_log: list[dict] = []  # BL-033: 実行したpython_replのcode/resultを蓄積
             # [CONSTRAINT] BL-014原因A: python_replは1回のツールループの間だけ状態を保持する
             # 対話セッションとする（ノード・リトライをまたいだ状態共有はしない、毎回新規生成）。
             # try/finallyで、成功・非収束・例外いずれの終了経路でも子プロセスを確実に終了させる。
@@ -700,6 +718,8 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                         print(f"✅ [{label}] ツールループ終了（iter={iteration}, tool_calls使用={tool_calls_used}回）")
                         if tool_calls_used == 0:
                             print(f"⚠️ [{label}] python_replを一度も使わずに応答しました（F-2.6監査対象）")
+                        global _LAST_PYTHON_CALLS
+                        _LAST_PYTHON_CALLS = python_calls_log
                         content = msg.content
                         return content if content is not None else "(APIから空の応答が返されました)"
                     loop_messages.append(msg.model_dump())
@@ -723,6 +743,7 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                                 continue
                             if tc.function.name == "python_repl":
                                 result = repl_session.run(args.get("code", ""))
+                                python_calls_log.append({"code": args.get("code", ""), "result": result})
                             else:
                                 result = handler(args.get("code", ""))
                             print(f"🔧 [{label}] python_repl 実行（iter={iteration}）:\n{args.get('code','')}\n→ {result}\n")
@@ -1145,8 +1166,9 @@ class LineageState(TypedDict):
     risk_register: list[RiskRegister]
     needs_revision_phases: list[str]
     phases_to_revise: list[str]
-    user_retry_count: int    
-    expert_retry_count: int 
+    user_retry_count: int
+    expert_retry_count: int
+    expert_last_python_calls: list[dict]  # BL-033: 直前Expert呼び出しのpython_repl実行記録（code/result）
 
 class Appconfig(TypedDict): 
     pattern: int
@@ -1430,24 +1452,11 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
         \n
         Task(ユーザーAIの指示): {state["user_input"]}\n
         \n
-        Taskを遂行するためにベストなエキスパートを選択してください: 
-            [requirement_engineer, 
-            boundary_checker, 
-            numerical_allocator, 
-            cost_optimizer, 
-            milestone_planner, 
-            risk_analyzer, 
-            code_architect, 
-            test_generator, 
-            logic_verifier, 
-            technical_writer, 
-            logistics_manager, 
-            crisis_coordinator, 
-            business_strategist, 
-            ux_researcher, 
-            safety_engineer, 
-            legal_advisor]\n
-            \n
+        Taskを遂行するために最も適した専門家の肩書き（役職名）を、固定リストから選ぶのではなく、
+        このタスクの内容に即して自由に生成してください。\n
+        例: 「地域公共交通の需要予測専門家」「自動運転車両の安全基準アナリスト」のように、
+        タスクの実態に即した具体的な肩書きにしてください（漠然とした「アシスタント」等は避ける）。\n
+        \n
         【プロジェクトの合意・決定事項・検討状況DB】
         {agreements_text}\n
         \n
@@ -1455,31 +1464,20 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
         \n
         回答は簡潔で論理的にせよ\n
         \n
-        Return ONLY JSON: {{"expert": "...", "reason": "..."}}'
+        Return ONLY JSON: {{"expert": "（生成した専門家の肩書き）", "reason": "..."}}'
         """
     )
     res = query_AI([{"role": "user", "content": prompt}], client=client_agent, model=model_agent, label="Orchestrator")
-    parsed = _safe_json_parse(res, fallback={"expert": "decision_extractor", "reason": ""})
-    
-    expert = parsed.get("expert", "decision_extractor")
-    valid_experts = ("requirement_engineer", 
-                     "boundary_checker", 
-                     "numerical_allocator", 
-                     "cost_optimizer", 
-                     "milestone_planner", 
-                     "risk_analyzer", 
-                     "code_architect", 
-                     "test_generator", 
-                     "logic_verifier", 
-                     "technical_writer", 
-                     "logistics_manager", 
-                     "crisis_coordinator", 
-                     "business_strategist", 
-                     "ux_researcher", 
-                     "safety_engineer", 
-                     "legal_advisor")
-    if expert not in valid_experts:
-        expert = "decision_extractor"
+    parsed = _safe_json_parse(res, fallback={"expert": "", "reason": ""})
+
+    # [CONSTRAINT] BL-018当時、専門家名を固定16種の配列に絞っていたが、call_expert/グラフのどちらも
+    # 具体的な専門家名で分岐しておらず（プロンプトへの埋め込みラベルとして使われるのみ）、
+    # 固定リストは無用な足かせだった（ログ上、リストのどれにも綺麗に当てはまらないタスクで
+    # 選定に無駄な思考コストが生じていた）。専門家ごとの個別ノード構造が必要になった時点で
+    # 再度制約を設ける方針とし、それまでは自由記述とする。空・空白のみの場合のみフォールバックする。
+    expert = (parsed.get("expert") or "").strip()
+    if not expert:
+        expert = "プロジェクト全般アドバイザー"
     return {"expert": expert, "reason": parsed.get("reason", "")}
 
 
@@ -1654,6 +1652,28 @@ def call_detector(state: LineageState, target_role: str) -> dict:
     acceptance_criteria = current_task.get("acceptance_criteria", [])
     criteria_text = "\n".join(f"{i}. {c}" for i, c in enumerate(acceptance_criteria)) or "(現在のタスクにacceptance_criteriaが定義されていません)"
 
+    # BL-033: Expertが実際に実行したpython_replの記録をDetectorに提示する。
+    # Expertの「検算完了」という自己申告（tool_calls=0でも書けてしまう）を鵜呑みにせず、
+    # まずDetector自身が独立して検算し、その後この記録と突き合わせて整合性を確認させる狙い。
+    expert_python_calls = state.get("expert_last_python_calls", [])
+    if expert_python_calls:
+        calls_text = "\n\n".join(
+            f"--- 呼び出し{i+1} ---\nコード:\n{c['code']}\n結果:\n{c['result']}"
+            for i, c in enumerate(expert_python_calls)
+        )
+        python_calls_block = (
+            f"【BL-033: Expertが実際に実行したpython_replの記録】\n{calls_text}\n\n"
+            f"まずあなた自身が独立してpython_replで検算してください。その上で、この記録のコードが"
+            f"論理的に妥当か、結果が一致するかを確認してください。あなたの検算結果とこの記録が"
+            f"食い違う場合はconstraint_issue=\"major\"としてください。\n"
+        )
+    else:
+        python_calls_block = (
+            f"【BL-033: 警告】今回のExpertはpython_replを一度も使用していません。\n"
+            f"数値主張が含まれる場合、Expertが「検算完了」等と自己申告していても絶対に鵜呑みにせず、"
+            f"必ずあなた自身がpython_replで独立して検算してください。\n"
+        )
+
 # 評価する対象（UserかExpertか）によって、チェック基準の厳しさを変える
     if target_role == "user":
         role_specific_instruction = (f"""
@@ -1718,6 +1738,7 @@ def call_detector(state: LineageState, target_role: str) -> dict:
         f"【F-2.6 機械的検算ゲート（必須）】数値主張（合計・比率・閾値比較等）を含む場合、"
         f"必ず python_repl ツールで機械的に再計算し、一致を確認してからでなければ constraint_issue=\"major\" としないでください。"
         f"暗算での承認・却下判定は禁止します。\n\n"
+        f"{python_calls_block}\n"
         f"System Goal: {goal}\n"
         f"Recent Decisions（参考程度）: {recent_decitions}\n\n"
         f"【BL-023: 現在タスクのacceptance_criteria充足チェック】\n"
@@ -1808,6 +1829,12 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
         {owns_variables_text}
         Agentが今回、これらの変数のいずれかについて具体的な数値を確定させた場合（python_replでの検算結果を含む）、
         `owned_variable_values` に {{変数名: 値}} の形で出力してください。該当がなければ空オブジェクト `{{}}` としてください。
+
+        【BL-029: owned_variable_valuesはcontentと目的が異なります】
+        `content`（Deliverable本体）は要約禁止・全文保持ですが、これは後で部分成果物を製本・合成するための
+        ものであり、`owned_variable_values`とは無関係です。`owned_variable_values`は他タスクが
+        `depends_on`を通じてこの値を参照する際に読む、ごく簡潔な要約（確定した結論・数値・根拠の要点のみ）
+        にしてください。`content`の全文をコピーしないでください。
         """
     else:
         # ==========================================
@@ -2596,6 +2623,8 @@ Updates system state with the expert's output, decisions, and conversational his
         state=state,
         config=config
     )
+    # BL-033: Expertが実際に実行したpython_replのcode/resultを、次のDetectorが参照できるようstateへ保存する。
+    state["expert_last_python_calls"] = get_last_python_calls()
     print(f"\n------ 完了 ------")
     decision = make_decision(who=f"expert:{state['selected_expert']}", what="タスクを実行", why=(output or "")[:100])
     state["expert_output"] = output
@@ -2641,7 +2670,19 @@ Manages state updates including risk levels, constraint logging, and decision re
    
 
     result = call_detector(state = state, target_role=target_role)
-    
+
+    # BL-033: ExpertもDetectorも一度もpython_replを使わなかった場合の複合失敗ガード。
+    # 「本当に計算不要なターン」まで巻き込む単純な強制差し戻しは無限ループのリスクがあるため、
+    # Expertの成果物を評価するターン（target_role=="assistant"）に限定し、かつ
+    # ExpertとDetectorの双方が検算不在だった場合のみフェイルクローズする。
+    detector_python_calls = get_last_python_calls()
+    if target_role == "assistant" and not state.get("expert_last_python_calls") and not detector_python_calls:
+        print("🚨 [Detector] BL-033: ExpertもDetectorも一度もpython_replを使用しませんでした。フェイルクローズ(major)します。")
+        result["constraint_issue"] = "major"
+        result["comment"] = (
+            "(BL-033フェイルクローズ) ExpertもDetectorも一度もpython_replを使用しておらず、"
+            "数値主張の機械的検算が一切行われていません。差し戻します。 " + result.get("comment", "")
+        )
 
     print(f"\n------ 完了 ------")
     state["risk_flag"] = result["risk"]
@@ -3460,6 +3501,7 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
         "current_task_id": "",
         "verified_facts": {},
         "task_criteria_status": {},
+        "expert_last_python_calls": [],
         "risk_register": [],
         "needs_revision_phases": [],
         "phases_to_revise": []
@@ -3538,6 +3580,9 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
 
 
 if __name__ == "__main__":
+    # カスタムロガーを標準出力に設定（importのみでは発火させない。BL-027）
+    sys.stdout = MultiLogger()
+
     TARGET_GOAL = (
         "過疎地域向け「AIオンデマンド自動運転バス」の導入計画と安全基準策定\n"
         "1. 初期導入予算は「上限1億円」、年間維持費（ランニングコスト）は「上限3,000万円」とする。\n"
