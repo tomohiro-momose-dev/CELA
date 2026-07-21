@@ -705,6 +705,9 @@ R3bで実装するツール呼び出し時に、プロンプトに以下の指�
 | R3b-T8 | 指標A（却下案の回避率）: 同じ制約に再度ぶつかったタスクで、AIが既に却下された案を再提案しないこと | 実LLMドライラン |
 | R3b-T9 | 指標E（自律書き込みカバレッジ80%以上、取りこぼし率20%以下） | 実LLMドライランログ解析 |
 | R3b-T10 | 指標F（Rejected自律書き込みの正確性）: 5ノード（Detector/Reviewer/Arbiter/Integrator/User AI）すべてで明示的な却下事案に`Rejected`書き込みが発生すること（★Integrator追加） | 実LLMドライランログ解析 |
+| R3b-T11 | `read_verified_fact`/`write_agreement`のツール結果がLLMに二重JSONエンコードされずに渡ること（§3.2.2、★新規） | オフラインスモークテスト（`json.loads`一回でdictへ復元できることを確認） |
+| R3b-T12 | `write_agreement`で`entry_type="Deliverable"`・200文字超の`decision_what`を送信した際、`log/.../deliverables/`にファイルが生成され`agreements.decision_what`が`FILE_PATH:`で始まること（§3.2.3、★新規） | オフラインスモークテスト |
+| R3b-T13 | `write_agreement`によるDeliverableのUPDATEで、短い要約が既存のFILE_PATHを上書きしないこと（§3.2.3のファイル上書き防止ロジック） | オフラインスモークテスト |
 
 ---
 
