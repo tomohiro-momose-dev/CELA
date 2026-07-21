@@ -321,9 +321,11 @@ def _build_task_scope_context(state, conn):
 | R3a-T1 | `verified_facts`テーブルに`reason`/`citations`/`confidence`列が追加されること | `python -c "import sqlite3; conn=sqlite3.connect('cela.db'); print(conn.execute('PRAGMA table_info(verified_facts)').fetchall())"` |
 | R3a-T2 | `upsert_verified_fact`が`reason`/`citations`/`confidence`を保存すること | オフラインスモークテスト |
 | R3a-T3 | `read_verified_fact`ツールがフェーズ横断の確定値を返すこと | オフラインスモークテスト |
-| R3a-T4 | `read_deliverable_file`ツールが`log/`配下のファイルを読み取れること | オフラインスモークテスト |
+| R3a-T4 | `read_deliverable_file`ツールが`log/`配下のファイルを読み取れること（実際のWindowsパス区切り、`..`によるトラバーサル拒否の両方を試験、★致命的③対応） | オフラインスモークテスト |
 | R3a-T5 | `_build_task_scope_context`が全フェーズを走査すること | ユニットテスト（フェーズ横断参照） |
-| R3a-T6 | BL-035/036/037と同一構成での再ドライランで財務・需要数値ドリフトが解消されること | 実LLMドライラン |
+| R3a-T6 | Integrator・Resource Arbiterの`query_AI`呼び出しに読み取りツールが付与されていること（★レビュー反映、非対称付与の解消確認） | オフラインスモークテスト |
+| R3a-T7 | `TOOL_DISPATCH`のディスパッチ処理が`args`辞書全体をハンドラへ渡すこと（★致命的①対応、R3a全体の前提） | オフラインスモークテスト（§1.5.2 R0-T2と同一） |
+| R3a-T8 | BL-035/036/037と同一構成での再ドライランで財務・需要数値ドリフトが解消されること | 実LLMドライラン |
 
 ---
 
@@ -344,7 +346,7 @@ WRITE_AGREEMENT_TOOL = {
             "For numeric claims, include Python REPL verification results in evidence (F-2.6). "
             "Expert can only use status='Proposed'. "
             "User AI can use all statuses. "
-            "Detector/Reviewer/Arbiter can only use status='Rejected'."
+            "Detector/Reviewer/Arbiter/Integrator can only use status='Rejected'."
         ),
         "parameters": {
             "type": "object",
@@ -489,20 +491,35 @@ def _check_write_permission(args, caller_role):
 
 **注記（Integratorの許可statusについて）**: Integratorは既存コードでは`decisions`テーブルへ「矛盾検知」を直接ログする専用経路（`cela_main.py:3086`、`make_decision`＋`db_append_decision`）を持ち、`agreements`への書き込み経路は今回のR3bで初めて持つことになる。役割上はDetector/Reviewer/Arbiterと同じ「横断的な矛盾の指摘」であるため、他の3ロールと同様`Rejected`のみを許可する設計とした。Integratorに他のstatusを許可する具体的なユースケースが出てきた場合は、この許可表を個別に見直す。
 
+### 3.2.1 `depends_on`が参照するIDのLLMへの露出（★新規、レビュー指摘⑤）
+
+**問題**: `_write_agreement_impl`は`depends_on`内の各IDを`agreements.id`（`AG-{timestamp}`形式、`decision_extractor_node`/`write_agreement`がコミット時にサーバー側で自動生成、`cela_main.py:2865`等）に対して検証する。しかし、既存の`_build_agreements_context`（`cela_main.py:1208-1269`）がプロンプトに出力する各行は`{icon}{type_label} {clean_topic}: {content_preview}`のみで、**`id`フィールドを一切含まない**。LLMは存在すら知らないIDを`depends_on`に指定することはできず、このままでは`depends_on`は実質的に常に空配列でしか使われない。
+
+**修正内容**: `_build_agreements_context`の出力行の先頭に`id`を追記し、LLMが`depends_on`にどのIDを指定すればよいか本文中から読み取れるようにする。
+
+```python
+# cela_main.py:1267付近、_build_agreements_context内
+lines.append(f"[{a.get('id', '?')}] {icon}{type_label} {clean_topic}: {content_preview}")
+```
+
+既存の呼び出し元（Hydrateコンテキスト等）は文字列をそのまま人間可読なプロンプトとして使っているだけで、`id`プレフィックスの追加によって既存の解析ロジックが壊れる箇所はない（`_build_agreements_context`の戻り値をパースして再利用している箇所は現状なし、要件定義書4.2のAgreement表示仕様にも反しない）。
+
 ### 3.3 ツールループへの統合
 
-R2で確立した`TOOL_DISPATCH`パターンに従い、`write_agreement`を追加する。
+R2で確立した`TOOL_DISPATCH`パターンに従い、`write_agreement`を追加する。`_write_agreement_impl`は§3.2の修正で`task_id`引数を追加したため、`_CURRENT_TASK_ID`もモジュールレベル変数として束縛する。
 
 ```python
 TOOL_DISPATCH = {
     "python_repl": _run_python_repl,
     "read_verified_fact": lambda args: _read_verified_fact(args, get_active_conn(), _CURRENT_RUN_ID),
     "read_deliverable_file": _read_deliverable_file,
-    "write_agreement": lambda args: _write_agreement_impl(args, get_active_conn(), _CURRENT_RUN_ID, _CURRENT_CALLER_ROLE),
+    "write_agreement": lambda args: _write_agreement_impl(
+        args, get_active_conn(), _CURRENT_RUN_ID, _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    ),
 }
 ```
 
-**注意**: `write_agreement`は`caller_role`を必要とする。`_CURRENT_CALLER_ROLE`をモジュールレベル変数として、各ノード関数の`query_AI`呼び出し前にセットする。
+**注意**: `write_agreement`は`caller_role`と`task_id`（confirmed_variablesの`source_task_id`用）を必要とする。`_CURRENT_CALLER_ROLE`・`_CURRENT_TASK_ID`をモジュールレベル変数として、各ノード関数の`query_AI`呼び出し前にセットする（`_CURRENT_TASK_ID`は`state["current_task_id"]`から取得できるノードではそれを、取得できないノード（Integrator等、現在タスクという概念を持たない）では空文字のままにする）。
 
 ### 3.4 各ノードへのツール付与とcaller_role設定
 
@@ -513,19 +530,26 @@ TOOL_DISPATCH = {
 | Detector | ✅（★v3b追加） | Rejectedのみ | "detector" |
 | Reviewer | ✅（★v3b追加） | Rejectedのみ | "reviewer" |
 | Arbiter | ✅（★v3b追加） | Rejectedのみ | "arbiter" |
+| Integrator | ✅（★レビュー反映で追加） | Rejectedのみ | "integrator" |
 
-**呼び出し側の変更**: 各ノード関数で`query_AI`を呼ぶ前に`global _CURRENT_CALLER_ROLE; _CURRENT_CALLER_ROLE = "expert"`のようにロールを設定する。
+**★レビュー反映**: 初版はIntegratorをこの表から漏らしており、R3a（読み取り）ではIntegratorに付与しR3b（書き込み）では付与しない、逆にArbiterはR3aで付与せずR3bでのみ付与するという非対称な状態になっていた。読み書き両ツールが必要なノードには両方を付与する方針（§0）に統一し、IntegratorをR3bにも追加した。
+
+**呼び出し側の変更**:
+- Expert/User AI/Detector/Reviewer/Arbiterは既存の`tools=[PYTHON_REPL_TOOL, ...]`（R3aで拡張済み）に`WRITE_AGREEMENT_TOOL`を追加する。
+- **Integrator（`call_integrator`）はR3aで新規に`tools`パラメータを追加済み**（§2.6参照）なので、そのリストに`WRITE_AGREEMENT_TOOL`も含める。
+- 各ノード関数で`query_AI`を呼ぶ前に`global _CURRENT_CALLER_ROLE; _CURRENT_CALLER_ROLE = "expert"`のようにロールを設定する。Integratorの場合は`"integrator"`を設定する。
 
 ### 3.5 `decision_extractor_node`の位置づけ変更（設計書v7 §3.3準拠）
 
 - `decision_extractor_node`は**撤廃しない**
 - ただし「各役割のAIが自身でツールを書き出すのが基本経路」とする
 - `decision_extractor_node`は「書き漏れ時の予備的セーフティネット」として維持
-- 各ターンで`write_agreement`が一度も呼ばれない場合のみ、`decision_extractor_node`を発火させる
+- 各ターンで`write_agreement`が一度も呼ばれない場合のみ、`decision_extractor_node`のAgreement抽出（`extracted_items`のDB書き込み）を発火させる
+- **ただし`verified_facts`への確定値保存（`owned_variable_values`抽出、`cela_main.py:2798-2808`）は、`write_agreement`が呼ばれたかどうかに関わらず引き続き毎ターン実行する**（★レビュー指摘②の修正）。理由: `write_agreement`の`confirmed_variables`（§3.1）は呼び出し側のAIが明示的に指定した場合のみ`verified_facts`を更新するため、AIが`confirmed_variables`を指定し忘れた場合の保険として、既存の`decision_extractor_node`によるverified_facts抽出は独立した経路として残す必要がある。これにより「`write_agreement`の採用率が上がるほど`verified_facts`が更新されなくなる」という自己矛盾（致命的②）を避ける。
 
 **実装方針**:
-- 既存の`decision_extractor_node`のロジックは変更しない
-- 各ノード（Expert/User AI/Detector/Reviewer/Arbiter）の`query_AI`呼び出し時に`write_agreement`ツールを付与し、AIが自律的に書き込む
+- 既存の`decision_extractor_node`のロジックのうち、Agreement/Decisionの書き込み部分は「`write_agreement`が呼ばれなかった場合のみ」に条件分岐するが、`owned_variable_values`→`upsert_verified_fact`の部分（2798-2808行目）は条件分岐せず現状のまま毎ターン実行する
+- 各ノード（Expert/User AI/Detector/Reviewer/Arbiter/Integrator）の`query_AI`呼び出し時に`write_agreement`ツールを付与し、AIが自律的に書き込む
 - `decision_extractor_node`は現在と同じタイミングで発火し、ツール呼び出しが行われなかった会話ターンを事後的に補完する
 
 ### 3.6 Reason記載の強制粒度（BL-037対応）
@@ -541,13 +565,15 @@ R3bで実装するツール呼び出し時に、プロンプトに以下の指�
 | # | 条件 | 検証方法 |
 |---|------|----------|
 | R3b-T1 | `write_agreement`ツールが`TOOL_DISPATCH`に登録されること | `python -c "from cela_main import TOOL_DISPATCH; assert 'write_agreement' in TOOL_DISPATCH"` |
-| R3b-T2 | Expertが`Proposed`以外のstatusを書き込めないこと | オフラインスモークテスト |
-| R3b-T3 | Detector/Reviewer/Arbiterが`Rejected`のみ書き込めること | オフラインスモークテスト |
+| R3b-T2 | Expertが`Proposed`以外のstatusを書き込めないこと（`Approved`/`Approved_with_Conditions`/`Rejected`/`Implicitly_Accepted`すべてを個別に試験） | オフラインスモークテスト |
+| R3b-T3 | Detector/Reviewer/Arbiter/Integratorが`Rejected`以外を書き込めないこと（★Integrator追加、全statusを網羅的に試験） | オフラインスモークテスト |
 | R3b-T4 | User AIが全statusを書き込めること | オフラインスモークテスト |
-| R3b-T5 | `decision_extractor_node`が引き続き正常に動作すること | 既存テスト回帰 |
-| R3b-T6 | 指標A（却下案の回避率）: 同じ制約に再度ぶつかったタスクで、AIが既に却下された案を再提案しないこと | 実LLMドライラン |
-| R3b-T7 | 指標E（自律書き込みカバレッジ80%以上、取りこぼし率20%以下） | 実LLMドライランログ解析 |
-| R3b-T8 | 指標F（Rejected自律書き込みの正確性）: 4ノードすべてで明示的な却下事案に`Rejected`書き込みが発生すること | 実LLMドライランログ解析 |
+| R3b-T5 | `decision_extractor_node`が引き続き正常に動作すること。特に`owned_variable_values`→`verified_facts`の抽出が、`write_agreement`呼び出し有無に関わらず毎ターン実行されること（★追加、致命的②の回帰確認） | 既存テスト回帰＋新規オフラインスモークテスト |
+| R3b-T6 | `confirmed_variables`を指定した`write_agreement`呼び出しが`verified_facts`へ正しく反映されること（confidence='provisional'を含む） | オフラインスモークテスト（★新規） |
+| R3b-T7 | `depends_on`に指定したIDが`_build_agreements_context`の出力に実際に出現していること（LLMが参照可能なIDのみを検証対象にできることの確認） | オフラインスモークテスト（★新規） |
+| R3b-T8 | 指標A（却下案の回避率）: 同じ制約に再度ぶつかったタスクで、AIが既に却下された案を再提案しないこと | 実LLMドライラン |
+| R3b-T9 | 指標E（自律書き込みカバレッジ80%以上、取りこぼし率20%以下） | 実LLMドライランログ解析 |
+| R3b-T10 | 指標F（Rejected自律書き込みの正確性）: 5ノード（Detector/Reviewer/Arbiter/Integrator/User AI）すべてで明示的な却下事案に`Rejected`書き込みが発生すること（★Integrator追加） | 実LLMドライランログ解析 |
 
 ---
 
@@ -559,12 +585,20 @@ R3bで実装するツール呼び出し時に、プロンプトに以下の指�
 | BL-005 | `turn_count`凍結によりreflection/facilitatorが発火不能 | R3のスコープ外（R4着手時にまとめて対応） |
 | BL-017 | 差し戻しループ沼からの脱出機構 | R3のスコープ外（R4着手時にまとめて対応） |
 | BL-021 | プロンプト自体の英語化 | R3のスコープ外 |
-| `_CURRENT_RUN_ID` | ツールハンドラからDB接続・run_idを参照するためのモジュールレベル変数 | `_query_AI_live`内で`TOOL_DISPATCH`を呼ぶ前にセットする必要がある。現在の`_query_AI_live`には`run_id`パラメータがないため、拡張が必要 |
-| `_CURRENT_CALLER_ROLE` | `write_agreement`の権限チェックに必要な呼び出し元ロール | 各ノード関数で`query_AI`呼び出し前にグローバル変数をセットする |
+| `TOOL_DISPATCH`のディスパッチ引数（★致命的①、修正済み） | `_query_AI_live`が`python_repl`以外のツールに`args.get("code","")`（空文字列）しか渡していなかった | §1.5.1で`handler(args)`に修正。R3a/R3b全ツールの前提条件 |
+| `verified_facts`の更新経路の空洞化（★致命的②、修正済み） | `write_agreement`採用率が上がるほど`decision_extractor_node`のowned_variable_values抽出が発火しなくなり、verified_factsが更新されなくなる自己矛盾 | `write_agreement`に`confirmed_variables`フィールドを追加（§3.1）し、`_write_agreement_impl`内で直接`upsert_verified_fact`を呼ぶ（§3.2）。かつ`decision_extractor_node`のverified_facts抽出部分は`write_agreement`呼び出し有無に関係なく毎ターン独立実行する（§3.5、保険としての二重化） |
+| `read_deliverable_file`のパス検証（★致命的③、修正済み） | `file_path.startswith("log/")`はWindows環境の実パス（バックスラッシュ区切り）を常に拒否し、かつパストラバーサルも防げない | `pathlib.Path.resolve()`＋`relative_to()`によるディレクトリ包含チェックに変更（§2.4.3） |
+| `_check_write_permission`の許可表不備（★中程度④、修正済み） | Approved/Rejectedの2値しかチェックしておらず、他のstatusは全ロールに開放されていた | ロール×status全組み合わせの許可表に変更（§3.2） |
+| `depends_on`のID非露出（★中程度⑤、修正済み） | LLMは`agreements.id`を一度もプロンプト中で見ないため`depends_on`を正しく指定できない | `_build_agreements_context`の各行に`id`を追記（§3.2.1） |
+| `_CURRENT_RUN_ID` / `_CURRENT_CALLER_ROLE` / `_CURRENT_TASK_ID` | ツールハンドラからDB接続・run_id・呼び出し元ロール・task_idを参照するためのモジュールレベル変数 | `_query_AI_live`自体のシグネチャは変更しない（既存の`_LAST_PYTHON_CALLS`と同じ、LangGraphの単一プロセス同期実行を前提としたモジュールグローバル方式を踏襲）。各ノード関数が`query_AI`呼び出し直前にこれらのグローバル変数をセットする |
 
 ---
 
 ## 5. 実装順序（推奨）
+
+### Step 0: 共通前提修正（★新規、最優先）
+- `_query_AI_live`のツールディスパッチ処理を`handler(args.get("code", ""))`→`handler(args)`に修正（§1.5.1、致命的①）
+- ダミーツールによる回帰テストで`python_repl`の既存動作に影響がないことを確認
 
 ### Step 1: R3a スキーマ変更
 - `verified_facts`テーブルに`reason`/`citations`/`confidence`列を追加（`init_db`内でALTER TABLE）
@@ -573,33 +607,38 @@ R3bで実装するツール呼び出し時に、プロンプトに以下の指�
 
 ### Step 2: R3a 読み取りツール定義
 - `READ_VERIFIED_FACT_TOOL` / `READ_DELIVERABLE_FILE_TOOL`の定義
-- `_read_verified_fact` / `_read_deliverable_file`のハンドラ実装
-- `TOOL_DISPATCH`への登録
+- `_read_verified_fact`のハンドラ実装
+- `_read_deliverable_file`のハンドラ実装（`pathlib.Path`によるディレクトリ包含チェック、§2.4.3、致命的③）
+- `TOOL_DISPATCH`への登録（Step 0修正後の`handler(args)`前提）
+- `from pathlib import Path`をファイル冒頭のimportに追加
 
 ### Step 3: R3a `_build_task_scope_context`修正（BL-035）
 - 走査対象を`state["phases"]`全体に拡張
 
 ### Step 4: R3a ツール付与
-- Expert/User AI/Detector/Reviewer/Integratorの`tools`リストに読み取りツールを追加
-- `query_AI`/`_query_AI_live`に`run_id`パラメータを追加（ツールハンドラからのDB参照用）
+- Expert/User AI/Detector/Reviewer/Resource Arbiterの`tools`リストに読み取りツールを追加（既存の`tools=[PYTHON_REPL_TOOL]`を拡張）
+- **Integratorの`query_AI`呼び出しに`tools`パラメータを新規追加**（現状`tools`なし、★レビュー反映）
+- `_CURRENT_RUN_ID`グローバル変数を導入し、`run_ai_vs_ai_loop`冒頭でセット（`_query_AI_live`自体のシグネチャは変更しない、§4参照）
 
 ### Step 5: R3a 検証
 - `python -m py_compile`構文確認
-- オフラインスモークテスト（フェーズ横断参照、ファイル読み取り）
+- オフラインスモークテスト（フェーズ横断参照、ファイル読み取り、Windowsパス区切りでの`read_deliverable_file`動作、`log/`外へのトラバーサル拒否）
 
 ### Step 6: R3b `write_agreement`ツール定義
-- `WRITE_AGREEMENT_TOOL`の定義
-- `_write_agreement_impl` / `_check_write_permission` / `_commit_agreement_from_tool`の実装
-- `TOOL_DISPATCH`への登録
+- `WRITE_AGREEMENT_TOOL`の定義（`confirmed_variables`フィールドを含む、§3.1、中程度対応）
+- `_build_agreements_context`に`id`表示を追加（§3.2.1、中程度⑤対応）
+- `_write_agreement_impl`（`confirmed_variables`→`upsert_verified_fact`反映を含む、§3.2、致命的②対応） / `_check_write_permission`（全status×全ロール許可表、§3.2、中程度④対応） / `_commit_agreement_from_tool`の実装
+- `TOOL_DISPATCH`への登録（`_CURRENT_TASK_ID`も束縛）
 
 ### Step 7: R3b ツール付与とcaller_role設定
-- 全ノードへの`write_agreement`ツール付与
-- `_CURRENT_CALLER_ROLE`グローバル変数の導入
-- 各ノード関数で`query_AI`呼び出し前のロール設定
+- Expert/User AI/Detector/Reviewer/Arbiter/**Integrator**への`write_agreement`ツール付与（★Integrator追加）
+- `_CURRENT_CALLER_ROLE`・`_CURRENT_TASK_ID`グローバル変数の導入
+- 各ノード関数で`query_AI`呼び出し前のロール・task_id設定
+- `decision_extractor_node`のうちAgreement書き込み部分のみ「write_agreement未呼び出し時」の条件分岐を追加し、`owned_variable_values`→`verified_facts`抽出部分は無条件のまま維持（§3.5、致命的②対応の一部）
 
 ### Step 8: R3b 検証
 - `python -m py_compile`構文確認
-- オフラインスモークテスト（権限チェック、構造チェック）
+- オフラインスモークテスト（権限チェックの全ロール×全status網羅、構造チェック、confirmed_variables反映、depends_on ID可視性）
 
 ### Step 9: 統合ドライラン
 - R3a+R3b適用後の実LLMドライラン
@@ -612,7 +651,7 @@ R3bで実装するツール呼び出し時に、プロンプトに以下の指�
 
 | ファイル | 変更内容 |
 |----------|----------|
-| `cela_main.py` | verified_factsスキーマ拡張、upsert/get関数拡張、読み取りツール定義・ハンドラ、write_agreementツール定義・ハンドラ、TOOL_DISPATCH更新、各ノードのtoolsリスト更新、`_build_task_scope_context`修正、`_query_AI_live`へのrun_idパラメータ追加、`_CURRENT_CALLER_ROLE`グローバル変数 |
+| `cela_main.py` | `from pathlib import Path`追加、ツールディスパッチの`handler(args)`修正（致命的①）、verified_factsスキーマ拡張、upsert/get関数拡張、読み取りツール定義・ハンドラ（パス検証修正済み）、write_agreementツール定義・ハンドラ（confirmed_variables対応）、`_build_agreements_context`へのid表示追加、`_check_write_permission`の全ロール×全status許可表、TOOL_DISPATCH更新、Integrator/Resource Arbiterを含む各ノードのtoolsリスト更新、`_build_task_scope_context`修正、`_CURRENT_RUN_ID`/`_CURRENT_CALLER_ROLE`/`_CURRENT_TASK_ID`グローバル変数（`_query_AI_live`自体のシグネチャは変更しない） |
 | `docs/design/r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md` | R3a/R3b該当節の追記（§3.2〜3.4.1にR3a読み取りツールの記述を追加） |
 | `docs/design/phase_gates.md` | P3a-1〜P3a-4、P3b-1〜P3b-2の状態更新 |
 | `docs/design/STATUS.md` | アクティブPhase・次アクション更新 |
