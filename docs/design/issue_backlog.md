@@ -1127,7 +1127,7 @@ for t in state.get("current_phase", {}).get("tasks", []):
 | 状態 | `open`（記録のみ、F-3.1〜F-3.7実装時に理由記載の強制粒度を再設計） |
 | 優先度 | P2 |
 | 依存 | [F-3.1〜F-3.7](要件定義書_v35.md)（自律的DB書き込みツール、`decision_extractor_node`の縮小・撤廃） |
-| 関連 | [D-034](decision_log.md#d-034-decisionagreementの理由記載の薄さはbl起票のみに留めf-3系統合時に再設計する)、[BL-034](issue_backlog.md#bl-034-deliverableのファイル保存がユーザー承認前に無条件で発生する)、[BL-035](issue_backlog.md#bl-035-_build_task_scope_contextがフェーズ横断のdepends_on参照を解決できない)、[BL-036](issue_backlog.md#bl-036-最終計画書の財務需要数値が統合パスのたびに再ドリフトするbl-035f-38の射程がコスト計算にも及ぶ実例) |
+| 関連 | [D-034](decision_log.md#d-034-decisionagreementの理由記載の薄さはbl起票のみに留めf-3系統合時に再設計する)、[D-035](decision_log.md#d-035-bl-036bl-037の解決方針としてnpu-context-saver由来の時間減衰検索構造化ファクトストアをf-84f-39として要件化する)（F-3.9で「暫定/確定」区別を含む理由記載を要件化）、[BL-034](issue_backlog.md#bl-034-deliverableのファイル保存がユーザー承認前に無条件で発生する)、[BL-035](issue_backlog.md#bl-035-_build_task_scope_contextがフェーズ横断のdepends_on参照を解決できない)、[BL-036](issue_backlog.md#bl-036-最終計画書の財務需要数値が統合パスのたびに再ドリフトするbl-035f-38の射程がコスト計算にも及ぶ実例) |
 
 **内容:**
 
