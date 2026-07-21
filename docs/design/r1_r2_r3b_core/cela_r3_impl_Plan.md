@@ -229,19 +229,35 @@ def _read_verified_fact(args: dict, conn: sqlite3.Connection, run_id: str) -> st
     return json.dumps(results, ensure_ascii=False, indent=2)
 
 def _read_deliverable_file(args: dict) -> str:
-    """[F-3.8] Deliverableファイル読み取りツールのハンドラ"""
+    """[F-3.8] Deliverableファイル読み取りツールのハンドラ
+
+    ★修正（レビュー指摘③）: `save_deliverable_to_file`（cela_main.py:134-138）は
+    `os.path.join(log_dir, "deliverables", filename)`でパスを生成しており、本環境（Windows）では
+    実際のパスは`log\\2026-07-20\\1421\\deliverables\\...`のようにバックスラッシュ区切りになる。
+    旧案の`file_path.startswith("log/")`（フォワードスラッシュ固定の文字列前方一致）は、
+    (a) この環境で実在するパスを常に拒否してしまう、(b) `log/../secret.txt`のような
+    パストラバーサルを防げない、という2つの欠陥を持っていた。`pathlib.Path.resolve()`で
+    絶対パスに正規化した上で`relative_to()`によるディレクトリ包含チェックに変更する。
+    """
     file_path = args.get("file_path", "")
-    if not file_path or not os.path.exists(file_path):
-        return json.dumps({"status": "not_found", "message": f"ファイルが見つかりません: {file_path}"}, ensure_ascii=False)
-    if not file_path.startswith("log/"):
-        return json.dumps({"status": "error", "message": "log/ディレクトリ外へのアクセスは禁止されています。"}, ensure_ascii=False)
+    if not file_path:
+        return json.dumps({"status": "error", "message": "file_pathが指定されていません。"}, ensure_ascii=False)
+    base_dir = Path(getattr(MultiLogger, "log_dir", "log")).resolve().parent.parent if False else Path("log").resolve()
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
+        resolved = Path(file_path).resolve()
+        resolved.relative_to(base_dir)
+    except ValueError:
+        return json.dumps({"status": "error", "message": "logディレクトリ外へのアクセスは禁止されています。"}, ensure_ascii=False)
+    if not resolved.exists() or not resolved.is_file():
+        return json.dumps({"status": "not_found", "message": f"ファイルが見つかりません: {file_path}"}, ensure_ascii=False)
+    try:
+        content = resolved.read_text(encoding="utf-8")
         return content[:10000]  # 大量出力防止
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 ```
+
+**注意**: `Path("log").resolve()`はプロセスのカレントディレクトリ基準で`log/`を解決する。`cela_main.py`は常にプロジェクトルートから起動される前提（既存の`MultiLogger`・`save_deliverable_to_file`も同じ前提に依存）のため、追加の設定は不要。上記コード中の`if False else`は説明目的の記述であり、実装時は右辺（`Path("log").resolve()`）のみを採用する。
 
 ### 2.5 `TOOL_DISPATCH`への登録
 
