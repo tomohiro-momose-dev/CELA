@@ -506,6 +506,8 @@ lines.append(f"[{a.get('id', '?')}] {icon}{type_label} {clean_topic}: {content_p
 
 ### 3.2.2 ツール結果の二重JSONエンコード（★新規、R3b実装レビューで発見。R3aにも遡って影響）
 
+**✅ 修正実装済み（2026-07-21、Claude Sonnet 5が直接修正）**: `_read_verified_fact_handler`・`_read_deliverable_file_handler`・`_write_agreement_impl`を生のdict/list/str返却へ変更し、`_query_AI_live`のwrite_agreement成功判定も`_safe_json_parse`を経由しない直接判定に簡略化した。オフラインスモークテストで、`json.dumps`一回で正しく復元できることを確認済み。
+
 **問題**: `_query_AI_live`のツールループ末尾（`cela_main.py:1056-1059`）は、`python_repl`を含む全ツールの結果を無条件で`json.dumps(result, ensure_ascii=False)`してから`loop_messages`（LLMへの`role: "tool"`メッセージ）に積む。
 
 ```python
