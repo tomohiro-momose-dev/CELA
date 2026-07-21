@@ -460,6 +460,17 @@
 
 ---
 
+## 論点41: `phaseN/`フォルダ命名の陳腐化とR番号への一本化（D-037）
+
+- **ユーザー提起:** D-036でのR3a/R3b再編作業の直後、「フォルダの構造をphase毎に分けていますが、R#で進んでいてあまり意味がない、むしろ混乱する感じになってきていますね...」と指摘。
+- **AI分析:** 実際に`docs/design/phase3/`フォルダの中身を確認したところ、実際にはR5設計書（`cela_phase3_design_R5_v2.md`）であり、旧v23時代の「Phase 3（二重防衛線ガバナンス）」という現行R番号とは無関係な概念の名残りであることが判明。`phase2/`にもR4設計書とR2内のBL-023設計書が混在していた。さらに直前のD-036で`phase_gates.md`に新設した「Phase 3」の見出しが、この`phase3/`フォルダ（実際の中身はR5）と名称衝突していることも発見。整理方針として(A)R番号一本化、(B)対応表を1箇所に固定しフォルダは現状維持、(C)記録のみで着手しない、の3案を提示。
+- **ユーザー決定:** 「R番号一本化（推奨）」を選択。
+- **AI対応:** `phase0/`→`r0_planning/`、`phase1/`→`r1_r2_r3b_core/`（内部ファイルもR番号ベースへリネーム）、`phase2/cela_phase2_design_R4.md`→`r4/cela_r4_design.md`、`phase2/cela_phase2_design_BL023_task_state.md`→`r1_r2_r3b_core/cela_r2_design_BL023_task_state.md`、`phase3/cela_phase3_design_R5_v2.md`→`r5/cela_r5_design_v2.md`へ`git mv`。`phase6/`→`phase6plus/`のみ、ロードマップ自身の「Phase 6以降」という意図的な非R番号呼称を尊重し例外として維持。全ドキュメントの相互リンクを更新し、`scripts/check_docs_consistency.py`で不整合ゼロを確認。D-037として記録。
+- **決定者:** t-momose（命名の陳腐化・混乱の指摘、整理方針の選択）、Claude Sonnet 5（実際のフォルダ内容の調査による衝突の特定、整理案3案の提示）
+- **関連:** [D-037](decision_log.md#d-037-docsdesignphasenフォルダ命名をr番号ロードマップの実装単位へ一本化する)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
