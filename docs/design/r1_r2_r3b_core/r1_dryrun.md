@@ -2,7 +2,7 @@
 
 > **作成日**: 2026-07-18
 > **対象BL**: [BL-002](../issue_backlog.md#bl-002-r1完了条件の実データabドライラン未実施)（本手順の主対象）、[BL-003](../issue_backlog.md#bl-003-recordreplayスタブの実llm応答による往復検証未実施)（本手順の7章で合わせて実施）
-> **参照**: [cela_phase1_design_v7.md §5, §5.1](cela_phase1_design_v7.md), [cela_phase1_impl_Plan.md §7](cela_phase1_impl_Plan.md)
+> **参照**: [cela_r1_r2_r3b_design_v7.md §5, §5.1](cela_r1_r2_r3b_design_v7.md), [cela_r1_impl_Plan.md §7](cela_r1_impl_Plan.md)
 > **本書の位置づけ**: `AGENTS.md`のドキュメント規律に従い、本書には**手順・環境詳細のみ**を記載する。Pass/Fail結果サマリーは`../traceability.md`（T-*）へ、失敗・次の修正は`../issue_backlog.md`（BL-xxx）へ記録すること。本書自体には結果を書き込まない。
 
 ---

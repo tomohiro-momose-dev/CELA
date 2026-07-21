@@ -41,7 +41,7 @@
 | 決定内容 | ドライラン（BL-002）は`is_completed`/`halt`による自然終了、または`app.invoke()`の外側（次の「🔷 [Turn N]」表示直後）での意図的な打ち切りのいずれでも完了とみなす。途中終了する場合、`traceability.md`のT-*には「30ターン後まで」ではなく実際に到達したターン数を明記し、30が恣意的なデフォルト値だった旨も付記する。`app.invoke()`内部（差し戻しループの最中等）での強制終了は、fixtureが半端な状態で残りStep 4の構造比較を阻害するため避ける。 |
 | 影響 | `phase1/phase1_dryrun.md`（Step 1〜Step 4の記述）、`traceability.md`の結果記録方法 |
 | 関連 BL | [BL-002](issue_backlog.md#bl-002-r1完了条件の実データabドライラン未実施), [BL-003](issue_backlog.md#bl-003-recordreplayスタブの実llm応答による往復検証未実施), [BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離) |
-| 参照 | [cela_phase1_design_v7.md §5](phase1/cela_phase1_design_v7.md) |
+| 参照 | [cela_phase1_design_v7.md §5](r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md) |
 
 ---
 
@@ -52,11 +52,11 @@
 | 日付 | 2026-07-18 |
 | 状態 | `decided` |
 | 決定者 | t-momose（実機ドライランログの観測に基づく判断） |
-| **決定理由** | list版ベースラインの実データドライラン（[traceability.md T-5](traceability.md)）のログで、`numerical_allocator`が提示するトリップ時間・処理能力・予算等の数値提案に対し、detectorが数値矛盾（major）を理由に何度も差し戻す事態が繰り返し観測された（例: 平均トリップ時間や処理能力の算出誤り、時間帯拡大に伴う処理能力の比例計算漏れ等）。これはLLMが暗算（機械的検算なしの算術）で数値提案を行っていることが原因であり、設計書付録A（[cela_phase1_design_v7.md §3.4](phase1/cela_phase1_design_v7.md)で引用「暗算は原理的に信頼できない」）で既に指摘されている既知の限界の実例である。この検算不能な状態のまま指標A（却下案の回避率）・B（制約の維持率）・C（収束性とコストのトレードオフ）を測定しても、「F-2.6検算ゲート（Python REPL、R2で実装）が無いことによる差し戻し」と「R1のSQLite永続化・Hydrate基盤自体の効果」が混在してしまい、R1固有の効果を正しく分離評価できない。なお設計書§0の対応表は元々§5評価メトリクスを「R1〜R3共通」と分類しており、R1単体での指標A・B・C完全測定を要求する設計ではなかった。 |
+| **決定理由** | list版ベースラインの実データドライラン（[traceability.md T-5](traceability.md)）のログで、`numerical_allocator`が提示するトリップ時間・処理能力・予算等の数値提案に対し、detectorが数値矛盾（major）を理由に何度も差し戻す事態が繰り返し観測された（例: 平均トリップ時間や処理能力の算出誤り、時間帯拡大に伴う処理能力の比例計算漏れ等）。これはLLMが暗算（機械的検算なしの算術）で数値提案を行っていることが原因であり、設計書付録A（[cela_phase1_design_v7.md §3.4](r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md)で引用「暗算は原理的に信頼できない」）で既に指摘されている既知の限界の実例である。この検算不能な状態のまま指標A（却下案の回避率）・B（制約の維持率）・C（収束性とコストのトレードオフ）を測定しても、「F-2.6検算ゲート（Python REPL、R2で実装）が無いことによる差し戻し」と「R1のSQLite永続化・Hydrate基盤自体の効果」が混在してしまい、R1固有の効果を正しく分離評価できない。なお設計書§0の対応表は元々§5評価メトリクスを「R1〜R3共通」と分類しており、R1単体での指標A・B・C完全測定を要求する設計ではなかった。 |
 | 決定内容 | BL-002の指標A・B・Cの実測比較は、R2（F-2.6 Python REPL機械的検算ゲート）の実装完了後に実施する。R1単体では、既に確認済みの構造的一致（BL-003, T-5）をもってR1スコープの検証は完了とみなし、指標A・B・Cの本格測定はR2着手後のBLとして再設定する。 |
 | 影響 | [issue_backlog.md BL-002](issue_backlog.md)の依存関係・状態、[phase_gates.md P1-4](phase_gates.md)（Phase1 Exit条件の再定義） |
 | 関連 BL | BL-002 |
-| 参照 | [cela_phase1_design_v7.md §0, §3.4, §5](phase1/cela_phase1_design_v7.md)、[traceability.md T-5](traceability.md) |
+| 参照 | [cela_phase1_design_v7.md §0, §3.4, §5](r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md)、[traceability.md T-5](traceability.md) |
 
 ---
 
@@ -86,7 +86,7 @@
 | 決定内容 | ツール呼び出しループ（R2.3）は、既存の`try/except`リトライブロックの内側で回す。これによりツールループ全体が1リトライ単位となり、失敗時は`loop_messages`の途中経過を破棄して最初からやり直す（粒度は粗いがMAX_TOOL_ITER=5・Python REPLはローカル実行のため実害は軽微と判断し許容）。 |
 | 影響 | `cela_main.py` `_query_AI_live`（R2.3のツール呼び出しループ実装箇所） |
 | 関連 BL | なし |
-| 参照 | [decision_lineage.md 論点3](decision_lineage.md)、[cela_phase1_design_v7.md §3.5.2](phase1/cela_phase1_design_v7.md) |
+| 参照 | [decision_lineage.md 論点3](decision_lineage.md)、[cela_phase1_design_v7.md §3.5.2](r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md) |
 
 ---
 
@@ -146,7 +146,7 @@
 | 決定内容 | ツール呼び出しループの実装はR2.0.1（`query_AI`への集約）の内容のまま採用する。大きな設計変更は行わない。任意の改善として、ツールのdispatch（ツール名→処理のマッピング）をループ本体から分離し辞書化しておくことを推奨する（R3の`write_agreement_tool`追加時にループ本体を変更せずに済むため）。 |
 | 影響 | `cela_main.py` `query_AI`（ツールdispatch部分、任意改善） |
 | 関連 BL | なし |
-| 参照 | [decision_lineage.md 論点7](decision_lineage.md)、[cela_phase1_design_v7.md §3.5.2](phase1/cela_phase1_design_v7.md) |
+| 参照 | [decision_lineage.md 論点7](decision_lineage.md)、[cela_phase1_design_v7.md §3.5.2](r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md) |
 
 ---
 
@@ -336,10 +336,10 @@
 | 状態 | `decided` |
 | 決定者 | t-momose |
 | **決定理由** | ユーザーから「このプロジェクト自身が使っているロードマップ／phaseN詳細設計／issue_backlog／decision_lineage／phase_gate／STATUS／traceability／確定値の再利用、という情報構造をエージェントにも持たせればよいのでは」という指摘があった。調査の結果、CELAには「決定の系譜」（`decisions`テーブル）に相当するものは既に存在するが、「今どのフェーズ・タスクが進行中か」（STATUS相当）は`state["current_phase"]`が初期化時に一度セットされたきり凍結（BL-024、BL-005と同型）しており、「先送り記録」（issue_backlog相当）「完了条件」（phase_gate相当）「充足チェック」（traceability相当）「確定値の共有」（BL-015と重複）はいずれも構造として存在しないことが判明した。これらを個別のBLに分割することも検討したが、ユーザーが「結局目指すところは一緒」と判断したため、BL-023の統合設計として1つの設計書にまとめることにした。状態遷移（`current_phase`/`current_task_id`の更新）の書き手をどのノードにするかについては、新規LLM呼び出しを増やさず、既存の`decision_extractor`が持つ`Directive`抽出パターンを拡張することで実現できるため、`decision_extractor_node`を唯一の書き手とし、書き込み前にtask_planner確定済みの`phases`/`tasks`と照合するフェイルクローズ検証を挟む設計とした（本プロジェクトの`check_docs_consistency.py`が果たす役割と同型）。過去に`generate_user_utterance`側の強制JSON出力（`phase_id`/`task_id`）が試みられ無効化された形跡があるが、無効化理由がドキュメントに残っておらず、AGENTS.mdの「no guessing」原則によりこの方式は採用しない。 |
-| 決定内容 | `LineageState`に`current_task_id`/`verified_facts`/`task_criteria_status`を追加し、`Phase`/`Agreement`型を拡張（`Task`型新設、`Agreement.task_id`・`status: "Deferred"`追加）。`decision_extractor`の出力スキーマに`advances_to_phase_id`/`advances_to_task_id`を追加し、`decision_extractor_node`内でtask_planner確定済みのIDと照合した上でのみ`state["current_phase"]`/`current_task_id`を更新する。詳細は`docs/design/phase2/cela_phase2_design_BL023_task_state.md`を参照。 |
+| 決定内容 | `LineageState`に`current_task_id`/`verified_facts`/`task_criteria_status`を追加し、`Phase`/`Agreement`型を拡張（`Task`型新設、`Agreement.task_id`・`status: "Deferred"`追加）。`decision_extractor`の出力スキーマに`advances_to_phase_id`/`advances_to_task_id`を追加し、`decision_extractor_node`内でtask_planner確定済みのIDと照合した上でのみ`state["current_phase"]`/`current_task_id`を更新する。詳細は`docs/design/r1_r2_r3b_core/cela_r2_design_BL023_task_state.md`を参照。 |
 | 影響 | `cela_main.py`（`LineageState`/`Phase`/`Agreement`/`Task`型、`decision_extractor`/`decision_extractor_node`、DBスキーマに`agreements.task_id`列・`verified_facts`テーブル追加） |
 | 関連 BL | [BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、[BL-024](issue_backlog.md#bl-024-current_phaseが初期化後フリーズしtask_id単位の状態追跡が存在しない)、[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)、[BL-015](issue_backlog.md) |
-| 参照 | `docs/design/phase2/cela_phase2_design_BL023_task_state.md`、[decision_lineage.md 論点24](decision_lineage.md) |
+| 参照 | `docs/design/r1_r2_r3b_core/cela_r2_design_BL023_task_state.md`、[decision_lineage.md 論点24](decision_lineage.md) |
 
 ---
 
@@ -550,6 +550,36 @@
 | 影響 | `要件定義書_v35.md`（F-3.9・F-8.4新規追加、v35.2）。`cela_main.py`は現時点で変更なし。 |
 | 関連 BL | [BL-036](issue_backlog.md#bl-036-最終計画書の財務需要数値が統合パスのたびに再ドリフトするbl-035f-38の射程がコスト計算にも及ぶ実例)、[BL-037](issue_backlog.md#bl-037-decisionagreementのreason_whyが薄くdetector自身も後から数値の根拠を辿れない) |
 | 参照 | NPU-Context-Saverの時間減衰RAG・決定/否決ターン除外の実運用実績、[decision_lineage.md 論点39](decision_lineage.md) |
+
+---
+
+### D-036: R2をD-002同様の扱いでクローズし、R3を「R3a（自律的読み取り、F-3.8/F-3.9）→R3b（自律的書き込み、旧来のR3）」に再編する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-21 |
+| 状態 | `decided` |
+| 決定者 | t-momose |
+| **決定理由** | 次アクションであった指標C実測（BL-023適用前ベースラインとの比較、最低5試行）について、ユーザーから「ホワイトボード・ファイル/DB I/Oが実装されないと、検証の手間の割に検算導入だけでは効果が出ない」とのROI上の懸念が提起された。これに対し、T-10ドライランのレビューで発見した交絡要因（BL-035フェーズ横断`verified_facts`参照不能、BL-036財務・需要数値ドリフト、BL-037`reason_why`の薄さ）はいずれもPhase 6の最終統合ステップに集中しており、かつ「自律的**読み取り**」の欠落が共通の根本原因であることを確認した。一方、旧来のR3（`write_agreement_tool`による自律**書き込み**）はこれらの問題を直接解消しない。したがって、指標C実測という金のかかる検証を今すぐ行うより先に、実害が確認済みの読み取り欠落（F-3.8/F-3.9、v35.1/v35.2で要件化済み）を解消する方が費用対効果が高いと判断した。R2自体は、指標D実測（T-7・T-8）と全18タスク完走の定性確認（T-10）をもって、Phase 1（D-002）と同じ「構造的完了」の扱いでクローズし、指標Cの定量実測はR3a完了後の再ドライランへ振り替える。 |
+| 決定内容 | (1) R2を`phase_gates.md` P2-2の構造的クローズをもってDoneとする。(2) `cela_roadmap_v25.md`のR3を、R3a（F-3.8自律的読み取りツール・F-3.9構造化ファクトストア、先行実装）とR3b（`write_agreement_tool`、F-3.1〜F-3.7、旧来のR3スコープ）の2段階に再編する。(3) R4（ホワイトボード差分パッチ化）の前提は「R3a＋R3bの両方の完了」とし、`cela_phase2_design_R4.md`冒頭にその旨を追記する。(4) 指標C（収束性とコストのトレードオフ）の実測はP2-2からP3a-4（`phase_gates.md`新設）へ振り替える。 |
+| 影響 | `cela_roadmap_v25.md`（R2完了注記・R3のR3a/R3b分割・R4前提の更新）、`phase_gates.md`（P2-2クローズ・Phase 3節新設・サインオフ表）、`STATUS.md`（アクティブPhase・次アクション更新）、`cela_phase2_design_R4.md`（冒頭前提注記の追記）。`cela_main.py`は現時点で変更なし。 |
+| 関連 BL | [BL-035](issue_backlog.md#bl-035-_build_task_scope_contextがフェーズ横断のdepends_on参照を解決できない)、[BL-036](issue_backlog.md#bl-036-最終計画書の財務需要数値が統合パスのたびに再ドリフトするbl-035f-38の射程がコスト計算にも及ぶ実例)、[BL-037](issue_backlog.md#bl-037-decisionagreementのreason_whyが薄くdetector自身も後から数値の根拠を辿れない) |
+| 参照 | [D-002](decision_log.md)（Phase 1クローズ時の同種の指標先送り判断、前例）、[decision_lineage.md 論点40](decision_lineage.md) |
+
+---
+
+### D-037: `docs/design/phaseN/`フォルダ命名をR番号（ロードマップの実装単位）へ一本化する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-21 |
+| 状態 | `decided` |
+| 決定者 | t-momose |
+| **決定理由** | D-036でR3をR3a/R3bに再編した直後、ユーザーから「フォルダ構造をphase毎に分けているが、R#で進んでいてあまり意味がない、むしろ混乱する」との指摘があった。調査の結果、`docs/design/phaseN/`という命名は旧v23時代の「Phase番号」概念の残骸であり、現行のロードマップR番号（R1〜R5）とは既に対応が取れていなかったことが判明した（例: `phase3/`フォルダの中身は実際にはR5設計書`cela_phase3_design_R5_v2.md`だった。`phase2/`にはR4設計書とR2内の一機能追加設計書が混在していた）。さらに直前のD-036で`phase_gates.md`に新設した「Phase 3」の見出しが、この`phase3/`フォルダ（実際はR5）と名称衝突する状態になっていた。ユーザーに整理方針の選択肢（R番号一本化／対応表を1箇所に固定／記録のみで着手しない）を提示し、「R番号一本化（推奨）」が選ばれた。 |
+| 決定内容 | `docs/design/`配下のフォルダ・ファイル名をR番号ベースへ統一。`phase0/`→`r0_planning/`、`phase1/`→`r1_r2_r3b_core/`（内部ファイルも`cela_phase1_design_v7.md`→`cela_r1_r2_r3b_design_v7.md`、`cela_phase1_impl_Plan.md`→`cela_r1_impl_Plan.md`、`phase1_dryrun.md`→`r1_dryrun.md`へリネーム）、`phase2/cela_phase2_design_R4.md`→`r4/cela_r4_design.md`、`phase2/cela_phase2_design_BL023_task_state.md`→`r1_r2_r3b_core/cela_r2_design_BL023_task_state.md`（R2の一部のため）、`phase3/cela_phase3_design_R5_v2.md`→`r5/cela_r5_design_v2.md`。`phase6/`→`phase6plus/`は維持（ロードマップ自身が「Phase 6以降」という非R番号の呼称を意図的に使っている特殊区分のため、R番号化はしない）。全ファイルの相互リンクを更新し、`scripts/check_docs_consistency.py`で不整合ゼロを確認。 |
+| 影響 | `README.md`（詳細設計索引・実装フェーズ表）、`phase_gates.md`（ドキュメント役割表）、`cela_roadmap_v25.md`（各R節の詳細設計リンク）、`STATUS.md`、`issue_backlog.md`、`decision_log.md`、`decision_lineage.md`のリンク・パス参照。フォルダ・ファイルの物理移動のみで、内容の変更は行っていない。 |
+| 関連 BL | — |
+| 参照 | [decision_lineage.md 論点41](decision_lineage.md) |
 
 ---
 

@@ -5,7 +5,7 @@
 | 種別 | 正しい参照先 |
 |------|-------------|
 | 要件・背景・完了条件 | [要件定義書_v35.md](要件定義書_v35.md) |
-| Phase 詳細設計 | [phase0/](phase0/) [phase1/](phase1/) |
+| Phase 詳細設計 | [r0_planning/](r0_planning/) [r1_r2_r3b_core/](r1_r2_r3b_core/) |
 | 意思決定（なぜ） | [decision_log.md](decision_log.md) |
 | 索引 | [README.md](README.md) |
 
@@ -81,7 +81,7 @@
 | 状態 | `done` |
 | 優先度 | P1 |
 | 依存 | R1完了 |
-| 関連 | [cela_phase1_impl_Plan.md §2.3, §9](phase1/cela_phase1_impl_Plan.md)、[decision_log.md D-003](decision_log.md) |
+| 関連 | [cela_phase1_impl_Plan.md §2.3, §9](r1_r2_r3b_core/cela_r1_impl_Plan.md)、[decision_log.md D-003](decision_log.md) |
 
 **内容:**
 
@@ -106,7 +106,7 @@ R1では「壊さない」優先で、既存の`Agreement` TypedDict（`content`
 | 状態 | `blocked`（構造的一致は確認済み。指標A・B・Cの実測はR2待ち） |
 | 優先度 | P0 |
 | 依存 | R2（F-2.6 Python REPL機械的検算ゲート実装） |
-| 関連 | [cela_phase1_design_v7.md §3.4, §5, §5.1](phase1/cela_phase1_design_v7.md)、[traceability.md T-5](traceability.md)、[decision_log.md D-002](decision_log.md) |
+| 関連 | [cela_phase1_design_v7.md §3.4, §5, §5.1](r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md)、[traceability.md T-5](traceability.md)、[decision_log.md D-002](decision_log.md) |
 
 **内容:**
 
@@ -131,7 +131,7 @@ R1では「壊さない」優先で、既存の`Agreement` TypedDict（`content`
 | 状態 | `done` |
 | 優先度 | P1 |
 | 依存 | BL-002 |
-| 関連 | [cela_phase1_impl_Plan.md §7](phase1/cela_phase1_impl_Plan.md)、[traceability.md T-5](traceability.md) |
+| 関連 | [cela_phase1_impl_Plan.md §7](r1_r2_r3b_core/cela_r1_impl_Plan.md)、[traceability.md T-5](traceability.md) |
 
 **内容:**
 
@@ -153,7 +153,7 @@ R1では「壊さない」優先で、既存の`Agreement` TypedDict（`content`
 | 状態 | `open` |
 | 優先度 | P3 |
 | 依存 | なし |
-| 関連 | [cela_phase1_design_v7.md §6](phase1/cela_phase1_design_v7.md) |
+| 関連 | [cela_phase1_design_v7.md §6](r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md) |
 
 **内容:**
 
@@ -172,7 +172,7 @@ R1では「壊さない」優先で、既存の`Agreement` TypedDict（`content`
 | 状態 | `open` |
 | 優先度 | P2 |
 | 依存 | なし |
-| 関連 | [cela_phase1_design_v7.md §3.1](phase1/cela_phase1_design_v7.md)（グラフトポロジは維持、R1では触っていない既存プロトタイプ由来の挙動） |
+| 関連 | [cela_phase1_design_v7.md §3.1](r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md)（グラフトポロジは維持、R1では触っていない既存プロトタイプ由来の挙動） |
 
 **内容:**
 
@@ -745,7 +745,7 @@ D-009の本来の狙いは「一時的なAPI障害はリトライ、ロジック
 - 各Phaseの実装前に、AGENTS.md §5.2の設計ブループリントを提示しユーザー承認を得る。
 - 指標C（BL-002）の本格計測は、少なくともPhase Aの対応が完了してから着手する方針とする。
 
-**詳細設計**: [`docs/design/phase2/cela_phase2_design_BL023_task_state.md`](phase2/cela_phase2_design_BL023_task_state.md)（BL-024・issue_backlog相当のDeferredステータス・traceability相当のacceptance_criteria充足チェック・確定値共有ストア`verified_facts`を含む統合設計）。
+**詳細設計**: [`docs/design/r1_r2_r3b_core/cela_r2_design_BL023_task_state.md`](r1_r2_r3b_core/cela_r2_design_BL023_task_state.md)（BL-024・issue_backlog相当のDeferredステータス・traceability相当のacceptance_criteria充足チェック・確定値共有ストア`verified_facts`を含む統合設計）。
 
 ---
 
