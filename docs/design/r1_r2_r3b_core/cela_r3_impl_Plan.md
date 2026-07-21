@@ -369,13 +369,35 @@ WRITE_AGREEMENT_TOOL = {
                 "task_id": {"type": "string"},
                 "depends_on": {"type": "array", "items": {"type": "string"}},
                 "resource_claims": {"type": "object"},
-                "target_topic": {"type": "string", "description": "For UPDATE: the topic to update"}
+                "target_topic": {"type": "string", "description": "For UPDATE: the topic to update"},
+                "confirmed_variables": {
+                    "type": "array",
+                    "description": (
+                        "Optional. [F-3.9] If this decision confirms one or more values that belong to the "
+                        "current task's owns_variables, list them here. Each entry is saved to the structured "
+                        "fact store (verified_facts) with its reason and confidence, independent of whether "
+                        "decision_extractor_node runs this turn. confidence='provisional' is a fully legitimate "
+                        "value — it means 'proceeded with this value for now', not 'this is unverified/wrong'."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "variable_name": {"type": "string", "description": "Must match one of the current task's owns_variables"},
+                            "value": {"type": "string"},
+                            "unit": {"type": "string", "default": ""},
+                            "confidence": {"type": "string", "enum": ["confirmed", "provisional"], "default": "confirmed"}
+                        },
+                        "required": ["variable_name", "value"]
+                    }
+                }
             },
             "required": ["action_type", "status", "topic", "decision_what", "reason_why", "entry_type"]
         }
     }
 }
 ```
+
+**★スキーマ追加の理由（レビュー指摘の修正）**: 初版はF-3.9の`confidence`（confirmed/provisional）区別を「`reason_why`に自由記述で書けばF-3.9準拠」と説明していたが、これでは機械可読な区別が`agreements`側で失われ、F-3.9が目指した「後で状況が変わった際に`provisional`な値だけを再検討対象として引ける」という設計意図（決定理由書D-035参照）を実現できない。`confirmed_variables`を独立したフィールドとして追加し、`_write_agreement_impl`内で`upsert_verified_fact`へ直接渡すことで、`agreements.reason_why`の自由記述と`verified_facts.confidence`の構造化区別を両立させる。
 
 ### 3.2 システム最終フィルター（F-3.2）
 
