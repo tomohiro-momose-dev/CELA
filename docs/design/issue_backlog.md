@@ -69,6 +69,7 @@
 | BL-035 | 高 | `cela_main.py` (`_build_task_scope_context`) | 実ドライラン（`log/2026-07-20/1421`）のtask_6_3（総合導入計画の完成）で、Expertがピーク輸送力を誤計算（60÷13.8×9×3=117人/時と主張、正しくは60/13.8×9=39.1人/時でピーク需要66.7人/時を下回る）しDetectorに差し戻された事例をユーザーが発見。検算の結果、これは別フェーズ（task_2_1）確定済みの車両台数がピーク需要を満たせていないという根深い問題だったが、`_build_task_scope_context`（`cela_main.py:1306-1311`）が`state["current_phase"]["tasks"]`のみを走査するため、フェーズをまたぐ`depends_on`参照（task_6_3→task_2_1）が構造的に解決不能で、Expertは根拠の確定値にアクセスできないまま差し戻しを繰り返すリスクがある。`expert_retry_count>=3`で`reflection`に丸投げされるが収束は保証されない。即応パッチ（`state["phases"]`全体を走査するよう修正）ではなく、F-3.8（自律的DB/ファイル読み取りツール、要件定義書v35.1新規）実装時にまとめて解消する方針（D-032）。現時点では実装せず記録のみ | P2 |
 | BL-036 | 中 | `cela_main.py`（`decision_extractor_node`の統合パス、task_6_3系ペルソナ） | ユーザー依頼により`log/2026-07-20/1421`の全21成果物ファイルを内容面でレビューしたところ、「最終計画書」の財務・需要数値が統合パスのたびに再ドリフトしていることを発見。年間ランニングコストがPhase 3承認値（task_3_2、2,541万円・補助金使用率4.70%）に対し、Ver.1.0/1.1（3,000万円・20.00%）、logic_verifierの完了報告（2,980万円・19.33%）と、統合の都度異なる数値になっており、赤字額は最大4.26倍の開きがある。需要側も同様にtask_1_1確定値（総人口5,000人・1日総需要400人/日）から、最終盤で「人口5,200人・1日総需要200トリップ/日」へ根拠なくドリフトしていた（Detector自身がこの乖離を検出し`minor`判定で通過させていた）。原因はBL-035と同一（統合パス担当ペルソナが承認済み根拠ファイルを実際に読み返す手段を持たず、その場で数値を再構成している）で、独立した新規欠陥ではなくBL-035／F-3.8の射程がコスト・需要計算にも及ぶことを裏付ける実例。ユーザー判断により、これは既知の根本原因（読み取りツール欠如）から予想される結果であるため参考記録に留め、F-3.8実装後に読み取りアクセスを持った状態で再度Phase 6を走らせて初めて実効性を評価する方針とし、現時点では独立の緊急対応は行わない | P2 |
 | BL-037 | 中 | `cela_main.py`（`call_decision_extractor`のDecision/Agreement抽出プロンプト） | ユーザーが「decisionなどある程度記憶の外部化ができているが、理由の記載が甘い」と指摘し、`log/2026-07-20/1421`のDetector自身の思考ログに、後から確認しようとした数値の根拠を辿れず「根拠が不明」「以前のタスクで設定された数値かもしれないが根拠が不明」と繰り返し書かれている箇所（対象人口5,200人vs5,000人、1周回15分、80km/ルート、電話対応所要時間7.5時間/日等）を確認。原因は2種類：①`80km/ルート`等の中間的な計算仮定はExpertの自由記述レポート内に埋め込まれるのみで、そもそも`decision_extractor`が個別のDecision/owns_variableとして抽出しておらず`reason_why`欄自体が存在しない、②`最適導入台数は3台`のように実際にDecision化された項目でも`reason_why`が結論の言い換え程度に留まり、前提・出典・棄却した代替案までは記録されないケースがある。根本原因はBL-034〜036と同系統（後から参照可能な情報の粒度不足）だが、対象がファイル読み取りではなく`reason_why`欄の記載品質・抽出粒度自体である点で異なる。ユーザー判断により、まずBL記載のみに留め、F-3.1〜F-3.7（エージェント自身の自律書き込みツールへの移行、`decision_extractor_node`の縮小・撤廃）着手時にあわせて理由記載の強制粒度を再設計する方針とし、現時点ではプロンプトの単体強化は行わない | P2 |
+| BL-038 | 高 | `cela_main.py` (`decision_extractor_node`、`expert_node`、`_query_AI_live`の`_LAST_WRITE_AGREEMENT_SUCCEEDED`伝播) | R3b実装後の実ドライラン（`log/2026-07-21/2248`）で、Expertの`write_agreement`成功（task_1.1、`vehicle_count`確定、`entry_type="Decision"`）後も`decision_extractor_node`のAgreement抽出がスキップされず、同一トピック「必要車両台数の算出結果」で`entry_type="Deliverable"`の別エントリが二重に書き込まれた。オフライン再現テストでは`expert_node`単体の状態伝播は正常動作したため、原因は実グラフ実行中の状態伝播バグか、`write_agreement`の部分的カバレッジ（Decisionのみ書きDeliverableは書かない）を想定できていない設計の粒度不足のいずれか未確定。次回ドライラン前に`decision_extractor_node`内に診断ログを追加し原因を確定させる方針 | P1 |
 
 ---
 
@@ -1164,7 +1165,35 @@ for t in state.get("current_phase", {}).get("tasks", []):
 
 ---
 
-## 更新履歴
+### BL-038: `write_agreement`成功後も`decision_extractor_node`のAgreement抽出がスキップされず、同一トピックでDecisionとDeliverableの二重書き込みが発生する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（原因未確定、次回ドライラン前に診断ログ追加を推奨） |
+| 優先度 | P1 |
+| 依存 | [cela_r3_impl_Plan.md §3.5/§3.5.1](r1_r2_r3b_core/cela_r3_impl_Plan.md)（`wrote_agreement_this_turn`検知機構） |
+| 関連 | [D-036](decision_log.md#d-036-r2をd-002同様の扱いでクローズしr3をr3a自律的読み取りf-38f-39r3b自律的書き込み旧来のr3に再編する)（R3b実装） |
+
+**内容:**
+
+R3b実装後の実ドライラン（`log/2026-07-21/2248`）で発見。task_1.1にてExpertが`write_agreement`ツールで`entry_type="Decision"`, topic「必要車両台数の算出結果」, `confirmed_variables=[{"variable_name":"vehicle_count","value":"4",...}]`を`status="Proposed"`で書き込み成功（ログで`→ {'success': True, 'message': 'DB update successful'}`を確認）。設計（`cela_r3_impl_Plan.md` §3.5.1）では、この成功を受けて`decision_extractor_node`のAgreement抽出ループ（`db_append_agreement`等）は当該ターンでスキップされるはずだった。
+
+しかし実際のログでは、直後の`decision_extractor_node`実行時に`⏭️ [decision_extractor] write_agreementが呼ばれたため...スキップしました`という該当ログが一度も出力されず、代わりに通常の抽出処理が走り、同一トピック名「必要車両台数の算出結果」で`entry_type="Deliverable"`の**別のAgreementエントリ**が新規作成され、ファイルにも保存された（`decision_extractor`自身の思考ログで「内容包含完整的报告，因此entry_type应为'Deliverable'」と判断していた）。
+
+**調査結果（Claude Sonnet 5によるオフライン再現テスト）：**
+
+- `expert_node`単体を、実際の`_query_AI_live`ツールループを通す形（フェイククライアントで`write_agreement`のtool_callを模擬）で検証したところ、`state["expert_wrote_agreement"]`は正しく`True`になることを確認した（`_LAST_WRITE_AGREEMENT_SUCCEEDED`グローバル変数とその伝播機構自体は単体では正常動作）。
+- したがって原因は以下のいずれか、または両方の複合と考えられる：
+  1. **状態伝播のバグ**：実際のグラフ実行（`expert` → `expert_detector` → `expert_decision_extractor`、いずれも`build_graph()`でのノード登録名）の中で、`state["expert_wrote_agreement"]`が何らかの理由で`decision_extractor_node`到達までに失われている。原因箇所は未特定。
+  2. **設計の粒度不足**：Expertの`write_agreement`呼び出しは`entry_type="Decision"`（数値確定）のみをカバーしており、`entry_type="Deliverable"`（報告書本体・ファイル保存）は呼び出していない。`decision_extractor_node`は独自の判断でこの報告書全体をDeliverableとして抽出すべきと判定しており、これ自体は誤りではない可能性がある。§3.5.1の「write_agreementが一度でも呼ばれたらAgreement抽出を全部スキップ」という設計は、Expertが部分的にしか`write_agreement`を使わない（Decisionのみ書いてDeliverableは書かない）ケースを想定できておらず、単位が粗すぎる。
+
+**実害:** データ破損や機能停止はない。Decision用とDeliverable用で同じ実質内容のAgreementが2件並存する状態（DB冗長化、`_build_agreements_context`のプロンプト表示が若干冗長になる程度）。
+
+**完了条件:**
+
+- `decision_extractor_node`内に`wrote_agreement_this_turn`・`target_role`・`state.get("expert_wrote_agreement")`/`state.get("user_wrote_agreement")`の値を出力する診断ログを一時追加し、次回ドライランで実際の値を確認して原因（状態伝播バグか設計の粒度不足か）を確定させる。
+- 原因が(1)状態伝播バグと判明した場合：該当箇所を修正し、オフラインスモークテストで実際のグラフ経由の状態伝播を検証するテストケースを追加する（`tests/test_r3_smoke.py`の既存テストは`decision_extractor_node`を直接呼び出す形のみで、`expert_node`からの実グラフ経由の状態伝播は未カバーだったため、本件で検知できなかった）。
+- 原因が(2)設計の粒度不足と判明した場合：スキップ判定を「ターン単位」ではなく「トピック単位・entry_type単位」に細分化するか、`write_agreement`の`entry_type="Deliverable"`呼び出しを促すプロンプト指示を追加するかを再設計する。
 
 | 日付 | 内容 |
 |------|------|
@@ -1202,3 +1231,4 @@ for t in state.get("current_phase", {}).get("tasks", []):
 | 2026-07-21 | ユーザー依頼により`log/2026-07-20/1421`の全21成果物を内容面でレビュー。「最終計画書」の財務数値（年間ランニングコスト・実質赤字額・補助金使用率）が統合パスのたびにPhase 3承認値と最大4.26倍乖離し、需要数値（人口・1日総需要）も根拠なくドリフトしていることを発見。BL-035と同一原因（統合パスが承認済みファイルを読み返せない）の別事例と判明したため、BL-036として起票。ユーザー判断により、既知原因からの予想された結果として参考記録に留め、F-3.8実装後の再ドライランで実効性を評価する方針とした（D-033、[decision_lineage.md 論点37](decision_lineage.md)）。 |
 | 2026-07-21 | ユーザーが「decisionなどの理由記載が甘い」と指摘。Detector自身の思考ログに、対象人口5,200人・1周回15分・80km/ルート等の数値の根拠を辿れず「根拠が不明」と繰り返し書かれている箇所を確認。①中間仮定がDecisionとして抽出されずreason_why欄自体が存在しない、②抽出されても理由が結論の言い換えに留まる、の2種の欠落と判明。BL-034〜036と同系統だが対象がreason_why欄の記載品質・抽出粒度である点で異なるためBL-037として起票。ユーザー判断により、まずBL記載のみに留め、F-3.1〜F-3.7（自律的書き込みツールへの移行）着手時にあわせて再設計する方針とした（D-034、[decision_lineage.md 論点38](decision_lineage.md)）。 |
 | 2026-07-21 | ユーザーがCELAの前身プロジェクトNPU-Context-Saverでの実運用実績（時間減衰RAG検索＋決定/否決ターンの自動セイリエンス固定、タイムスタンプ順の時系列復元読み、値・理由・引用元の三つ組をトピック検索できるファクトストア）を共有し、これらをBL-036/BL-037の解決方針として要件化するよう提案。理由（reason）は絶対的な正しさを要求せず「暫定値として進めた」こと自体を正当な理由として認め、暫定/確定の区別を後の再検討トリガーとして機能させる設計を追加提起。要件定義書にF-8.4・F-3.9を新規追加（v35.2、D-035）し、BL-036・BL-037にこの解決方針への参照を追記した（[decision_lineage.md 論点39](decision_lineage.md)）。 |
+| 2026-07-21 | R3b実装後の実ドライラン（`log/2026-07-21/2248`）レビュー中に、Expertの`write_agreement`成功（task_1.1、`vehicle_count`確定）後も`decision_extractor_node`のAgreement抽出がスキップされず、同一トピックでDecision/Deliverableの二重書き込みが発生していることを発見。オフライン再現テストでは`expert_node`単体の状態伝播（`state["expert_wrote_agreement"]`）は正常動作したため、原因は実グラフ実行中の状態伝播バグか、`write_agreement`の部分的カバレッジ（Decisionのみ、Deliverableは別経路）を想定できていない設計の粒度不足のいずれかに絞り込んだ。原因未確定のためBL-038として新規起票、次回ドライラン前に診断ログの追加を推奨する内容を記録した。 |
