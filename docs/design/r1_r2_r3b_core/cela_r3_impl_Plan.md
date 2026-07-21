@@ -261,6 +261,8 @@ def _read_deliverable_file(args: dict) -> str:
 
 ### 2.5 `TOOL_DISPATCH`への登録
 
+**★修正（§1.5.1のディスパッチ修正を前提）**: ディスパッチループが`handler(args)`（辞書全体）を渡すよう修正済みなので、`TOOL_DISPATCH`の各エントリは`(args: dict) -> str`という単一シグネチャで統一できる。`conn`・`run_id`はモジュールレベル変数経由でクロージャに束縛する（`_LAST_PYTHON_CALLS`と同様、LangGraphが1プロセス内でノードを同期的に逐次実行する現行アーキテクチャ前提のパターンを踏襲、BL-033参照）。
+
 ```python
 TOOL_DISPATCH = {
     "python_repl": _run_python_repl,
@@ -269,7 +271,7 @@ TOOL_DISPATCH = {
 }
 ```
 
-**注意**: `read_verified_fact`は`conn`と`run_id`を必要とするが、`TOOL_DISPATCH`のハンドラは`(args: dict) -> str`というシグネチャを持つ必要がある。モジュールレベルの`_CURRENT_RUN_ID`変数を`run_ai_vs_ai_loop`冒頭でセットし、ハンドラから参照する。
+**注意**: `read_verified_fact`は`conn`と`run_id`を必要とする。モジュールレベルの`_CURRENT_RUN_ID`変数を`run_ai_vs_ai_loop`冒頭でセットし、ハンドラから参照する。
 
 ### 2.6 ツール付与ノードの拡張
 
