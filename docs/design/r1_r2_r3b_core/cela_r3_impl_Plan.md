@@ -242,7 +242,7 @@ def _read_deliverable_file(args: dict) -> str:
     file_path = args.get("file_path", "")
     if not file_path:
         return json.dumps({"status": "error", "message": "file_pathが指定されていません。"}, ensure_ascii=False)
-    base_dir = Path(getattr(MultiLogger, "log_dir", "log")).resolve().parent.parent if False else Path("log").resolve()
+    base_dir = Path("log").resolve()
     try:
         resolved = Path(file_path).resolve()
         resolved.relative_to(base_dir)
@@ -257,7 +257,7 @@ def _read_deliverable_file(args: dict) -> str:
         return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 ```
 
-**注意**: `Path("log").resolve()`はプロセスのカレントディレクトリ基準で`log/`を解決する。`cela_main.py`は常にプロジェクトルートから起動される前提（既存の`MultiLogger`・`save_deliverable_to_file`も同じ前提に依存）のため、追加の設定は不要。上記コード中の`if False else`は説明目的の記述であり、実装時は右辺（`Path("log").resolve()`）のみを採用する。
+**注意**: `Path("log").resolve()`はプロセスのカレントディレクトリ基準で`log/`を解決する。`cela_main.py`は常にプロジェクトルートから起動される前提（既存の`MultiLogger`・`save_deliverable_to_file`も同じ前提に依存）のため、追加の設定変更は不要。`pathlib.Path`は本ファイル冒頭に未importのため、`cela_main.py`側で`from pathlib import Path`の追加が必要（変更対象ファイル一覧§6に反映済み）。
 
 ### 2.5 `TOOL_DISPATCH`への登録
 
