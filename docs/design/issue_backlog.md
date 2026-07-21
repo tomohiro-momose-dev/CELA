@@ -70,6 +70,7 @@
 | BL-036 | 中 | `cela_main.py`（`decision_extractor_node`の統合パス、task_6_3系ペルソナ） | ユーザー依頼により`log/2026-07-20/1421`の全21成果物ファイルを内容面でレビューしたところ、「最終計画書」の財務・需要数値が統合パスのたびに再ドリフトしていることを発見。年間ランニングコストがPhase 3承認値（task_3_2、2,541万円・補助金使用率4.70%）に対し、Ver.1.0/1.1（3,000万円・20.00%）、logic_verifierの完了報告（2,980万円・19.33%）と、統合の都度異なる数値になっており、赤字額は最大4.26倍の開きがある。需要側も同様にtask_1_1確定値（総人口5,000人・1日総需要400人/日）から、最終盤で「人口5,200人・1日総需要200トリップ/日」へ根拠なくドリフトしていた（Detector自身がこの乖離を検出し`minor`判定で通過させていた）。原因はBL-035と同一（統合パス担当ペルソナが承認済み根拠ファイルを実際に読み返す手段を持たず、その場で数値を再構成している）で、独立した新規欠陥ではなくBL-035／F-3.8の射程がコスト・需要計算にも及ぶことを裏付ける実例。ユーザー判断により、これは既知の根本原因（読み取りツール欠如）から予想される結果であるため参考記録に留め、F-3.8実装後に読み取りアクセスを持った状態で再度Phase 6を走らせて初めて実効性を評価する方針とし、現時点では独立の緊急対応は行わない | P2 |
 | BL-037 | 中 | `cela_main.py`（`call_decision_extractor`のDecision/Agreement抽出プロンプト） | ユーザーが「decisionなどある程度記憶の外部化ができているが、理由の記載が甘い」と指摘し、`log/2026-07-20/1421`のDetector自身の思考ログに、後から確認しようとした数値の根拠を辿れず「根拠が不明」「以前のタスクで設定された数値かもしれないが根拠が不明」と繰り返し書かれている箇所（対象人口5,200人vs5,000人、1周回15分、80km/ルート、電話対応所要時間7.5時間/日等）を確認。原因は2種類：①`80km/ルート`等の中間的な計算仮定はExpertの自由記述レポート内に埋め込まれるのみで、そもそも`decision_extractor`が個別のDecision/owns_variableとして抽出しておらず`reason_why`欄自体が存在しない、②`最適導入台数は3台`のように実際にDecision化された項目でも`reason_why`が結論の言い換え程度に留まり、前提・出典・棄却した代替案までは記録されないケースがある。根本原因はBL-034〜036と同系統（後から参照可能な情報の粒度不足）だが、対象がファイル読み取りではなく`reason_why`欄の記載品質・抽出粒度自体である点で異なる。ユーザー判断により、まずBL記載のみに留め、F-3.1〜F-3.7（エージェント自身の自律書き込みツールへの移行、`decision_extractor_node`の縮小・撤廃）着手時にあわせて理由記載の強制粒度を再設計する方針とし、現時点ではプロンプトの単体強化は行わない | P2 |
 | BL-038 | 高 | `cela_main.py` (`decision_extractor_node`、`expert_node`、`_query_AI_live`の`_LAST_WRITE_AGREEMENT_SUCCEEDED`伝播) | R3b実装後の実ドライラン（`log/2026-07-21/2248`）で、Expertの`write_agreement`成功（task_1.1、`vehicle_count`確定、`entry_type="Decision"`）後も`decision_extractor_node`のAgreement抽出がスキップされず、同一トピック「必要車両台数の算出結果」で`entry_type="Deliverable"`の別エントリが二重に書き込まれた。オフライン再現テストでは`expert_node`単体の状態伝播は正常動作したため、原因は実グラフ実行中の状態伝播バグか、`write_agreement`の部分的カバレッジ（Decisionのみ書きDeliverableは書かない）を想定できていない設計の粒度不足のいずれか未確定。次回ドライラン前に`decision_extractor_node`内に診断ログを追加し原因を確定させる方針 | P1 |
+| BL-039 | 高 | `cela_main.py` (`_resolve_task_transition`, `_get_current_task`, `call_decision_extractor`) | 実ドライラン（`log/2026-07-21/2248`）で、`decision_extractor`が出力する`advances_to_task_id`がドット表記（`task_1.1`等）である一方、`call_task_planner`が生成する実際の`task_id`はアンダースコア表記（`task_1_1`等）であるため、`_resolve_task_transition`の存在チェックに毎回失敗し、ログ全体（task_1.2〜task_2.2、8箇所）で**タスク遷移が1回も成功していない**ことが判明。`current_task_id`が初期値のまま更新されず、`_get_current_task`のフォールバックにより`call_detector`・`call_expert`（`light_system_prompt`）・`decision_extractor_node`（`owns_variables`スコープ）が終始phase 1先頭タスクのスコープ情報を参照し続けており、BL-023/BL-025のスコープガードレール機構がドライラン開始直後から実質的に無効化されていた | P0 |
 
 ---
 
@@ -1194,6 +1195,42 @@ R3b実装後の実ドライラン（`log/2026-07-21/2248`）で発見。task_1.1
 - `decision_extractor_node`内に`wrote_agreement_this_turn`・`target_role`・`state.get("expert_wrote_agreement")`/`state.get("user_wrote_agreement")`の値を出力する診断ログを一時追加し、次回ドライランで実際の値を確認して原因（状態伝播バグか設計の粒度不足か）を確定させる。
 - 原因が(1)状態伝播バグと判明した場合：該当箇所を修正し、オフラインスモークテストで実際のグラフ経由の状態伝播を検証するテストケースを追加する（`tests/test_r3_smoke.py`の既存テストは`decision_extractor_node`を直接呼び出す形のみで、`expert_node`からの実グラフ経由の状態伝播は未カバーだったため、本件で検知できなかった）。
 - 原因が(2)設計の粒度不足と判明した場合：スキップ判定を「ターン単位」ではなく「トピック単位・entry_type単位」に細分化するか、`write_agreement`の`entry_type="Deliverable"`呼び出しを促すプロンプト指示を追加するかを再設計する。
+
+### BL-039: `decision_extractor`が出力するtask_idの表記ゆれ（ドット vs アンダースコア）により、タスク遷移がドライラン全体で1回も成功していない
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P0 |
+| 依存 | [BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)（`_get_current_task`によるスコープ限定機構）、[BL-024](issue_backlog.md#bl-024-current_phaseが初期化後フリーズしtask_id単位の状態追跡が存在しない)（`current_phase`/`current_task_id`の状態管理）、[BL-025](issue_backlog.md#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする)（Expertスコープガードレール） |
+| 関連 | [decision_lineage.md 論点24・26](decision_lineage.md)（BL-023/BL-025設計時の議論） |
+
+**内容:**
+
+R3b実装後の実ドライラン（`log/2026-07-21/2248`、`log_no_prompt.md`）レビュー中に発見。`call_task_planner`が生成する実際の`task_id`はアンダースコア表記（例: `"task_id": "task_1_1"`）だが、`call_decision_extractor`が返す`advances_to_task_id`はドット表記（例: `"task_1.1"`）になっており、`_resolve_task_transition`（`cela_main.py:3160-3164`）の`valid_task_ids`存在チェックに毎回一致しない。ログ全体を検索したところ、以下の8箇所すべてでタスク遷移が拒否されていた（`⚠️ [decision_extractor] 存在しないtask_id '...' への遷移要求を無視しました。`）：
+
+```
+task_1.1 → task_1.2 遷移時 / task_1.2 → task_1.3 遷移時 / task_1.3 → task_1.4 遷移時（×2）
+task_1.4 → task_1.5 遷移時 / task_1.5 → task_2.1 遷移時 / task_2.1 → task_2.2 遷移時
+```
+
+`state["current_task_id"]`は初期値（空文字列）のまま一度も正しく更新されておらず、`_get_current_task`（`cela_main.py:1671-1681`）は毎ターン、フォールバック（`return tasks[0] if tasks else {}`）によりそのフェーズの先頭タスクを返し続けていた。実際、ログ後半（task_2.1評価時点、21600行台）でDetectorに提示されたacceptance_criteriaは、依然としてtask_1.1のもの（車両台数算出関連の3項目）のままだった。
+
+`phase_id`側（`advances_to_phase_id`）はアンダースコアなしの`phase_2`等の単純な表記のため一致しており、phase遷移自体は成功していた形跡がある一方、`task_id`側だけが表記ゆれで機能していない。プロンプト側の指示例（`cela_main.py:2265`「次のタスク（task_1_2）に移行する」）自体は正しいアンダースコア表記だが、LLMが会話履歴中の自然文表記（人間がタスクを"task_1.1"のようにドットで言及する慣習）を引きずってしまっていると考えられる。
+
+**影響範囲:** `_get_current_task`はBL-023/BL-025のスコープ限定機構の中核であり、以下すべてに波及する。
+- `call_detector`のacceptance_criteria充足チェック（`cela_main.py:2043-2045`）
+- `call_expert`の`light_system_prompt`（現在タスクの範囲限定、BL-025のガードレール、`cela_main.py:2017-2024`）
+- `decision_extractor_node`の`owns_variables`スコープ（`cela_main.py:3189-3190`）
+
+つまりBL-023 Phase A・BL-025で実装したスコープガードレールが、本ドライランの開始直後（task_1.2着手時点）から実質的に無効化されていた可能性が高い。実害としては、Detector判定時の`criteria_status`が終始的外れなAC（task_1.1のもの）に対するbool配列になっていた（Detector自身が思考ログ内で毎回「これはtask_1.1のACではないか」と気づき、`comment`欄で補足しつつ`risk`/`constraint_issue`自体は妥当な値に自己修正していたため、致命的な誤判定・不当な差し戻しには至っていない）。ただしExpertの`light_system_prompt`側で同様のスコープ混線が実際にどう影響したか（BL-025ガードレールが常にtask_1.1基準で発動していたか）は未確認。
+
+**完了条件:**
+
+- `_resolve_task_transition`内で、LLMが返す`next_task_id`/`next_phase_id`を実在ID集合と照合する前に正規化（ドット→アンダースコア変換、または`task_id`の数字部分のみを抽出したファジーマッチ）を行い、表記ゆれを吸収する。
+- 併せて、`call_decision_extractor`のプロンプトに現在フェーズの正確な`task_id`一覧（`state["phases"]`から動的に列挙）を明示し、LLMがコピー元を持てるようにする。
+- 修正後、オフラインスモークテスト（`tests/test_r3_smoke.py`等）に、ドット表記を含む`advances_to_task_id`が正しく正規化されて遷移が成立することを検証するケースを追加する。
+- 修正後の再ドライランで、`_get_current_task`が実際に想定タスクを返し続けていること（Detectorのcriteria_textが各タスク固有のACになっていること）をログで確認する。
 
 | 日付 | 内容 |
 |------|------|
