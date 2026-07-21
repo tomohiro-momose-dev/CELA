@@ -552,6 +552,57 @@ TOOL_DISPATCH = {
 - 各ノード（Expert/User AI/Detector/Reviewer/Arbiter/Integrator）の`query_AI`呼び出し時に`write_agreement`ツールを付与し、AIが自律的に書き込む
 - `decision_extractor_node`は現在と同じタイミングで発火し、ツール呼び出しが行われなかった会話ターンを事後的に補完する
 
+### 3.5.1 「今ターン`write_agreement`が呼ばれたか」の検知機構（★新規、レビュー指摘G4）
+
+**問題**: §3.5は「`write_agreement`が呼ばれなかった場合のみAgreement書き込みを行う」という意図は明記していたが、**その検知手段を具体的に与えていなかった**。この欠落により、実装時に何を条件にすればよいか判断できず、`decision_extractor_node`側の条件分岐が実装されない事態を招いた（本節はこの欠落そのものの修正）。
+
+**修正内容**: BL-033で導入済みの`_LAST_PYTHON_CALLS`/`get_last_python_calls()`（`query_AI()`呼び出しのたびにリセットされ、ツールループ内で蓄積されるモジュールレベルの記録）と全く同じパターンを踏襲する。
+
+```python
+# query_AI()冒頭、_LAST_PYTHON_CALLS = [] のすぐ隣でリセットする
+_LAST_WRITE_AGREEMENT_SUCCEEDED = False
+
+
+def get_last_write_agreement_succeeded() -> bool:
+    """[R3b] 直前のquery_AI呼び出しのツールループ内で、write_agreementが
+    1回でも成功したか（success=Trueで返ったか）を返す。"""
+    return _LAST_WRITE_AGREEMENT_SUCCEEDED
+
+
+# query_AI()内、_LAST_PYTHON_CALLS = [] と同じ場所に追加
+def query_AI(messages, client, model, label="Unknown Node", tools=None, light_system_prompt=None):
+    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED
+    _LAST_PYTHON_CALLS = []
+    _LAST_WRITE_AGREEMENT_SUCCEEDED = False
+    ...
+
+
+# _query_AI_liveのツールループ、else分岐（result = handler(args)の直後）
+result = handler(args)
+if tc.function.name == "write_agreement" and isinstance(result, dict) and result.get("success"):
+    global _LAST_WRITE_AGREEMENT_SUCCEEDED
+    _LAST_WRITE_AGREEMENT_SUCCEEDED = True
+```
+
+**stateへのキャプチャ**: `_LAST_PYTHON_CALLS`が`expert_node`内で`state["expert_last_python_calls"] = get_last_python_calls()`としてキャプチャされているのと全く同じ場所・同じタイミングで、以下を追加する。
+
+- `expert_node`（`call_expert`呼び出し直後）: `state["expert_wrote_agreement"] = get_last_write_agreement_succeeded()`
+- User AIのノード（`generate_user_utterance`呼び出し直後）: `state["user_wrote_agreement"] = get_last_write_agreement_succeeded()`
+
+**`decision_extractor_node`側の条件分岐**:
+
+```python
+# target_role判定の直後（既存の「直前の発言者が誰かを履歴の末尾から自動判定する」ブロックの後）
+wrote_agreement_this_turn = (
+    state.get("expert_wrote_agreement", False) if target_role == "expert"
+    else state.get("user_wrote_agreement", False)
+)
+```
+
+`call_decision_extractor`（LLM呼び出し自体）は`owned_variable_values`抽出のため無条件で毎ターン実行し続けるが、`extracted_items`をループして`db_append_agreement`/`db_supersede_agreement`を呼ぶブロック全体を`if not wrote_agreement_this_turn:`で囲む。`owned_variable_values`→`upsert_verified_fact`の処理（2798-2808行目）はこの条件の**外側**に置き、無条件のまま維持する。
+
+**注意（Detector/Reviewer/Arbiter/Integratorの`write_agreement`について）**: これら4ノードは`Rejected`のみの書き込み権限であり、`decision_extractor_node`が拾う対象は「直前の発言者（Expert/User AI）のchat_history」であるため、Detector等が`write_agreement`を呼んでも`wrote_agreement_this_turn`の判定には影響しない（意図的）。Detector等のRejected書き込みは`decision_extractor_node`のセーフティネットと独立して常に有効な経路のままとする。
+
 ### 3.6 Reason記載の強制粒度（BL-037対応）
 
 R3bで実装するツール呼び出し時に、プロンプトに以下の指示を追加する：
