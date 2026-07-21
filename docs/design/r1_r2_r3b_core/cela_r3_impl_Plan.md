@@ -536,6 +536,8 @@ loop_messages.append({
 
 ### 3.2.3 `write_agreement`経由のDeliverable保存処理の欠落（★新規、R3b実装レビューで発見。本計画書§3.1〜3.2自体の記述漏れ）
 
+**✅ 修正実装済み（2026-07-21、Claude Sonnet 5が直接修正）**: `_commit_agreement_from_tool`にDeliverableのファイル保存（CREATE時、200文字超）とファイル上書き防止（UPDATE時）を追加した。オフラインスモークテストで、500文字のDeliverableが`log/deliverables/`にファイル保存され`agreements.decision_what`が`FILE_PATH:`で始まること、保存内容が一致することを確認済み。
+
 **問題**: `decision_extractor_node`（既存コード、`cela_main.py`旧2810-2860行目付近）には、`entry_type=="Deliverable"`の場合に本文を`save_deliverable_to_file`でファイル保存し`decision_what`に`FILE_PATH:{filepath}`というポインタを格納する処理と、UPDATE時に短い要約でファイルパスを上書きしないための保護処理（「🛡️ ファイル上書き防止の鉄壁の保護」ブロック）が存在する。
 
 しかし、本計画書§3.1（`WRITE_AGREEMENT_TOOL`定義）・§3.2（`_write_agreement_impl`/`_commit_agreement_from_tool`）は、Deliverableのファイル保存について**一度も言及していなかった**。実装（`_commit_agreement_from_tool`）はこの欠落をそのまま反映し、`args.get("decision_what", "")`を無条件でそのまま`agreements.decision_what`列にINSERTしている。実機検証の結果、`write_agreement`で`entry_type="Deliverable"`・`action_type="CREATE"`・500文字の本文を送信したところ、**ファイルには一切保存されず、生の本文がSQLiteの`decision_what`列に直接格納される**ことを確認した。
