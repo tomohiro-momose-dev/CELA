@@ -84,6 +84,7 @@
 | BL-050 | 中 | `cela_main.py` (`call_decision_extractor`, `_build_agreements_context`) | ドライラン（`log/2026-07-22/2336`）で、車両台数が「task_1_1で3台」→「task_4_1の指示で2台」に変わった経緯をDetectorが辿れず、根拠を確認できないまま「Userが確定値と言っている以上、調整済みと解釈できる」と流してしまう場面を確認。`write_agreement`のSUPERSEDEは旧レコードを`status='Superseded'`にして残す方式だが、①Detectorに提示する`【決定事項DB】`コンテキストが有効な行だけに絞り込まれ過去版を見せない、②新しい値の`reason_why`が「前の値から何故変わったか」を明示することを要求されていない、の2点が実質的な欠落と判明。BL-037（reason_why記載品質、既存）と同系統だが「変遷の可視化」という点で更に踏み込んだ課題。`decision_extractor`を「新規決定を抽出する」役割から「各ノードが自ら出した決定の`reason_why`が妥当な理由になっているか監査する」役割へ軸足を移す方向性と、`【決定事項DB】`への差分・変更理由の明示を提案（設計相談・BL起票のみ、実装は次回以降） | P2 |
 | BL-051 | 中 | `cela_main.py` (`call_detector`, `detector_node`, フェーズ終了判定ロジック) | Detectorの現行出力（`risk`/`constraint_issue`/`comment`の単一判定）では、思考過程で気づいた致命的でない懸念が構造化されずに失われる問題をユーザーが指摘。Detectorの気づきをissue_bl的な構造化リスト（`{id, severity, description, resolved, phase_id}`等）として蓄積し、フェーズ終了は未解決issueがゼロになるまで完了できないゲートとし、延期にはUser・Detector双方が確認する明示的な理由を要求する監視機構を提案。BL-041（facilitator/Arbiter再設計、design draft作成済みだが未実装）と同格の大きめの構造変更のため、まず設計ドラフトの作成から始める方針（設計相談・BL起票のみ、実装は次回以降） | P2 |
 | BL-052 | 低 | `cela_main.py` (`WRITE_AGREEMENT_TOOL`スキーマ、ホワイトボード本文フォーマット) | ホワイトボード（`whiteboard_drafts`）の各文・意味のまとまりに、根拠となる`agreements.id`等を指す参照（例:`[AG:123]`）をExpertに明示させ、本文中の主張とDB上の決定・理由を直接紐付けられるようにする提案をユーザーが発案（BL-050の「経緯が辿れない」問題への補完策）。捏造ID・可読性低下のリスクはあるが、`depends_on`の数値ID検証（BL-047で実装済みのパターン）がそのまま転用できる見込み。BL-050（理由監査役）・BL-051（issue_bl）とセットで設計するのが筋が良い方針（ID実在チェックはdecision_extractor監査役の担当範囲に自然に乗る）（設計相談・BL起票のみ、実装は次回以降） | P3 |
+| BL-053 | 高 | `cela_main.py` (`get_verified_facts_from_db`) | ~~ドライラン（`log/2026-07-22/2336`）で、`read_verified_fact`/`read_deliverable_file`呼び出し44回中18回（41%）が`not_found`になっていることをユーザーが指摘~~ → `done`。真因は、`get_verified_facts_from_db`の`topic_keyword`あいまい検索が`variable_name`列（英語スネークケース識別子、例:`vehicle_count`）のみを対象にしていた一方、AIが渡す`topic_keyword`はツール定義自体が例示する通り「予算」「オペレーター」等の日本語の説明的キーワードがほとんどで、両者が文字列として重なることが構造的にほぼ無かったこと。`verified_facts`テーブルには日本語理由文が入る`reason`列が既に存在するのに検索対象に含まれていなかった。`variable_name OR reason`のLIKE検索に変更して修正、回帰テスト1件追加（`tests/test_r3_smoke.py`） | P1 |
 
 ---
 
@@ -1649,6 +1650,38 @@ BL-050（理由監査役）・BL-051（issue_bl）とセットで設計するの
 - `WRITE_AGREEMENT_TOOL`の`decision_what`（Deliverable本文）または`edits`内で、インラインID参照の記法（例:`[AG:123]`）を定義する。
 - BL-047の`depends_on`検証と同様、ID実在チェックを`_write_agreement_impl`または`decision_extractor`監査役に実装する。
 - BL-050・BL-051の設計確定後、まとめて着手するか個別に着手するかを判断する。
+
+---
+
+### BL-053: `get_verified_facts_from_db`のtopic_keyword検索が`variable_name`列しか見ておらず、日本語キーワードで構造的にほぼ一致しない
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 依存 | なし |
+| 関連 | [BL-040](issue_backlog.md#bl-040-read_deliverable_fileがfile_path直接指定に依存し実質的に発見不能だった問題)（同種の「発見不能性」問題、`read_deliverable_file`側は解決済み） |
+
+**内容:**
+
+ドライラン（`log/2026-07-22/2336`）で、`read_verified_fact`/`read_deliverable_file`呼び出し44回中18回（41%）が`not_found`になっていることをユーザーが指摘した。
+
+調査の結果、`get_verified_facts_from_db`（`cela_main.py`）の`topic_keyword`によるあいまい検索が
+
+```python
+"SELECT * FROM verified_facts WHERE run_id=? AND variable_name LIKE ?"
+```
+
+と`variable_name`列のみを対象にしていたことが真因と判明。`variable_name`は`vehicle_count`のような英語スネークケース識別子だが、`READ_VERIFIED_FACT_TOOL`のツール定義自体が`topic_keyword`の例として「'車両', '予算', '需要'」という日本語の説明的キーワードを挙げており、AIが実際に渡す値もほぼ日本語。両者が文字列として重なることは構造的にほぼ無く、"予算"・"オペレーター"・"通信"・"システム構築費"等の日本語キーワード検索がログ上ほぼ全て`not_found`になっていた。`verified_facts`テーブルには日本語理由文が入る`reason`列（`upsert_verified_fact`で保存済み）が既に存在するのに、検索対象に含まれていなかった。
+
+**実装（`cela_main.py`）:**
+
+`variable_name LIKE ? OR reason LIKE ?`のLIKE検索に変更し、`reason`列も検索対象に含めた。
+
+**完了条件:**
+
+- `tests/test_r3_smoke.py`に回帰テスト`test_bl053_get_verified_facts_topic_search_matches_japanese_reason`を追加（日本語`topic_keyword`「予算」で`reason`列にのみ「予算上限」を含む`variable_name`をヒットさせられることを確認）、既存テストと合わせてPass。
+- 実LLM再ドライランで、`read_verified_fact`の`not_found`率が改善することを確認する（次回待ち）。
 
 ---
 
