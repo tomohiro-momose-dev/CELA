@@ -598,6 +598,36 @@
 
 ---
 
+### D-039: ドライランの一時停止・再開を、`app.stream()`によるノード単位チェックポイントで実装する（ターン境界方式は不採用）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-22 |
+| 状態 | `decided` |
+| 決定者 | t-momose（ターン凍結の指摘・最終承認） / Claude Sonnet 5（当初案の提示・誤りの訂正・再設計） |
+| **決定理由** | ドライラン長時間化により連続稼働が難しいとの相談を受け、AIは当初「`app.invoke()`から戻ったターン境界でstateをJSON保存し、次回起動時に再開する」方式を提案した。しかしユーザーが「そもそも今、ターンは凍結されて1のままなのでは？」と指摘し、BL-005（`state["turn_count"]`は`route_after_expert_decision`が`generate_user_utterance`へ内部ループバックし続ける限り更新されず、`app.invoke()`単位では長時間戻ってこないことがある）を踏まえると、ターン境界でのチェックポイントは実用にならないと判明した。 |
+| 決定内容 | `run_ai_vs_ai_loop`で`app.invoke(state)`の代わりに`app.stream(state, stream_mode="values")`を使い、グラフの各ノード実行後のstateスナップショットを都度受け取ってcheckpoint（`_save_checkpoint`、原子的書き込み）へ保存する。`KeyboardInterrupt`（Ctrl+C）を捕捉し保存後に終了、`--resume <checkpoint.json>`で`_load_checkpoint`から`state`/`config`/`current_turn`を復元する。グラフのentry_pointが`task_planner`固定のため、再開は「止めたノードそのものから」ではなく「その回（ラウンド）の頭（`generate_user_utterance`）から」になる（`task_planner_node`に`turn_count==1 and not state.get("phases")`の冪等性ガードを追加し、ターン1途中の再開でも計画を再生成しないようにした）。 |
+| 影響 | `cela_main.py`（`_save_checkpoint`/`_load_checkpoint`新設、`run_ai_vs_ai_loop`の`resume_from`引数、`task_planner_node`の冪等性ガード、`__main__`の`--resume` CLI引数）。`tests/test_checkpoint_resume.py`（新規4件）。オフラインスモークテスト計70件通過。実LLMドライランでのCtrl+C→`--resume`往復の実地確認は未実施。 |
+| 関連 BL | [BL-044](issue_backlog.md#bl-044-ドライランの一時停止再開機能ctrlccheckpointjson--resume)、[BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離) |
+| 参照 | [decision_lineage.md 論点45](decision_lineage.md) |
+
+---
+
+### D-040: reflection/facilitatorの周期発火を、`turn_count`ではなく新設の`round_count`（`generate_user_utterance_node`再入場カウント）で判定するよう変更する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-23 |
+| 状態 | `decided` |
+| 決定者 | t-momose（区切り単位の確認・承認） / Claude Sonnet 5（原因特定・実装） |
+| **決定理由** | 実ドライラン（`log/2026-07-22/2336`）で、task_planner生成のacceptance_criteria自体に数学的矛盾（山間部12km・時速20km/h前提では30分以内は不可能）があったところ、Expertが根拠のない内訳（8km+4km）ででっち上げて帳尻を合わせ、Detectorも自身の推測で追認してしまう事例をユーザーが発見。ユーザーが「このお題はGeminiとの壁打ちで、あえて無理な制約を与えAIがどう格闘するか見る趣旨だった」「reflectorが定期的に会話ログを見て、でっちあげ・制約違反を見つける設計だったはず」と経緯を共有し、この監査層（`docs/design/r5/cela_r5_design_v2.md` §1.3、F-2.1拡張として設計済み）を実際に機能させる方針で合意した。しかし`route_after_expert_decision`のreflection発火判定は`state["turn_count"]`を使っており、BL-005（`turn_count`はグラフ内部ループでは更新されず凍結し得る）の影響で`reflection_interval`が実質的に一度も発火しない状態だった。 |
+| 決定内容 | (1) `LineageState`に`round_count: int`を新設し、`turn_count`には手を加えない（影響範囲を最小化するため）。(2) `generate_user_utterance_node`（BL-044で確認済みの「ラウンド」定義における各ラウンドの起点）への再入場のたびに`round_count`をインクリメントする。(3) `route_after_expert_decision`のreflection発火条件を`state["turn_count"] % state["reflection_interval"]`から`state["round_count"] % state["reflection_interval"]`へ変更する。(4) `call_reflection`のプロンプトに、`docs/design/r5/cela_r5_design_v2.md` §1.3で設計済みの「でっちあげ監査」の趣旨を反映した監査ブロックを追加する。ただし同節が前提とする`internal_thought_process`（reasoning content）のキャプチャ・全経路への配線は別途大きめの変更となるため、今回は既存の`chat_history`/決定タイムラインのみを材料にした軽量版とし、フル版（F-2.1本体）は別途実装判断とする。 |
+| 影響 | `cela_main.py`（`LineageState`への`round_count`追加、`generate_user_utterance_node`のインクリメント、`route_after_expert_decision`の判定変更、`call_reflection`のプロンプト追加）。既存の`turn_count`ベースの表示・`max_turns`比較ロジックには影響しない。旧形式のcheckpoint（`round_count`キーなし）は`state.get("round_count", 0)`のデフォルト値で後方互換。 |
+| 関連 BL | [BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)、[BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)（facilitatorはreflectionの`stagnant`/`drift_flag`判定を経由するため、reflection発火の復旧で間接的に到達可能になる） |
+| 参照 | [decision_lineage.md 論点46](decision_lineage.md) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
