@@ -1263,6 +1263,7 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 - ~~`read_deliverable_file`に`task_id`/`topic_keyword`引数を追加し、agreements DBの`FILE_PATH:`ポインタから実際のパスを逆引きする~~ → `READ_DELIVERABLE_FILE_TOOL`のスキーマに`task_id`/`topic_keyword`を追加（`file_path`は既知の場合のみのフォールバックに降格）。`_resolve_deliverable_file_path`ヘルパーを新設し、`entry_type=="Deliverable"`かつ`decision_what`が`FILE_PATH:`で始まるagreementsをtask_id/topic_keywordで絞り込み、複数該当時は最新（id最大）を採用。
 - ~~agreements.task_id列がLLMのargs依存で欠落しがちな問題の修正~~ → `_commit_agreement_from_tool`に`task_id`引数を追加し、`args.get("task_id")`が空の場合は`_write_agreement_impl`経由で伝播される`_CURRENT_TASK_ID`をフォールバックとして使用するよう修正（従来はLLMがwrite_agreement呼び出し時に`task_id`を明示的に含めない限りDB上のtask_id列が空になり、本修正の逆引きも機能しなかった）。
 - ~~オフラインスモークテストの追加~~ → `tests/test_r3_smoke.py`に`test_bl040_read_deliverable_file_lookup_by_task_id`（task_id/topic_keywordによる逆引き成功、該当なしのnot_found確認）を追加、全49件Pass。
+- ~~（ユーザー追加提案、2026-07-22）ファイル名をタイムスタンプではなく`_Vn`のバージョン連番にし、旧版は`old/`フォルダへ退避する~~ → `done`。`save_deliverable_to_file`をバージョン連番方式（`deliverables/`・`deliverables/old/`双方を走査して次番号を採番）に変更し、`_archive_old_deliverable_file`ヘルパーを新設。`_commit_agreement_from_tool`・`decision_extractor_node`双方のUPDATE時新版保存パスに旧版退避を追加（BL-034の孤児ファイル問題も同時に緩和）。`test_bl040_deliverable_filenames_are_versioned_and_old_versions_archived`を追加、全50件Pass。
 - 修正後の再ドライランで、`read_deliverable_file`のnot_found率が実際に低下することをログで確認する（**未実施、次回ドライラン待ち**）。
 
 ### BL-041: 一度確定した決定（例: 車両台数）を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しない（Resource Arbiter機構が死んだコードパスになっている）
