@@ -1033,10 +1033,10 @@ BL-029の議論から派生した設計アイデア。現状の`owned_variable_v
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（記録のみ、実装は見送り） |
+| 状態 | `partial`（2026-07-22: R4実装によりwrite_agreement経由の主経路はwhiteboard_drafts方式へ移行し、ファイルの承認前無条件保存・孤児ファイル問題は解消。ただしdecision_extractor_nodeの安全網フォールバック経路は旧来のファイル保存ロジックのまま残っており、そちらは未解消） |
 | 優先度 | P3 |
 | 依存 | なし |
-| 関連 | [D-031](decision_log.md#d-031-deliverableの物理ファイル保存を承認前提にする設計変更はr4のホワイトボード化まで見送る)、[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)（`whiteboard_drafts`/R4） |
+| 関連 | [D-031](decision_log.md#d-031-deliverableの物理ファイル保存を承認前提にする設計変更はr4のホワイトボード化まで見送る)、[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)（`whiteboard_drafts`/R4）、[cela_r4_impl_Plan.md](r4/cela_r4_impl_Plan.md) |
 
 **内容:**
 
