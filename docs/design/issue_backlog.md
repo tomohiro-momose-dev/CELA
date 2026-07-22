@@ -79,6 +79,7 @@
 | BL-045 | 高 | `cela_main.py` (`_query_AI_live`のツールループ、`_LAST_PYTHON_CALLS`) | ~~実ドライラン（`log/2026-07-22/2217`）で、Expertがpython_replによる検算完了・`write_agreement`成功（whiteboard Ver.1保存）の直後、同一ツールループの次iterationでAPI 429エラーが発生しリトライを使い切ってエラープレースホルダを返した際、BL-033のフェイルクローズガードが「python_repl未使用」と誤判定し`constraint_issue=major`へ強制上書き→差し戻し→保存直後のホワイトボードがロールバックされ、実際には完了していた検算成果が破棄される事故が発生~~ → `done`。根本原因は`_LAST_PYTHON_CALLS`（BL-033の判定材料）がツールループの**正常終了時のみ**更新される実装になっており、ループ途中のAPIエラー例外で打ち切られた場合、実際に実行済みのpython_repl記録が`_LAST_PYTHON_CALLS`へ反映されないまま失われていたこと（対照的に`_LAST_WRITE_AGREEMENT_SUCCEEDED`はツール実行のその場で即時セットされるため例外の影響を受けず、非対称な状態になっていた）。python_repl実行のたびに`_LAST_PYTHON_CALLS`を即時反映するよう修正し、ループが途中終了しても記録が失われないようにした | P1 |
 | BL-046 | 中 | `cela_main.py` (`_query_AI_live`の`for attempt`リトライループ、except節) | ~~BL-045の再開ドライラン（`log/2026-07-22/2300`）レビュー中、ユーザーが「Expertの思考とiter番号が同じループになっているログが見える」と報告。調査の結果、`🧰 tools attached`が2回連続で印字され間に何のログもないまま`思考（iter=1）`に巻き戻る箇所（`cela_main.py:1904-1905`該当）を確認~~ → `done`。原因は、`for attempt in range(len(delays)+1):`（BL-009の既知のリトライ設計）がツール呼び出しループ全体を内包しており、途中でAPIエラーが起きても**最後の試行を使い切るまでは何も表示せず**`time.sleep`するだけで`loop_messages`/`python_calls_log`をサイレントに破棄してiter=1からやり直していたこと。リトライ発生自体を可視化するログ出力（`🔄 [{label}] 一時的なAPIエラー、{delay}秒後にツールループを最初からやり直します...`）を追加。なお、リトライ時に`loop_messages`を破棄せず継続する（`write_agreement`成功後の巻き戻りによる重複書き込みリスクを本質的に解消する）設計変更は、より大きめの変更のため今回は見送り、可視化のみ対応 | P2 |
 | BL-047 | 中 | `cela_main.py` (`WRITE_AGREEMENT_TOOL`スキーマの`depends_on`、`_write_agreement_impl`の整合性チェック) | ~~ドライラン（`log/2026-07-22/2320`）で、Expertが`write_agreement`呼び出し時に`"depends_on": ["task_1_1"]`を指定し`{'success': False, 'error': 'depends_onに存在しないID: task_1_1'}`で失敗、1往復無駄にしてから`depends_on`を除去して再送する事故を2回確認~~ → `done`。真因は、`depends_on`スキーマ（`cela_main.py:782`）に説明文が一切なく、コード側の検証は`agreements`テーブルの数値行ID（`【決定事項DB】`表示の`[42]`等）を期待する一方、AIが日常的に目にしているのはtask_planner側のタスク定義の`depends_on`（`task_id`文字列を指す全く別概念、例：`"depends_on": ["task_1_1"]`）であり、同名フィールドの意味衝突がAIを誤誘導していたこと。`depends_on`のdescriptionに、agreements DBの数値ID（決定事項DB表示の`[N]`）を使うこと・task_idを入れてはいけないこと・不明なら省略してよいことを明記して修正 | P3 |
+| BL-048 | 高 | `cela_main.py` (`LineageState`、`generate_user_utterance_node`、`route_after_expert_decision`、`call_reflection`) | ~~ドライラン（`log/2026-07-22/2336`）で、task_2_1のacceptance_criteria自体の数学的矛盾をExpertが根拠のない数値ででっち上げ、Detectorも無根拠な推測で追認してしまう事例をユーザーが発見。reflectorが定期的にこの種の「でっちあげ」を検出する設計（`docs/design/r5/cela_r5_design_v2.md` §1.3、F-2.1拡張）だったはずが、BL-005（`turn_count`凍結）によりreflection自体が一度も発火していなかった~~ → `done`（reflection発火の症状のみ復旧、BL-005本体は未修正）。`LineageState`に`round_count`を新設し`generate_user_utterance_node`への再入場ごとにインクリメント、`route_after_expert_decision`のreflection発火判定を`turn_count`から`round_count`へ変更。`call_reflection`のプロンプトに`cela_r5_design_v2.md` §1.3の趣旨を反映した軽量版「でっちあげ監査」ブロックを追加（`internal_thought_process`の全経路キャプチャを要するフル版は別途判断） | P1 |
 
 ---
 
@@ -203,6 +204,8 @@ R1では「壊さない」優先で、既存の`Agreement` TypedDict（`content`
 - 既存プロトタイプの動作実績（設計書§1「既に実装済みで実運用ログで高い検出精度が確認されている」）を壊さないことを優先し、修正する場合は最小差分に留める。
 
 **2026-07-19追記（影響範囲の再評価：安全網が事実上無効化されていたことが判明）**: 表示上のずれだけでなく、より深刻な副作用が実ドライラン（`log/2026-07-19/2056`）で確認された。`route_after_expert_decision`の`state["turn_count"] % state["reflection_interval"] == 0`判定は、`turn_count`が凍結されている間は`reflection`（延いてはその先の`facilitator`）に一度も到達できない。今回のドライランでは同一タスク（task_1_2）へのDetector差し戻しが3回連続発生したが、`turn_count`が1のまま（`reflection_interval`デフォルト3の倍数にならない）だったため、`reflection`は一度も発火せず、`facilitator`も出現しなかった。つまり本Issueは「表示のずれ」ではなく「周期的な議論健全性チェック（reflection）とその先の調停機構（facilitator）が丸ごと機能停止しうる」問題であり、優先度の見直しが必要（詳細は[decision_lineage.md 論点19](decision_lineage.md)、[BL-017](issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)）。ユーザー方針として、本修正はR4（ホワイトボード化・スコープ制御の検討）と合わせて着手する。
+
+**2026-07-23追記（reflection発火の症状のみBL-048で迂回、`turn_count`本体は依然未修正）**: [BL-048](issue_backlog.md#bl-048-reflectionfacilitatorの周期発火を新設round_countで復旧するturn_count本体は未修正)により、reflection/facilitatorの周期発火という副作用症状のみ`round_count`という別カウンタで迂回・解消した。しかし本Issueの本体（`turn_count`自体の意味、外側ターン表示・`max_turns`上限判定が実態と乖離している点）は未修正のまま残っており、本Issueは引き続き`open`とする。
 
 ---
 
@@ -1490,6 +1493,38 @@ BL-045修正後の再開ドライラン（`log/2026-07-22/2300`）をユーザ�
 
 - オフラインスモークテスト（既存74件）が非退行でPass。
 - 実LLM再ドライランで、同種のエラーが再発しないことを確認する（次回待ち）。
+
+---
+
+### BL-048: reflection/facilitatorの周期発火を新設`round_count`で復旧する（`turn_count`本体は未修正）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（reflection発火の症状のみ復旧。BL-005本体＝`turn_count`自体の意味修正は未着手） |
+| 優先度 | P1 |
+| 依存 | [BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)、[D-039](decision_log.md#d-039-ドライランの一時停止再開をappstreamによるノード単位チェックポイントで実装するターン境界方式は不採用)（ラウンド定義を踏襲） |
+| 関連 | `docs/design/r5/cela_r5_design_v2.md` §1.3（F-2.1拡張、でっちあげ検出の設計） |
+
+**内容:**
+
+実ドライラン（`log/2026-07-22/2336`）で、task_2_1のacceptance_criteria自体に含まれる数学的矛盾（山間部12km・時速20km/h前提では30分以内は不可能）に対し、Expertが根拠のない内訳（勾配区間8km＋平坦区間4km、複数パターンを逆算して境界値を選定）ででっち上げて帳尻を合わせ、Detectorも自身の推測（「中心部の半径2kmだから4kmは平坦なはず」）で追認してしまう事例をユーザーが発見。
+
+ユーザーが、このお題自体が構想初期にGeminiとの壁打ちで「あえて無理な制約を与えAI達がどう格闘するか見る」という趣旨で発案されたものであり、CELA前身プログラムの会話ログをGeminiに読ませた際にも同じ指摘（AIが適当にでっちあげる）を受けていたこと、「3ターンに一回reflectorが会話ログを見て、適当にでっちあげていないか？と制約違反を見つけていた記憶がある」という経緯を共有した。実際、`docs/design/r5/cela_r5_design_v2.md` §1.3にはこの現象（「計算ツールを使っていないのに適当な数字を出している」「都合の悪い制約から意図的に目を逸らして結論を急いでいる」）を検出する思考ログ監査の設計が既に存在していた。しかし`route_after_expert_decision`のreflection発火判定（`state["turn_count"] % state["reflection_interval"] == 0`）はBL-005（`turn_count`はグラフ内部ループでは更新されず凍結し得る）の影響で実質的に一度も成立せず、reflection自体が発火していなかった。
+
+Web検索ツールを与えて実在地域のデータで裏取りする代替案も検討したが、「地図情報なしで推論から妥当な数値を探る」という今回のお題の実験条件自体が崩れるため、まずreflection復旧を優先する方針とした（詳細は[decision_lineage.md 論点46](decision_lineage.md)）。
+
+**実装（`cela_main.py`）:**
+
+1. `LineageState`に`round_count: int`を新設（`turn_count`本体には手を加えない、影響範囲最小化）。
+2. `generate_user_utterance_node`（BL-044で確認済みの「ラウンド」定義における各ラウンドの起点）への再入場のたびに`round_count`をインクリメント。
+3. `route_after_expert_decision`のreflection発火条件を`round_count % reflection_interval == 0`に変更。
+4. `call_reflection`のプロンプトに、`cela_r5_design_v2.md` §1.3の趣旨（根拠のない数値のでっち上げ、都合の悪い制約からの逃避、Detector自身の無根拠な追認）を反映した「でっちあげ監査」ブロックを追加。ただし同節が前提とする`internal_thought_process`（reasoning content）の全経路キャプチャ・配線は別途大きめの変更となるため、今回は既存の`chat_history`/決定タイムラインのみを材料にした軽量版とした（フル版=F-2.1本体は別途判断）。
+
+**完了条件:**
+
+- オフラインスモークテスト（既存74件）が非退行でPass。
+- 実LLM再ドライランで、`round_count`ベースのreflection/facilitatorが実際に周期発火することを確認する（次回待ち）。
+- reflectionの「でっちあげ監査」が実際に今回のようなパターンを検出できるかを確認する（次回待ち）。フル版（F-2.1、`internal_thought_process`配線）が必要かはこの結果を見て判断する。
 
 ---
 
