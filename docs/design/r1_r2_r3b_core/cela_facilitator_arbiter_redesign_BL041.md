@@ -117,9 +117,10 @@ def _aggregate_global_constraints(agreements: list[dict]) -> list[GlobalConstrai
 - [ ] BL-005の根本修正（`turn_count`の正しい伝播）
 - [ ] `WRITE_AGREEMENT_TOOL.resource_claims`のスキーマ具体化（`{変数名: {phase_id, value, total_cap}}`）とプロンプト指示追加
 - [ ] `_aggregate_global_constraints`の実装と、Integrator直前での`state["global_constraints"]`構築
-- [ ] `call_resource_arbiter`プロンプトへの3種エスカレーション行動メニュー追加
-- [ ] `facilitator_node`の段階的エスカレーション（1-2回目は促し、3回目でメニュー提示）
-- [ ] オフラインスモークテスト（`global_constraints`集約、arbiterの超過検出、facilitatorの段階制御）
+- [ ] `call_resource_arbiter`プロンプトへの4段階エスカレーション行動メニュー追加（Substitute/Descope/Force Decision/そもそも論への昇華）
+- [ ] `facilitator_node`の3段階制御（1回目: 促し、2回目: 段階1〜3提示、3回目: そもそも論への昇華＋halt）
+- [ ] 「そもそも論への昇華」時、対立する前提を構造化して`decisions`テーブルの`why`欄に残すロジック
+- [ ] オフラインスモークテスト（`global_constraints`集約、arbiterの超過検出、facilitatorの3段階制御）
 - [ ] 実LLM再ドライランで、意図的に予算超過シナリオを仕込んだ場合にarbiter/facilitatorが実際に発火することを確認
 
 ---
