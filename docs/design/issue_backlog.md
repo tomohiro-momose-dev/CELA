@@ -81,6 +81,9 @@
 | BL-047 | 中 | `cela_main.py` (`WRITE_AGREEMENT_TOOL`スキーマの`depends_on`、`_write_agreement_impl`の整合性チェック) | ~~ドライラン（`log/2026-07-22/2320`）で、Expertが`write_agreement`呼び出し時に`"depends_on": ["task_1_1"]`を指定し`{'success': False, 'error': 'depends_onに存在しないID: task_1_1'}`で失敗、1往復無駄にしてから`depends_on`を除去して再送する事故を2回確認~~ → `done`。真因は、`depends_on`スキーマ（`cela_main.py:782`）に説明文が一切なく、コード側の検証は`agreements`テーブルの数値行ID（`【決定事項DB】`表示の`[42]`等）を期待する一方、AIが日常的に目にしているのはtask_planner側のタスク定義の`depends_on`（`task_id`文字列を指す全く別概念、例：`"depends_on": ["task_1_1"]`）であり、同名フィールドの意味衝突がAIを誤誘導していたこと。`depends_on`のdescriptionに、agreements DBの数値ID（決定事項DB表示の`[N]`）を使うこと・task_idを入れてはいけないこと・不明なら省略してよいことを明記して修正 | P3 |
 | BL-048 | 高 | `cela_main.py` (`LineageState`、`generate_user_utterance_node`、`route_after_expert_decision`、`call_reflection`) | ~~ドライラン（`log/2026-07-22/2336`）で、task_2_1のacceptance_criteria自体の数学的矛盾をExpertが根拠のない数値ででっち上げ、Detectorも無根拠な推測で追認してしまう事例をユーザーが発見。reflectorが定期的にこの種の「でっちあげ」を検出する設計（`docs/design/r5/cela_r5_design_v2.md` §1.3、F-2.1拡張）だったはずが、BL-005（`turn_count`凍結）によりreflection自体が一度も発火していなかった~~ → `done`（reflection発火の症状のみ復旧、BL-005本体は未修正）。`LineageState`に`round_count`を新設し`generate_user_utterance_node`への再入場ごとにインクリメント、`route_after_expert_decision`のreflection発火判定を`turn_count`から`round_count`へ変更。`call_reflection`のプロンプトに`cela_r5_design_v2.md` §1.3の趣旨を反映した軽量版「でっちあげ監査」ブロックを追加（`internal_thought_process`の全経路キャプチャを要するフル版は別途判断） | P1 |
 | BL-049 | 高 | `cela_main.py` (`call_detector`, `generate_user_utterance`, `call_expert`) | ~~ドライラン（`log/2026-07-22/2336`）で、ユーザーが「計算ツールを入れたことによりすべてのノードの思考が『計算が合っているか』に引き寄せられ、非数値的な重大懸念（バス2台の予備車両欠如、監視員2名の労基法適合性）を出力に反映できていない」と指摘。task_1_1「3名（シフト制）」とtask_2_2「2名常駐固定」というオペレーター人数のtask間矛盾が、双方とも算数としては通過するため検出されていなかったことを確認~~ → `done`。`call_detector`を、既存の数値検算パス（python_repl付き）＋新設の独立したドメイン妥当性レビューパス（ツールなし、数値監査結果を提示し再検算不要と明示、法規制・物理的運用可能性・でっち上げ疑義を評価）の2段構成に変更、より重篤な判定を採用。`generate_user_utterance`（User AI）はDetectorの検算を信頼しドメイン評価に集中する指示へ変更、`call_expert`には検算とは独立したドメイン妥当性チェックの自問を追加。オフラインスモークテストで発見したドメイン妥当性レビューの過検知（情報不足をmajorの理由にする）は基準明記で修正済み | P1 |
+| BL-050 | 中 | `cela_main.py` (`call_decision_extractor`, `_build_agreements_context`) | ドライラン（`log/2026-07-22/2336`）で、車両台数が「task_1_1で3台」→「task_4_1の指示で2台」に変わった経緯をDetectorが辿れず、根拠を確認できないまま「Userが確定値と言っている以上、調整済みと解釈できる」と流してしまう場面を確認。`write_agreement`のSUPERSEDEは旧レコードを`status='Superseded'`にして残す方式だが、①Detectorに提示する`【決定事項DB】`コンテキストが有効な行だけに絞り込まれ過去版を見せない、②新しい値の`reason_why`が「前の値から何故変わったか」を明示することを要求されていない、の2点が実質的な欠落と判明。BL-037（reason_why記載品質、既存）と同系統だが「変遷の可視化」という点で更に踏み込んだ課題。`decision_extractor`を「新規決定を抽出する」役割から「各ノードが自ら出した決定の`reason_why`が妥当な理由になっているか監査する」役割へ軸足を移す方向性と、`【決定事項DB】`への差分・変更理由の明示を提案（設計相談・BL起票のみ、実装は次回以降） | P2 |
+| BL-051 | 中 | `cela_main.py` (`call_detector`, `detector_node`, フェーズ終了判定ロジック) | Detectorの現行出力（`risk`/`constraint_issue`/`comment`の単一判定）では、思考過程で気づいた致命的でない懸念が構造化されずに失われる問題をユーザーが指摘。Detectorの気づきをissue_bl的な構造化リスト（`{id, severity, description, resolved, phase_id}`等）として蓄積し、フェーズ終了は未解決issueがゼロになるまで完了できないゲートとし、延期にはUser・Detector双方が確認する明示的な理由を要求する監視機構を提案。BL-041（facilitator/Arbiter再設計、design draft作成済みだが未実装）と同格の大きめの構造変更のため、まず設計ドラフトの作成から始める方針（設計相談・BL起票のみ、実装は次回以降） | P2 |
+| BL-052 | 低 | `cela_main.py` (`WRITE_AGREEMENT_TOOL`スキーマ、ホワイトボード本文フォーマット) | ホワイトボード（`whiteboard_drafts`）の各文・意味のまとまりに、根拠となる`agreements.id`等を指す参照（例:`[AG:123]`）をExpertに明示させ、本文中の主張とDB上の決定・理由を直接紐付けられるようにする提案をユーザーが発案（BL-050の「経緯が辿れない」問題への補完策）。捏造ID・可読性低下のリスクはあるが、`depends_on`の数値ID検証（BL-047で実装済みのパターン）がそのまま転用できる見込み。BL-050（理由監査役）・BL-051（issue_bl）とセットで設計するのが筋が良い方針（ID実在チェックはdecision_extractor監査役の担当範囲に自然に乗る）（設計相談・BL起票のみ、実装は次回以降） | P3 |
 
 ---
 
@@ -1566,6 +1569,89 @@ AIは当初Detectorのみを2段構成に分割する案（または新規グラ
 
 ---
 
+### BL-050: `decision_extractor`の役割転換（抽出役→理由監査役）＋決定事項の変遷履歴の可視化
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計相談・BL起票のみ） |
+| 優先度 | P2 |
+| 依存 | [BL-037](issue_backlog.md#bl-037-decisionagreementのreason_whyが薄くdetector自身も後から数値の根拠を辿れない)、[BL-043](issue_backlog.md#bl-043-decision_extractorのjson出力をfunction-calling方式に作り替え既存の自己修復ループd-009に一本化する) |
+| 関連 | [D-041](decision_log.md#d-041-f-26検算ゲートによる注意力の偏りを是正するためdetectoruser-aiexpertの数値検算とドメイン妥当性レビューを分離する)（役割分担の考え方が地続き） |
+
+**内容:**
+
+ドライラン（`log/2026-07-22/2336`）継続レビュー中、車両台数が「task_1_1で3台」→「task_4_1の指示で2台」に変わった経緯をDetectorが辿れず、実際に「車両台数が2台になった理由は何か？なぜ3台から2台になったのか経緯は監査対象外の履歴に含まれている可能性があります」と困惑した末、根拠を確認できないまま「Userが確定値と言っている以上、調整済みと解釈できる」と流してしまう場面を確認した（`log/2026-07-22/2336/log_no_prompt.md` 18652〜18692行）。
+
+調査の結果、`write_agreement`のSUPERSEDEは実際には旧レコードを`status='Superseded'`にして**残す**（削除しない）方式であり、履歴自体は失われていないことが判明した。実質的な欠落は以下の2点：
+1. Detectorに提示する`【決定事項DB】`コンテキスト（`_build_agreements_context`）が有効な行（`status != "Superseded"`）だけに絞り込まれ、過去版を見せない。
+2. `write_agreement`の`reason_why`が「前の値から何故変わったか（差分の理由）」を明示することを要求されておらず、新しい値単体の妥当性しか記述されない。
+
+BL-037（`reason_why`の記載品質が薄い、既存）と同系統だが、「変遷の可視化」という点で更に踏み込んだ課題。
+
+**ユーザー提案:**
+
+`decision_extractor`を「新規決定を抽出する」役割から「各ノードが自ら`write_agreement`で出した決定の`reason_why`が実際に妥当な理由になっているか監査する」役割へ軸足を移してはどうか、という提案。各ノードが自律的にツールで決定を書き込む現行アーキテクチャ（R3b以降）では、`decision_extractor`本来の「抽出」という役目は縮小傾向にあり（BL-034で既に指摘済みの傾向）、この提案は自然な延長線上にある。
+
+**完了条件（着手時）:**
+
+- `【決定事項DB】`コンテキストに、SUPERSEDEされた直前versionとその`reason_why`を差分表示する仕組みを追加する（Detectorが「前は何だったか」を即座に参照できるようにする）。
+- `write_agreement`のUPDATE/SUPERSEDE時、`reason_why`に「前の値から何故変わったか」の明示を求めるスキーマ・プロンプト変更を検討する。
+- `decision_extractor`の役割転換（抽出役→理由監査役）は、BL-043（Function Calling化）の設計確定と合わせて具体化する。
+
+---
+
+### BL-051: Detectorの気づきを`issue_bl`リストとして蓄積し、フェーズ終了条件とする
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計相談・BL起票のみ） |
+| 優先度 | P2 |
+| 依存 | [BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている) |
+| 関連 | [BL-049](issue_backlog.md#bl-049-f-26検算ゲートによる注意力の偏りを是正する-数値検算とドメイン妥当性レビューの分離)（Detectorの出力拡張と自然に統合できる） |
+
+**内容:**
+
+Detectorは思考過程（`💭 [Detector] 思考`のログ）で数多くの重要な懸念（数値の根拠不明、ドメイン的な違和感等）に気づいているが、現行の出力形式が`{risk, constraint_issue: none/minor/major, comment}`という単一判定に集約されるため、致命的でない（`major`にはしない）気づきは`comment`欄に埋もれるかそもそも捨てられ、次のターンへ引き継がれない。
+
+ユーザー提案：Detectorの気づきを、このプロジェクト自身の`issue_backlog.md`と同じ発想の構造化リスト（例: `{id, severity, description, resolved: bool, phase_id}`）として蓄積する。フェーズの終了は、このissue_blリストが解消される（全件`resolved`になる）までは完了できないゲートとし、この監視はUserとDetector双方が担う。もし解消せずに次フェーズへ進む（延期する）場合は、明確な理由が必須。
+
+**設計上の論点（未確定）:**
+
+- issue_blエントリの永続化先（新規DBテーブル or `state`内リスト）。
+- 「フェーズ終了をブロックする」ロジックをどのグラフノード・ルーティング関数に実装するか（BL-041のfacilitator/Arbiter再設計と同格の構造変更になる見込み）。
+- BL-049で新設したDetectorのドメイン妥当性レビューパスの出力（`comment`）を、issue_bl候補として自動的に拾い上げられるか。
+
+**完了条件（着手時）:**
+
+- まず設計ドラフト（BL-041の`cela_facilitator_arbiter_redesign_BL041.md`のような形式）を作成し、ユーザー確認を経てから実装に着手する。
+
+---
+
+### BL-052: ホワイトボード本文に決定/理由DBへのインラインID参照を埋め込む
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計相談・BL起票のみ） |
+| 優先度 | P3 |
+| 依存 | [BL-047](issue_backlog.md#bl-047-write_agreementのdepends_onパラメータの意味衝突agreements-dbの数値idかtask_id文字列かでaiが毎回同じエラーを起こす)（数値ID検証パターンの転用元） |
+| 関連 | [BL-050](issue_backlog.md#bl-050-decision_extractorの役割転換抽出役理由監査役決定事項の変遷履歴の可視化)、[BL-051](issue_backlog.md#bl-051-detectorの気づきをissue_blリストとして蓄積しフェーズ終了条件とする) |
+
+**内容:**
+
+ホワイトボード（`whiteboard_drafts`）の各文・意味のまとまりに、それを裏付ける決定・理由のDB行を指す参照（例:`[AG:123]`のような`agreements.id`への参照）をExpertに明示させる提案。BL-050で指摘した「この数値の根拠は？」という調査コストを、本文に埋め込まれた参照で即座に解消できる狙い（ユーザー提案）。
+
+BL-047で実装済みの`depends_on`の数値ID検証（agreements DBに実在する行IDかをチェックし、存在しなければエラーを返す）パターンがそのまま転用できる見込み。リスクは、①AIが実在しないIDを捏造する可能性（BL-047と同様の検証が必要）、②本文にタグが増えることによる可読性の低下、の2点。
+
+BL-050（理由監査役）・BL-051（issue_bl）とセットで設計するのが筋が良い（ID実在チェックはdecision_extractor監査役の担当範囲に自然に乗る）という方針。
+
+**完了条件（着手時）:**
+
+- `WRITE_AGREEMENT_TOOL`の`decision_what`（Deliverable本文）または`edits`内で、インラインID参照の記法（例:`[AG:123]`）を定義する。
+- BL-047の`depends_on`検証と同様、ID実在チェックを`_write_agreement_impl`または`decision_extractor`監査役に実装する。
+- BL-050・BL-051の設計確定後、まとめて着手するか個別に着手するかを判断する。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -1616,3 +1702,4 @@ AIは当初Detectorのみを2段構成に分割する案（または新規グラ
 | 2026-07-22 | 続くドライラン（`log/2026-07-22/2320`）で、ユーザーが`write_agreement`の`depends_on`エラー（"depends_onに存在しないID: task_1_1"）を報告。調査の結果、`WRITE_AGREEMENT_TOOL`スキーマの`depends_on`に説明文が一切なく、検証コードは`agreements`テーブルの数値行IDを期待する一方、AIはtask_planner側の別概念（task_idのdepends_on）と混同して`"task_1_1"`を渡し、無駄な1往復を経てから自己修正していたことが判明。BL-047として新規起票・`done`化、`depends_on`のdescriptionに正しい使い方（決定事項DB表示の`[N]`を使う、task_idは不可、不明なら省略）を追記して修正。 |
 | 2026-07-23 | 続くドライラン（`log/2026-07-22/2336`）で、ユーザーがtask_2_1のacceptance_criteria自体の数学的矛盾をExpertが根拠のない数値ででっち上げ、Detectorも無根拠な推測で追認した事例を発見・共有。このお題がGeminiとの壁打ちで「あえて無理な制約下でのAIの格闘を見る」趣旨で発案されたという背景、reflectorが定期的にでっちあげを検出する設計だったはずという記憶が共有され、`docs/design/r5/cela_r5_design_v2.md` §1.3に実際にその設計が存在することを確認。BL-005（`turn_count`凍結）によりreflectionの周期発火が実質機能停止していたことが判明し、Web検索ツール付与案とも比較のうえreflection復旧を優先する方針で合意（D-040）。新設`round_count`（`generate_user_utterance_node`再入場カウント、論点45のラウンド定義を踏襲）でreflection発火判定を置き換え、`call_reflection`に軽量版でっちあげ監査プロンプトを追加。BL-048として新規起票・`done`化（reflection発火の症状のみ復旧、BL-005本体は引き続き`open`）、オフラインスモークテスト74件Pass。 |
 | 2026-07-23 | 同ドライラン継続レビューで、ユーザーが「計算ツールを入れたことによりすべてのノードの思考が計算の正誤に引き寄せられ、非数値的な重大懸念（バス2台の予備車両欠如、監視員2名の労基法適合性）を出力に反映できていない」と指摘。task_1_1「3名（シフト制）」とtask_2_2「2名常駐固定」というオペレーター人数のtask間矛盾が、双方とも算数としては通過するため検出されていなかったことをログで確認。当初のDetector限定の分離案を、ユーザーが「detector、ユーザーとも同じ検算を3〜4回繰り返している場面がある」ことを理由にUser AI・Expertも含む方針へ拡張し、「ユーザーはdetectorの検算を信じてドメイン評価に重きを置く」という具体的な役割分担を指示（D-041）。`call_detector`を数値検算パス＋独立したドメイン妥当性レビューパスの2段構成に変更、`generate_user_utterance`・`call_expert`のプロンプトも調整。BL-049として新規起票・`done`化。オフラインスモークテストでドメイン妥当性レビューの過検知（情報不足をmajorの理由にする）を発見し、判定基準の明記で修正・再検証済み。 |
+| 2026-07-23 | 続くレビューで、ユーザーが「各ノードが出す数値などの決定事項の理由が適当すぎる。実際バスが3台か2台になった経緯がわからずdetectorが困惑していた」と指摘し、車両台数3→2の経緯をDetectorが辿れなかった実例をログで確認（`log/2026-07-22/2336` 18652〜18692行）。調査の結果、SUPERSEDEは履歴を削除せず残す方式だが、Detectorへのコンテキスト提示が有効行のみに絞られ`reason_why`も差分理由を要求していないことが実質的な欠落と判明。ユーザーから3提案：①`decision_extractor`を抽出役から理由監査役へ軸足転換、②Detectorの気づきをissue_bl的リストとして蓄積しフェーズ終了条件とする（User・Detector監視、延期は理由必須）、③ホワイトボード本文に決定/理由DBへのインラインID参照（`[AG:123]`等）を埋め込む。「まずBL化してください」との指示によりBL-050・BL-051・BL-052として新規起票（いずれも`open`、設計相談・BL起票のみで実装は見送り）。 |
