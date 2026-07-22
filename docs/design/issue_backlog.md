@@ -1285,11 +1285,20 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 
 **実害:** 今回は顕在化しなかったが、タスク分解の粒度やタスク自身のacceptance_criteriaの書き方次第では、後続タスクが解決不能な制約矛盾に陥ったまま`expert_retry_count>=3`で`reflection`に丸投げされ、そこでも収束が保証されない（BL-005/BL-017参照）ため、無限の差し戻しループやフェイルオープンでの通過につながるリスクがある。
 
-**完了条件（設計判断が必要なため、現時点では実装しない）:**
+**ユーザーによる根本原因の再診断（2026-07-22、[decision_lineage.md 論点42](decision_lineage.md)）:**
 
-- `agreements.resource_claims`（write_agreementのスキーマに既存）を、いつ・どのタイミングで`state["global_constraints"]`に集約するか（ターンごとか、フェーズ確定時か）を設計する。
-- `arbiter_node`の発火条件（`reflection_interval`同様の周期トリガーか、`check_global_constraint_overrun`の即時トリガーか）を、BL-005/BL-017のreflection/facilitator復旧方針とあわせて整理する。
-- 上記が固まるまでは、少なくとも「後続タスクが前段タスクの確定値と矛盾する制約違反を検出した場合にDetectorがmajorとして扱い、Userに明示的なSUPERSEDE判断を仰ぐ」という現行のconstraint_issue経由の間接的な安全網で代替する（ただし今回のドライランのようにタスク自身のACで吸収されてしまうと、この安全網も発動しない点に留意）。
+「木を見て森を見ず」状態が発生していた。task_1.1が「必要車両台数の選定」という狭いスコープだったため、AIはそのスコープ内でのみ作業し、予算全体最適という視座を持てなかった。解決の方向性として3点を提示：
+
+1. 暫定のリソース配分を検討するタスクを最初に置く、または確定済み数値でも合理的な理由があれば上書き可能にしタスク間で「すり合わせる」機構を持たせる。
+2. 初期制約（ゴールで直接与えられた予算上限等）は絶対とする一方、検討中に導出された数値（車両台数等）はデフォルトで暫定扱いとし、後で変更の余地を残す。どこかに「すり合わせフェーズ」が必要。
+3. 現実の予算折衝同様、無限に議論を続けるのではなく「何をしないか」（車両リース化、自社開発ではなく既存SaaS利用等）を含めたエスカレーションが必要で、**この役目はfacilitatorが担うべき**（facilitatorは元々「議論の膠着を緩和させる」役目であり、`reflection`同様に数ターンごとに様子を見る周期的発火タイミングの調整が必要、という補足あり）。
+
+**完了条件:**
+
+- ~~提案2（暫定値デフォルト化）を実装~~ → `done`。F-3.9の`verified_facts.confidence`（confirmed/provisional）を活用し、`call_expert`のシステムプロンプト（フル版・軽量版`light_system_prompt`双方）に「ゴール直接の絶対制約以外はデフォルトでconfidence='provisional'とする」原則を追加。`WRITE_AGREEMENT_TOOL.confirmed_variables`のJSON schemaとコード側デフォルト値も`"confirmed"`→`"provisional"`に変更（`cela_main.py`）。オフラインスモークテスト（`tests/test_r3_smoke.py`、既存分含め50件）で非退行を確認。なお、`decision_extractor`の`owned_variable_values`経由の安全網パス（`upsert_verified_fact`のデフォルト引数）は今回スコープ外のため`"confirmed"`のまま残っており、Expertがwrite_agreementを呼ばずowned_variable_valuesのみで確定値を出した場合はこの原則が及ばない点に留意（次回対応候補）。
+- 提案3（facilitatorのエスカレーション役への再設計、`reflection_interval`同様の周期的発火）は、BL-017（reflection/facilitatorの当初設計意図復旧）と統合すべき影響範囲の広い変更のため、**今回は実装せず、`docs/design/r1_r2_r3b_core/`配下に設計書を先に作成する**方針とした（未着手）。
+- 提案1（すり合わせタスクを最初に置く／上書き機構）は、facilitator再設計とあわせて検討する将来課題として保留。
+- `agreements.resource_claims`を`state["global_constraints"]`へ集約するタイミング、`arbiter_node`の発火条件の設計は上記facilitator再設計と統合して検討する（未着手）。
 
 | 日付 | 内容 |
 |------|------|
