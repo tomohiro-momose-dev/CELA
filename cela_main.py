@@ -19,6 +19,7 @@ import ast
 import subprocess
 import threading
 from typing import Annotated, Literal, TypedDict
+from pathlib import Path
 
 def _take_latest(a, b):
     """【SLM要約】
@@ -122,23 +123,60 @@ class MultiLogger:
 # ===========================================================================
 def save_deliverable_to_file(topic: str, content: str) -> str:
     """【SLM要約】
-    Serialization of final outputs into time-stamped, sanitized Markdown files within the system's log directory.
+    Serialization of final outputs into versioned, sanitized Markdown files within the system's log directory.
     """
-    """成果物をMarkdownファイルとしてlogディレクトリ内に保存し、そのパスを返す"""
+    """成果物をMarkdownファイルとしてlogディレクトリ内に保存し、そのパスを返す。
+    ★修正（BL-040）: ファイル名をUnixタイムスタンプ付き（例: topic_1784643517.md）から
+    `topic_V{n}.md`のバージョン連番方式に変更した。タイムスタンプはAIが事前に予測できず
+    read_deliverable_fileの発見不能性の一因になっていたため、予測可能な連番にすることで
+    (1)AIが最新版のファイル名を推測しやすくする、(2)旧版はdeliverables/old/へ退避し
+    現行ディレクトリを最新版のみに保つ、の両方を狙う。バージョン番号はファイルシステム上の
+    既存ファイル（deliverables/・deliverables/old/の両方）を走査して次の番号を採番する。
+    """
     safe_topic = re.sub(r'[\\/*?:"<>|]', "_", topic).strip()
     if not safe_topic:
         safe_topic = "deliverable"
     safe_topic = safe_topic[:50] # 長すぎるファイル名を防止
-    filename = f"{safe_topic}_{int(time.time())}.md"
-    
+
     log_dir = getattr(MultiLogger, "log_dir", "log")
     deliv_dir = os.path.join(log_dir, "deliverables")
+    old_dir = os.path.join(deliv_dir, "old")
     os.makedirs(deliv_dir, exist_ok=True)
-    
+
+    version_pattern = re.compile(rf"^{re.escape(safe_topic)}_V(\d+)\.md$")
+    existing_versions = [0]
+    for d in (deliv_dir, old_dir):
+        if os.path.isdir(d):
+            for name in os.listdir(d):
+                m = version_pattern.match(name)
+                if m:
+                    existing_versions.append(int(m.group(1)))
+    next_version = max(existing_versions) + 1
+
+    filename = f"{safe_topic}_V{next_version}.md"
     filepath = os.path.join(deliv_dir, filename)
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(content)
     return filepath
+
+
+def _archive_old_deliverable_file(file_path: str) -> None:
+    """[BL-040] Deliverableが新版に置き換わる際、旧版ファイルをdeliverables/old/へ退避する。
+    旧版が既に存在しない・退避先に同名衝突がある等の異常はデータ損失を避けるため無視して継続する
+    （成果物の整合性はDBのagreements.decision_whatが正であり、ファイルはあくまで補助資料のため）。
+    """
+    if not file_path or not os.path.isfile(file_path):
+        return
+    old_dir = os.path.join(os.path.dirname(file_path), "old")
+    try:
+        os.makedirs(old_dir, exist_ok=True)
+        dest = os.path.join(old_dir, os.path.basename(file_path))
+        if os.path.exists(dest):
+            return
+        os.replace(file_path, dest)
+        print(f"  🗄️ [File Archived] 旧版を退避しました: {dest}")
+    except OSError as e:
+        print(f"  ⚠️ [File Archive Failed] 旧版の退避に失敗しました（無視して続行）: {e}")
 
 
 # ===========================================================================
@@ -503,14 +541,388 @@ PYTHON_REPL_TOOL = {
     },
 }
 
+# [F-3.8] R3a: 読み取り専用ツール定義
+READ_VERIFIED_FACT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_verified_fact",
+        "description": (
+            "Search verified facts (confirmed values) across ALL phases. "
+            "You can search by variable name (e.g. 'vehicle_count') or by topic keyword. "
+            "Returns the value, reason, citations, and confidence level. "
+            "Use this to access cross-phase dependencies that are not in your current phase's scope."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "variable_name": {
+                    "type": "string",
+                    "description": "Exact variable name to search for (e.g. 'vehicle_count', 'annual_operating_cost')"
+                },
+                "topic_keyword": {
+                    "type": "string",
+                    "description": "Topic keyword for fuzzy search (e.g. '車両', '予算', '需要')"
+                }
+            }
+        }
+    }
+}
+
+READ_DELIVERABLE_FILE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_deliverable_file",
+        "description": (
+            "Read a deliverable file for a previous task's output (for cross-phase integration). "
+            "Deliverable filenames include an unpredictable timestamp suffix, so guessing "
+            "file_path directly will usually fail with not_found. "
+            "Prefer task_id or topic_keyword: the tool will look up the actual saved file path "
+            "from the agreements database for you. Only pass file_path if you already have the "
+            "exact path (e.g. copied verbatim from a 'FILE_PATH:...' value shown elsewhere). "
+            "Returns the file content as text."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "task_id that produced the deliverable (e.g. 'task_1_1'). Preferred lookup method."
+                },
+                "topic_keyword": {
+                    "type": "string",
+                    "description": "Topic keyword for fuzzy search (e.g. '車両', '予算') if task_id is unknown."
+                },
+                "file_path": {
+                    "type": "string",
+                    "description": "Exact full path to the deliverable file, only if already known verbatim."
+                }
+            }
+        }
+    }
+}
+
+
+def _read_verified_fact_handler(args: dict) -> dict | list:
+    """[F-3.8] verified_facts読み取りツールのハンドラ。TOOL_DISPATCH経由で呼び出される。
+    conn/run_idはモジュールレベル変数から取得する（_DB_CONN/_CURRENT_RUN_ID）。
+    ★修正（レビュー指摘H1、二重JSONエンコード対応）: _query_AI_liveのツールループ末尾が
+    全ツール結果を無条件でjson.dumps()するため、ハンドラ自身はjson.dumps済み文字列ではなく
+    生のPythonオブジェクト（dict/list）を返す。ここでjson.dumpsすると、末尾で再度
+    json.dumpsされ「JSON文字列を表すJSON文字列」という二重エスケープになりLLMに渡ってしまう。
+    """
+    conn = get_active_conn()
+    run_id = _CURRENT_RUN_ID
+    variable_name = args.get("variable_name")
+    topic_keyword = args.get("topic_keyword")
+    results = get_verified_facts_from_db(
+        conn, run_id,
+        variable_names=[variable_name] if variable_name else None,
+        topic=topic_keyword,
+    )
+    if not results:
+        return {"status": "not_found", "message": "該当する確定値が見つかりませんでした。"}
+    return results
+
+
+def _resolve_deliverable_file_path(task_id: str, topic_keyword: str) -> str | None:
+    """[BL-040] `read_deliverable_file`のtask_id/topic_keyword検索用ヘルパー。
+    Deliverableのファイル名はトピック文字列＋Unixタイムスタンプで一意に決まり、
+    AIが事前に予測できないため、agreements DBに記録された`FILE_PATH:...`ポインタから
+    実際のパスを逆引きする。同一task_id/topicで複数件ある場合は最新（id最大）を優先する。
+    """
+    conn = get_active_conn()
+    run_id = _CURRENT_RUN_ID
+    agreements = get_agreements_from_db(conn, run_id)
+    candidates = [
+        a for a in agreements
+        if a.get("entry_type") == "Deliverable"
+        and str(a.get("decision_what", "")).startswith("FILE_PATH:")
+        and (not task_id or a.get("task_id") == task_id)
+        and (not topic_keyword or topic_keyword in str(a.get("topic", "")))
+    ]
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda a: a.get("id", 0))
+    return best["decision_what"][len("FILE_PATH:"):]
+
+
+def _read_deliverable_file_handler(args: dict) -> dict | str:
+    """[F-3.8] Deliverableファイル読み取りツールのハンドラ。
+    ★修正（レビュー指摘③）: pathlib.Path.resolve()によるディレクトリ包含チェックで
+    Windowsパス区切り・パストラバーサル防止の両方を対応する。
+    ★修正（レビュー指摘H1、二重JSONエンコード対応）: エラー/not_found時はjson.dumps済み
+    文字列ではなく生のdictを返す（理由は_read_verified_fact_handlerのコメント参照）。
+    成功時のファイル内容（プレーン文字列）は元々二重エンコードの問題がないためそのまま。
+    ★修正（BL-040）: 実ドライランでfile_path直接指定が約68%の割合でnot_foundになっていた
+    （タイムスタンプ付きファイル名をAIが予測できないため）。task_id/topic_keywordによる
+    DB逆引きを優先させ、file_pathは既に正確なパスが分かっている場合のみのフォールバックとする。
+    """
+    task_id = args.get("task_id", "")
+    topic_keyword = args.get("topic_keyword", "")
+    file_path = args.get("file_path", "")
+    if task_id or topic_keyword:
+        resolved_path = _resolve_deliverable_file_path(task_id, topic_keyword)
+        if resolved_path:
+            file_path = resolved_path
+        elif not file_path:
+            return {"status": "not_found", "message": f"task_id={task_id!r} topic_keyword={topic_keyword!r} に該当するDeliverableファイルが見つかりませんでした。"}
+    if not file_path:
+        return {"status": "error", "message": "task_id、topic_keyword、file_pathのいずれかを指定してください。"}
+    base_dir = Path("log").resolve()
+    try:
+        resolved = Path(file_path).resolve()
+        resolved.relative_to(base_dir)
+    except ValueError:
+        return {"status": "error", "message": "logディレクトリ外へのアクセスは禁止されています。"}
+    if not resolved.exists() or not resolved.is_file():
+        return {"status": "not_found", "message": f"ファイルが見つかりません: {file_path}"}
+    try:
+        content = resolved.read_text(encoding="utf-8")
+        return content[:10000]  # 大量出力防止
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# R3a/R3b共通: ツールハンドラのモジュールレベル変数（LangGraphの単一プロセス同期実行前提）
+_CURRENT_RUN_ID: str = ""
+_CURRENT_CALLER_ROLE: str = ""  # R3b: write_agreementの権限チェック用
+_CURRENT_TASK_ID: str = ""      # R3b: confirmed_variablesのsource_task_id用
+
+# [F-3.1] R3b: 書き込みツール定義
+WRITE_AGREEMENT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "write_agreement",
+        "description": (
+            "Save a decision, directive, or deliverable to the agreements database. "
+            "Always separate What (decision_what) and Why (reason_why). "
+            "For numeric claims, include Python REPL verification results in evidence (F-2.6). "
+            "Expert can only use status='Proposed'. "
+            "User AI can use all statuses. "
+            "Detector/Reviewer/Arbiter/Integrator can only use status='Rejected'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action_type": {
+                    "type": "string",
+                    "enum": ["CREATE", "UPDATE", "SUPERSEDE"]
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["Proposed", "Approved", "Approved_with_Conditions", "Rejected", "Implicitly_Accepted"]
+                },
+                "topic": {"type": "string", "description": "Brief heading"},
+                "decision_what": {"type": "string", "description": "What was decided/proposed"},
+                "reason_why": {"type": "string", "description": "Why adopted or rejected"},
+                "evidence": {"type": "string", "description": "Objective evidence (F-2.6: include Python REPL results for numeric claims)"},
+                "entry_type": {
+                    "type": "string",
+                    "enum": ["Decision", "Directive", "Deliverable"]
+                },
+                "phase_id": {"type": "string"},
+                "task_id": {"type": "string"},
+                "depends_on": {"type": "array", "items": {"type": "string"}},
+                "resource_claims": {"type": "object"},
+                "target_topic": {"type": "string", "description": "For UPDATE: the topic to update"},
+                "confirmed_variables": {
+                    "type": "array",
+                    "description": (
+                        "Optional. [F-3.9] If this decision confirms one or more values that belong to the "
+                        "current task's owns_variables, list them here. Each entry is saved to the structured "
+                        "fact store (verified_facts) with its reason and confidence, independent of whether "
+                        "decision_extractor_node runs this turn. confidence='provisional' is a fully legitimate "
+                        "value — it means 'proceeded with this value for now', not 'this is unverified/wrong'. "
+                        "[BL-041] Default to 'provisional' unless this value is an absolute constraint given "
+                        "directly in the goal, or the User has explicitly approved it as final."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "variable_name": {"type": "string", "description": "Must match one of the current task's owns_variables"},
+                            "value": {"type": "string"},
+                            "unit": {"type": "string", "default": ""},
+                            "confidence": {"type": "string", "enum": ["confirmed", "provisional"], "default": "provisional"}
+                        },
+                        "required": ["variable_name", "value"]
+                    }
+                }
+            },
+            "required": ["action_type", "status", "topic", "decision_what", "reason_why", "entry_type"]
+        }
+    }
+}
+
+
+def _check_write_permission(args: dict, caller_role: str) -> str | None:
+    """[F-3.2] 権限チェック: ロール×status許可表を全組み合わせで判定する。
+    ExpertはProposedのみ、User AIは全status、Detector/Reviewer/Arbiter/IntegratorはRejectedのみ。
+    """
+    ALLOWED_STATUS_BY_ROLE = {
+        "expert": {"Proposed"},
+        "user": {"Proposed", "Approved", "Approved_with_Conditions", "Rejected", "Implicitly_Accepted"},
+        "detector": {"Rejected"},
+        "reviewer": {"Rejected"},
+        "arbiter": {"Rejected"},
+        "integrator": {"Rejected"},
+    }
+    status = args.get("status")
+    allowed = ALLOWED_STATUS_BY_ROLE.get(caller_role, set())
+    if status not in allowed:
+        return f"{caller_role}はstatus='{status}'を書き込めません（許可: {sorted(allowed)}）"
+    return None
+
+
+def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str, task_id: str = "") -> None:
+    """[F-3.1] write_agreementツールからDBへagreementをコミットする。
+    action_type=SUPERSEDEの場合は既存レコードをSupersededに更新する。
+
+    ★修正（レビュー指摘H2）: decision_extractor_nodeが持つDeliverable専用処理
+    （ファイル保存＋FILE_PATH:ポインタ化、UPDATE時のファイル上書き防止）を移植する。
+    これがないと、write_agreement経由のDeliverableは生本文がそのままagreements.decision_what
+    に格納されてしまい、既存のファイルベース運用（save_deliverable_to_file）と食い違う。
+
+    ★修正（BL-040）: agreements.task_id列は従来args.get("task_id")のみに依存していたが、
+    WRITE_AGREEMENT_TOOLのスキーマ上task_idは任意項目でありLLMが省略することが多いため、
+    read_deliverable_fileのtask_idによる逆引き（_resolve_deliverable_file_path）が機能しない
+    ケースが多かった。_CURRENT_TASK_IDから伝播されるtask_id引数をフォールバックとして使う。
+    """
+    action_type = args.get("action_type", "CREATE")
+    entry_type = args.get("entry_type", "Decision")
+    topic = args.get("topic", "")
+    raw_content = args.get("decision_what", "")
+
+    if action_type == "SUPERSEDE":
+        target_topic = args.get("target_topic", topic)
+        for a in reversed(get_agreements_from_db(conn, run_id)):
+            if a["topic"] == target_topic and a.get("status") != "Superseded":
+                db_supersede_agreement(a["id"], conn, run_id)
+                break
+        return
+
+    depends_on_val = json.dumps(args.get("depends_on", []), ensure_ascii=False) if isinstance(args.get("depends_on"), (list, dict)) else (args.get("depends_on") or "[]")
+    resource_claims_val = json.dumps(args.get("resource_claims", {}), ensure_ascii=False) if isinstance(args.get("resource_claims"), (list, dict)) else (args.get("resource_claims") or "{}")
+
+    # [F-3.1/H2] Deliverableのファイル保存（decision_extractor_nodeの既存ロジックを移植）
+    content = raw_content
+    if entry_type == "Deliverable" and action_type == "CREATE" and len(raw_content) > 200:
+        filepath = save_deliverable_to_file(topic, raw_content)
+        content = f"FILE_PATH:{filepath}"
+        print(f"  📁 [File Saved] write_agreement経由の成果物 '{topic}' をファイルに保存しました: {filepath}")
+
+    if action_type == "UPDATE":
+        target_topic = args.get("target_topic", topic)
+        old_content = ""
+        for a in reversed(get_agreements_from_db(conn, run_id)):
+            if a["topic"] == target_topic and a.get("status") != "Superseded":
+                old_content = a["decision_what"]
+                db_supersede_agreement(a["id"], conn, run_id)
+                break
+        # [F-3.1/H2] ファイル上書き防止（decision_extractor_nodeの既存ロジックを移植）
+        if entry_type == "Deliverable" and old_content.startswith("FILE_PATH:"):
+            if not content or (not content.startswith("FILE_PATH:") and len(content) < 200):
+                content = old_content
+                print(f"  🔒 [File Protected] write_agreement経由の更新で '{target_topic}' のファイルパスを保護しました。")
+            elif not content.startswith("FILE_PATH:") and len(content) >= 200:
+                _archive_old_deliverable_file(old_content[len("FILE_PATH:"):])
+                filepath = save_deliverable_to_file(target_topic, content)
+                content = f"FILE_PATH:{filepath}"
+                print(f"  📁 [File Updated] write_agreement経由で '{target_topic}' の修正版を新しいファイルに保存しました: {filepath}")
+
+    conn.execute(
+        "INSERT INTO agreements (id, turn, action_type, status, topic, decision_what, reason_why, proposed_by, "
+        "entry_type, phase_id, task_id, abstraction_level, scope, time_axis, depends_on, resource_claims, timestamp, "
+        "evidence, is_frozen, internal_thought_process, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            f"AG-{int(time.time() * 1000)}", 0, action_type, args.get("status", "Proposed"),
+            topic, content, args.get("reason_why", ""),
+            caller_role, entry_type,
+            args.get("phase_id", ""), args.get("task_id") or task_id,
+            "design", "local", "current",
+            depends_on_val, resource_claims_val, time.time(),
+            args.get("evidence", ""), 0, None, run_id
+        )
+    )
+
+
+def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str, task_id: str = "") -> dict:
+    """[F-3.2] write_agreement_toolの実体。バリデーション→権限チェック→SQLiteコミット→確定値反映
+
+    ★修正（レビュー指摘H1、二重JSONエンコード対応）: 生のdictを返す。json.dumps済み文字列を
+    返すと、_query_AI_liveのツールループ末尾で再度json.dumpsされ二重エンコードになるため
+    （理由は_read_verified_fact_handlerのコメント参照）。
+    """
+    # 1. 構造チェック
+    required = ["action_type", "status", "topic", "decision_what", "reason_why", "entry_type"]
+    missing = [f for f in required if not args.get(f)]
+    if missing:
+        return {"success": False, "error": f"必須フィールドが不足: {missing}"}
+
+    # 2. enum値チェック
+    valid_actions = {"CREATE", "UPDATE", "SUPERSEDE"}
+    valid_statuses = {"Proposed", "Approved", "Approved_with_Conditions", "Rejected", "Implicitly_Accepted"}
+    valid_entries = {"Decision", "Directive", "Deliverable"}
+    if args["action_type"] not in valid_actions:
+        return {"success": False, "error": f"不正なaction_type: {args['action_type']}"}
+    if args["status"] not in valid_statuses:
+        return {"success": False, "error": f"不正なstatus: {args['status']}"}
+    if args["entry_type"] not in valid_entries:
+        return {"success": False, "error": f"不正なentry_type: {args['entry_type']}"}
+
+    # 3. 権限チェック
+    perm_error = _check_write_permission(args, caller_role)
+    if perm_error:
+        return {"success": False, "error": perm_error}
+
+    # 4. depends_onリレーション整合性チェック
+    if args.get("depends_on"):
+        for dep_id in args["depends_on"]:
+            exists = conn.execute(
+                "SELECT 1 FROM agreements WHERE id=? AND run_id=?", (dep_id, run_id)
+            ).fetchone()
+            if not exists:
+                return {"success": False, "error": f"depends_onに存在しないID: {dep_id}"}
+
+    # 5. コミット
+    _commit_agreement_from_tool(args, conn, run_id, caller_role, task_id)
+
+    # 6. confirmed_variablesをverified_factsへ反映
+    for cv in args.get("confirmed_variables", []) or []:
+        var_name = cv.get("variable_name")
+        if not var_name:
+            continue
+        upsert_verified_fact(
+            conn, run_id, var_name, cv.get("value"), unit=cv.get("unit", ""),
+            source_task_id=task_id, source_phase_id=args.get("phase_id", ""),
+            confirmed_by=caller_role,
+            reason=args.get("reason_why", ""),
+            citations=[args.get("topic", "")],
+            confidence=cv.get("confidence", "provisional"),
+        )
+
+    return {"success": True, "message": "DB update successful"}
+
+
 TOOL_DISPATCH = {
     "python_repl": _run_python_repl,
+    "read_verified_fact": _read_verified_fact_handler,
+    "read_deliverable_file": _read_deliverable_file_handler,
+    "write_agreement": lambda args: _write_agreement_impl(
+        args, get_active_conn(), _CURRENT_RUN_ID, _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    ),
 }
 
 # BL-033: 直前のquery_AI呼び出しでLLMが実際に実行したpython_replの(code, result)記録。
 # ノードをまたいでも参照できるよう、呼び出し元(expert_node等)がstateへコピーする前提の
 # 一時バッファ（stateにはシリアライズ不要な生実行ログを持たせない方針、_DB_CONNと同様）。
 _LAST_PYTHON_CALLS: list[dict] = []
+
+# [R3b §3.5.1] 直前のquery_AI呼び出しのツールループ内でwrite_agreementが
+# 1回でも成功したか（success=Trueで返ったか）を記録するフラグ。
+# decision_extractor_node側で「write_agreementが呼ばれたターンか」を
+# 判定するための機構（expert_node/generate_user_utterance_nodeが
+# stateへコピーする）。query_AI()呼び出しごとにリセットされる。
+_LAST_WRITE_AGREEMENT_SUCCEEDED: bool = False
 
 
 def get_last_python_calls() -> list[dict]:
@@ -520,14 +932,24 @@ def get_last_python_calls() -> list[dict]:
     return list(_LAST_PYTHON_CALLS)
 
 
+def get_last_write_agreement_succeeded() -> bool:
+    """【SLM要約】
+    [R3b §3.5.1] 直前のquery_AI呼び出しのツールループ内で、write_agreementが
+    1回でも成功したか（success=Trueで返ったか）を返す。
+    decision_extractor_nodeの条件分岐で使用する。
+    """
+    return _LAST_WRITE_AGREEMENT_SUCCEEDED
+
+
 def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unknown Node", tools: list[dict] | None = None,
              light_system_prompt: str | None = None) -> str:
     """【SLM要約】
     Orchestration of external AI API calls with Record/Replay stub support (keyed by (label, call_seq)),
     delegating the actual retry/provider-selection logic to _query_AI_live.
     """
-    global _call_seq_counter, _LAST_PYTHON_CALLS
+    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED
     _LAST_PYTHON_CALLS = []
+    _LAST_WRITE_AGREEMENT_SUCCEEDED = False
 
     call_seq = _call_seq_counter
     _call_seq_counter += 1
@@ -744,9 +1166,21 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                             if tc.function.name == "python_repl":
                                 result = repl_session.run(args.get("code", ""))
                                 python_calls_log.append({"code": args.get("code", ""), "result": result})
+                                print(f"🔧 [{label}] python_repl 実行（iter={iteration}）:\n{args.get('code','')}\n→ {result}\n")
                             else:
-                                result = handler(args.get("code", ""))
-                            print(f"🔧 [{label}] python_repl 実行（iter={iteration}）:\n{args.get('code','')}\n→ {result}\n")
+                                # [CONSTRAINT] R3: python_repl以外のツール（read_verified_fact,
+                                # read_deliverable_file, write_agreement等）は構造化された
+                                # args辞書（dict）を受け取るため、辞書全体を渡す。
+                                # 旧: handler(args.get("code","")) → 新: handler(args)
+                                result = handler(args)
+                                # [R3b §3.5.1] write_agreementが成功したらフラグをセット
+                                # ★修正（レビュー指摘H1）: resultは生dict（json.dumps済み文字列ではない）
+                                # なので、_safe_json_parseで再パースせず直接判定できる。
+                                if tc.function.name == "write_agreement":
+                                    if isinstance(result, dict) and result.get("success"):
+                                        global _LAST_WRITE_AGREEMENT_SUCCEEDED
+                                        _LAST_WRITE_AGREEMENT_SUCCEEDED = True
+                                print(f"🔧 [{label}] {tc.function.name} 実行（iter={iteration}）: {json.dumps(args, ensure_ascii=False)}\n→ {result}\n")
 
                         loop_messages.append({
                             "role": "tool", "tool_call_id": tc.id,
@@ -944,6 +1378,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     );
     """)
     _ensure_agreements_task_id_column(conn)
+    _ensure_verified_facts_r3a_columns(conn)
 
 
 def _ensure_agreements_task_id_column(conn: sqlite3.Connection) -> None:
@@ -953,6 +1388,21 @@ def _ensure_agreements_task_id_column(conn: sqlite3.Connection) -> None:
     if "task_id" not in cols:
         conn.execute("ALTER TABLE agreements ADD COLUMN task_id TEXT DEFAULT ''")
         conn.commit()
+
+
+def _ensure_verified_facts_r3a_columns(conn: sqlite3.Connection) -> None:
+    """[F-3.9] R3a: verified_factsテーブルに構造化ファクトストア用の列を追加する。
+    reason（理由）、citations（引用元JSON）、confidence（confirmed/provisional）。
+    SQLiteのALTER TABLE ADD COLUMNはIF NOT EXISTSを持たないため、
+    PRAGMA table_infoで既存列を確認してから追加する。"""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(verified_facts)").fetchall()}
+    if "reason" not in cols:
+        conn.execute("ALTER TABLE verified_facts ADD COLUMN reason TEXT DEFAULT ''")
+    if "citations" not in cols:
+        conn.execute("ALTER TABLE verified_facts ADD COLUMN citations TEXT DEFAULT '[]'")
+    if "confidence" not in cols:
+        conn.execute("ALTER TABLE verified_facts ADD COLUMN confidence TEXT DEFAULT 'confirmed'")
+    conn.commit()
 
 
 def db_append_decision(d: dict, conn: sqlite3.Connection, run_id: str) -> None:
@@ -1013,34 +1463,59 @@ def get_decisions_from_db(conn: sqlite3.Connection, run_id: str) -> list[dict]:
 
 
 def upsert_verified_fact(conn: sqlite3.Connection, run_id: str, variable_name: str, value,
-                          unit: str, source_task_id: str, source_phase_id: str, confirmed_by: str) -> None:
-    """[CONSTRAINT] BL-023 2.6節: owns_variablesで宣言された共有変数の確定値を保存する。
+                          unit: str, source_task_id: str, source_phase_id: str, confirmed_by: str,
+                          reason: str = "", citations: list | None = None,
+                          confidence: str = "provisional") -> None:
+    """[F-3.9] 構造化ファクトストア: {topic, value, reason, citations, confidence} を保存する。
+    BL-023 2.6節: owns_variablesで宣言された共有変数の確定値を保存する。
     下流タスクはこの値を再導出せず、確定済みの定数として参照する前提。
+    ★R3a拡張: reason/citations/confidenceを追加。暂定(provisional)値も正当な理由として保存し、
+    後の再検討トリガーとして機能させる（F-3.9、D-035）。
+    ★修正（BL-041）: デフォルトを"confirmed"から"provisional"に変更。呼び出し元が明示的に
+    confidenceを指定しない限り「木を見て森を見ず」の暫定値を確定扱いにしてしまう安全性の
+    問題があったため（decision_extractor_nodeのowned_variable_values安全網パスが該当）。
     """
+    citations_json = json.dumps(citations or [], ensure_ascii=False)
     conn.execute(
         "INSERT INTO verified_facts (run_id, variable_name, value, unit, source_task_id, "
-        "source_phase_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        "source_phase_id, confirmed_by, confirmed_at, reason, citations, confidence) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(run_id, variable_name) DO UPDATE SET value=excluded.value, "
         "unit=excluded.unit, source_task_id=excluded.source_task_id, "
         "source_phase_id=excluded.source_phase_id, confirmed_by=excluded.confirmed_by, "
-        "confirmed_at=excluded.confirmed_at",
+        "confirmed_at=excluded.confirmed_at, reason=excluded.reason, "
+        "citations=excluded.citations, confidence=excluded.confidence",
         (run_id, variable_name, str(value), unit, source_task_id, source_phase_id,
-         confirmed_by, time.time())
+         confirmed_by, time.time(), reason, citations_json, confidence)
     )
 
 
-def get_verified_facts_from_db(conn: sqlite3.Connection, run_id: str, variable_names: list[str]) -> list[dict]:
-    """【SLM要約】
-    指定されたvariable_names（通常は現在タスクのdepends_on先タスクのowns_variables）に限定して
-    確定値を取得する。無関係な変数を注入しないための絞り込み。
+def get_verified_facts_from_db(conn: sqlite3.Connection, run_id: str,
+                                variable_names: list[str] | None = None,
+                                topic: str | None = None) -> list[dict]:
+    """[F-3.9] 構造化ファクトストアから検索する。
+    variable_namesで絞り込み、またはtopicキーワードでLIKE検索を行う。
+    どちらも未指定の場合は全件返す。
+    ★R3a拡張: トピック検索機能を追加。read_verified_factツールから呼び出される。
     """
-    if not variable_names:
-        return []
-    placeholders = ",".join("?" for _ in variable_names)
-    rows = conn.execute(
-        f"SELECT * FROM verified_facts WHERE run_id=? AND variable_name IN ({placeholders})",
-        (run_id, *variable_names)
-    ).fetchall()
+    if topic:
+        rows = conn.execute(
+            "SELECT * FROM verified_facts WHERE run_id=? AND variable_name LIKE ?",
+            (run_id, f"%{topic}%")
+        ).fetchall()
+    elif variable_names:
+        if not variable_names:
+            return []
+        placeholders = ",".join("?" for _ in variable_names)
+        rows = conn.execute(
+            f"SELECT * FROM verified_facts WHERE run_id=? AND variable_name IN ({placeholders})",
+            (run_id, *variable_names)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM verified_facts WHERE run_id=?",
+            (run_id,)
+        ).fetchall()
     return [dict(r) for r in rows]
 
 # ---------------------------------------------------------------------------
@@ -1263,8 +1738,10 @@ Filters out superseded or directive items and applies status-based formatting/la
             content_preview = f"(ファイルに出力済み: {file_path})"
         else:
             content_preview = content_preview[:150]
-                
-        lines.append(f"{icon}{type_label} {clean_topic}: {content_preview}")
+
+        # [R3b対応] LLMがdepends_onにどのagreements.idを指定すればよいか本文中から読み取れるようidを追記
+        agreement_id = a.get('id', '?')
+        lines.append(f"[{agreement_id}] {icon}{type_label} {clean_topic}: {content_preview}")
 
     return "\n".join(lines)
 
@@ -1305,9 +1782,13 @@ def _build_task_scope_context(state: LineageState, conn: sqlite3.Connection) -> 
 
     depends_on_task_ids = current_task.get("depends_on", [])
     dependency_variable_names: list[str] = []
-    for t in state.get("current_phase", {}).get("tasks", []):
-        if t.get("task_id") in depends_on_task_ids:
-            dependency_variable_names.extend(t.get("owns_variables", []))
+    # [BL-035修正] 全フェーズを走査して依存タスクのowns_variablesを解決する。
+    # 従来はstate["current_phase"]["tasks"]のみを走査しており、フェーズ横断の
+    # depends_on参照（例: task_6_3→task_2_1）が構造的に解決不能だった。
+    for phase in state.get("phases", []):
+        for t in phase.get("tasks", []):
+            if t.get("task_id") in depends_on_task_ids:
+                dependency_variable_names.extend(t.get("owns_variables", []))
     verified_facts_rows = get_verified_facts_from_db(conn, state["run_id"], dependency_variable_names) if dependency_variable_names else []
     verified_facts_json = json.dumps(verified_facts_rows, ensure_ascii=False, indent=2) if verified_facts_rows else "(依存タスクの確定値はまだありません)"
 
@@ -1575,6 +2056,25 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     {remaining_criteria_text}\n
     """)
 
+    # [BL-041] 「木を見て森を見ず」対策: 狭いタスクスコープ内で導出した数値が、
+    # 実は他タスクの制約と衝突する可能性を残したまま無条件に確定値として扱われ、
+    # 後から発覚しても誰も再検討しない（Expertはスコープガードレールで他タスクに
+    # 踏み込めず、write_agreementのSUPERSEDEも自発的には使われない）問題への対応。
+    # ゴールで与えられた絶対制約と、タスク内で導出した暫定値を区別させ、
+    # write_agreementのconfirmed_variables.confidenceで機械可読に記録させる。
+    system_prompt += (f"""
+    \n🔀 【確定値と暫定値の区別（重要）】\n
+    ゴールで直接与えられた絶対的な制約（例:「予算上限1億円」「上限3,000万円」）はconfidence判断の対象外です。\n
+    一方、あなたがこのタスクの範囲内で導出した数値（例：車両台数、内訳金額）は、他タスクの制約と
+    まだ突き合わせが済んでいない可能性があるため、原則として\n
+    write_agreementのconfirmed_variablesでは confidence="provisional" として記録してください。\n
+    confidence="confirmed" にしてよいのは、この数値がプロジェクト全体を通じて他のどのタスクの
+    制約からも影響を受けないと明確に判断できる場合、またはUserが明示的にこの値を最終確定と
+    承認した場合に限ります。\n
+    暫定値は後続タスクで矛盾が判明した際に再検討される前提の値であり、暫定として記録すること自体は
+    後退ではありません。\n
+    """)
+
     # 履歴からは消えた「前回の自分のNG発言」をStateから復元して突きつける
     previous_output = state.get("expert_output", "(取得不可)")
 
@@ -1632,10 +2132,16 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         f"【未充足の要求項目】\n{remaining_criteria_text}\n\n"
         "他タスクのowns_variablesに該当する内容は新たに算出・提案しないでください。\n"
         "数値的根拠は python_repl ツールで検算し、暗算での提示は禁止します。\n"
+        "[BL-041] ゴールで直接与えられた絶対制約以外で、このタスク内で導出した数値は、"
+        "write_agreementのconfirmed_variablesでconfidence=\"provisional\"として記録してください"
+        "（他タスクの制約とまだ突き合わせが済んでいないため）。\n"
     )
 
+    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    _CURRENT_CALLER_ROLE = "expert"
+    _CURRENT_TASK_ID = state.get("current_task_id", "")
     return query_AI(messages, client=client_agent, model=model_agent, label=f"Expert:{expert_name}",
-                     tools=[PYTHON_REPL_TOOL], light_system_prompt=light_system_prompt)
+                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL], light_system_prompt=light_system_prompt)
 
 
 #def call_detector(goal: str, user_input: str, expert_output: str, decisions: list[Decision], current_phase: dict) -> dict:
@@ -1758,9 +2264,12 @@ def call_detector(state: LineageState, target_role: str) -> dict:
         #f"- 上記の視座より抽象的な話（例: 設計フェーズなのに目的論を繰り返す）が出た場合も drift=True\n"
         f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由", "criteria_status": [true/false, ...]}}'
     )
+    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    _CURRENT_CALLER_ROLE = "detector"
+    _CURRENT_TASK_ID = state.get("current_task_id", "")
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_auditor, model=model_auditor, label="Detector",
-        tools=[PYTHON_REPL_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": []},
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": []},
     )
     if parse_failed:
         # [SAFETY] D-005: 層2リトライを使い切った場合はフェイルオープン（none）ではなくフェイルクローズ（major）に倒す。
@@ -1781,7 +2290,8 @@ def call_detector(state: LineageState, target_role: str) -> dict:
     return {"risk": risk, "constraint_issue": constraint_issue, "comment": parsed.get("comment", ""), "criteria_status": criteria_status}
 
 def call_decision_extractor(chat_history: list[dict], existing_topics: list[str], target_role: str,
-                             owns_variables: list[str] | None = None) -> tuple[list[dict], dict]:
+                             owns_variables: list[str] | None = None,
+                             valid_task_ids: list[str] | None = None) -> tuple[list[dict], dict]:
     """【SLM要約】
     Extracting structured records of proposed decisions or evaluating user acceptance/rejection from recent conversation history based on the system's current context and interaction role.
     """
@@ -1798,6 +2308,10 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
     owns_variables_text = (
         "\n".join(f"- {v}" for v in owns_variables)
         if owns_variables else "(現在のタスクが確定させるべき共有変数はありません)"
+    )
+    valid_task_ids_text = (
+        "\n".join(f"- {tid}" for tid in valid_task_ids)
+        if valid_task_ids else "(タスク一覧が取得できませんでした)"
     )
     if target_role == "expert":
         # ==========================================
@@ -1867,10 +2381,15 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
                 → `action_type: "UPDATE"`, `target_topic`: 過去のトピック名, `status: "Implicitly_Accepted"`
             - User自身が新しい制約を提示した場合は `action_type: "CREATE"`, `status: "Proposed"`, `proposed_by: "User"` で抽出してください。
 
-            【BL-024: フェーズ・タスク遷移の検出】Userが「次のタスク（task_1_2）に移行する」のように
+            【BL-024: フェーズ・タスク遷移の検出】Userが「次のタスクに移行する」のように
             明示的に次のフェーズ・タスクへの移行を指示した場合のみ、トップレベルの`advances_to_phase_id`/
             `advances_to_task_id`にその移行先のIDを設定してください。移行の指示がない場合は両方とも
             `null`にしてください（前のタスクへの言及や単なるレビューは移行に該当しません）。
+
+            【BL-039: task_idは以下の一覧から一字一句そのままコピーしてください】
+            会話文中で「task_1.1」のようにドット区切りで言及されていても、`advances_to_task_id`には
+            必ず下記一覧のアンダースコア区切り表記をそのまま使ってください（一覧にない表記は無効として扱われます）。
+            {valid_task_ids_text}
         """
 
         prompt_old = f"""
@@ -2052,7 +2571,10 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict]) -> 
         "rationale": "判断理由"
     }}
     """
-    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Resource Arbiter", tools=[PYTHON_REPL_TOOL])
+    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    _CURRENT_CALLER_ROLE = "arbiter"
+    _CURRENT_TASK_ID = ""
+    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Resource Arbiter", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL])
     return _safe_json_parse(res, fallback={})
 
 
@@ -2208,7 +2730,10 @@ def call_integrator(goal: str, merged_text: str) -> dict:
         "details": "矛盾の具体的な内容と理由"
     }}
     """
-    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Integrator")
+    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    _CURRENT_CALLER_ROLE = "integrator"
+    _CURRENT_TASK_ID = ""
+    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Integrator", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL])
     return _safe_json_parse(res, fallback={"contradictions": False, "affected_phases": [], "details": ""})
 
 
@@ -2280,9 +2805,12 @@ def call_reviewer(goal: str, deliverable_text: str) -> dict:
         "reasoning": "判定の根拠（成果物のどの部分が目標に達していないのか、要求された成果物のうち何が欠落しているのかを具体的に明示すること）"
     }}
     """
+    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    _CURRENT_CALLER_ROLE = "reviewer"
+    _CURRENT_TASK_ID = ""
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_auditor, model=model_auditor, label="Reviewer QA",
-        tools=[PYTHON_REPL_TOOL], fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"},
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL], fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"},
     )
     if parse_failed:
         # [SAFETY] D-005: 層2リトライを使い切った場合はフェイルクローズ（passed=False、差し戻し）に倒す。
@@ -2458,12 +2986,18 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         messages.append({"role": "user", "content": "(会話を開始してください。要件を伝えて作業を指示してください)"})
         print("---NO chat_history---\n")
 
-    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL])
+    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    _CURRENT_CALLER_ROLE = "user"
+    _CURRENT_TASK_ID = state.get("current_task_id", "")
+    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL])
 
     if content is None or content.strip() == "" or content == "(APIから空の応答が返されました)":
         for retry in range(3):
             print(f"⚠️ [User AI] 空応答を検知。リトライ {retry+1}/3...")
-            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL])
+            # global宣言は既に上の行で完了しているため再宣言不要
+            _CURRENT_CALLER_ROLE = "user"
+            _CURRENT_TASK_ID = state.get("current_task_id", "")
+            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL])
             if content and content.strip() and content != "(APIから空の応答が返されました)":
                 break
         else:
@@ -2528,6 +3062,8 @@ def generate_user_utterance_node(state: LineageState) -> LineageState:
         state["user_retry_count"] = 0
     
     user_input = generate_user_utterance(state, config)
+    # [R3b §3.5.1] 今ターンでwrite_agreementが1回でも成功したかをstateに保存
+    state["user_wrote_agreement"] = get_last_write_agreement_succeeded()
     print(f"\n>>> 👤 User AIの発言:\n{user_input}")
     state["user_input"] = user_input
     state["chat_history"].append({"role": "user", "content": state["user_input"]})
@@ -2625,6 +3161,8 @@ Updates system state with the expert's output, decisions, and conversational his
     )
     # BL-033: Expertが実際に実行したpython_replのcode/resultを、次のDetectorが参照できるようstateへ保存する。
     state["expert_last_python_calls"] = get_last_python_calls()
+    # [R3b §3.5.1] 今ターンでwrite_agreementが1回でも成功したかをstateに保存
+    state["expert_wrote_agreement"] = get_last_write_agreement_succeeded()
     print(f"\n------ 完了 ------")
     decision = make_decision(who=f"expert:{state['selected_expert']}", what="タスクを実行", why=(output or "")[:100])
     state["expert_output"] = output
@@ -2744,12 +3282,21 @@ def _resolve_task_transition(state: LineageState, transition: dict) -> None:
         return
 
     if next_task_id:
+        # [BL-039] LLMはtask_idを「task_1.1」のようなドット区切りで返すことがあるが、
+        # task_planner確定済みのtask_idは「task_1_1」のアンダースコア区切りで統一されている。
+        # 正規化なしで単純一致比較すると常に不一致となり、current_task_idが永久に
+        # フォールバック値のまま更新されない（実ドライランで全遷移が失敗する事故を確認済み）。
         valid_task_ids = {t["task_id"] for t in target_phase.get("tasks", [])}
-        if next_task_id not in valid_task_ids:
+        normalized_next_task_id = next_task_id.replace(".", "_")
+        if next_task_id in valid_task_ids:
+            canonical_task_id = next_task_id
+        elif normalized_next_task_id in valid_task_ids:
+            canonical_task_id = normalized_next_task_id
+        else:
             print(f"  ⚠️ [decision_extractor] 存在しないtask_id '{next_task_id}' への遷移要求を無視しました。")
             return
-        state["current_task_id"] = next_task_id
-        print(f"  ➡️ [decision_extractor] current_task_id を '{next_task_id}' に更新しました。")
+        state["current_task_id"] = canonical_task_id
+        print(f"  ➡️ [decision_extractor] current_task_id を '{canonical_task_id}' に更新しました。")
 
     if next_phase_id:
         state["current_phase"] = target_phase
@@ -2774,8 +3321,16 @@ def decision_extractor_node(state: LineageState) -> LineageState:
     existing_topics = list({a["topic"] for a in get_agreements_from_db(_conn, _run_id) if a.get("status") != "Superseded"})
     current_task_for_extraction = _get_current_task(state)
     owns_variables = current_task_for_extraction.get("owns_variables", [])
-    extracted_items, transition = call_decision_extractor(state["chat_history"], existing_topics, target_role, owns_variables)
+    # [BL-039] 全フェーズのtask_idをLLMに提示し、正しい表記でのコピーを促す。
+    valid_task_ids = [t["task_id"] for phase in state.get("phases", []) for t in phase.get("tasks", [])]
+    extracted_items, transition = call_decision_extractor(state["chat_history"], existing_topics, target_role, owns_variables, valid_task_ids)
     print(f"\n------ 完了 ------")
+
+    # [R3b §3.5.1] 今ターンでwrite_agreementが1回でも成功したかをstateから取得
+    wrote_agreement_this_turn = (
+        state.get("expert_wrote_agreement", False) if target_role == "expert"
+        else state.get("user_wrote_agreement", False)
+    )
 
     for item in extracted_items:
         action_type = item.get("action_type", "CREATE")
@@ -2796,6 +3351,7 @@ def decision_extractor_node(state: LineageState) -> LineageState:
         resource_claims = item.get("resource_claims", {})
 
         # BL-023 2.6節: owns_variablesに含まれる変数のみをverified_factsへ確定保存する
+        # ★R3b §3.5.1: write_agreement呼び出し有無に関わらず毎ターン無条件実行
         owned_variable_values = item.get("owned_variable_values", {})
         if isinstance(owned_variable_values, dict):
             for var_name, var_value in owned_variable_values.items():
@@ -2804,123 +3360,100 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                         _conn, _run_id, var_name, var_value, unit="",
                         source_task_id=task_id, source_phase_id=phase_id,
                         confirmed_by=proposed_by
+                        # [BL-041] confidence未指定→デフォルトのprovisionalで保存される。
+                        # このパスはwrite_agreementのconfirmed_variables指定漏れの保険であり、
+                        # Expert自身がconfidenceを判断した経路ではないため安全側に倒す。
                     )
-                    print(f"  🔒 [verified_facts] '{var_name}' = {var_value} を確定値として保存しました（source: {task_id}）。")
+                    print(f"  🔒 [verified_facts] '{var_name}' = {var_value} を暫定値(provisional)として保存しました（source: {task_id}）。")
 
-        # ===== 成果物のファイル書き出し処理 (バックアップ処理付き) =====
-        content = "" # 初期化
-        if entry_type == "Deliverable" and action_type == "CREATE":
-            #content_to_save = raw_content
-            if len(raw_content) > 200:
-                content_to_save = raw_content
-            else:
-                content_to_save = state.get("expert_output", "")
-            """
-            # LLMがサボって短い要約しか出さなかった場合は直前のAgent出力をそのままバックアップ保存する
-            if len(raw_content) < 200 and state.get("expert_output"):
-                content_to_save = state["expert_output"]
-                print(f"  ⚠️ [Decision Extractor] 成果物の抽出内容が短すぎるため、Agentの生出力を直接ファイルにバックアップ保存します。")
-            """
-            if content_to_save:
-                filepath = save_deliverable_to_file(topic, content_to_save)
-                content = f"FILE_PATH:{filepath}"
-                print(f"  📁 [File Saved] 成果物 '{topic}' をファイルに保存しました: {filepath}")
+        # ★R3b §3.5.1: write_agreementが呼ばれたターンはdecision_extractor_nodeによる
+        # Agreement書き込み（db_append_agreement/db_supersede_agreement）をスキップする。
+        # write_agreementが既にagreementsとverified_factsの両方を更新しているため、
+        # 二重書き込みを防止する。verified_factsへの保存（上記のowned_variable_values→
+        # upsert_verified_fact）はwrite_agreementのconfirmed_variables指定漏れの保険
+        # として、write_agreement呼び出し有無に関わらず毎ターン無条件実行する。
+        if not wrote_agreement_this_turn:
+            # ===== 成果物のファイル書き出し処理 (バックアップ処理付き) =====
+            content = "" # 初期化
+            if entry_type == "Deliverable" and action_type == "CREATE":
+                if len(raw_content) > 200:
+                    content_to_save = raw_content
+                else:
+                    content_to_save = state.get("expert_output", "")
+                if content_to_save:
+                    filepath = save_deliverable_to_file(topic, content_to_save)
+                    content = f"FILE_PATH:{filepath}"
+                    print(f"  📁 [File Saved] 成果物 '{topic}' をファイルに保存しました: {filepath}")
+                else:
+                    content = raw_content
+            elif entry_type == "Deliverable" and action_type == "UPDATE":
+                 content = raw_content
             else:
                 content = raw_content
-        elif entry_type == "Deliverable" and action_type == "UPDATE":
-             content = raw_content # この後保護処理が入る
-        else:
-            content = raw_content
-        # ============================================
 
-        if action_type == "UPDATE" or status == "Approved_with_Conditions":
-            target_topic = item.get("target_topic", topic)
-            old_content = ""
-            for a in reversed(get_agreements_from_db(_conn, _run_id)):
-                if a["topic"] == target_topic and a.get("status") != "Superseded":
-                    old_content = a["decision_what"]
-                    db_supersede_agreement(a["id"], _conn, _run_id)
-                    if proposed_by == "Unknown" or not proposed_by:
-                        proposed_by = a.get("proposed_by", "Unknown")
-                    break
-                    
-            # --- 🛡️ ファイル上書き防止の鉄壁の保護 🛡️ ---
-            if old_content.startswith("FILE_PATH:"):
-                # もし新しいcontentが空文字、もしくは「FILE_PATH:」で始まらない短い文字列（要約や承認の言葉など）なら、古いファイルパスを引き継ぐ
-                if not content or (not content.startswith("FILE_PATH:") and len(content) < 200):
-                    content = old_content
-                    print(f"  🔒 [File Protected] 成果物 '{target_topic}' のファイルパスを保護し、次ターンへ引き継ぎました。")
-                elif not content.startswith("FILE_PATH:") and len(content) >= 200:
-                    # 200文字以上の新しい本文が提示された場合は、新しいファイルとして保存して更新する
-                    filepath = save_deliverable_to_file(target_topic, content)
-                    content = f"FILE_PATH:{filepath}"
-                    print(f"  📁 [File Updated] 成果物 '{target_topic}' の修正版を新しいファイルに保存しました: {filepath}")
-            # -----------------------------------------------
+            if action_type == "UPDATE" or status == "Approved_with_Conditions":
+                target_topic = item.get("target_topic", topic)
+                old_content = ""
+                for a in reversed(get_agreements_from_db(_conn, _run_id)):
+                    if a["topic"] == target_topic and a.get("status") != "Superseded":
+                        old_content = a["decision_what"]
+                        db_supersede_agreement(a["id"], _conn, _run_id)
+                        if proposed_by == "Unknown" or not proposed_by:
+                            proposed_by = a.get("proposed_by", "Unknown")
+                        break
+                        
+                if old_content.startswith("FILE_PATH:"):
+                    if not content or (not content.startswith("FILE_PATH:") and len(content) < 200):
+                        content = old_content
+                        print(f"  🔒 [File Protected] 成果物 '{target_topic}' のファイルパスを保護し、次ターンへ引き継ぎました。")
+                    elif not content.startswith("FILE_PATH:") and len(content) >= 200:
+                        _archive_old_deliverable_file(old_content[len("FILE_PATH:"):])
+                        filepath = save_deliverable_to_file(target_topic, content)
+                        content = f"FILE_PATH:{filepath}"
+                        print(f"  📁 [File Updated] 成果物 '{target_topic}' の修正版を新しいファイルに保存しました: {filepath}")
+                
+                new_content = content if content else old_content
+                if not new_content:
+                    new_content = "(状態のみ更新)"
+                
+                agreement: Agreement = {
+                    "id": f"AG-{int(time.time() * 1000)}", "turn": state["turn_count"],
+                    "action_type": "UPDATE", "entry_type": entry_type, "status": status,
+                    "topic": target_topic, "decision_what": new_content, "reason_why": rationale,
+                    "proposed_by": proposed_by, "phase_id": phase_id, "task_id": task_id,
+                    "abstraction_level": abstraction_level, "scope": scope, "time_axis": time_axis,
+                    "depends_on": depends_on, "resource_claims": resource_claims
+                }
+                db_append_agreement(agreement, _conn, _run_id)
+                decision_log = make_decision(
+                    who="decision_extractor",
+                    what=f"合意更新[{status}]: {target_topic}",
+                    why=f"[{proposed_by}] {rationale}"
+                )
+                db_append_decision(decision_log, _conn, _run_id)
+            else:
+                agreement: Agreement = {
+                    "id": f"AG-{int(time.time() * 1000)}", "turn": state["turn_count"],
+                    "action_type": action_type, "entry_type": entry_type, "status": status,
+                    "topic": topic, "decision_what": content, "reason_why": rationale,
+                    "proposed_by": proposed_by, "phase_id": phase_id, "task_id": task_id,
+                    "abstraction_level": abstraction_level, "scope": scope, "time_axis": time_axis,
+                    "depends_on": depends_on, "resource_claims": resource_claims
+                }
+                db_append_agreement(agreement, _conn, _run_id)
+                decision_log = make_decision(
+                    who="decision_extractor",
+                    what=f"新規抽出[{status}]: {topic}",
+                    why=f"[{proposed_by}] {rationale}"
+                )
+                db_append_decision(decision_log, _conn, _run_id)
             
-            new_content = content if content else old_content
-            if not new_content:
-                new_content = "(状態のみ更新)"
-            
-            agreement: Agreement = {
-                "id": f"AG-{int(time.time() * 1000)}",
-                "turn": state["turn_count"],
-                "action_type": "UPDATE",
-                "entry_type": entry_type,
-                "status": status,
-                "topic": target_topic,
-                "decision_what": new_content,
-                "reason_why": rationale,
-                "proposed_by": proposed_by,
-                "phase_id": phase_id,
-                "task_id": task_id,
-                "abstraction_level": abstraction_level,
-                "scope": scope,
-                "time_axis": time_axis,
-                "depends_on": depends_on,
-                "resource_claims": resource_claims
-            }
-            db_append_agreement(agreement, _conn, _run_id)
-
-            decision_log = make_decision(
-                who="decision_extractor",
-                what=f"合意更新[{status}]: {target_topic}",
-                why=f"[{proposed_by}] {rationale}"
-            )
-            db_append_decision(decision_log, _conn, _run_id)
-
+            print(f"\n  📝 [Extract] {agreement['action_type']} - {agreement['entry_type']}: {agreement['topic']}")
+            print(f"     ├ Status: {agreement['status']} | By: {agreement['proposed_by']}")
+            print(f"     ├ Meta  : Phase={agreement['phase_id']} | Level={agreement['abstraction_level']} | Scope={agreement['scope']} | Time={agreement['time_axis']}")
+            print(f"     ├ Reason: {agreement['reason_why']}")
         else:
-            agreement: Agreement = {
-                "id": f"AG-{int(time.time() * 1000)}",
-                "turn": state["turn_count"],
-                "action_type": action_type,
-                "entry_type": entry_type,
-                "status": status,
-                "topic": topic,
-                "decision_what": content,
-                "reason_why": rationale,
-                "proposed_by": proposed_by,
-                "phase_id": phase_id,
-                "task_id": task_id,
-                "abstraction_level": abstraction_level,
-                "scope": scope,
-                "time_axis": time_axis,
-                "depends_on": depends_on,
-                "resource_claims": resource_claims
-            }
-            db_append_agreement(agreement, _conn, _run_id)
-
-            decision_log = make_decision(
-                who="decision_extractor",
-                what=f"新規抽出[{status}]: {topic}",
-                why=f"[{proposed_by}] {rationale}"
-            )
-            db_append_decision(decision_log, _conn, _run_id)
-        
-        # 🌟 【ここが追加部分】 抽出結果をターミナルに綺麗にプリントする
-        print(f"\n  📝 [Extract] {agreement['action_type']} - {agreement['entry_type']}: {agreement['topic']}")
-        print(f"     ├ Status: {agreement['status']} | By: {agreement['proposed_by']}")
-        print(f"     ├ Meta  : Phase={agreement['phase_id']} | Level={agreement['abstraction_level']} | Scope={agreement['scope']} | Time={agreement['time_axis']}")
-        print(f"     ├ Reason: {agreement['reason_why']}")
+            print(f"  ⏭️ [decision_extractor] write_agreementが呼ばれたため、ExtractからAgreement書き込みをスキップしました（topic: {topic}）")
 
     _resolve_task_transition(state, transition)
 
@@ -3459,6 +3992,8 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
         os.replace(_REPLAY_FIXTURE_PATH, backup_path)
         print(f"⚠️ [RECORD] 既存のfixtureファイルを {backup_path} に退避しました（前回記録の上書き消失を防止）。")
 
+    global _CURRENT_RUN_ID
+    _CURRENT_RUN_ID = run_id
     _DB_CONN = get_db_connection(db_path)
     init_db(_DB_CONN)
 
