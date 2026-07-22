@@ -78,24 +78,26 @@ def apply_whiteboard_patch(conn, run_id: str, phase_id: str, task_id: str,
 `expert_detector`がmajor判定を出した場合、直前バージョンを物理的に「正」として扱う。削除は行わず、**新しいレコードとして「ロールバック済みVer.N+1」を追加する**（削除するとDAGの追跡性が失われるため、監査ログとして残す方針とする）。
 
 ```python
-def rollback_whiteboard(db_connection, phase_id: str, task_id: str, reason: str):
-    latest_two = db_connection.execute(
+def rollback_whiteboard(conn, run_id: str, phase_id: str, task_id: str, reason: str):
+    rows = conn.execute(
         "SELECT version, content FROM whiteboard_drafts "
-        "WHERE phase_id=? AND task_id=? ORDER BY version DESC LIMIT 2",
-        (phase_id, task_id)
+        "WHERE run_id=? AND phase_id=? AND task_id=? ORDER BY version DESC LIMIT 2",
+        (run_id, phase_id, task_id)
     ).fetchall()
-    
-    if len(latest_two) < 2:
+
+    if len(rows) < 2:
         return  # ロールバック先がない（初版でのmajor判定は別途ハンドリング）
-    
-    prev_version_content = latest_two[1]["content"]
+
+    prev_version_content = rows[1]["content"]
     apply_whiteboard_patch(
-        db_connection, phase_id, task_id,
+        conn, run_id, phase_id, task_id,
         new_content=prev_version_content,
         author_role="system_rollback",
         edit_summary=f"[ROLLBACK] Detector major判定により前バージョンへ復元: {reason}"
     )
 ```
+
+実装では、直前ターンでExpertがwhiteboard_draftsに書き込んだか（どのphase_id/task_idか）を`expert_node`がstateに保存し（`state["expert_last_whiteboard_edit"]`、BL-033の`_LAST_PYTHON_CALLS`と同じ「LangGraph単一プロセス同期実行前提」パターン）、次ターンで`constraint_issue=="major"`と判定された場合にこの情報を使ってロールバックする。
 
 **設計判断の理由**: ロールバックを「バージョン番号を巻き戻す」のではなく「同じ内容を新バージョンとして追記する」方式にしたのは、要件定義書N-2（トレーサビリティ：全判断ログをSQLiteに完全保存）の原則に従うため。バージョン番号を巻き戻すと、「Ver.4で何が却下されたか」という履歴自体が失われる。
 
