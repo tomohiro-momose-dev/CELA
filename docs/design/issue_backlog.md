@@ -75,6 +75,7 @@
 | BL-041 | 高 | `cela_main.py` (`arbiter_node`, `check_global_constraint_overrun`, `global_constraints`) | ユーザーが「task_1.1で車両台数4台を決定し予算1億円を使い果たした後、システム開発費等の算出でこの決定をどう覆すか」と問いかけたことを契機に調査。`state["global_constraints"]`は`task_planner_node`での初期化（`[]`）以外に実際のクレームデータを書き込む箇所がコードベース中に一切なく、`check_global_constraint_overrun`は常に空リストを走査するため超過を検出できない。実ドライラン全文検索でも`[Resource Arbiter]`・`[facilitator]`・`[reflection]`・`phases_to_revise`はいずれも0件で、この調停機構は設計上は存在するが**実際には一度も発火し得ない死んだコードパス**であることを確認した。今回のドライランでは幸い、task_1.2が自タスクのacceptance_criteria（「予算超過時の調整案が検討されている」）内で帳尻を合わせた（残額わずか42万円）ため実害はなかったが、これは偶然であり、一度確定した決定（`vehicle_count=4`等）を後続タスクの発見（コスト不足等）を根拠に体系的に再検討させる自動メカニズムは現状存在しない。`write_agreement`のSUPERSEDE機構自体はあるが、BL-025のスコープガードレールによりExpertは自タスク外の合意を書き換えない設計のため、これも自動トリガーにはならない。設計判断が必要な項目（`global_constraints`への`resource_claims`集約タイミング、`reflection_interval`とarbiter発火条件の関係）のため、現時点では記録のみで実装は見送り | P1 |
 | BL-042 | 中 | `cela_main.py` (`call_detector`のconstraint_issue判定プロンプト) | R4実装後の実ドライラン（`log/2026-07-22/1804`）で、Detectorのconstraint_issue判定（minor/major境界の運賃単価矛盾）が同じ論点をiter=8〜9以上再検討し続け、同一のpython_replコードを重複実行するなど非効率にトークンを消費していたことを発見。ユーザー提案の「3回思考し多数決を取る」方式を`call_detector`プロンプトへの指示追加として実装（コード側での強制カウントではなく、まずプロンプト指示のみで様子見）。実LLM再ドライランでの効果確認は未実施 | P2 |
 | BL-043 | 低 | `cela_main.py` (`call_decision_extractor`のJSON出力方式) | ユーザー提案：「AIがJSON出力→パース失敗→1からやり直し」ではなく「ツールでJSON構造確認→OK/FAULTと不備箇所をフィードバック→該当箇所だけ直して再出力」にできないか、という相談を契機に調査。既存の`write_agreement`等のツール呼び出し引数パースには、壊れたJSONを検出した場合にエラー内容をモデルへ返し同一ツールループ内で自己修復させる仕組み（D-009）が既に存在することが判明。`decision_extractor`自体をFunction Calling方式（例:`submit_extracted_events`ツール）に作り替えこの既存の自己修復ループに一本化する案を採用したが、設計変更としてはやや大きめのためBL起票のみに留め、JSONパース失敗（`_safe_json_parse`のフォールバック採用）が実害として頻発するようになった時点で実装に着手する方針 | P3 |
+| BL-044 | 中 | `cela_main.py` (`run_ai_vs_ai_loop`, `task_planner_node`, `_save_checkpoint`/`_load_checkpoint`) | ユーザー提案：ドライラン長時間化により連続稼働が難しいため一時停止・再開機能が欲しいという相談。当初案（ターン境界でのcheckpoint保存）はBL-005（`turn_count`凍結）によりターン境界が実用にならないとユーザー自身が指摘し発覚、`app.stream(state, stream_mode="values")`によるノード単位保存方式へ設計変更（D-039）。`_save_checkpoint`/`_load_checkpoint`、`run_ai_vs_ai_loop`の`resume_from`引数、`task_planner_node`の冪等性ガード（`turn_count==1 and not phases`）、`--resume` CLI引数を実装。`tests/test_checkpoint_resume.py`（4件）新規、オフラインスモークテスト計70件Pass。実LLMドライランでのCtrl+C→`--resume`往復の実地確認は未実施 | P2 |
 
 ---
 
@@ -1376,6 +1377,39 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 - 既存のツールループの自己修復パターン（D-009、引数JSONパース失敗時のエラーフィードバック＋同一ループ内再試行）にそのまま乗ることを確認する。
 - 現行の`_safe_json_parse`ベースの単発呼び出し・層2リトライ（D-005）は本経路について不要になるため撤去する。
 - `tests/test_r3_smoke.py`等のオフラインスモークテストで、壊れたJSON引数を渡した場合に自己修復ループが機能することを検証するテストケースを追加する。
+
+---
+
+### BL-044: ドライランの一時停止・再開機能（Ctrl+C→checkpoint.json→`--resume`）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（実装・オフラインスモークテスト4件Pass。実LLMドライランでのCtrl+C→`--resume`往復の実地確認は未実施） |
+| 優先度 | P2 |
+| 依存 | [BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)（`turn_count`がグラフ内部ループの間更新されないため、ターン境界でのチェックポイントでは粒度が粗すぎると判明した経緯） |
+| 関連 | [D-039](decision_log.md)、[decision_lineage.md 論点45](decision_lineage.md) |
+
+**内容:**
+
+ユーザーから「ドライランが長時間化しやすく連続稼働させ続けるのが難しいので、一時停止・再開の仕組みを組めないか」と相談。当初AIは「`app.invoke()`から戻ったターン境界でstateをJSON保存し、次回起動時に読み込んで再開する」方式を提案したが、ユーザーが「そもそも今、ターンは凍結されて1のままなのでは」と指摘。BL-005（`state["turn_count"]`はグラフ内部で`generate_user_utterance`へループバックし続ける限り更新されず、外側の`app.invoke()`単位では長時間戻ってこないことがある）を踏まえると、ターン境界でのチェックポイントは実用にならないと判断し、方式を変更した。
+
+**実装（`cela_main.py`）:**
+
+1. `_save_checkpoint`/`_load_checkpoint`: `state`/`config`/`current_turn`をJSONとして原子的に（一時ファイル→`os.replace`）保存・復元するヘルパーを新設。
+2. `run_ai_vs_ai_loop`: `app.invoke(state)`（グラフ全体を1回で最後まで実行）の代わりに`app.stream(state, stream_mode="values")`を使い、グラフの各ノード実行後のstateスナップショットを都度受け取ってcheckpoint（そのランのログフォルダ内`checkpoint.json`）へ保存するよう変更。`KeyboardInterrupt`（Ctrl+C）を捕捉し、直前のcheckpointパスと再開コマンドを案内してから終了する。`resume_from`引数を追加し、指定時はfreshなstateを作らずcheckpointから`state`/`config`/`current_turn`・`run_id`・`db_path`を復元する（`init_db`は`CREATE TABLE IF NOT EXISTS`のため同一DBへの再接続は安全）。
+3. `task_planner_node`: グラフのentry_pointが`task_planner`固定のため、再開時も必ずこのノードを通る。従来の`if state["turn_count"]==1:`だけのガードだと、ターン1の途中（既にphases確定済み）で止めた場合に計画を無条件で再生成してしまうため、`if state["turn_count"]==1 and not state.get("phases"):`に修正（冪等性）。
+4. `__main__`: `argparse`で`--resume <checkpoint.jsonのパス>`を追加。指定なしは従来通り新規スタート。
+
+**制約（設計時に明確化）:** グラフのentry_pointが`task_planner`固定のため、「止めたノードそのものから再開」ではなく「その回（ラウンド）の頭（`generate_user_utterance`、ターン2以降）から再開」になる。それでも、BL-005の影響で数百行分内部ループしうる「ターン単位」の粗い粒度と比べれば、最大でも直近1ラウンド分のやり直しで済むため実用上十分と判断した。
+
+**完了条件:**
+
+- `tests/test_checkpoint_resume.py`（新規4件）: checkpoint往復・原子的書き込み・上書き・`task_planner_node`冪等性ガードをオフラインで検証、全件Pass。
+- 実LLMドライランで実際にCtrl+Cで一時停止し、`--resume`で再開できることを確認する（未実施）。
+
+| 日付 | 内容 |
+|------|------|
+| 2026-07-22 | 新規起票・実装完了。ユーザー提案を受けチェックポイント方式を設計する過程で、当初案（ターン境界での保存）がBL-005（`turn_count`凍結）により実用にならないとユーザー自身が指摘して発覚し、`app.stream()`によるノード単位保存方式へ設計変更（D-039）。`_save_checkpoint`/`_load_checkpoint`・`run_ai_vs_ai_loop`の`resume_from`引数・`task_planner_node`の冪等性ガード・`--resume` CLI引数を実装。`tests/test_checkpoint_resume.py`（4件）新規追加、オフラインスモークテスト計70件Pass。実LLMドライランでの実地確認は次回待ち。 |
 
 | 日付 | 内容 |
 |------|------|
