@@ -489,6 +489,19 @@
 
 ---
 
+## 論点43: R4（ホワイトボード差分パッチ化）の優先着手決定と、差分マージ方式の確定
+
+- **ユーザー提起:** 論点42の議論の直後、「R4のホワイトボード化を先に進めたい。現状はドライランの長時間化・トークン食いで検証コストが高い。決定・フェーズ横断情報構造化DB（BL-041/BL-018）とは独立して進められると理解している。さらにintegratorを卒業できる」と提案。
+- **AI分析・確認:** R4設計書（`cela_r4_design.md`）の完了条件表を確認したところ、Integratorの「矛盾検知」という役割自体は残り、発火タイミングが「議論終盤に1回」から「パッチ適用の都度」に変わるだけであることを指摘。ユーザーは「卒業は語弊でした。最後に全成果物を一括結合するテキスト生成処理を卒業できる、ですね」と訂正・合意。
+- **Plan mode探索での発見:** 既存のR4設計書§2.2〜2.4の疑似コードは、Expertが提示する「変更箇所」を既存の完全版へどうマージするかを定義しておらず（自由記述の部分修正をそのまま上書き保存すると触れていない箇所が失われる）、実装不能な状態だったことをAIが発見。
+- **ユーザーへの確認（AskUserQuestion、3択提示）:** ①構造化セクション方式（`{見出し:本文}`のdictマージ）、②常に全文再送、③unified diff形式、のいずれで実装するか確認したところ、ユーザーが「君のようなエージェントで採用されている差分変更の仕組みは何？」と逆質問。AIが**Claude Code自身のEditツール方式**（`old_text`の完全一致検索→`new_text`への置換、一致しない/複数一致する場合はエラーを返し同一ツールループ内で修正・再試行させる）を提案し、これを採用することで合意。LLMに行番号やunified diff形式を要求せず、マージ処理も100%機械的（決定的）なため実装リスクが低いと判断。
+- **実装:** `cela_main.py`に`get_latest_whiteboard`/`apply_whiteboard_patch`/`rollback_whiteboard`/`_apply_text_edits`を新設。`WRITE_AGREEMENT_TOOL`に`edits`パラメータ（`old_text`/`new_text`/`replace_all`の配列）を追加し、`_write_agreement_impl`/`_commit_agreement_from_tool`のDeliverable経路をwhiteboard_drafts方式に全面移行。`call_expert`（フル版・軽量版）・`generate_user_utterance`・`call_detector`のプロンプトに現在タスクの最新ホワイトボード内容を注入。`integrator_node`・`read_deliverable_file`ツールに`WHITEBOARD:`ポインタの解決を追加。Detectorのmajor判定時のロールバック（F-7.3）を`expert_node`の差し戻し処理に配線。BL-034/BL-040のファイルベース版管理（`save_deliverable_to_file`/`_archive_old_deliverable_file`）は削除せず、`integrator_node`が生成する1回限りの最終統合文書専用として残した。
+- **テスト:** 既存の`tests/test_r3_smoke.py`のうちDeliverableファイル保存を前提としていた3件（R3b-T12・T13、BL-040バージョニングテスト）をWHITEBOARD方式の挙動に更新。新規`tests/test_r4_smoke.py`（14件）を追加。オフラインスモークテスト計64件がすべてPass。
+- **決定者:** t-momose（R4優先着手の提案とその理由、「卒業」の範囲訂正、差分変更の実装方式についての逆質問による誘導）、Claude Sonnet 5（Integrator役割継続の指摘、マージ方式の未定義部分の発見、Claude Code Editツール方式の提案・実装）
+- **関連:** [BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)（本Issueより優先着手）、[cela_r4_design.md](r4/cela_r4_design.md)、[cela_r4_impl_Plan.md](r4/cela_r4_impl_Plan.md)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
