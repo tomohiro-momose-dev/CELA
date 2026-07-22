@@ -1272,7 +1272,7 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 |------|------|
 | 状態 | `partial`（暫定値デフォルト化は実装済み。facilitator再設計・すり合わせタスクは設計判断待ち） |
 | 優先度 | P1 |
-| 関連 | [BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)（reflection/facilitatorが同様に発火不能という既知の系譜）、[BL-017](issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)（facilitatorの調停行動そのものの設計不足、本Issueと統合予定）、[decision_lineage.md 論点42](decision_lineage.md)（根本原因の再診断とユーザー提案の詳細） |
+| 関連 | [BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)（reflection/facilitatorが同様に発火不能という既知の系譜）、[BL-017](issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)（facilitatorの調停行動そのものの設計不足、本Issueと統合予定）、[decision_lineage.md 論点42](decision_lineage.md)（根本原因の再診断とユーザー提案の詳細）、[cela_facilitator_arbiter_redesign_BL041.md](r1_r2_r3b_core/cela_facilitator_arbiter_redesign_BL041.md)（設計ドラフト、2026-07-22、未承認） |
 
 **内容:**
 
