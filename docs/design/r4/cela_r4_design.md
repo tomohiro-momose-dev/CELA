@@ -56,25 +56,19 @@ flowchart TD
 ### 2.2 `whiteboard_drafts`書き込みロジック
 
 ```python
-def apply_whiteboard_patch(db_connection, phase_id: str, task_id: str, 
-                             new_content: str, author_role: str, edit_summary: str) -> int:
+def apply_whiteboard_patch(conn, run_id: str, phase_id: str, task_id: str,
+                            new_content: str, author_role: str, edit_summary: str) -> int:
     """
-    現在の最新バージョンを取得し、新バージョンとしてINSERTする。
-    全文書き換えではなく、Expertには「変更が必要なセクションのみ」を
-    プロンプトで指示し、その結果をnew_contentとして受け取る想定。
+    現在の最新バージョンを取得し、new_content（マージ済みの完全版）を新バージョンとしてINSERTする。
+    new_contentの構築方法（全文かold_text/new_text差分の適用結果か）は§2.4・§2.6を参照。
     """
-    latest = db_connection.execute(
-        "SELECT version, content FROM whiteboard_drafts "
-        "WHERE phase_id=? AND task_id=? ORDER BY version DESC LIMIT 1",
-        (phase_id, task_id)
-    ).fetchone()
-
+    latest = get_latest_whiteboard(conn, run_id, phase_id, task_id)
     new_version = (latest["version"] + 1) if latest else 1
 
-    db_connection.execute(
-        "INSERT INTO whiteboard_drafts (draft_id, phase_id, task_id, version, content, author_role, edit_summary, timestamp) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (f"DF-{int(time.time()*1000)}", phase_id, task_id, new_version, new_content, author_role, edit_summary, time.time())
+    conn.execute(
+        "INSERT INTO whiteboard_drafts (draft_id, phase_id, task_id, version, content, author_role, edit_summary, timestamp, run_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (f"DF-{int(time.time()*1000)}", phase_id, task_id, new_version, new_content, author_role, edit_summary, time.time(), run_id)
     )
     return new_version
 ```
