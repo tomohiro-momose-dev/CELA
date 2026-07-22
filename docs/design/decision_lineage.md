@@ -519,6 +519,31 @@
 
 ---
 
+## 論点45: ドライラン一時停止・再開機能の設計 — ターン境界方式からノード単位方式への転換（D-039）
+
+- **発端:** ユーザーが「エージェント動作（pythonプログラム）の一時停止と再開の仕組みを組めないか。ドライランが長いので、連続で稼働させるのがなかなか難しい」と提案。
+- **AIの当初案（誤り）:** AIは「`app.invoke()`から戻ったターン境界（外側Python whileループの1周ごと）でstateをJSON保存し、次回起動時に読み込んで再開する」方式を提案し、「終了はCtrl+C、再開はcheckpointのJSONファイルパスですね」というユーザーの確認に対し実装に着手しようとした。
+- **ユーザーによる決定的な指摘:** ユーザーが「ターンっていま凍結されているのでは？動いているんでしたっけ？」「現在はターンは一生1では？？」と、既知のBL-005（`state["turn_count"]`は外側Python whileループの1周ごとにセットされるが、グラフ内部で`route_after_expert_decision`が`generate_user_utterance`へループバックし続ける限り更新されず、`app.invoke()`が長時間戻ってこないことがある）を踏まえた根本的な疑問を提示。実際に直近ログ（`log/2026-07-22/1932`）で「Turn 1」しか出現していないことをAIが確認し、ターン境界でのチェックポイントは実用にならないと判明した（ユーザーが既知の設計欠陥を思い出し、AIの提案の前提が崩れていることを見抜いた形）。
+- **再設計:** AIが`app.stream(state, stream_mode="values")`（グラフの各ノード実行後のstateスナップショットを都度受け取れる、`app.invoke()`より細かい粒度のAPI）への切り替えを提案し、ユーザーが承認（「OKです変更してください。終了はcnrl+c,再開はjsonのファイルパスですね？」「お願いします」）。
+- **ラウンド定義の確認:** ユーザーが「ラウンドの定義はtask_plannerから始まり、次のgenerate_user_utteranceまで行ったら1ラウンド、またgenerate_user_utteranceまできたら2ラウンド、という認識でよい？」と確認を求め、AIが「task_planner→最初のgenerate_user_utterance＝ラウンド1の開始（完了ではない）、再度generate_user_utteranceに到達＝ラウンド1完了/ラウンド2開始」という定義で合意。この定義は後の論点46（round_count実装）でそのまま踏襲された。
+- **副次的な発見:** グラフのentry_pointが`task_planner`固定であるため、再開は「止めたノードそのものから」ではなく「そのラウンドの頭から」になることが判明。`task_planner_node`の既存ガード（`if state["turn_count"]==1:`のみ）だと、ターン1途中（既にphases確定済み）での再開時に計画を無条件で再生成してしまう副作用があることをAIが発見し、`turn_count==1 and not state.get("phases")`への修正を追加実装した。
+- **決定者:** t-momose（BL-005に基づく設計上の疑問の提起、ターン境界方式の実質的な却下、再設計方針の承認）、Claude Sonnet 5（当初案の提示・誤りの訂正・`app.stream()`への再設計・`task_planner_node`冪等性ガードの発見と実装）
+- **関連:** [BL-044](issue_backlog.md#bl-044-ドライランの一時停止再開機能ctrlccheckpointjson--resume)、[BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)、[D-039](decision_log.md#d-039-ドライランの一時停止再開をappstreamによるノード単位チェックポイントで実装するターン境界方式は不採用)
+
+---
+
+## 論点46: 「でっちあげ」検出のためreflection/facilitatorを実際に発火させる — `round_count`によるBL-005迂回（D-040）
+
+- **発端:** ユーザーが実ドライラン（`log/2026-07-22/2336`）で、task_2_1のacceptance_criteria自体に含まれる数学的矛盾（山間部12km・時速20km/h前提では30分以内は不可能）に対し、Expertが根拠のない内訳（勾配区間8km＋平坦区間4km、複数パターンを逆算して境界値を選定）ででっち上げ、Detectorも自身の推測（「中心部の半径2kmだから4kmは平坦なはず」）で追認してしまった事例をAIと共有・分析した。
+- **背景の共有:** ユーザーが、このお題自体が構想初期にGeminiとの壁打ちで「あえて無理な制約を与えAI達がどう格闘するか見る」という趣旨で発案されたものであり、CELA前身プログラムの会話ログをGeminiに読ませた際にも同じ指摘（AIが適当にでっちあげる）を受けていたという経緯を共有。「3ターンに一回reflectorが会話ログを見て、適当にでっちあげていないか？と制約違反を見つけていた記憶がある」との想起があり、Web検索ツールを与えて実在データを取得可能にする代替案も検討した。
+- **AIの推奨:** AIは、reflection/facilitatorの周期発火を復旧する方向（`docs/design/r5/cela_r5_design_v2.md` §1.3のF-2.1拡張として既に設計済みの、思考プロセス監査・でっちあげ検出の仕組みを実際に繋ぐ）を推奨した。理由は、Web検索ツールで実データを与えると「地図情報なしで推論から妥当な数値を探る」という今回のお題の実験条件自体が崩れ、Geminiが想定した「差し戻しが続くことで通常出さない発想が引き出されるか」という観察もできなくなるため。ユーザーが同意。
+- **境界（区切り）の設計:** ユーザーが「ターンカウントの概念が崩れているので、現状のグラフ構造でどこが区切りかを決める必要がある。維持停止機構を作った時のようなラウンドカウントにしますか？ユーザー発言が区切り？」と確認。AIは、論点45で既に合意済みの「ラウンド」定義（`generate_user_utterance`への再入場＝1ラウンド完了）をそのまま使うことを提案し、既存の`turn_count`（複数箇所で使用中、意味も破損済み）には触れず、新規`round_count`を追加して`reflection_interval`判定のみをこちらに切り替える最小スコープ案を提示。ユーザーが承認（「良いです。とりかかってください」）。
+- **実装:** `LineageState`に`round_count: int`を追加、`generate_user_utterance_node`への再入場のたびにインクリメント、`route_after_expert_decision`のreflection発火判定を`round_count`ベースに変更。`call_reflection`のプロンプトに、`cela_r5_design_v2.md` §1.3の趣旨（計算根拠のない数値のでっち上げ、都合の悪い制約からの逃避、Detector自身の無根拠な追認）を反映した「でっちあげ監査」ブロックを追加。ただし同節が前提とする`internal_thought_process`（reasoning content）の全経路キャプチャは別途大きめの変更となるため、今回は既存の`chat_history`/決定タイムラインのみを材料にした軽量版とし、フル版（F-2.1本体）は別途判断とすることをAIが明示。
+- **決定者:** t-momose（背景共有、Web検索案との比較判断、ラウンド区切りの確認・承認）、Claude Sonnet 5（reflection復旧の推奨とその理由の提示、round_countの最小スコープ実装案の提示・実装）
+- **関連:** [BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)、[BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)、[decision_lineage.md 論点45](decision_lineage.md#論点45-ドライラン一時停止再開機能の設計-ターン境界方式からノード単位方式への転換d-039)、[D-040](decision_log.md#d-040-reflectionfacilitatorの周期発火をturn_countではなく新設のround_countgenerate_user_utterance_node再入場カウントで判定するよう変更する)、`docs/design/r5/cela_r5_design_v2.md` §1.3
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
@@ -561,3 +586,5 @@
 | 2026-07-22 | 論点42を追記。BL-041（車両台数決定を覆す自動メカニズム不在）の根本原因を「木を見て森を見ず」（狭いタスクスコープでの作業）と再診断したユーザー分析、暫定値デフォルト化（F-3.9のconfidence活用）・すり合わせタスク・facilitatorのエスカレーション役への再定義という3方向の提案を記録。暫定値デフォルト化は`cela_main.py`のExpertプロンプト・`WRITE_AGREEMENT_TOOL`スキーマに実装（オフラインスモークテスト50件Pass）、facilitator再設計はBL-017と統合し設計書を先に作成する方針とした。あわせてBL-039（task_idドット/アンダースコア表記ゆれ）・BL-040（`read_deliverable_file`発見不能性、ファイル名の`_Vn`バージョニング＋`old/`退避）も本セッションで実装・`done`化。 |
 | 2026-07-22 | 論点43を追記。R4（ホワイトボード差分パッチ化）をBL-041実装より優先着手する決定と、Plan modeでの実装計画策定を記録。既存のR4設計書が「Expertの変更箇所を既存完全版へどうマージするか」を未定義のまま残していたことを発見し、Claude Code自身のEditツール方式（old_text完全一致検索→new_text置換）を採用する決定（ユーザーの逆質問に基づく）を記録。`cela_main.py`に`whiteboard_drafts`のCRUD・`_apply_text_edits`・`edits`パラメータ付き`WRITE_AGREEMENT_TOOL`を実装し、Expert/Detector/User AI/integrator_node/read_deliverable_fileの各所を統合。`cela_r4_design.md`・`cela_r4_impl_Plan.md`を更新・新規作成。`tests/test_r4_smoke.py`（14件）追加、既存`test_r3_smoke.py`の3件をWHITEBOARD方式に合わせて更新、オフラインスモークテスト計64件Pass。 |
 | 2026-07-22 | 論点44を追記。実LLMドライラン（`log/2026-07-22/1407`）レビュー中に発見したBL-038の実データ破損（WHITEBOARDポインタがdecision_extractorのフォールバック経路でプレーンテキスト上書きされSupersededになる事故）と、その根本原因（LangGraphがTypedDictスキーマ未宣言キーをノード間で伝播しないこと、`expert_wrote_agreement`/`user_wrote_agreement`/`expert_last_whiteboard_edit`がLineageStateへの追加漏れだったこと）の実証的特定（D-038）を記録。`LineageState`へのフィールド追加、decision_extractorフォールバックへのWHITEBOARD保護追加、実グラフ経由の回帰テスト2件追加（オフラインスモークテスト計66件Pass）を実施。 |
+| 2026-07-22 | 論点45を追記（遡及記録）。ドライラン一時停止・再開機能について、当初のターン境界方式案がユーザーのBL-005指摘により却下され、`app.stream()`によるノード単位チェックポイント方式へ再設計した経緯（D-039）を記録。ラウンド定義（`generate_user_utterance`再入場＝1ラウンド完了）の確認、`task_planner_node`冪等性ガードの副次的発見も記録。 |
+| 2026-07-23 | 論点46を追記。task_2_1のacceptance_criteria自体の数学的矛盾をExpertが根拠のない数値ででっち上げ、Detectorも無根拠な推測で追認した事例（`log/2026-07-22/2336`）の発見と、このお題がGeminiとの壁打ちで「あえて無理な制約下でのAIの格闘を見る」趣旨で発案されたという背景共有を記録。reflection/facilitatorの周期発火をBL-005を迂回しつつ復旧する方針（`round_count`新設、論点45のラウンド定義を踏襲）、Web検索ツール付与案との比較判断、`call_reflection`への軽量版でっちあげ監査プロンプト追加（`cela_r5_design_v2.md` §1.3のフル版は別途判断）を記録（D-040）。 |
