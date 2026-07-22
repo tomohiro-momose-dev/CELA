@@ -101,21 +101,21 @@ def rollback_whiteboard(conn, run_id: str, phase_id: str, task_id: str, reason: 
 
 **設計判断の理由**: ロールバックを「バージョン番号を巻き戻す」のではなく「同じ内容を新バージョンとして追記する」方式にしたのは、要件定義書N-2（トレーサビリティ：全判断ログをSQLiteに完全保存）の原則に従うため。バージョン番号を巻き戻すと、「Ver.4で何が却下されたか」という履歴自体が失われる。
 
-### 2.4 Expertへのプロンプト変更（全文書き換え→差分指示）
+### 2.4 Expertへのプロンプト変更（全文書き換え→old_text/new_text差分）
 
-既存の`call_expert`関数のsystem_promptに、以下を追加する。
+既存の`call_expert`関数のsystem_prompt（フル版・軽量版の両方）に、`_build_task_scope_context`経由で以下を追加する。
 
 ```
-【成果物の編集方針（★R4で追加）】
-あなたは成果物の全文を毎回書き直す必要はありません。
-現在のホワイトボード最新版（Ver.{latest_version}）を以下に示します。
-ユーザーから指示されたセクションのみを修正し、変更した箇所とその理由を
-edit_summaryとして明記してください。変更不要なセクションは
-そのまま維持されるため、再掲する必要はありません。
-
-【現在のホワイトボード Ver.{latest_version}】
+【現在のホワイトボード Ver.{latest_version}（このタスクの成果物の最新版）】
 {whiteboard_content}
+
+【R4: 編集方針】上記を修正する場合、全文を書き直す必要はありません。write_agreementツールを
+action_type='UPDATE', entry_type='Deliverable'で呼び、editsパラメータに
+変更箇所のold_text/new_textのみを指定してください（old_textは上記本文と一字一句一致させること）。
+大幅な構成変更の場合のみ、decision_whatに全文を渡してください。
 ```
+
+`write_agreement`ツールの`edits`パラメータは`[{old_text, new_text, replace_all}]`の配列で、システム側は各`old_text`を現在のホワイトボード本文に対し完全一致検索し、`new_text`に置換する（§2.6参照）。`old_text`が本文中に見つからない、または`replace_all=false`で複数箇所に一致した場合はDBへの書き込みを行わずエラーを返し、Expertは同一ツールループ内で修正・再試行できる（既存のJSON引数パースエラー時の自己修復（D-009）と同じ仕組み）。
 
 ### 2.5 高品質初版ドラフト生成ルール（F-7.4）の試験導入
 
