@@ -74,6 +74,7 @@
 | BL-040 | 高 | `cela_main.py` (`read_deliverable_file`, `_read_deliverable_file_handler`, `_commit_agreement_from_tool`) | ~~実ドライラン（`log/2026-07-21/2248`）で`read_deliverable_file`呼び出し31回中21回（約68%）が`not_found`。ファイル名がトピック文字列＋Unixタイムスタンプで一意に決まりAIが予測できないため、`file_path`直接指定への依存が実質的な発見不能性を招いていた~~ → `done`（`task_id`/`topic_keyword`引数を追加し、agreements DBの`FILE_PATH:`ポインタから実際のパスを逆引きする方式に変更。あわせてagreements.task_id列が`args.get("task_id")`のみに依存し、LLMが省略すると逆引きできない問題も`_CURRENT_TASK_ID`フォールバックで修正） | P1 |
 | BL-041 | 高 | `cela_main.py` (`arbiter_node`, `check_global_constraint_overrun`, `global_constraints`) | ユーザーが「task_1.1で車両台数4台を決定し予算1億円を使い果たした後、システム開発費等の算出でこの決定をどう覆すか」と問いかけたことを契機に調査。`state["global_constraints"]`は`task_planner_node`での初期化（`[]`）以外に実際のクレームデータを書き込む箇所がコードベース中に一切なく、`check_global_constraint_overrun`は常に空リストを走査するため超過を検出できない。実ドライラン全文検索でも`[Resource Arbiter]`・`[facilitator]`・`[reflection]`・`phases_to_revise`はいずれも0件で、この調停機構は設計上は存在するが**実際には一度も発火し得ない死んだコードパス**であることを確認した。今回のドライランでは幸い、task_1.2が自タスクのacceptance_criteria（「予算超過時の調整案が検討されている」）内で帳尻を合わせた（残額わずか42万円）ため実害はなかったが、これは偶然であり、一度確定した決定（`vehicle_count=4`等）を後続タスクの発見（コスト不足等）を根拠に体系的に再検討させる自動メカニズムは現状存在しない。`write_agreement`のSUPERSEDE機構自体はあるが、BL-025のスコープガードレールによりExpertは自タスク外の合意を書き換えない設計のため、これも自動トリガーにはならない。設計判断が必要な項目（`global_constraints`への`resource_claims`集約タイミング、`reflection_interval`とarbiter発火条件の関係）のため、現時点では記録のみで実装は見送り | P1 |
 | BL-042 | 中 | `cela_main.py` (`call_detector`のconstraint_issue判定プロンプト) | R4実装後の実ドライラン（`log/2026-07-22/1804`）で、Detectorのconstraint_issue判定（minor/major境界の運賃単価矛盾）が同じ論点をiter=8〜9以上再検討し続け、同一のpython_replコードを重複実行するなど非効率にトークンを消費していたことを発見。ユーザー提案の「3回思考し多数決を取る」方式を`call_detector`プロンプトへの指示追加として実装（コード側での強制カウントではなく、まずプロンプト指示のみで様子見）。実LLM再ドライランでの効果確認は未実施 | P2 |
+| BL-043 | 低 | `cela_main.py` (`call_decision_extractor`のJSON出力方式) | ユーザー提案：「AIがJSON出力→パース失敗→1からやり直し」ではなく「ツールでJSON構造確認→OK/FAULTと不備箇所をフィードバック→該当箇所だけ直して再出力」にできないか、という相談を契機に調査。既存の`write_agreement`等のツール呼び出し引数パースには、壊れたJSONを検出した場合にエラー内容をモデルへ返し同一ツールループ内で自己修復させる仕組み（D-009）が既に存在することが判明。`decision_extractor`自体をFunction Calling方式（例:`submit_extracted_events`ツール）に作り替えこの既存の自己修復ループに一本化する案を採用したが、設計変更としてはやや大きめのためBL起票のみに留め、JSONパース失敗（`_safe_json_parse`のフォールバック採用）が実害として頻発するようになった時点で実装に着手する方針 | P3 |
 
 ---
 
@@ -1173,7 +1174,7 @@ for t in state.get("current_phase", {}).get("tasks", []):
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `done`（根本原因特定・修正済み、オフラインスモークテスト66件通過。実LLM再ドライランでの最終確認は未実施） |
+| 状態 | `done`（根本原因特定・修正済み、オフラインスモークテスト66件通過。**2026-07-22、実LLMドライラン（`log/2026-07-22/1804`）で`expert_wrote_agreement=True`の正常伝播と`⏭️`スキップ（同一ターンで10件全て）を確認、修正の実効性を確定**） |
 | 優先度 | P1 |
 | 依存 | [cela_r3_impl_Plan.md §3.5/§3.5.1](r1_r2_r3b_core/cela_r3_impl_Plan.md)（`wrote_agreement_this_turn`検知機構） |
 | 関連 | [D-036](decision_log.md#d-036-r2をd-002同様の扱いでクローズしr3をr3a自律的読み取りf-38f-39r3b自律的書き込み旧来のr3に再編する)（R3b実装）、[D-038](decision_log.md#d-038-bl-038の根本原因をlanggraphの未宣言typeddictキー消失と特定しlineagestateへのフィールド追加とdecision_extractorフォールバックのwhiteboard保護で対応する)（根本原因特定・修正） |
@@ -1209,7 +1210,7 @@ R3b実装後の実ドライラン（`log/2026-07-21/2248`）で発見。task_1.1
 1. `LineageState`（`cela_main.py`）に`expert_wrote_agreement: bool`・`user_wrote_agreement: bool`・`expert_last_whiteboard_edit: dict | None`を追加。
 2. 二重防御として、`decision_extractor_node`のフォールバック経路に`WHITEBOARD:`ポインタの保護分岐を追加（`FILE_PATH:`と同様、フォールバック経路からの上書きを禁止）。
 3. `tests/test_r4_smoke.py`に、実際の`StateGraph(cela_main.LineageState)`を`app.invoke()`経由で検証する回帰テストと、WHITEBOARD保護の回帰テストを追加（オフラインスモークテスト66件全通過）。
-4. 実LLM再ドライランでの最終確認（本当にログに`⏭️`スキップメッセージが出るか）はまだ未実施。
+4. **実LLM再ドライランでの最終確認（2026-07-22、`log/2026-07-22/1804`）**: `[DEBUG] decision_extractor target_role='expert' expert_wrote_agreement=True user_wrote_agreement=False -> wrote_agreement_this_turn=True`が正しく出力され、同一ターンで抽出された10件の`extracted_events`すべてに対し`⏭️ [decision_extractor] write_agreementが呼ばれたため、ExtractからAgreement書き込みをスキップしました`が出力された。修正の実効性を実機で確認。
 
 ### BL-039: `decision_extractor`が出力するtask_idの表記ゆれ（ドット vs アンダースコア）により、タスク遷移がドライラン全体で1回も成功していない
 
@@ -1346,6 +1347,36 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 - 次回実LLMドライランで、同種の判定（minor/major境界の数値矛盾）においてDetectorのツールループのiter数が明確に減少し、同一論点の重複検討・重複python_repl実行が解消されることを確認する。
 - (A)のプロンプト指示だけでは守られない場合、(B)のコード側強制（iterごとの暫定判定パースと機械的多数決・強制打ち切り）に進む。
 
+---
+
+### BL-043: `decision_extractor`のJSON出力をFunction Calling方式に作り替え、既存の自己修復ループ（D-009）に一本化する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（BL起票のみ、実装はJSONパース失敗が実害として頻発した場合に着手） |
+| 優先度 | P3 |
+| 依存 | [D-009](decision_log.md)（`write_agreement`等のツール呼び出しで確立済みの、引数JSON破損時の自己修復パターン） |
+| 関連 | `_safe_json_parse`・`_query_and_parse_with_retry`（[../../cela_main.py](../../cela_main.py)、現行の層2リトライ、D-005） |
+
+**内容:**
+
+`decision_extractor`（`call_decision_extractor`）は現在、`tools`なしの単発`query_AI`呼び出しで長大なJSON（`extracted_events`配列）を生テキストとして出力させ、`_safe_json_parse`でパースしている。パースに失敗した場合、`_query_and_parse_with_retry`（一部の呼び出し元のみ）またはノード呼び出し自体を最初からやり直す「層2リトライ」（D-005）で対応しているが、これは**JSON全体を1から書き直させる**荒い単位のリトライであり、どこが壊れていたかのフィードバックはモデルに一切返っていない。
+
+ユーザーから「AIがJSON出力→パース失敗→1からやり直し、ではなく、ツール使用でJSON構造を確認→AIへOK/FAULTとどこが間違っているかをフィードバック→AIが該当箇所だけ直して再出力、という流れにできないか」という提案があった。
+
+調査の結果、このコードベースには既にほぼ同じ仕組みが`write_agreement`等のツール呼び出し引数のパースに実装済みであることが判明した（`cela_main.py`のツールループ内、`json.loads(tc.function.arguments)`が`json.JSONDecodeError`を送出した場合、クラッシュさせずエラー内容をツール結果としてモデルに返し、同一ツールループ内（`MAX_TOOL_ITER`の予算内）で自己修復させる、D-009のパターン）。
+
+**決定（2026-07-22）:**
+
+2つの実装案（(1) `jsonschema`ライブラリ等を使った検証専用ツールを新設し現行の生テキスト出力方式に追加する案、(2) `decision_extractor`自体をFunction Calling方式（例: `submit_extracted_events`ツール）に作り替え、D-009の既存自己修復ループに一本化する案）をAIが提示し、ユーザーは(2)を選択。ただし設計変更としてはやや大きめ（`extracted_events`配列全体をtools schemaとして定義し直す必要がある、Detector同様MAX_TOOL_ITERの予算管理が必要になる等）であるため、**今回はBL起票のみに留め、JSONパース失敗（`_safe_json_parse`のフォールバック採用）が実ドライランで実害として頻発するようになった時点で実装に着手する**方針とした。
+
+**完了条件（着手時）:**
+
+- `call_decision_extractor`の`tools`引数に`extracted_events`配列を受け取る専用ツール（例: `submit_extracted_events`）のJSON Schemaを定義し、Function Calling方式に変更する。
+- 既存のツールループの自己修復パターン（D-009、引数JSONパース失敗時のエラーフィードバック＋同一ループ内再試行）にそのまま乗ることを確認する。
+- 現行の`_safe_json_parse`ベースの単発呼び出し・層2リトライ（D-005）は本経路について不要になるため撤去する。
+- `tests/test_r3_smoke.py`等のオフラインスモークテストで、壊れたJSON引数を渡した場合に自己修復ループが機能することを検証するテストケースを追加する。
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -1390,3 +1421,4 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 | 2026-07-22 | ユーザーがR4（ホワイトボード差分パッチ化）をBL-041実装より優先着手する決定（ドライランの長時間化・トークン消費が理由、[decision_lineage.md 論点43](decision_lineage.md)）。Plan modeで実装計画を策定し、既存R4設計書が未定義のまま残していた「Expertの変更箇所を既存完全版へどうマージするか」をClaude Code自身のEditツール方式（old_text完全一致検索→new_text置換）で解決。`cela_main.py`に`whiteboard_drafts`のCRUD・`_apply_text_edits`を実装し、`WRITE_AGREEMENT_TOOL`に`edits`パラメータを追加。Deliverableの主経路をwhiteboard_drafts方式に全面移行（`integrator_node`最終統合文書のみ旧来のファイル方式を維持）。Expert/Detector/User AIのプロンプトに現在タスクの最新ホワイトボードを注入し、`read_deliverable_file`・ロールバック（F-7.3）も対応。`cela_r4_design.md`・`cela_r4_impl_Plan.md`を更新・新規作成。`tests/test_r4_smoke.py`（14件）新規追加、既存`test_r3_smoke.py`の3件（R3b-T12・T13、BL-040バージョニングテスト）をWHITEBOARD方式に合わせて更新。オフラインスモークテスト計64件Pass、`python -m py_compile`合格。BL-034・BL-040のステータスをR4実装反映済みに更新（`partial`/`done`のまま補足追記）。 |
 | 2026-07-22 | R4実装後の実LLMドライラン（`log/2026-07-22/1407`）レビュー中、DBを直接クエリしてBL-038の実データ破損（WHITEBOARDポインタがdecision_extractorのフォールバック経路でプレーンテキスト上書きされSupersededになる事故）を確認。インストール済みLangGraph（v1.2.9）の最小再現コードで、`StateGraph`のスキーマ（`LineageState` TypedDict）に宣言されていないキーはノード間で伝播せず消えることを実証し、`expert_wrote_agreement`/`user_wrote_agreement`/`expert_last_whiteboard_edit`のTypedDict宣言漏れが真因と特定（D-038）。`LineageState`へのフィールド追加、decision_extractorフォールバックへの`WHITEBOARD:`保護分岐の追加、実グラフ経由の回帰テスト2件を`tests/test_r4_smoke.py`へ追加し、オフラインスモークテスト計66件Pass。BL-038を`done`化。 |
 | 2026-07-22 | 同ドライラン継続中のログ（`log/2026-07-22/1804`）レビューで、Detectorのconstraint_issue判定（minor/major境界）が同じ論点を8〜9 iter以上再検討し続ける非効率を発見。ユーザー提案の「3回思考し多数決を取る」方式を、`call_detector`プロンプトへの指示追加（3回だけ判定し多数決で確定、以降の再検討を禁止）として実装。BL-042として新規起票（`open`、プロンプト指示のみで様子見。守られない場合はコード側で暫定判定を強制カウントし機械的に打ち切る案へ進む）。同セッションで、`task_planner`の体感的な遅さの相談を機に`_query_AI_live`へstreaming描画（tools無し・tools付きツールループの両方）を追加、`MultiLogger.write()`の`flush()`欠落（ログファイルがターミナル表示より遅れて書き込まれる原因）も修正。 |
+| 2026-07-22 | 同ドライラン継続（`log/2026-07-22/1804`）で、`[DEBUG] decision_extractor target_role='expert' expert_wrote_agreement=True ... -> wrote_agreement_this_turn=True`と、同一ターンで抽出された10件全てへの`⏭️`スキップログを確認し、BL-038（D-038）の修正が実機で正しく機能することを確定。あわせて、ユーザー提案の「JSONパース失敗時にツールでの構造確認・フィードバック・部分修正」を、既存のツール呼び出し引数の自己修復ループ（D-009）へ`decision_extractor`をFunction Calling化して一本化する案として整理し、BL-043を新規起票（`open`、設計変更がやや大きいためBL起票のみに留め、JSONパース失敗が実害として頻発した場合に実装着手）。 |
