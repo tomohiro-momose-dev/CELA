@@ -76,6 +76,9 @@
 | BL-042 | 中 | `cela_main.py` (`call_detector`のconstraint_issue判定プロンプト) | R4実装後の実ドライラン（`log/2026-07-22/1804`）で、Detectorのconstraint_issue判定（minor/major境界の運賃単価矛盾）が同じ論点をiter=8〜9以上再検討し続け、同一のpython_replコードを重複実行するなど非効率にトークンを消費していたことを発見。ユーザー提案の「3回思考し多数決を取る」方式を`call_detector`プロンプトへの指示追加として実装（コード側での強制カウントではなく、まずプロンプト指示のみで様子見）。実LLM再ドライランでの効果確認は未実施 | P2 |
 | BL-043 | 低 | `cela_main.py` (`call_decision_extractor`のJSON出力方式) | ユーザー提案：「AIがJSON出力→パース失敗→1からやり直し」ではなく「ツールでJSON構造確認→OK/FAULTと不備箇所をフィードバック→該当箇所だけ直して再出力」にできないか、という相談を契機に調査。既存の`write_agreement`等のツール呼び出し引数パースには、壊れたJSONを検出した場合にエラー内容をモデルへ返し同一ツールループ内で自己修復させる仕組み（D-009）が既に存在することが判明。`decision_extractor`自体をFunction Calling方式（例:`submit_extracted_events`ツール）に作り替えこの既存の自己修復ループに一本化する案を採用したが、設計変更としてはやや大きめのためBL起票のみに留め、JSONパース失敗（`_safe_json_parse`のフォールバック採用）が実害として頻発するようになった時点で実装に着手する方針 | P3 |
 | BL-044 | 中 | `cela_main.py` (`run_ai_vs_ai_loop`, `task_planner_node`, `_save_checkpoint`/`_load_checkpoint`) | ユーザー提案：ドライラン長時間化により連続稼働が難しいため一時停止・再開機能が欲しいという相談。当初案（ターン境界でのcheckpoint保存）はBL-005（`turn_count`凍結）によりターン境界が実用にならないとユーザー自身が指摘し発覚、`app.stream(state, stream_mode="values")`によるノード単位保存方式へ設計変更（D-039）。`_save_checkpoint`/`_load_checkpoint`、`run_ai_vs_ai_loop`の`resume_from`引数、`task_planner_node`の冪等性ガード（`turn_count==1 and not phases`）、`--resume` CLI引数を実装。`tests/test_checkpoint_resume.py`（4件）新規、オフラインスモークテスト計70件Pass。実LLMドライランでのCtrl+C→`--resume`往復の実地確認は未実施 | P2 |
+| BL-045 | 高 | `cela_main.py` (`_query_AI_live`のツールループ、`_LAST_PYTHON_CALLS`) | ~~実ドライラン（`log/2026-07-22/2217`）で、Expertがpython_replによる検算完了・`write_agreement`成功（whiteboard Ver.1保存）の直後、同一ツールループの次iterationでAPI 429エラーが発生しリトライを使い切ってエラープレースホルダを返した際、BL-033のフェイルクローズガードが「python_repl未使用」と誤判定し`constraint_issue=major`へ強制上書き→差し戻し→保存直後のホワイトボードがロールバックされ、実際には完了していた検算成果が破棄される事故が発生~~ → `done`。根本原因は`_LAST_PYTHON_CALLS`（BL-033の判定材料）がツールループの**正常終了時のみ**更新される実装になっており、ループ途中のAPIエラー例外で打ち切られた場合、実際に実行済みのpython_repl記録が`_LAST_PYTHON_CALLS`へ反映されないまま失われていたこと（対照的に`_LAST_WRITE_AGREEMENT_SUCCEEDED`はツール実行のその場で即時セットされるため例外の影響を受けず、非対称な状態になっていた）。python_repl実行のたびに`_LAST_PYTHON_CALLS`を即時反映するよう修正し、ループが途中終了しても記録が失われないようにした | P1 |
+| BL-046 | 中 | `cela_main.py` (`_query_AI_live`の`for attempt`リトライループ、except節) | ~~BL-045の再開ドライラン（`log/2026-07-22/2300`）レビュー中、ユーザーが「Expertの思考とiter番号が同じループになっているログが見える」と報告。調査の結果、`🧰 tools attached`が2回連続で印字され間に何のログもないまま`思考（iter=1）`に巻き戻る箇所（`cela_main.py:1904-1905`該当）を確認~~ → `done`。原因は、`for attempt in range(len(delays)+1):`（BL-009の既知のリトライ設計）がツール呼び出しループ全体を内包しており、途中でAPIエラーが起きても**最後の試行を使い切るまでは何も表示せず**`time.sleep`するだけで`loop_messages`/`python_calls_log`をサイレントに破棄してiter=1からやり直していたこと。リトライ発生自体を可視化するログ出力（`🔄 [{label}] 一時的なAPIエラー、{delay}秒後にツールループを最初からやり直します...`）を追加。なお、リトライ時に`loop_messages`を破棄せず継続する（`write_agreement`成功後の巻き戻りによる重複書き込みリスクを本質的に解消する）設計変更は、より大きめの変更のため今回は見送り、可視化のみ対応 | P2 |
+| BL-047 | 中 | `cela_main.py` (`WRITE_AGREEMENT_TOOL`スキーマの`depends_on`、`_write_agreement_impl`の整合性チェック) | ~~ドライラン（`log/2026-07-22/2320`）で、Expertが`write_agreement`呼び出し時に`"depends_on": ["task_1_1"]`を指定し`{'success': False, 'error': 'depends_onに存在しないID: task_1_1'}`で失敗、1往復無駄にしてから`depends_on`を除去して再送する事故を2回確認~~ → `done`。真因は、`depends_on`スキーマ（`cela_main.py:782`）に説明文が一切なく、コード側の検証は`agreements`テーブルの数値行ID（`【決定事項DB】`表示の`[42]`等）を期待する一方、AIが日常的に目にしているのはtask_planner側のタスク定義の`depends_on`（`task_id`文字列を指す全く別概念、例：`"depends_on": ["task_1_1"]`）であり、同名フィールドの意味衝突がAIを誤誘導していたこと。`depends_on`のdescriptionに、agreements DBの数値ID（決定事項DB表示の`[N]`）を使うこと・task_idを入れてはいけないこと・不明なら省略してよいことを明記して修正 | P3 |
 
 ---
 
@@ -1411,6 +1414,85 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 |------|------|
 | 2026-07-22 | 新規起票・実装完了。ユーザー提案を受けチェックポイント方式を設計する過程で、当初案（ターン境界での保存）がBL-005（`turn_count`凍結）により実用にならないとユーザー自身が指摘して発覚し、`app.stream()`によるノード単位保存方式へ設計変更（D-039）。`_save_checkpoint`/`_load_checkpoint`・`run_ai_vs_ai_loop`の`resume_from`引数・`task_planner_node`の冪等性ガード・`--resume` CLI引数を実装。`tests/test_checkpoint_resume.py`（4件）新規追加、オフラインスモークテスト計70件Pass。実LLMドライランでの実地確認は次回待ち。 |
 
+---
+
+### BL-045: `write_agreement`成功直後のAPIエラーでBL-033フェイルクローズが誤爆し、保存済みのホワイトボードがロールバックされる
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 依存 | [D-038](decision_log.md#d-038-bl-038の根本原因をlanggraphの未宣言typeddictキー消失と特定しlineagestateへのフィールド追加とdecision_extractorフォールバックのwhiteboard保護で対応する)（`_LAST_WRITE_AGREEMENT_SUCCEEDED`と`_LAST_PYTHON_CALLS`の非対称という同系統の状態管理欠陥） |
+| 関連 | BL-033（フェイルクローズ本体） |
+
+**内容:**
+
+実ドライラン（`log/2026-07-22/2217`）で、Expertがpython_replによる検算を完了し`write_agreement`でホワイトボードVer.1保存に成功した直後、同一ツールループの次iterationでAPI 429エラーが発生しリトライを使い切ってエラープレースホルダ（`"(サーバー高負荷によるAPIエラー)"`）を返した。後続のDetectorは3回多数決方式で正しく`minor`判定していたが、BL-033のフェイルクローズガード（`detector_node`）が`state["expert_last_python_calls"]`の空を理由に`constraint_issue`を`major`へ強制上書きし、差し戻し→保存直後のホワイトボードがロールバックされる事故が発生した。
+
+根本原因は`_LAST_PYTHON_CALLS`（BL-033の判定材料）が`_query_AI_live`のツールループの**正常終了時のみ**更新される実装になっており、ループ途中のAPIエラー例外で打ち切られた場合、実際に実行済みのpython_repl記録が反映されないまま失われていたこと。対照的に`_LAST_WRITE_AGREEMENT_SUCCEEDED`はツール実行のその場で即時セットされるため例外の影響を受けず、両者が非対称な状態になっていた。
+
+**実装（`cela_main.py`）:**
+
+python_repl実行のたびに`_LAST_PYTHON_CALLS`を即時反映するよう修正（正常終了時の更新と合わせて二重に更新されるが冪等）。ループが途中で例外終了しても、それまでに実行済みのpython_repl記録が失われなくなった。
+
+**完了条件:**
+
+- オフラインスモークテスト（既存74件）が非退行でPass。
+- 実LLM再ドライランで、`write_agreement`成功後にAPIエラーが起きてもBL-033フェイルクローズが誤爆しないことを確認する（次回待ち）。
+
+---
+
+### BL-046: `_query_AI_live`のリトライがツール呼び出しループ全体をサイレントに巻き戻し、途中経過が見えない
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（可視化のみ対応、本質的な巻き戻り防止は見送り） |
+| 優先度 | P2 |
+| 依存 | BL-009（既知の粗いリトライ粒度、当時受容済み）、BL-045（同セッションで発見） |
+| 関連 | なし |
+
+**内容:**
+
+BL-045修正後の再開ドライラン（`log/2026-07-22/2300`）をユーザーが継続レビューし、「Expertの思考とiter番号が同じループになっているログが見える」と報告。調査の結果、`🧰 tools attached`が2回連続で印字され間に何のログもないまま`思考（iter=1）`に巻き戻る箇所（`cela_main.py`該当行）を確認した。
+
+真因は、`_query_AI_live`の`for attempt in range(len(delays)+1):`（BL-009の既知のリトライ設計）がツール呼び出しループ全体（`for iteration in range(1, MAX_TOOL_ITER+1):`）を内包しており、途中でAPIエラーが起きても**最後の試行を使い切るまでは何も表示せず**`time.sleep`するだけで`loop_messages`/`python_calls_log`をサイレントに破棄しiter=1からやり直していたこと。BL-009策定当時は`write_agreement`にDB副作用（R4のホワイトボード版管理）がなかったため「粗いリトライ粒度」として許容されていたが、現在はこの巻き戻りが`write_agreement`成功後に起きると重複バージョン書き込み等の実害リスクがある。
+
+**実装:**
+
+中間リトライ発生時にもログ出力を追加（`🔄 [{label}] 一時的なAPIエラー、{delay}秒後にツールループを最初からやり直します（attempt N/6）: {エラー内容}`）。リトライ時に`loop_messages`を破棄せず継続する（重複書き込みリスクの本質的解消）設計変更は、より大きめの変更のためユーザー判断により今回は見送り、可視化のみ対応。
+
+**完了条件:**
+
+- オフラインスモークテスト（既存74件）が非退行でPass。
+- （見送り分）`loop_messages`を保持したままリトライする設計は、`write_agreement`の重複書き込みが実ドライランで実害として確認された場合に着手する。
+
+---
+
+### BL-047: `write_agreement`の`depends_on`パラメータの意味衝突（agreements DBの数値IDかtask_id文字列か）でAIが毎回同じエラーを起こす
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P3 |
+| 関連 | なし |
+
+**内容:**
+
+ドライラン（`log/2026-07-22/2320`）で、Expert/User AIが`write_agreement`呼び出し時に`"depends_on": ["task_1_1"]`を指定し`{'success': False, 'error': 'depends_onに存在しないID: task_1_1'}`で失敗、1往復無駄にしてから`depends_on`を除去して再送する事故を2回確認した。
+
+真因は、`WRITE_AGREEMENT_TOOL`スキーマの`depends_on`（`cela_main.py`）に説明文が一切なく、コード側の検証（`_write_agreement_impl`）は`agreements`テーブルの数値行ID（AIに提示される【決定事項DB】表示の`[42]`等）を期待する一方、AIが日常的に目にしているのはtask_planner側のタスク定義の`depends_on`（`task_id`文字列を指す全く別概念、例：`"depends_on": ["task_1_1"]`）であり、同名フィールドの意味衝突がAIを誤誘導していたこと。
+
+**実装:**
+
+`depends_on`のdescriptionに、agreements DBの数値ID（決定事項DB表示の`[N]`）を使うこと・task_idを入れてはいけないこと・不明なら省略してよいことを明記。
+
+**完了条件:**
+
+- オフラインスモークテスト（既存74件）が非退行でPass。
+- 実LLM再ドライランで、同種のエラーが再発しないことを確認する（次回待ち）。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -1456,3 +1538,6 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 | 2026-07-22 | R4実装後の実LLMドライラン（`log/2026-07-22/1407`）レビュー中、DBを直接クエリしてBL-038の実データ破損（WHITEBOARDポインタがdecision_extractorのフォールバック経路でプレーンテキスト上書きされSupersededになる事故）を確認。インストール済みLangGraph（v1.2.9）の最小再現コードで、`StateGraph`のスキーマ（`LineageState` TypedDict）に宣言されていないキーはノード間で伝播せず消えることを実証し、`expert_wrote_agreement`/`user_wrote_agreement`/`expert_last_whiteboard_edit`のTypedDict宣言漏れが真因と特定（D-038）。`LineageState`へのフィールド追加、decision_extractorフォールバックへの`WHITEBOARD:`保護分岐の追加、実グラフ経由の回帰テスト2件を`tests/test_r4_smoke.py`へ追加し、オフラインスモークテスト計66件Pass。BL-038を`done`化。 |
 | 2026-07-22 | 同ドライラン継続中のログ（`log/2026-07-22/1804`）レビューで、Detectorのconstraint_issue判定（minor/major境界）が同じ論点を8〜9 iter以上再検討し続ける非効率を発見。ユーザー提案の「3回思考し多数決を取る」方式を、`call_detector`プロンプトへの指示追加（3回だけ判定し多数決で確定、以降の再検討を禁止）として実装。BL-042として新規起票（`open`、プロンプト指示のみで様子見。守られない場合はコード側で暫定判定を強制カウントし機械的に打ち切る案へ進む）。同セッションで、`task_planner`の体感的な遅さの相談を機に`_query_AI_live`へstreaming描画（tools無し・tools付きツールループの両方）を追加、`MultiLogger.write()`の`flush()`欠落（ログファイルがターミナル表示より遅れて書き込まれる原因）も修正。 |
 | 2026-07-22 | 同ドライラン継続（`log/2026-07-22/1804`）で、`[DEBUG] decision_extractor target_role='expert' expert_wrote_agreement=True ... -> wrote_agreement_this_turn=True`と、同一ターンで抽出された10件全てへの`⏭️`スキップログを確認し、BL-038（D-038）の修正が実機で正しく機能することを確定。あわせて、ユーザー提案の「JSONパース失敗時にツールでの構造確認・フィードバック・部分修正」を、既存のツール呼び出し引数の自己修復ループ（D-009）へ`decision_extractor`をFunction Calling化して一本化する案として整理し、BL-043を新規起票（`open`、設計変更がやや大きいためBL起票のみに留め、JSONパース失敗が実害として頻発した場合に実装着手）。 |
+| 2026-07-22 | ユーザーがドライラン（`log/2026-07-22/2217`）で「Expertが`write_agreement`でホワイトボードVer.1保存に成功した直後、サーバー高負荷エラーになり、次のDetectorが機械的にmajor判定、差戻でホワイトボードが破棄された」事故を報告。ログ調査で、Detector自身は3回多数決で正しく`minor`判定していたが、BL-033のフェイルクローズガードが`expert_last_python_calls`の空を理由に`major`へ強制上書きしていたことを確認。真因は`_LAST_PYTHON_CALLS`（BL-033判定材料）がツールループの正常終了時のみ更新される実装で、python_repl検算・write_agreement成功済みの状態でも次iterationのAPIエラー例外で打ち切られると記録が失われていたこと（`_LAST_WRITE_AGREEMENT_SUCCEEDED`は即時セットのため例外の影響を受けず非対称）。BL-045として新規起票・`done`化、`_query_AI_live`のpython_repl実行箇所で`_LAST_PYTHON_CALLS`を即時反映するよう修正。 |
+| 2026-07-22 | BL-045修正後、`--resume`で再開したドライラン（`log/2026-07-22/2300`）をユーザーが継続レビューし、「Expertの思考とiter番号が同じループになっているログが見える」と報告。調査の結果、`for attempt`リトライループ（BL-009）がツール呼び出しループ全体を内包しており、途中のAPIエラーで中間リトライが発生すると**何も表示せず**`loop_messages`/`python_calls_log`をサイレントに破棄しiter=1から巻き戻していたことが真因と判明（`cela_main.py:1904-1905`で`tools attached`の2連続印字を確認）。R4のwrite_agreementにDB副作用（ホワイトボード版管理）が加わった現在、この巻き戻りが`write_agreement`成功後に起きると重複書き込みの実害リスクがあることも指摘。ユーザー判断により、まず可視化（リトライ発生をログ出力）のみ対応する方針とし、`loop_messages`を破棄しない設計変更（重複書き込みリスクの本質的解消）はBL-046として記録のみに留めた。 |
+| 2026-07-22 | 続くドライラン（`log/2026-07-22/2320`）で、ユーザーが`write_agreement`の`depends_on`エラー（"depends_onに存在しないID: task_1_1"）を報告。調査の結果、`WRITE_AGREEMENT_TOOL`スキーマの`depends_on`に説明文が一切なく、検証コードは`agreements`テーブルの数値行IDを期待する一方、AIはtask_planner側の別概念（task_idのdepends_on）と混同して`"task_1_1"`を渡し、無駄な1往復を経てから自己修正していたことが判明。BL-047として新規起票・`done`化、`depends_on`のdescriptionに正しい使い方（決定事項DB表示の`[N]`を使う、task_idは不可、不明なら省略）を追記して修正。 |
