@@ -100,7 +100,15 @@ def _aggregate_global_constraints(agreements: list[dict]) -> list[GlobalConstrai
 **方針:**
 1. BL-005の根本修正（`turn_count`を`app.invoke()`呼び出しをまたいで正しくインクリメントする、または外側ループのカウンタをstateに正しく反映する）を本設計の前提として先に対応する。
 2. `reflection_node`の判定結果`discussion_status`に、既存の"stagnant"に加えて`arbiter_node`由来の「リソース超過が検出されたが未解決」という状態を合流させ、facilitatorが呼ばれる条件を「議論の停滞」だけでなく「リソース調停の必要性」にも拡張する。
-3. `facilitator_node`が呼ぶ`call_facilitator`に、§3.2で定義した3種のエスカレーション行動メニューを（Arbiterと共通のプロンプト部品として）持たせ、「穏やかな促し」だけでなく「膠着が一定回数続いた場合は代替案を強制提示する」段階的な強さの変化を持たせる（現行の`facilitation_count>3`で問答無用にhaltする一段階のみの設計から、1-2回目は促し・3回目でエスカレーション行動メニュー提示、に変更）。
+3. `facilitator_node`が呼ぶ`call_facilitator`に、§3.2で定義した4段階のエスカレーション行動メニューを（Arbiterと共通のプロンプト部品として）持たせ、`facilitation_count`に応じて強さを変える。現行の「`facilitation_count>3`で問答無用にhalt」という一段階設計を、以下のように置き換える：
+
+   | `facilitation_count` | 行動 |
+   |---|---|
+   | 1回目 | 穏やかな促し（現行の`call_facilitator`のまま） |
+   | 2回目 | 段階1〜3（Substitute/Descope/Force Decision）を具体的に提示 |
+   | 3回目 | 段階4（そもそも論への昇華）へ移行し、対立する前提を構造化してUserにSOSを出し、`halt`する |
+
+   これにより、現行の「3回促してもダメなら無言で停止」から、「3回目には“なぜ止まったか”が対立する前提の言語化として`decisions`テーブルに残る」形に変わる。
 
 ---
 
