@@ -69,10 +69,11 @@
 | BL-035 | 高 | `cela_main.py` (`_build_task_scope_context`) | 実ドライラン（`log/2026-07-20/1421`）のtask_6_3（総合導入計画の完成）で、Expertがピーク輸送力を誤計算（60÷13.8×9×3=117人/時と主張、正しくは60/13.8×9=39.1人/時でピーク需要66.7人/時を下回る）しDetectorに差し戻された事例をユーザーが発見。検算の結果、これは別フェーズ（task_2_1）確定済みの車両台数がピーク需要を満たせていないという根深い問題だったが、`_build_task_scope_context`（`cela_main.py:1306-1311`）が`state["current_phase"]["tasks"]`のみを走査するため、フェーズをまたぐ`depends_on`参照（task_6_3→task_2_1）が構造的に解決不能で、Expertは根拠の確定値にアクセスできないまま差し戻しを繰り返すリスクがある。`expert_retry_count>=3`で`reflection`に丸投げされるが収束は保証されない。即応パッチ（`state["phases"]`全体を走査するよう修正）ではなく、F-3.8（自律的DB/ファイル読み取りツール、要件定義書v35.1新規）実装時にまとめて解消する方針（D-032）。現時点では実装せず記録のみ | P2 |
 | BL-036 | 中 | `cela_main.py`（`decision_extractor_node`の統合パス、task_6_3系ペルソナ） | ユーザー依頼により`log/2026-07-20/1421`の全21成果物ファイルを内容面でレビューしたところ、「最終計画書」の財務・需要数値が統合パスのたびに再ドリフトしていることを発見。年間ランニングコストがPhase 3承認値（task_3_2、2,541万円・補助金使用率4.70%）に対し、Ver.1.0/1.1（3,000万円・20.00%）、logic_verifierの完了報告（2,980万円・19.33%）と、統合の都度異なる数値になっており、赤字額は最大4.26倍の開きがある。需要側も同様にtask_1_1確定値（総人口5,000人・1日総需要400人/日）から、最終盤で「人口5,200人・1日総需要200トリップ/日」へ根拠なくドリフトしていた（Detector自身がこの乖離を検出し`minor`判定で通過させていた）。原因はBL-035と同一（統合パス担当ペルソナが承認済み根拠ファイルを実際に読み返す手段を持たず、その場で数値を再構成している）で、独立した新規欠陥ではなくBL-035／F-3.8の射程がコスト・需要計算にも及ぶことを裏付ける実例。ユーザー判断により、これは既知の根本原因（読み取りツール欠如）から予想される結果であるため参考記録に留め、F-3.8実装後に読み取りアクセスを持った状態で再度Phase 6を走らせて初めて実効性を評価する方針とし、現時点では独立の緊急対応は行わない | P2 |
 | BL-037 | 中 | `cela_main.py`（`call_decision_extractor`のDecision/Agreement抽出プロンプト） | ユーザーが「decisionなどある程度記憶の外部化ができているが、理由の記載が甘い」と指摘し、`log/2026-07-20/1421`のDetector自身の思考ログに、後から確認しようとした数値の根拠を辿れず「根拠が不明」「以前のタスクで設定された数値かもしれないが根拠が不明」と繰り返し書かれている箇所（対象人口5,200人vs5,000人、1周回15分、80km/ルート、電話対応所要時間7.5時間/日等）を確認。原因は2種類：①`80km/ルート`等の中間的な計算仮定はExpertの自由記述レポート内に埋め込まれるのみで、そもそも`decision_extractor`が個別のDecision/owns_variableとして抽出しておらず`reason_why`欄自体が存在しない、②`最適導入台数は3台`のように実際にDecision化された項目でも`reason_why`が結論の言い換え程度に留まり、前提・出典・棄却した代替案までは記録されないケースがある。根本原因はBL-034〜036と同系統（後から参照可能な情報の粒度不足）だが、対象がファイル読み取りではなく`reason_why`欄の記載品質・抽出粒度自体である点で異なる。ユーザー判断により、まずBL記載のみに留め、F-3.1〜F-3.7（エージェント自身の自律書き込みツールへの移行、`decision_extractor_node`の縮小・撤廃）着手時にあわせて理由記載の強制粒度を再設計する方針とし、現時点ではプロンプトの単体強化は行わない | P2 |
-| BL-038 | 高 | `cela_main.py` (`decision_extractor_node`、`expert_node`、`_query_AI_live`の`_LAST_WRITE_AGREEMENT_SUCCEEDED`伝播) | R3b実装後の実ドライラン（`log/2026-07-21/2248`）で、Expertの`write_agreement`成功（task_1.1、`vehicle_count`確定、`entry_type="Decision"`）後も`decision_extractor_node`のAgreement抽出がスキップされず、同一トピック「必要車両台数の算出結果」で`entry_type="Deliverable"`の別エントリが二重に書き込まれた。オフライン再現テストでは`expert_node`単体の状態伝播は正常動作したため、原因は実グラフ実行中の状態伝播バグか、`write_agreement`の部分的カバレッジ（Decisionのみ書きDeliverableは書かない）を想定できていない設計の粒度不足のいずれか未確定。次回ドライラン前に`decision_extractor_node`内に診断ログを追加し原因を確定させる方針 | P1 |
+| BL-038 | 高 | `cela_main.py` (`LineageState`、`decision_extractor_node`、`expert_node`) | ~~R3b実装後の実ドライランで、Expertの`write_agreement`成功後も`decision_extractor_node`のAgreement抽出がスキップされず二重書き込みが発生~~ → `done`。R4実装後のドライランでDBを直接クエリしWHITEBOARDポインタがプレーンテキストで上書きされる実害を確認、根本原因はLangGraphが`LineageState`（TypedDict）に未宣言のキー（`expert_wrote_agreement`等）をノード間で伝播しない仕様と特定（D-038）。`LineageState`へのフィールド追加とdecision_extractorフォールバックへのWHITEBOARD保護を実装、オフラインスモークテスト66件Pass | P1 |
 | BL-039 | 高 | `cela_main.py` (`_resolve_task_transition`, `_get_current_task`, `call_decision_extractor`) | ~~実ドライラン（`log/2026-07-21/2248`）で、`decision_extractor`が出力する`advances_to_task_id`がドット表記（`task_1.1`等）である一方、`call_task_planner`が生成する実際の`task_id`はアンダースコア表記（`task_1_1`等）であるため、`_resolve_task_transition`の存在チェックに毎回失敗し、タスク遷移が1回も成功していなかった~~ → `done`（`_resolve_task_transition`にドット→アンダースコア正規化を追加、`call_decision_extractor`に全task_id一覧を提示してLLMに正確な表記をコピーさせる誘導を追加） | P0 |
 | BL-040 | 高 | `cela_main.py` (`read_deliverable_file`, `_read_deliverable_file_handler`, `_commit_agreement_from_tool`) | ~~実ドライラン（`log/2026-07-21/2248`）で`read_deliverable_file`呼び出し31回中21回（約68%）が`not_found`。ファイル名がトピック文字列＋Unixタイムスタンプで一意に決まりAIが予測できないため、`file_path`直接指定への依存が実質的な発見不能性を招いていた~~ → `done`（`task_id`/`topic_keyword`引数を追加し、agreements DBの`FILE_PATH:`ポインタから実際のパスを逆引きする方式に変更。あわせてagreements.task_id列が`args.get("task_id")`のみに依存し、LLMが省略すると逆引きできない問題も`_CURRENT_TASK_ID`フォールバックで修正） | P1 |
 | BL-041 | 高 | `cela_main.py` (`arbiter_node`, `check_global_constraint_overrun`, `global_constraints`) | ユーザーが「task_1.1で車両台数4台を決定し予算1億円を使い果たした後、システム開発費等の算出でこの決定をどう覆すか」と問いかけたことを契機に調査。`state["global_constraints"]`は`task_planner_node`での初期化（`[]`）以外に実際のクレームデータを書き込む箇所がコードベース中に一切なく、`check_global_constraint_overrun`は常に空リストを走査するため超過を検出できない。実ドライラン全文検索でも`[Resource Arbiter]`・`[facilitator]`・`[reflection]`・`phases_to_revise`はいずれも0件で、この調停機構は設計上は存在するが**実際には一度も発火し得ない死んだコードパス**であることを確認した。今回のドライランでは幸い、task_1.2が自タスクのacceptance_criteria（「予算超過時の調整案が検討されている」）内で帳尻を合わせた（残額わずか42万円）ため実害はなかったが、これは偶然であり、一度確定した決定（`vehicle_count=4`等）を後続タスクの発見（コスト不足等）を根拠に体系的に再検討させる自動メカニズムは現状存在しない。`write_agreement`のSUPERSEDE機構自体はあるが、BL-025のスコープガードレールによりExpertは自タスク外の合意を書き換えない設計のため、これも自動トリガーにはならない。設計判断が必要な項目（`global_constraints`への`resource_claims`集約タイミング、`reflection_interval`とarbiter発火条件の関係）のため、現時点では記録のみで実装は見送り | P1 |
+| BL-042 | 中 | `cela_main.py` (`call_detector`のconstraint_issue判定プロンプト) | R4実装後の実ドライラン（`log/2026-07-22/1804`）で、Detectorのconstraint_issue判定（minor/major境界の運賃単価矛盾）が同じ論点をiter=8〜9以上再検討し続け、同一のpython_replコードを重複実行するなど非効率にトークンを消費していたことを発見。ユーザー提案の「3回思考し多数決を取る」方式を`call_detector`プロンプトへの指示追加として実装（コード側での強制カウントではなく、まずプロンプト指示のみで様子見）。実LLM再ドライランでの効果確認は未実施 | P2 |
 
 ---
 
@@ -1172,10 +1173,10 @@ for t in state.get("current_phase", {}).get("tasks", []):
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（原因未確定、次回ドライラン前に診断ログ追加を推奨） |
+| 状態 | `done`（根本原因特定・修正済み、オフラインスモークテスト66件通過。実LLM再ドライランでの最終確認は未実施） |
 | 優先度 | P1 |
 | 依存 | [cela_r3_impl_Plan.md §3.5/§3.5.1](r1_r2_r3b_core/cela_r3_impl_Plan.md)（`wrote_agreement_this_turn`検知機構） |
-| 関連 | [D-036](decision_log.md#d-036-r2をd-002同様の扱いでクローズしr3をr3a自律的読み取りf-38f-39r3b自律的書き込み旧来のr3に再編する)（R3b実装） |
+| 関連 | [D-036](decision_log.md#d-036-r2をd-002同様の扱いでクローズしr3をr3a自律的読み取りf-38f-39r3b自律的書き込み旧来のr3に再編する)（R3b実装）、[D-038](decision_log.md#d-038-bl-038の根本原因をlanggraphの未宣言typeddictキー消失と特定しlineagestateへのフィールド追加とdecision_extractorフォールバックのwhiteboard保護で対応する)（根本原因特定・修正） |
 
 **内容:**
 
@@ -1194,9 +1195,21 @@ R3b実装後の実ドライラン（`log/2026-07-21/2248`）で発見。task_1.1
 
 **完了条件:**
 
-- `decision_extractor_node`内に`wrote_agreement_this_turn`・`target_role`・`state.get("expert_wrote_agreement")`/`state.get("user_wrote_agreement")`の値を出力する診断ログを一時追加し、次回ドライランで実際の値を確認して原因（状態伝播バグか設計の粒度不足か）を確定させる。
-- 原因が(1)状態伝播バグと判明した場合：該当箇所を修正し、オフラインスモークテストで実際のグラフ経由の状態伝播を検証するテストケースを追加する（`tests/test_r3_smoke.py`の既存テストは`decision_extractor_node`を直接呼び出す形のみで、`expert_node`からの実グラフ経由の状態伝播は未カバーだったため、本件で検知できなかった）。
-- 原因が(2)設計の粒度不足と判明した場合：スキップ判定を「ターン単位」ではなく「トピック単位・entry_type単位」に細分化するか、`write_agreement`の`entry_type="Deliverable"`呼び出しを促すプロンプト指示を追加するかを再設計する。
+- ~~`decision_extractor_node`内に診断ログを一時追加し、次回ドライランで実際の値を確認して原因を確定させる。~~ → 2026-07-22、R4実装後の実ドライラン（`log/2026-07-22/1407`）で実害（DB上でWHITEBOARDポインタがプレーンテキストで上書きされSupersededになる事故）を直接確認し、根本原因を特定済み。
+- ~~原因が(1)状態伝播バグと判明した場合：該当箇所を修正し、オフラインスモークテストで実際のグラフ経由の状態伝播を検証するテストケースを追加する~~ → 完了。
+
+**根本原因（確定）:**
+
+原因は仮説(1)「状態伝播のバグ」だった。インストール済みLangGraph（v1.2.9）で最小構成の再現コードを書いて実証: `StateGraph`のスキーマとして渡す`LineageState`（TypedDict）に**宣言されていないキー**は、ノードが戻り値の辞書にセットしても次のノードには伝播せず消える。`expert_wrote_agreement`・`user_wrote_agreement`・`expert_last_whiteboard_edit`（R3b/R4で導入）はいずれも`LineageState`への追加が漏れており、`expert_node`内で正しく`True`にセットされていても、`decision_extractor_node`到達時には常にデフォルト値（False/None）に戻っていた。同時期に導入された`expert_last_python_calls`はTypedDictへの追加が行われていたため正常動作しており、この対比が根本原因の裏付けとなった。
+
+`tests/test_r3_smoke.py`/`test_r4_smoke.py`の既存テストが`decision_extractor_node`をPython関数として直接呼び出す形式だったため、LangGraphのチャネル機構（未宣言キーの消失）を経由せず、本件を検知できなかった。
+
+**修正内容（D-038）:**
+
+1. `LineageState`（`cela_main.py`）に`expert_wrote_agreement: bool`・`user_wrote_agreement: bool`・`expert_last_whiteboard_edit: dict | None`を追加。
+2. 二重防御として、`decision_extractor_node`のフォールバック経路に`WHITEBOARD:`ポインタの保護分岐を追加（`FILE_PATH:`と同様、フォールバック経路からの上書きを禁止）。
+3. `tests/test_r4_smoke.py`に、実際の`StateGraph(cela_main.LineageState)`を`app.invoke()`経由で検証する回帰テストと、WHITEBOARD保護の回帰テストを追加（オフラインスモークテスト66件全通過）。
+4. 実LLM再ドライランでの最終確認（本当にログに`⏭️`スキップメッセージが出るか）はまだ未実施。
 
 ### BL-039: `decision_extractor`が出力するtask_idの表記ゆれ（ドット vs アンダースコア）により、タスク遷移がドライラン全体で1回も成功していない
 
@@ -1301,6 +1314,38 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 - 提案1（すり合わせタスクを最初に置く／上書き機構）は、facilitator再設計とあわせて検討する将来課題として保留。
 - `agreements.resource_claims`を`state["global_constraints"]`へ集約するタイミング、`arbiter_node`の発火条件の設計は上記facilitator再設計と統合して検討する（未着手）。
 
+---
+
+### BL-042: Detectorのconstraint_issue判定（minor/major境界）でツールループが同じ論点を延々再検討し、トークンを浪費する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（プロンプト指示による軽量対策を実装、実LLM再ドライランでの効果確認待ち） |
+| 優先度 | P2 |
+| 依存 | [D-038](decision_log.md#d-038-bl-038の根本原因をlanggraphの未宣言typeddictキー消失と特定しlineagestateへのフィールド追加とdecision_extractorフォールバックのwhiteboard保護で対応する)（同じドライランで発見） |
+| 関連 | なし |
+
+**内容:**
+
+実LLMドライラン（`log/2026-07-22/1804`）レビュー中に発見。task_1_1のDeliverable評価で、Agentの成果物中の「平均164円/トリップ」という記載が制約「1乗車一律200円」と矛盾する件について、Detectorがconstraint_issueを"minor"にするか"major"にするかで、iter=1から少なくともiter=8〜9まで、ほぼ同じ論点・同じ数値的根拠を繰り返し再検討し続けた（一度"minor"と結論しかけては直後に「Actually, let me reconsider once more」と覆す、を何度も繰り返す）。iter=6とiter=7では全く同一のpython_replコード（acceptance_criteria充足チェック）を重複実行しており、これは言い回しの繰り返しに留まらずツール呼び出し予算（`MAX_TOOL_ITER=15`）の実消費でもある。クラッシュ・非収束エラーには至っていないが、1回の判定だけで予算の半分以上を使う状態だった。
+
+根本原因は、Detectorのconstraint_issue判定基準プロンプト（`call_detector`）が「明白な数値矛盾ならmajor」という厳格な基準と「結論に影響しなければminorでよい」という緩やかな基準の両方を許容する書き方になっており、モデルがどちらを優先すべきか自己判断で行ったり来たりしてしまうこと。
+
+**ユーザー提案・決定（2026-07-22）:**
+
+ユーザーが「多数決方式（3回思考して結論の多い方を採用）」を提案。当初AIは「3回別々にAPI呼び出しをする」という3倍コスト増の方式と誤解して懸念を示したが、ユーザーが「同じ呼び出しの中で3回明示的に判定し多数決を取る」という意図であることを明確化。この方式は、単純な「2回目で強制確定」（結果が変わったかどうかを問わず機械的に打ち切る案、AI提起）よりも「たまたま偶数回目の判定が不安定だった場合のブレ」に強いという利点があるとAIが指摘し、採用が決定した。
+
+実装方式について、(A)プロンプト指示のみでモデルに3回判定＋多数決を守らせる案と、(B)コード側でiterごとの暫定判定を強制的にカウントし3回分溜まったら機械的に多数決を計算して打ち切る案の2択をAIが提示。今回の堂々巡り自体、既存プロンプトの「無駄な再検討をするな」という趣旨の指示があっても守られなかった実績があるため(B)の方が確実だが、まず実装コストの低い(A)で様子を見て、それでも守られないなら(B)に進む、という順序でユーザーが合意。
+
+**実装:**
+
+`call_detector`のプロンプト（`cela_main.py`）に、「【判定のブレ防止（3回多数決方式）】」ブロックを追加。同じ論点について独立した判定を3回だけ行い（各回は結論のみ簡潔に）、3回のうち多数だった結論を採用し、それ以上の再検討を禁止する指示を挿入した。プロンプト文字列のみの変更のためロジック変更はなく、オフラインスモークテスト66件は非退行（`python -m py_compile`合格）。
+
+**完了条件:**
+
+- 次回実LLMドライランで、同種の判定（minor/major境界の数値矛盾）においてDetectorのツールループのiter数が明確に減少し、同一論点の重複検討・重複python_repl実行が解消されることを確認する。
+- (A)のプロンプト指示だけでは守られない場合、(B)のコード側強制（iterごとの暫定判定パースと機械的多数決・強制打ち切り）に進む。
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -1343,3 +1388,5 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 | 2026-07-22 | ユーザーがBL-041を「木を見て森を見ず」（task_1.1の狭いスコープ内で作業していたことが真因）と再診断し、①暫定値デフォルト化（F-3.9のconfidence活用）②すり合わせタスク／上書き機構③facilitatorのエスカレーション役への再定義（`reflection`同様の周期的発火）の3方向を提案（[decision_lineage.md 論点42](decision_lineage.md)）。ユーザー指示により①はcela_main.py（Expertプロンプト・WRITE_AGREEMENT_TOOLスキーマのconfidenceデフォルトを`confirmed`→`provisional`に変更）に実装、③はBL-017と統合し設計書を先に作成する方針とし実装は見送り。あわせてBL-040にユーザー提案（ファイル名を`_Vn`バージョン連番化し旧版は`old/`へ退避）を追加実装。`tests/test_r3_smoke.py`にテスト1件追加、全50件Pass。 |
 | 2026-07-22 | `decision_extractor`の`owned_variable_values`安全網パス（Expertがwrite_agreementを呼ばない場合）も暫定値原則の抜け穴になっていた点を修正。`upsert_verified_fact`のデフォルト引数を`confidence="confirmed"`→`"provisional"`に変更し、既存テストの期待値も更新（全50件Pass）。`cela_main.py`・`tests/test_r3_smoke.py`をコミット（c08bbd8）。あわせてBL-041のfacilitator/Resource Arbiter再設計ドラフトを`cela_facilitator_arbiter_redesign_BL041.md`として作成（未承認・未実装、実装前にユーザー確認が必要な未決事項4点を明記）。 |
 | 2026-07-22 | ユーザーがR4（ホワイトボード差分パッチ化）をBL-041実装より優先着手する決定（ドライランの長時間化・トークン消費が理由、[decision_lineage.md 論点43](decision_lineage.md)）。Plan modeで実装計画を策定し、既存R4設計書が未定義のまま残していた「Expertの変更箇所を既存完全版へどうマージするか」をClaude Code自身のEditツール方式（old_text完全一致検索→new_text置換）で解決。`cela_main.py`に`whiteboard_drafts`のCRUD・`_apply_text_edits`を実装し、`WRITE_AGREEMENT_TOOL`に`edits`パラメータを追加。Deliverableの主経路をwhiteboard_drafts方式に全面移行（`integrator_node`最終統合文書のみ旧来のファイル方式を維持）。Expert/Detector/User AIのプロンプトに現在タスクの最新ホワイトボードを注入し、`read_deliverable_file`・ロールバック（F-7.3）も対応。`cela_r4_design.md`・`cela_r4_impl_Plan.md`を更新・新規作成。`tests/test_r4_smoke.py`（14件）新規追加、既存`test_r3_smoke.py`の3件（R3b-T12・T13、BL-040バージョニングテスト）をWHITEBOARD方式に合わせて更新。オフラインスモークテスト計64件Pass、`python -m py_compile`合格。BL-034・BL-040のステータスをR4実装反映済みに更新（`partial`/`done`のまま補足追記）。 |
+| 2026-07-22 | R4実装後の実LLMドライラン（`log/2026-07-22/1407`）レビュー中、DBを直接クエリしてBL-038の実データ破損（WHITEBOARDポインタがdecision_extractorのフォールバック経路でプレーンテキスト上書きされSupersededになる事故）を確認。インストール済みLangGraph（v1.2.9）の最小再現コードで、`StateGraph`のスキーマ（`LineageState` TypedDict）に宣言されていないキーはノード間で伝播せず消えることを実証し、`expert_wrote_agreement`/`user_wrote_agreement`/`expert_last_whiteboard_edit`のTypedDict宣言漏れが真因と特定（D-038）。`LineageState`へのフィールド追加、decision_extractorフォールバックへの`WHITEBOARD:`保護分岐の追加、実グラフ経由の回帰テスト2件を`tests/test_r4_smoke.py`へ追加し、オフラインスモークテスト計66件Pass。BL-038を`done`化。 |
+| 2026-07-22 | 同ドライラン継続中のログ（`log/2026-07-22/1804`）レビューで、Detectorのconstraint_issue判定（minor/major境界）が同じ論点を8〜9 iter以上再検討し続ける非効率を発見。ユーザー提案の「3回思考し多数決を取る」方式を、`call_detector`プロンプトへの指示追加（3回だけ判定し多数決で確定、以降の再検討を禁止）として実装。BL-042として新規起票（`open`、プロンプト指示のみで様子見。守られない場合はコード側で暫定判定を強制カウントし機械的に打ち切る案へ進む）。同セッションで、`task_planner`の体感的な遅さの相談を機に`_query_AI_live`へstreaming描画（tools無し・tools付きツールループの両方）を追加、`MultiLogger.write()`の`flush()`欠落（ログファイルがターミナル表示より遅れて書き込まれる原因）も修正。 |

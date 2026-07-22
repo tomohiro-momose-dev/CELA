@@ -502,6 +502,23 @@
 
 ---
 
+## 論点44: BL-038の根本原因確定 — LangGraphの未宣言TypedDictキー消失（D-038）
+
+- **発端:** R4実装後、ユーザーが実LLMドライラン（`log/2026-07-22/1407`）を開始し、途中経過のログレビューをAIに依頼。AIがログを読み進める中で、task_1_1のDeliverableが`write_agreement`経由で`WHITEBOARD:phase_1:task_1_1`として正しく保存された直後に、`decision_extractor`が同一トピックを再抽出している形跡（`📝 [Extract] UPDATE - Deliverable`のログに、対応する`⏭️`スキップメッセージが1件も伴っていない）に気づき、DB（`cela.db`）を直接クエリして事実を確認した。結果、該当行が`Superseded`になり、代わりにポインタでも何でもないプレーンな短文（Agentのチャット完了報告の要約）が最新のDeliverableとして残っていることを実データで確認した（AI提起・実害の実証）。
+- **ユーザーによる検証:** AIが提示した仮説（`_commit_agreement_from_tool`内のwrite_agreement成功判定コードが原因）に対し、ユーザーが「`success`キーの値が`True`（文字列ではなくbool）であることは関係あるか」と、コードの該当行を選択して直接確認を求めた。AIが検証した結果、その箇所自体は正しく機能しており（`result`はJSON文字列ではなく生dictであるため`result.get("success")`は実際のbool `True`を正しく評価する）、バグの所在ではないことを確認・回答。
+- **ユーザーからの指示:** 「オフラインテストで何とか確認できないか」という要望を受け、AIが以下を実施:
+  1. 既存のオフラインテスト（`test_r3_smoke.py`の`test_r3b_t5_...`）が`decision_extractor_node`をPython関数として直接呼び出す形式であり、`expert_wrote_agreement=True`を手動で渡せば正しくスキップされることを確認 — ガードのロジック自体は正しいことを再確認。
+  2. しかし実ドライランでは同じロジックが機能していない。両者の違い（実グラフ経由 vs 直接呼び出し）に着目し、インストール済みLangGraph（v1.2.9）で最小構成の再現コード（2ノードの`StateGraph`、一方が未宣言キーをセットし他方が読む）を書いて実行。結果、**TypedDictスキーマに宣言されていないキーは、ノードの戻り値に含めてもLangGraphが次のノードへ伝播せず消える**ことを実証。
+  3. `LineageState`（`cela_main.py`）を確認したところ、`expert_wrote_agreement`・`user_wrote_agreement`・`expert_last_whiteboard_edit`（いずれもR3b/R4で導入）がTypedDictフィールドとして宣言されていなかったことを発見。同時期に導入された`expert_last_python_calls`（BL-033）はTypedDictへの追加が行われており正常動作していたという対比が、根本原因の裏付けとなった。
+- **決定・実装:** ユーザーが「一応printは残して、後は進めてください」と指示（デバッグ用に追加した`[DEBUG]`printの削除は不要、修正は進めてよい）。AIが以下を実装:
+  1. `LineageState`に3フィールド（`expert_wrote_agreement: bool`・`user_wrote_agreement: bool`・`expert_last_whiteboard_edit: dict | None`）を追加。
+  2. 二重防御として、`decision_extractor_node`のフォールバック経路に`WHITEBOARD:`ポインタの保護分岐を追加（`FILE_PATH:`と同じ扱いで、フォールバック経路からのプレーンテキスト上書きを常に禁止）。ガードが将来再び機能しなかった場合でも実データ破損には至らないようにする、という設計判断（AI提起）。
+  3. `tests/test_r4_smoke.py`に、実際の`StateGraph(cela_main.LineageState)`を`app.invoke()`経由で検証する回帰テストと、WHITEBOARD保護の回帰テストを追加。オフラインスモークテスト計66件が全通過。
+- **決定者:** t-momose（実データ確認の指示、offlineテストでの切り分け指示、修正実施の許可）、Claude Sonnet 5（DB上の実害確認、LangGraphの挙動の実証的検証、根本原因の特定、修正案の提示・実装）
+- **関連:** [BL-038](issue_backlog.md#bl-038-write_agreement成功後もdecision_extractor_nodeのagreement抽出がスキップされず同一トピックでdecisionとdeliverableの二重書き込みが発生する)、[D-038](decision_log.md#d-038-bl-038の根本原因をlanggraphの未宣言typeddictキー消失と特定しlineagestateへのフィールド追加とdecision_extractorフォールバックのwhiteboard保護で対応する)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
@@ -543,3 +560,4 @@
 | 2026-07-21 | 論点41を追記。`phaseN/`フォルダ命名が現行R番号と対応せず混乱の原因になっていたという指摘（`phase3/`の中身が実際にはR5設計書だった等）と、R番号一本化への全面リネーム決定（D-037）を記録。 |
 | 2026-07-22 | 論点42を追記。BL-041（車両台数決定を覆す自動メカニズム不在）の根本原因を「木を見て森を見ず」（狭いタスクスコープでの作業）と再診断したユーザー分析、暫定値デフォルト化（F-3.9のconfidence活用）・すり合わせタスク・facilitatorのエスカレーション役への再定義という3方向の提案を記録。暫定値デフォルト化は`cela_main.py`のExpertプロンプト・`WRITE_AGREEMENT_TOOL`スキーマに実装（オフラインスモークテスト50件Pass）、facilitator再設計はBL-017と統合し設計書を先に作成する方針とした。あわせてBL-039（task_idドット/アンダースコア表記ゆれ）・BL-040（`read_deliverable_file`発見不能性、ファイル名の`_Vn`バージョニング＋`old/`退避）も本セッションで実装・`done`化。 |
 | 2026-07-22 | 論点43を追記。R4（ホワイトボード差分パッチ化）をBL-041実装より優先着手する決定と、Plan modeでの実装計画策定を記録。既存のR4設計書が「Expertの変更箇所を既存完全版へどうマージするか」を未定義のまま残していたことを発見し、Claude Code自身のEditツール方式（old_text完全一致検索→new_text置換）を採用する決定（ユーザーの逆質問に基づく）を記録。`cela_main.py`に`whiteboard_drafts`のCRUD・`_apply_text_edits`・`edits`パラメータ付き`WRITE_AGREEMENT_TOOL`を実装し、Expert/Detector/User AI/integrator_node/read_deliverable_fileの各所を統合。`cela_r4_design.md`・`cela_r4_impl_Plan.md`を更新・新規作成。`tests/test_r4_smoke.py`（14件）追加、既存`test_r3_smoke.py`の3件をWHITEBOARD方式に合わせて更新、オフラインスモークテスト計64件Pass。 |
+| 2026-07-22 | 論点44を追記。実LLMドライラン（`log/2026-07-22/1407`）レビュー中に発見したBL-038の実データ破損（WHITEBOARDポインタがdecision_extractorのフォールバック経路でプレーンテキスト上書きされSupersededになる事故）と、その根本原因（LangGraphがTypedDictスキーマ未宣言キーをノード間で伝播しないこと、`expert_wrote_agreement`/`user_wrote_agreement`/`expert_last_whiteboard_edit`がLineageStateへの追加漏れだったこと）の実証的特定（D-038）を記録。`LineageState`へのフィールド追加、decision_extractorフォールバックへのWHITEBOARD保護追加、実グラフ経由の回帰テスト2件追加（オフラインスモークテスト計66件Pass）を実施。 |
