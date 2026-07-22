@@ -1238,7 +1238,7 @@ task_1.4 → task_1.5 遷移時 / task_1.5 → task_2.1 遷移時 / task_2.1 →
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `done`（オフラインスモークテスト済み、実LLM再ドライラン未実施） |
+| 状態 | `done`（オフラインスモークテスト済み、実LLM再ドライラン未実施。2026-07-22: R4実装によりper-task Deliverableの主経路はwhiteboard_drafts方式へ移行したため、`_Vn`バージョニング＋`old/`退避は現在`integrator_node`の最終統合文書専用。ファイル・ホワイトボードどちらの場合も`read_deliverable_file`は同一インターフェースで解決できることを維持） |
 | 優先度 | P1 |
 | 依存 | F-3.8（自律的DB/ファイル読み取りツール、[decision_log.md D-036](decision_log.md)） |
 | 関連 | [BL-035](issue_backlog.md#bl-035-_build_task_scope_contextがフェーズ横断のdepends_on参照を解決できない)・[BL-036](issue_backlog.md#bl-036-最終計画書の財務需要数値が統合パスのたびに再ドリフトするbl-035f-38の射程がコスト計算にも及ぶ実例)（F-3.8導入の動機となった読み取りアクセス欠如の系譜） |
