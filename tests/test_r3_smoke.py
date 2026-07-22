@@ -409,18 +409,18 @@ def test_r3b_t11_write_agreement_result_not_double_encoded(db_conn):
 
 
 def test_r3b_t12_deliverable_create_via_write_agreement_saves_file(db_conn):
-    """R3b-T12（H2の回帰確認）: write_agreementでentry_type='Deliverable'・200文字超の
-    decision_whatを送信した際、log/deliverables/にファイルが生成され、
-    agreements.decision_whatがFILE_PATH:で始まること。"""
+    """R3b-T12（H2の回帰確認、R4でホワイトボード方式に移行）: write_agreementで
+    entry_type='Deliverable'・200文字超のdecision_whatを送信した際、whiteboard_draftsに
+    Ver.1として保存され、agreements.decision_whatがWHITEBOARD:で始まること。"""
     conn, run_id = db_conn
     cela_main._CURRENT_CALLER_ROLE = "expert"
     cela_main._CURRENT_TASK_ID = "task_x"
 
-    before = set(os.listdir("log/deliverables")) if os.path.isdir("log/deliverables") else set()
     long_content = "X" * 500
     result = cela_main.TOOL_DISPATCH["write_agreement"]({
         "action_type": "CREATE", "status": "Proposed", "topic": "R3bテスト成果物T12",
         "decision_what": long_content, "reason_why": "r", "entry_type": "Deliverable",
+        "phase_id": "phase_1",
     })
     assert result["success"] is True
 
@@ -429,37 +429,30 @@ def test_r3b_t12_deliverable_create_via_write_agreement_saves_file(db_conn):
         ("R3bテスト成果物T12", run_id),
     ).fetchall()
     assert len(rows) == 1
-    assert rows[0]["decision_what"].startswith("FILE_PATH:")
+    assert rows[0]["decision_what"] == "WHITEBOARD:phase_1:task_x"
 
-    after = set(os.listdir("log/deliverables")) if os.path.isdir("log/deliverables") else set()
-    new_files = after - before
-    assert new_files, "log/deliverables/にファイルが作られていない"
-    try:
-        saved_path = rows[0]["decision_what"].split("FILE_PATH:")[1]
-        with open(saved_path, encoding="utf-8") as f:
-            assert f.read() == long_content
-    finally:
-        for fn in new_files:
-            os.remove(os.path.join("log", "deliverables", fn))
+    wb = cela_main.get_latest_whiteboard(conn, run_id, "phase_1", "task_x")
+    assert wb is not None and wb["version"] == 1 and wb["content"] == long_content
 
 
 def test_r3b_t13_deliverable_update_protects_existing_file_path(db_conn):
-    """R3b-T13（H2の回帰確認）: write_agreementによるDeliverableのUPDATEで、
-    200文字未満の短い要約が既存のFILE_PATHを上書きせず引き継ぐこと。"""
+    """R3b-T13（H2の回帰確認、R4でホワイトボード方式に移行）: write_agreementによる
+    DeliverableのUPDATEで、editsも200文字超のdecision_whatもない（実質的に変更なしの）
+    更新では新バージョンを作らず既存バージョンを維持すること。"""
     conn, run_id = db_conn
     cela_main._CURRENT_CALLER_ROLE = "expert"
     cela_main._CURRENT_TASK_ID = "task_x"
 
-    before = set(os.listdir("log/deliverables")) if os.path.isdir("log/deliverables") else set()
     create_result = cela_main.TOOL_DISPATCH["write_agreement"]({
         "action_type": "CREATE", "status": "Proposed", "topic": "R3bテスト成果物T13",
         "decision_what": "Y" * 500, "reason_why": "r", "entry_type": "Deliverable",
+        "phase_id": "phase_1",
     })
     assert create_result["success"] is True
 
     update_result = cela_main.TOOL_DISPATCH["write_agreement"]({
         "action_type": "UPDATE", "status": "Proposed", "topic": "R3bテスト成果物T13",
-        "target_topic": "R3bテスト成果物T13",
+        "target_topic": "R3bテスト成果物T13", "phase_id": "phase_1",
         "decision_what": "軽微な修正のみです", "reason_why": "r", "entry_type": "Deliverable",
     })
     assert update_result["success"] is True
@@ -469,13 +462,11 @@ def test_r3b_t13_deliverable_update_protects_existing_file_path(db_conn):
         ("R3bテスト成果物T13", run_id),
     ).fetchall()
     assert len(rows) == 1
-    assert rows[0]["decision_what"].startswith("FILE_PATH:"), (
-        "短い要約による更新が既存のFILE_PATHを上書きしてしまった（ファイル上書き防止の回帰）"
+    assert rows[0]["decision_what"] == "WHITEBOARD:phase_1:task_x", (
+        "短い要約による更新が既存のWHITEBOARDポインタを上書きしてしまった（保護ロジックの回帰）"
     )
-
-    after = set(os.listdir("log/deliverables")) if os.path.isdir("log/deliverables") else set()
-    for fn in after - before:
-        os.remove(os.path.join("log", "deliverables", fn))
+    wb = cela_main.get_latest_whiteboard(conn, run_id, "phase_1", "task_x")
+    assert wb is not None and wb["version"] == 1, "実質的な変更がないのに新バージョンが作られてしまった"
 
 
 # ===========================================================================
@@ -540,48 +531,29 @@ def test_bl040_read_deliverable_file_lookup_by_task_id(db_conn):
             os.remove(os.path.join("log", "deliverables", fn))
 
 
-def test_bl040_deliverable_filenames_are_versioned_and_old_versions_archived(db_conn):
+def test_bl040_deliverable_filenames_are_versioned_and_old_versions_archived():
     """BL-040: save_deliverable_to_fileがタイムスタンプではなく`_V{n}`の予測可能な連番を
-    使うこと、およびwrite_agreementでDeliverableを更新した際に旧版がdeliverables/old/へ
-    退避されること（古いディレクトリに旧版が積み上がらないこと）を確認する。"""
-    conn, run_id = db_conn
-    cela_main._CURRENT_CALLER_ROLE = "expert"
-    cela_main._CURRENT_TASK_ID = "task_x"
+    使うこと、および`_archive_old_deliverable_file`で旧版がdeliverables/old/へ退避される
+    こと（古いディレクトリに旧版が積み上がらないこと）を確認する。
+    ★R4以降、write_agreement経由のper-task Deliverableはwhiteboard_draftsへ移行したため、
+    この2関数は現在integrator_nodeの最終統合文書（1回限り、版管理は不要）専用だが、
+    ファイル名採番・退避ロジック自体の回帰は本テストで直接確認する。"""
     old_dir = os.path.join("log", "deliverables", "old")
-
     before = set(os.listdir("log/deliverables")) if os.path.isdir("log/deliverables") else set()
     before_old = set(os.listdir(old_dir)) if os.path.isdir(old_dir) else set()
     try:
-        create_result = cela_main.TOOL_DISPATCH["write_agreement"]({
-            "action_type": "CREATE", "status": "Proposed", "topic": "BL040バージョニングテスト",
-            "decision_what": "A" * 500, "reason_why": "r", "entry_type": "Deliverable",
-        })
-        assert create_result["success"] is True
-        row = conn.execute(
-            "SELECT decision_what FROM agreements WHERE topic=? AND run_id=?",
-            ("BL040バージョニングテスト", run_id),
-        ).fetchone()
-        v1_path = row["decision_what"][len("FILE_PATH:"):]
+        v1_path = cela_main.save_deliverable_to_file("BL040バージョニングテスト", "A" * 500)
         assert v1_path.endswith("_V1.md"), f"初回保存はV1になるはず: {v1_path}"
         assert "1784" not in v1_path, "ファイル名がタイムスタンプ形式のままになっている"
 
-        update_result = cela_main.TOOL_DISPATCH["write_agreement"]({
-            "action_type": "UPDATE", "status": "Proposed", "topic": "BL040バージョニングテスト",
-            "target_topic": "BL040バージョニングテスト",
-            "decision_what": "B" * 500, "reason_why": "r", "entry_type": "Deliverable",
-        })
-        assert update_result["success"] is True
-        row2 = conn.execute(
-            "SELECT decision_what FROM agreements WHERE topic=? AND run_id=? AND status != 'Superseded'",
-            ("BL040バージョニングテスト", run_id),
-        ).fetchone()
-        v2_path = row2["decision_what"][len("FILE_PATH:"):]
-        assert v2_path.endswith("_V2.md"), f"更新後はV2になるはず: {v2_path}"
-
+        cela_main._archive_old_deliverable_file(v1_path)
         assert not os.path.exists(v1_path), "旧版(V1)がdeliverables直下に残ったままになっている"
         assert os.path.isfile(os.path.join(old_dir, os.path.basename(v1_path))), (
             "旧版(V1)がdeliverables/old/へ退避されていない"
         )
+
+        v2_path = cela_main.save_deliverable_to_file("BL040バージョニングテスト", "B" * 500)
+        assert v2_path.endswith("_V2.md"), f"次の保存はV2になるはず（old/内の旧版も採番に考慮する）: {v2_path}"
     finally:
         after = set(os.listdir("log/deliverables")) if os.path.isdir("log/deliverables") else set()
         for fn in after - before:

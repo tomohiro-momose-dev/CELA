@@ -92,12 +92,21 @@ class MultiLogger:
         """【SLM要約】
         Content output routing: directs a message to the prompt file, terminal, and/or other specified logs based on system mode.
         """
+        # [UX] ファイルはデフォルトでブロックバッファリングされ、ある程度書き込みが
+        # 溜まらないとディスクに反映されない（ターミナル表示とログファイルの内容が
+        # ずれて見える原因）。streamingの逐次printも含め毎回のwrite()直後にflushし、
+        # ターミナル表示とほぼ同期させる（頻度は高いが、対話的なドライラン用途では
+        # 性能より即時性を優先する）。
         if self.is_prompt_mode:
             self.file_with_prompt.write(message)
+            self.file_with_prompt.flush()
         else:
             self.terminal.write(message)
+            self.terminal.flush()
             self.file_with_prompt.write(message)
+            self.file_with_prompt.flush()
             self.file_no_prompt.write(message)
+            self.file_no_prompt.flush()
 
     def flush(self):
         """【SLM要約】
@@ -180,6 +189,39 @@ def _archive_old_deliverable_file(file_path: str) -> None:
 
 
 # ===========================================================================
+# 一時停止・再開（チェックポイント）
+# ===========================================================================
+# [UX] ドライランが長時間化しやすく、連続稼働させ続けるのが難しいというユーザー要望を受けて追加。
+# app.stream(state, stream_mode="values")によりグラフの各ノード実行後にstateのスナップショットが
+# 得られるため、そのたびにcheckpoint.jsonへ保存する（BL-005: turn_countはグラフ内部でループバックする
+# 限り更新されず、外側のapp.invoke()単位では長時間戻ってこないことがあるため、ノード単位より粗い
+# 「ターン単位」でのチェックポイントは実用にならないと判断）。
+# [CONSTRAINT] グラフのentry_pointはtask_planner固定（再開時も必ずここから通る）であり、
+# 「止めたノードそのものから再開」ではなく「その回（ラウンド）の頭（generate_user_utterance）から
+# 再開」になる。task_planner_nodeはturn_count==1のときのみ実処理するため、ターン2以降の再開は
+# 実質generate_user_utteranceからのやり直しで済む。
+def _save_checkpoint(checkpoint_path: str, state: "LineageState", config: "Appconfig", current_turn: int) -> None:
+    """【SLM要約】
+    現在のstate/config/current_turnをJSONとしてcheckpoint_pathへ原子的に書き込む
+    （一時ファイルへ書いてからos.replaceすることで、書き込み中断による破損ファイルを防ぐ）。
+    """
+    payload = {"state": state, "config": config, "current_turn": current_turn}
+    tmp_path = f"{checkpoint_path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, checkpoint_path)
+
+
+def _load_checkpoint(checkpoint_path: str) -> tuple["LineageState", "Appconfig", int]:
+    """【SLM要約】
+    _save_checkpointで保存したJSONを読み込み、(state, config, current_turn)を返す。
+    """
+    with open(checkpoint_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    return payload["state"], payload["config"], payload["current_turn"]
+
+
+# ===========================================================================
 # クライアント・モデル設定（APIキーは環境変数から読み込み）
 # ===========================================================================
 # .envファイルに以下のように設定してください:
@@ -193,8 +235,8 @@ deepseek = "deepseek-r1-0528:8b"
 gemini_2_5 = "gemini-2.5-flash-lite"
 gemini_3_1 = "gemini-3.1-flash-lite"
 gemma_local = "gemma4-it:e4b"
-#deepseek_v4_flash = "deepseek-v4-flash"
 deepseek_v4_flash = "deepseek-v4-flash"
+#deepseek_v4_flash = "mimo-v2.5"
 _gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
 _gemini_auditor_key = os.environ.get("GEMINI_API_KEY_AUDITOR", "")
 _deepseek_v4_flash_auditor_key = os.environ.get("DSEEK_V4_FLASH_AUDITOR_KEY", "")
@@ -624,11 +666,11 @@ def _read_verified_fact_handler(args: dict) -> dict | list:
     return results
 
 
-def _resolve_deliverable_file_path(task_id: str, topic_keyword: str) -> str | None:
-    """[BL-040] `read_deliverable_file`のtask_id/topic_keyword検索用ヘルパー。
-    Deliverableのファイル名はトピック文字列＋Unixタイムスタンプで一意に決まり、
-    AIが事前に予測できないため、agreements DBに記録された`FILE_PATH:...`ポインタから
-    実際のパスを逆引きする。同一task_id/topicで複数件ある場合は最新（id最大）を優先する。
+def _resolve_deliverable_pointer(task_id: str, topic_keyword: str) -> str | None:
+    """[BL-040/R4] `read_deliverable_file`のtask_id/topic_keyword検索用ヘルパー。
+    Deliverableのファイル名はトピック文字列＋Unixタイムスタンプ（またはR4のWHITEBOARD:ポインタ）
+    で決まり、AIが事前に予測できないため、agreements DBに記録された`FILE_PATH:...`/`WHITEBOARD:...`
+    ポインタ（生の値）を逆引きする。同一task_id/topicで複数件ある場合は最新（id最大）を優先する。
     """
     conn = get_active_conn()
     run_id = _CURRENT_RUN_ID
@@ -636,14 +678,14 @@ def _resolve_deliverable_file_path(task_id: str, topic_keyword: str) -> str | No
     candidates = [
         a for a in agreements
         if a.get("entry_type") == "Deliverable"
-        and str(a.get("decision_what", "")).startswith("FILE_PATH:")
+        and (str(a.get("decision_what", "")).startswith("FILE_PATH:") or str(a.get("decision_what", "")).startswith("WHITEBOARD:"))
         and (not task_id or a.get("task_id") == task_id)
         and (not topic_keyword or topic_keyword in str(a.get("topic", "")))
     ]
     if not candidates:
         return None
     best = max(candidates, key=lambda a: a.get("id", 0))
-    return best["decision_what"][len("FILE_PATH:"):]
+    return best["decision_what"]
 
 
 def _read_deliverable_file_handler(args: dict) -> dict | str:
@@ -656,16 +698,25 @@ def _read_deliverable_file_handler(args: dict) -> dict | str:
     ★修正（BL-040）: 実ドライランでfile_path直接指定が約68%の割合でnot_foundになっていた
     （タイムスタンプ付きファイル名をAIが予測できないため）。task_id/topic_keywordによる
     DB逆引きを優先させ、file_pathは既に正確なパスが分かっている場合のみのフォールバックとする。
+    ★修正（R4）: 逆引き先がWHITEBOARD:ポインタの場合はファイルI/Oではなくwhiteboard_draftsの
+    最新版を直接返す。呼び出し側（Detector/Expert/User）はFILE_PATH方式かWHITEBOARD方式かを
+    意識せず、task_id/topic_keywordだけで読めるようにする。
     """
     task_id = args.get("task_id", "")
     topic_keyword = args.get("topic_keyword", "")
     file_path = args.get("file_path", "")
     if task_id or topic_keyword:
-        resolved_path = _resolve_deliverable_file_path(task_id, topic_keyword)
-        if resolved_path:
-            file_path = resolved_path
+        resolved = _resolve_deliverable_pointer(task_id, topic_keyword)
+        if resolved and resolved.startswith("WHITEBOARD:"):
+            _, wb_phase_id, wb_task_id = resolved.split(":", 2)
+            wb = get_latest_whiteboard(get_active_conn(), _CURRENT_RUN_ID, wb_phase_id, wb_task_id)
+            if wb:
+                return wb["content"][:10000]
+            return {"status": "not_found", "message": f"ホワイトボードが見つかりません: phase={wb_phase_id}, task={wb_task_id}"}
+        elif resolved and resolved.startswith("FILE_PATH:"):
+            file_path = resolved[len("FILE_PATH:"):]
         elif not file_path:
-            return {"status": "not_found", "message": f"task_id={task_id!r} topic_keyword={topic_keyword!r} に該当するDeliverableファイルが見つかりませんでした。"}
+            return {"status": "not_found", "message": f"task_id={task_id!r} topic_keyword={topic_keyword!r} に該当するDeliverableが見つかりませんでした。"}
     if not file_path:
         return {"status": "error", "message": "task_id、topic_keyword、file_pathのいずれかを指定してください。"}
     base_dir = Path("log").resolve()
@@ -713,7 +764,13 @@ WRITE_AGREEMENT_TOOL = {
                     "enum": ["Proposed", "Approved", "Approved_with_Conditions", "Rejected", "Implicitly_Accepted"]
                 },
                 "topic": {"type": "string", "description": "Brief heading"},
-                "decision_what": {"type": "string", "description": "What was decided/proposed"},
+                "decision_what": {
+                    "type": "string",
+                    "description": (
+                        "What was decided/proposed. For entry_type='Deliverable' UPDATE, you may omit this "
+                        "(or leave it empty) if you provide 'edits' instead — see 'edits' below."
+                    )
+                },
                 "reason_why": {"type": "string", "description": "Why adopted or rejected"},
                 "evidence": {"type": "string", "description": "Objective evidence (F-2.6: include Python REPL results for numeric claims)"},
                 "entry_type": {
@@ -746,9 +803,29 @@ WRITE_AGREEMENT_TOOL = {
                         },
                         "required": ["variable_name", "value"]
                     }
+                },
+                "edits": {
+                    "type": "array",
+                    "description": (
+                        "[R4] For entry_type='Deliverable', action_type='UPDATE' only. Instead of restating "
+                        "the full document in decision_what, provide targeted text replacements against the "
+                        "CURRENT whiteboard version shown in your system prompt. Each old_text must match "
+                        "exactly (and uniquely, unless replace_all=true) in the current content, or this call "
+                        "fails with an error you can fix and retry in the same turn. Do not use this for the "
+                        "very first version of a deliverable (use decision_what with action_type='CREATE')."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_text": {"type": "string", "description": "Exact text to find in the current whiteboard version"},
+                            "new_text": {"type": "string", "description": "Replacement text"},
+                            "replace_all": {"type": "boolean", "default": False, "description": "Replace every occurrence instead of requiring a unique match"}
+                        },
+                        "required": ["old_text", "new_text"]
+                    }
                 }
             },
-            "required": ["action_type", "status", "topic", "decision_what", "reason_why", "entry_type"]
+            "required": ["action_type", "status", "topic", "reason_why", "entry_type"]
         }
     }
 }
@@ -773,14 +850,17 @@ def _check_write_permission(args: dict, caller_role: str) -> str | None:
     return None
 
 
-def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str, task_id: str = "") -> None:
+def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str, task_id: str = "") -> str | None:
     """[F-3.1] write_agreementツールからDBへagreementをコミットする。
     action_type=SUPERSEDEの場合は既存レコードをSupersededに更新する。
+    戻り値: 失敗時はエラーメッセージ（呼び出し元_write_agreement_implはDBに何もコミットせず
+    このメッセージをそのままLLMへのエラーとして返す）、成功時はNone。
 
-    ★修正（レビュー指摘H2）: decision_extractor_nodeが持つDeliverable専用処理
-    （ファイル保存＋FILE_PATH:ポインタ化、UPDATE時のファイル上書き防止）を移植する。
-    これがないと、write_agreement経由のDeliverableは生本文がそのままagreements.decision_what
-    に格納されてしまい、既存のファイルベース運用（save_deliverable_to_file）と食い違う。
+    ★修正（R4）: per-taskのDeliverableはファイル保存（save_deliverable_to_file、旧H2/BL-040対応）
+    ではなく、whiteboard_drafts（バージョン管理済みDB格納）へ移行した。ExpertはCREATE時に
+    decision_whatで初版を送り、以降のUPDATEはedits（old_text/new_text）で差分のみ送れる。
+    save_deliverable_to_file/_archive_old_deliverable_fileは、1回限りで版管理が不要な
+    integrator_nodeの最終統合文書向けにそのまま残す（本関数では使わない）。
 
     ★修正（BL-040）: agreements.task_id列は従来args.get("task_id")のみに依存していたが、
     WRITE_AGREEMENT_TOOLのスキーマ上task_idは任意項目でありLLMが省略することが多いため、
@@ -791,6 +871,8 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
     entry_type = args.get("entry_type", "Decision")
     topic = args.get("topic", "")
     raw_content = args.get("decision_what", "")
+    phase_id = args.get("phase_id", "")
+    tid = args.get("task_id") or task_id
 
     if action_type == "SUPERSEDE":
         target_topic = args.get("target_topic", topic)
@@ -798,17 +880,19 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
             if a["topic"] == target_topic and a.get("status") != "Superseded":
                 db_supersede_agreement(a["id"], conn, run_id)
                 break
-        return
+        return None
 
     depends_on_val = json.dumps(args.get("depends_on", []), ensure_ascii=False) if isinstance(args.get("depends_on"), (list, dict)) else (args.get("depends_on") or "[]")
     resource_claims_val = json.dumps(args.get("resource_claims", {}), ensure_ascii=False) if isinstance(args.get("resource_claims"), (list, dict)) else (args.get("resource_claims") or "{}")
 
-    # [F-3.1/H2] Deliverableのファイル保存（decision_extractor_nodeの既存ロジックを移植）
+    # [R4] Deliverableのホワイトボード保存
+    global _LAST_WHITEBOARD_EDIT
     content = raw_content
     if entry_type == "Deliverable" and action_type == "CREATE" and len(raw_content) > 200:
-        filepath = save_deliverable_to_file(topic, raw_content)
-        content = f"FILE_PATH:{filepath}"
-        print(f"  📁 [File Saved] write_agreement経由の成果物 '{topic}' をファイルに保存しました: {filepath}")
+        v = apply_whiteboard_patch(conn, run_id, phase_id, tid, raw_content, author_role=caller_role, edit_summary="初版作成")
+        _LAST_WHITEBOARD_EDIT = {"phase_id": phase_id, "task_id": tid, "version": v}
+        content = f"WHITEBOARD:{phase_id}:{tid}"
+        print(f"  📋 [Whiteboard] write_agreement経由の成果物 '{topic}' をwhiteboard_drafts Ver.1として保存しました（phase={phase_id}, task={tid}）。")
 
     if action_type == "UPDATE":
         target_topic = args.get("target_topic", topic)
@@ -816,18 +900,50 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
         for a in reversed(get_agreements_from_db(conn, run_id)):
             if a["topic"] == target_topic and a.get("status") != "Superseded":
                 old_content = a["decision_what"]
+                break
+        if entry_type == "Deliverable":
+            edits = args.get("edits")
+            is_whiteboard = old_content.startswith("WHITEBOARD:")
+            if edits:
+                # editsが指定された場合、ホワイトボード済みならその最新版、未昇格の短文ならold_content自体を
+                # 編集対象のベースとする（どちらの場合も編集後はwhiteboard_draftsへ格納・昇格させる）。
+                if is_whiteboard:
+                    latest = get_latest_whiteboard(conn, run_id, phase_id, tid)
+                    base_content = latest["content"] if latest else None
+                else:
+                    base_content = old_content
+                if base_content is None:
+                    return f"更新対象のホワイトボード（phase={phase_id}, task={tid}）が見つかりません。"
+                merged, err = _apply_text_edits(base_content, edits)
+                if err:
+                    return err
+                v = apply_whiteboard_patch(conn, run_id, phase_id, tid, merged, author_role=caller_role,
+                                            edit_summary=args.get("reason_why", ""))
+                _LAST_WHITEBOARD_EDIT = {"phase_id": phase_id, "task_id": tid, "version": v}
+                content = f"WHITEBOARD:{phase_id}:{tid}"
+                print(f"  📋 [Whiteboard] write_agreement経由で '{target_topic}' に{len(edits)}件の差分を適用しました（phase={phase_id}, task={tid}）。")
+            elif raw_content:
+                # edits未指定・全文が渡された場合は全文置換の抜け道として扱う
+                if len(raw_content) > 200:
+                    v = apply_whiteboard_patch(conn, run_id, phase_id, tid, raw_content, author_role=caller_role,
+                                                edit_summary=args.get("reason_why", ""))
+                    _LAST_WHITEBOARD_EDIT = {"phase_id": phase_id, "task_id": tid, "version": v}
+                    content = f"WHITEBOARD:{phase_id}:{tid}"
+                    print(f"  📋 [Whiteboard] write_agreement経由で '{target_topic}' の全文を新バージョンとして保存しました（phase={phase_id}, task={tid}）。")
+                elif is_whiteboard:
+                    # [H2踏襲] 既にホワイトボード化済みの完全版に対し、200文字以下の短い要約が
+                    # 送られてきた場合は「承認コメント」等とみなし、既存の完全版を上書きしない。
+                    content = old_content
+                    print(f"  🔒 [Whiteboard Protected] '{target_topic}' への短い更新が既存の完全版を上書きしないよう保護しました。")
+                # 200文字以下かつ未昇格ならそのまま短文としてagreementsに保持（content=raw_contentのまま）
+            else:
+                content = old_content
+                print(f"  🔒 [Whiteboard Protected] '{target_topic}' への実質的な変更がなかったため、既存バージョンを維持しました。")
+        # ここでようやく旧レコードをSuperseded化（上記のedits検証失敗時はここに到達せず、旧レコードは温存される）
+        for a in reversed(get_agreements_from_db(conn, run_id)):
+            if a["topic"] == target_topic and a.get("status") != "Superseded":
                 db_supersede_agreement(a["id"], conn, run_id)
                 break
-        # [F-3.1/H2] ファイル上書き防止（decision_extractor_nodeの既存ロジックを移植）
-        if entry_type == "Deliverable" and old_content.startswith("FILE_PATH:"):
-            if not content or (not content.startswith("FILE_PATH:") and len(content) < 200):
-                content = old_content
-                print(f"  🔒 [File Protected] write_agreement経由の更新で '{target_topic}' のファイルパスを保護しました。")
-            elif not content.startswith("FILE_PATH:") and len(content) >= 200:
-                _archive_old_deliverable_file(old_content[len("FILE_PATH:"):])
-                filepath = save_deliverable_to_file(target_topic, content)
-                content = f"FILE_PATH:{filepath}"
-                print(f"  📁 [File Updated] write_agreement経由で '{target_topic}' の修正版を新しいファイルに保存しました: {filepath}")
 
     conn.execute(
         "INSERT INTO agreements (id, turn, action_type, status, topic, decision_what, reason_why, proposed_by, "
@@ -837,12 +953,13 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
             f"AG-{int(time.time() * 1000)}", 0, action_type, args.get("status", "Proposed"),
             topic, content, args.get("reason_why", ""),
             caller_role, entry_type,
-            args.get("phase_id", ""), args.get("task_id") or task_id,
+            phase_id, tid,
             "design", "local", "current",
             depends_on_val, resource_claims_val, time.time(),
             args.get("evidence", ""), 0, None, run_id
         )
     )
+    return None
 
 
 def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str, task_id: str = "") -> dict:
@@ -853,7 +970,12 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
     （理由は_read_verified_fact_handlerのコメント参照）。
     """
     # 1. 構造チェック
-    required = ["action_type", "status", "topic", "decision_what", "reason_why", "entry_type"]
+    # [R4] entry_type=Deliverable かつ action_type=UPDATE で edits が指定されている場合、
+    # decision_what（全文）は省略可能（old_text/new_textによる差分置換で代替するため）。
+    uses_edits = args.get("entry_type") == "Deliverable" and args.get("action_type") == "UPDATE" and args.get("edits")
+    required = ["action_type", "status", "topic", "reason_why", "entry_type"]
+    if not uses_edits:
+        required.append("decision_what")
     missing = [f for f in required if not args.get(f)]
     if missing:
         return {"success": False, "error": f"必須フィールドが不足: {missing}"}
@@ -884,7 +1006,9 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
                 return {"success": False, "error": f"depends_onに存在しないID: {dep_id}"}
 
     # 5. コミット
-    _commit_agreement_from_tool(args, conn, run_id, caller_role, task_id)
+    commit_error = _commit_agreement_from_tool(args, conn, run_id, caller_role, task_id)
+    if commit_error:
+        return {"success": False, "error": commit_error}
 
     # 6. confirmed_variablesをverified_factsへ反映
     for cv in args.get("confirmed_variables", []) or []:
@@ -924,6 +1048,12 @@ _LAST_PYTHON_CALLS: list[dict] = []
 # stateへコピーする）。query_AI()呼び出しごとにリセットされる。
 _LAST_WRITE_AGREEMENT_SUCCEEDED: bool = False
 
+# [R4] 直前のquery_AI呼び出しのツールループ内でwhiteboard_draftsに新バージョンが
+# 書き込まれた場合、その{phase_id, task_id, version}を記録する（BL-033の
+# _LAST_PYTHON_CALLSと同じ「LangGraph単一プロセス同期実行前提」パターン）。
+# Detectorがmajor判定を出した場合、expert_nodeの差し戻し処理からロールバックするために使う。
+_LAST_WHITEBOARD_EDIT: dict | None = None
+
 
 def get_last_python_calls() -> list[dict]:
     """【SLM要約】
@@ -941,15 +1071,24 @@ def get_last_write_agreement_succeeded() -> bool:
     return _LAST_WRITE_AGREEMENT_SUCCEEDED
 
 
+def get_last_whiteboard_edit() -> dict | None:
+    """【SLM要約】
+    [R4] 直前のquery_AI呼び出しのツールループ内でwhiteboard_draftsに新バージョンが
+    書き込まれた場合、その{phase_id, task_id, version}を返す。ロールバック判定に使う。
+    """
+    return dict(_LAST_WHITEBOARD_EDIT) if _LAST_WHITEBOARD_EDIT else None
+
+
 def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unknown Node", tools: list[dict] | None = None,
              light_system_prompt: str | None = None) -> str:
     """【SLM要約】
     Orchestration of external AI API calls with Record/Replay stub support (keyed by (label, call_seq)),
     delegating the actual retry/provider-selection logic to _query_AI_live.
     """
-    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED
+    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WHITEBOARD_EDIT
     _LAST_PYTHON_CALLS = []
     _LAST_WRITE_AGREEMENT_SUCCEEDED = False
+    _LAST_WHITEBOARD_EDIT = None
 
     call_seq = _call_seq_counter
     _call_seq_counter += 1
@@ -998,6 +1137,43 @@ def _inject_japanese_output_directive(messages: list[dict]) -> list[dict]:
         patched_first["content"] = f"{patched_first['content']}\n\n{_JAPANESE_OUTPUT_DIRECTIVE}"
         return [patched_first, *messages[1:]]
     return [{"role": "system", "content": _JAPANESE_OUTPUT_DIRECTIVE}, *messages]
+
+
+class _StreamToolCallFunction:
+    """[UX] streamモードのツール呼び出しループ用: 分割されて届くfunction.name/argumentsの
+    断片を蓄積した後、非streaming版のresponse.choices[0].message.tool_calls[i].functionと
+    同じインターフェース（.name/.arguments属性）で下流コードに渡すための軽量ラッパー。"""
+    def __init__(self, name: str, arguments: str):
+        self.name = name
+        self.arguments = arguments
+
+
+class _StreamToolCall:
+    """[UX] 上記と同様、tool_calls[i]（.id/.function）の非streaming版インターフェースを再現する。"""
+    def __init__(self, tc_id: str | None, name: str, arguments: str):
+        self.id = tc_id
+        self.type = "function"
+        self.function = _StreamToolCallFunction(name, arguments)
+
+
+class _StreamMessage:
+    """[UX] streamモードで蓄積したcontent/tool_callsを、非streaming版のchoice.messageと
+    同じインターフェース（.content/.tool_calls/.model_dump()）で下流コードに渡すための
+    軽量ラッパー。reasoningは既にstream中にprint済みのためNone固定でよい。"""
+    def __init__(self, content: str | None, tool_calls: list[_StreamToolCall] | None):
+        self.content = content
+        self.tool_calls = tool_calls
+        self.reasoning = None
+
+    def model_dump(self) -> dict:
+        d: dict = {"role": "assistant", "content": self.content}
+        if self.tool_calls:
+            d["tool_calls"] = [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in self.tool_calls
+            ]
+        return d
 
 
 def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str = "Unknown Node", tools: list[dict] | None = None,
@@ -1077,7 +1253,8 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                 extra_body = {
                     "provider": {
                         # 推論速度が速いプロバイダーを左から順に優先して接続させる
-                        "order": ["baidu/fp8", "siliconflow/fp8","wandb/fp8","morph"],
+                        #"order": ["venice/fp8", "novita/fp8", "xiaomi/fp8", "baidu/fp8", "fireworks", "streamlake/fp8", "novita/fp8" ],
+                        "order": ["venice/fp8", "novita/fp8", "xiaomi/fp8", "baidu/fp8", "fireworks", "streamlake/fp8", "novita/fp8" ],
                         "allow_fallbacks": False # 全滅した場合は空いている他プロバイダーへ迂回
                     }
                 }
@@ -1086,16 +1263,42 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                 create_kwargs["extra_body"] = extra_body
 
             if tools is None:
-                response = client.chat.completions.create(**create_kwargs)
-                choice = response.choices[0]
-                if choice.finish_reason == "length":
+                # [UX] task_planner等、体感的な待ち時間が長いノード向けにストリーミング描画する。
+                # 「思考が進んでいる感」を得る目的のみで、リトライ・エラー処理のロジックは
+                # 非ストリーミング版と同一（finish_reason=="length"検出、例外は外側のexceptで捕捉）。
+                create_kwargs["stream"] = True
+                response_stream = client.chat.completions.create(**create_kwargs)
+                reasoning_parts: list[str] = []
+                content_parts: list[str] = []
+                reasoning_started = False
+                content_started = False
+                finish_reason = None
+                for chunk in response_stream:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
+                    finish_reason = chunk.choices[0].finish_reason or finish_reason
+                    delta_reasoning = getattr(delta, "reasoning", None)
+                    if delta_reasoning:
+                        if not reasoning_started:
+                            print(f"💭 [{label}] 思考:\n", end="", flush=True)
+                            reasoning_started = True
+                        print(delta_reasoning, end="", flush=True)
+                        reasoning_parts.append(delta_reasoning)
+                    if delta.content:
+                        if not content_started:
+                            if reasoning_started:
+                                print()  # 思考ブロックとの区切り改行
+                            content_started = True
+                        print(delta.content, end="", flush=True)
+                        content_parts.append(delta.content)
+                if reasoning_started or content_started:
+                    print()
+                if finish_reason == "length":
                     print(f" [{label_lower}] ⚠️ max_tokens超過により出力が打ち切られました")
                     raise ValueError("Output truncated due to max_tokens limit")
-                reasoning_text = getattr(choice.message, "reasoning", None)
-                if reasoning_text:
-                    print(f"💭 [{label}] 思考:\n{reasoning_text}\n")
-                content = response.choices[0].message.content
-                return content if content is not None else "(APIから空の応答が返されました)"
+                content = "".join(content_parts)
+                return content if content else "(APIから空の応答が返されました)"
 
             # --- R2.3: ツール呼び出しループ（query_AI集約方式、D-008準拠） ---
             # [CONSTRAINT] 既存try/exceptリトライブロックの内側で回す（D-004）。1回のcreate()が
@@ -1109,6 +1312,7 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
             MAX_TOOL_ITER = 15
             loop_messages = list(messages)
             create_kwargs["messages"] = loop_messages
+            create_kwargs["stream"] = True  # [UX] ツールループもstreamingで「思考中」感を出す
             tool_calls_used = 0
             python_calls_log: list[dict] = []  # BL-033: 実行したpython_replのcode/resultを蓄積
             # [CONSTRAINT] BL-014原因A: python_replは1回のツールループの間だけ状態を保持する
@@ -1117,25 +1321,62 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
             repl_session = _PythonReplSession()
             try:
                 for iteration in range(1, MAX_TOOL_ITER + 1):
-                    response = client.chat.completions.create(**create_kwargs)
-                    choice = response.choices[0]
-                    msg = choice.message
+                    # [UX] stream=Trueで届くchunkを、reasoning/content/tool_callsの3種に分けて
+                    # リアルタイム描画しつつ蓄積する。tool_callsは複数の呼び出しがindex単位で
+                    # 断片的に届く（id/function.name/function.argumentsがそれぞれ複数chunkに
+                    # またがることがある）ため、indexごとに文字列連結して復元する。
+                    stream = client.chat.completions.create(**create_kwargs)
+                    content_parts: list[str] = []
+                    reasoning_started = False
+                    content_started = False
+                    finish_reason = None
+                    tool_call_accum: dict[int, dict] = {}
+                    for chunk in stream:
+                        if not chunk.choices:
+                            continue
+                        delta = chunk.choices[0].delta
+                        finish_reason = chunk.choices[0].finish_reason or finish_reason
+                        delta_reasoning = getattr(delta, "reasoning", None)
+                        if delta_reasoning:
+                            if not reasoning_started:
+                                print(f"💭 [{label}] 思考（iter={iteration}）:\n", end="", flush=True)
+                                reasoning_started = True
+                            print(delta_reasoning, end="", flush=True)
+                        if delta.content:
+                            if not content_started:
+                                if reasoning_started:
+                                    print()  # 思考ブロックとの区切り改行
+                                print(f"💬 [{label}] 発言（iter={iteration}）:\n", end="", flush=True)
+                                content_started = True
+                            print(delta.content, end="", flush=True)
+                            content_parts.append(delta.content)
+                        if getattr(delta, "tool_calls", None):
+                            for tc_delta in delta.tool_calls:
+                                entry = tool_call_accum.setdefault(
+                                    tc_delta.index, {"id": None, "name": "", "arguments": ""}
+                                )
+                                if tc_delta.id:
+                                    entry["id"] = tc_delta.id
+                                if tc_delta.function:
+                                    if tc_delta.function.name:
+                                        entry["name"] += tc_delta.function.name
+                                    if tc_delta.function.arguments:
+                                        entry["arguments"] += tc_delta.function.arguments
+                    if reasoning_started or content_started:
+                        print()
+
                     # [CONSTRAINT] max_tokens超過によるtool_call引数の途中切れをここで検出する（D-009）。
                     # ValueErrorはAPIError系ではないため下記exceptに飲み込まれず、原因が伝播する。
-                    if choice.finish_reason == "length":
+                    if finish_reason == "length":
                         print(f"⚠️ [{label}] ツールループ内でmax_tokens超過により出力が打ち切られました（iter={iteration}）")
                         raise ValueError("Tool call output truncated due to max_tokens limit")
-                    # BL-019: ツール呼び出しの前後でモデルが何を考えているか（なぜこのツールを呼ぶか、
-                    # 前回の結果をどう解釈したか）をログに出す。reasoning_effort_levelが設定されて
-                    # いるノードのみ非空になる（未設定ノードはgetattrがNone/空文字を返すだけで無害）。
-                    reasoning_text = getattr(msg, "reasoning", None)
-                    if reasoning_text:
-                        print(f"💭 [{label}] 思考（iter={iteration}）:\n{reasoning_text}\n")
-                    # BL-019追記: 「思考モデル」でなくとも、tool_calls付きの応答にcontentが
-                    # 同梱されるモデル/プロバイダも存在しうる（実機確認では現行モデルは常にnull だが、
-                    # モデル・プロバイダが変わった場合の取りこぼしを防ぐため無条件でチェックする）。
-                    if msg.content and msg.content.strip() and getattr(msg, "tool_calls", None):
-                        print(f"💬 [{label}] 発言（iter={iteration}, tool_calls同梱）:\n{msg.content}\n")
+
+                    tool_calls_list = [
+                        _StreamToolCall(entry["id"], entry["name"], entry["arguments"])
+                        for _, entry in sorted(tool_call_accum.items())
+                    ] if tool_call_accum else None
+                    msg = _StreamMessage("".join(content_parts) or None, tool_calls_list)
+
                     if not getattr(msg, "tool_calls", None):
                         print(f"✅ [{label}] ツールループ終了（iter={iteration}, tool_calls使用={tool_calls_used}回）")
                         if tool_calls_used == 0:
@@ -1445,6 +1686,77 @@ def db_supersede_agreement(agreement_id: str, conn: sqlite3.Connection, run_id: 
     )
 
 
+# ===========================================================================
+# [R4] whiteboard_drafts: ホワイトボード差分パッチ化
+# ===========================================================================
+
+def get_latest_whiteboard(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str) -> dict | None:
+    """[R4] 指定task_idの最新バージョンの{version, content}を返す。存在しなければNone。"""
+    row = conn.execute(
+        "SELECT version, content FROM whiteboard_drafts "
+        "WHERE run_id=? AND phase_id=? AND task_id=? ORDER BY version DESC LIMIT 1",
+        (run_id, phase_id, task_id)
+    ).fetchone()
+    return {"version": row["version"], "content": row["content"]} if row else None
+
+
+def apply_whiteboard_patch(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str,
+                            new_content: str, author_role: str, edit_summary: str) -> int:
+    """[R4] 現在の最新バージョンを取得し、new_contentを新バージョンとしてINSERTする。
+    削除は行わずバージョンを積み増す方式（cela_r4_design.md §2.2、N-2のトレーサビリティ原則に従う）。
+    """
+    latest = get_latest_whiteboard(conn, run_id, phase_id, task_id)
+    new_version = (latest["version"] + 1) if latest else 1
+    conn.execute(
+        "INSERT INTO whiteboard_drafts (draft_id, phase_id, task_id, version, content, author_role, edit_summary, timestamp, run_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (f"DF-{int(time.time()*1000)}", phase_id, task_id, new_version, new_content, author_role, edit_summary, time.time(), run_id)
+    )
+    return new_version
+
+
+def rollback_whiteboard(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str, reason: str) -> None:
+    """[R4] F-7.3: Detectorのmajor判定を受け、直前バージョンの内容を新バージョンとして再INSERTすることで
+    ロールバックする（cela_r4_design.md §2.3）。バージョン番号は巻き戻さず、ロールバック自体も
+    監査ログとして残す（N-2のトレーサビリティ原則）。
+    """
+    rows = conn.execute(
+        "SELECT version, content FROM whiteboard_drafts "
+        "WHERE run_id=? AND phase_id=? AND task_id=? ORDER BY version DESC LIMIT 2",
+        (run_id, phase_id, task_id)
+    ).fetchall()
+    if len(rows) < 2:
+        return  # ロールバック先がない（初版でのmajor判定は別途ハンドリング）
+    prev_content = rows[1]["content"]
+    apply_whiteboard_patch(
+        conn, run_id, phase_id, task_id,
+        new_content=prev_content, author_role="system_rollback",
+        edit_summary=f"[ROLLBACK] Detector major判定により前バージョンへ復元: {reason}"
+    )
+
+
+def _apply_text_edits(current_content: str, edits: list[dict]) -> tuple[str | None, str | None]:
+    """[R4] Claude Code Editツールと同じ方式のテキスト置換。各editの{old_text, new_text, replace_all}を
+    current_contentに対し完全一致検索→置換する。old_textが本文中に0件、または複数件かつ
+    replace_all=Falseの場合は失敗としてエラーメッセージを返す（Expertが同ターン内のツールループで
+    修正・再試行できるよう、原因を具体的に伝える）。全edit成功時のみ(新content, None)を返す。
+    """
+    content = current_content
+    for i, e in enumerate(edits):
+        old_text = e.get("old_text", "")
+        new_text = e.get("new_text", "")
+        replace_all = bool(e.get("replace_all", False))
+        if not old_text:
+            return None, f"edits[{i}]: old_textが空です。"
+        count = content.count(old_text)
+        if count == 0:
+            return None, f"edits[{i}]: old_textが現在のホワイトボード内容に見つかりませんでした。一字一句正確な引用か確認してください。"
+        if count > 1 and not replace_all:
+            return None, f"edits[{i}]: old_textが{count}箇所に一致し、一意に特定できません。replace_all=trueにするか、より長い一意な文脈を含めてください。"
+        content = content.replace(old_text, new_text) if replace_all else content.replace(old_text, new_text, 1)
+    return content, None
+
+
 def get_agreements_from_db(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     """【SLM要約】
     指定run_idのagreementsをid昇順（登録順序保証）で全件取得する。
@@ -1644,6 +1956,13 @@ class LineageState(TypedDict):
     user_retry_count: int
     expert_retry_count: int
     expert_last_python_calls: list[dict]  # BL-033: 直前Expert呼び出しのpython_repl実行記録（code/result）
+    # [BL-038] LangGraphはTypedDictスキーマに宣言されていないキーをノード間で伝播しない
+    # （未宣言キーへの書き込みは次ノードに渡る前に消える）。expert_wrote_agreement/
+    # user_wrote_agreement/expert_last_whiteboard_editはR3b/R4で導入されて以来ここへの
+    # 追加が漏れており、値が常にFalse/None扱いになる実運用バグの原因だった。
+    expert_wrote_agreement: bool
+    user_wrote_agreement: bool
+    expert_last_whiteboard_edit: dict | None
 
 class Appconfig(TypedDict): 
     pattern: int
@@ -1800,11 +2119,29 @@ def _build_task_scope_context(state: LineageState, conn: sqlite3.Connection) -> 
     ]
     remaining_criteria_text = "\n".join(f"- {c}" for c in remaining_criteria) or "(未充足の項目はありません、または未判定です)"
 
+    # [R4] 現在タスクの最新ホワイトボード版（Deliverableの差分パッチ化対象）。
+    # 存在すれば、Expertは全文を書き直さずwrite_agreementのeditsで変更箇所のみ送れることを示す。
+    current_phase_id = state.get("current_phase", {}).get("phase_id", "")
+    current_task_id = current_task.get("task_id", "")
+    whiteboard = get_latest_whiteboard(conn, state["run_id"], current_phase_id, current_task_id) if current_task_id else None
+    if whiteboard:
+        whiteboard_text = (
+            f"【現在のホワイトボード Ver.{whiteboard['version']}（このタスクの成果物の最新版）】\n"
+            f"{whiteboard['content']}\n\n"
+            "【R4: 編集方針】上記を修正する場合、全文を書き直す必要はありません。write_agreementツールを"
+            "action_type='UPDATE', entry_type='Deliverable'で呼び、editsパラメータに"
+            "変更箇所のold_text/new_textのみを指定してください（old_textは上記本文と一字一句一致させること）。"
+            "大幅な構成変更の場合のみ、decision_whatに全文を渡してください。"
+        )
+    else:
+        whiteboard_text = "(このタスクの成果物はまだホワイトボードに存在しません。初版はwrite_agreementのdecision_whatに全文を渡してください)"
+
     return {
         "current_task": current_task,
         "current_task_json": current_task_json,
         "verified_facts_json": verified_facts_json,
         "remaining_criteria_text": remaining_criteria_text,
+        "whiteboard_text": whiteboard_text,
     }
 
 
@@ -2039,6 +2376,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     current_task_json = _scope_ctx["current_task_json"]
     verified_facts_json = _scope_ctx["verified_facts_json"]
     remaining_criteria_text = _scope_ctx["remaining_criteria_text"]
+    whiteboard_text = _scope_ctx["whiteboard_text"]
 
     system_prompt += (f"""
     \n📏 【回答のスコープについて（厳守）】\n
@@ -2055,6 +2393,8 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     【未充足の要求項目（これ以外を新たに追加提案しないこと）】\n
     {remaining_criteria_text}\n
     """)
+
+    system_prompt += f"\n📋 【R4: 成果物の差分編集】\n{whiteboard_text}\n"
 
     # [BL-041] 「木を見て森を見ず」対策: 狭いタスクスコープ内で導出した数値が、
     # 実は他タスクの制約と衝突する可能性を残したまま無条件に確定値として扱われ、
@@ -2135,6 +2475,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "[BL-041] ゴールで直接与えられた絶対制約以外で、このタスク内で導出した数値は、"
         "write_agreementのconfirmed_variablesでconfidence=\"provisional\"として記録してください"
         "（他タスクの制約とまだ突き合わせが済んでいないため）。\n"
+        f"\n[R4] {whiteboard_text}\n"
     )
 
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
@@ -2157,6 +2498,16 @@ def call_detector(state: LineageState, target_role: str) -> dict:
     current_task = _get_current_task(state)
     acceptance_criteria = current_task.get("acceptance_criteria", [])
     criteria_text = "\n".join(f"{i}. {c}" for i, c in enumerate(acceptance_criteria)) or "(現在のタスクにacceptance_criteriaが定義されていません)"
+
+    # [R4] Deliverableが差分パッチ化されている場合、直近の会話（差分の要約のみ）だけでは
+    # 編集後の完全な内容を検証できないため、現在タスクの最新ホワイトボード版を提示する。
+    _current_phase_id = state.get("current_phase", {}).get("phase_id", "")
+    _current_task_id = current_task.get("task_id", "")
+    _whiteboard = get_latest_whiteboard(get_active_conn(), state["run_id"], _current_phase_id, _current_task_id) if _current_task_id else None
+    whiteboard_block = (
+        f"【R4: 現在タスクの成果物・最新ホワイトボード Ver.{_whiteboard['version']}（編集後の完全版）】\n{_whiteboard['content']}\n\n"
+        if _whiteboard else ""
+    )
 
     # BL-033: Expertが実際に実行したpython_replの記録をDetectorに提示する。
     # Expertの「検算完了」という自己申告（tool_calls=0でも書けてしまう）を鵜呑みにせず、
@@ -2252,6 +2603,13 @@ def call_detector(state: LineageState, target_role: str) -> dict:
         f"{criteria_text}\n"
         f"今回のAgentの発言が、それぞれの項目に応えている（充足している）かをbool配列で判定してください。\n"
         f"配列の長さ・順序は上記の一覧と対応させてください。\n\n"
+        f"{whiteboard_block}"
+        f"【判定のブレ防止（3回多数決方式）】constraint_issueの判定（特にminorとmajorの境界）で"
+        f"結論が変わったり迷ったりする場合、同じ論点を無限に再検討し続けないでください。"
+        f"その論点について、独立した判定を意識的に3回だけ行い（1回目・2回目・3回目、それぞれ短く"
+        f"「trial1: minor」のように結論だけ明記すればよく、毎回長い理由の再展開は不要です）、"
+        f"3回のうち多数だった結論を最終的なconstraint_issueとして採用してください。"
+        f"3回分の判定が出た時点で、それ以上の再検討・迷いは禁止します。\n\n"
         f"【今回評価するターンのやり取り】\n"
         f"{history_text}\n"
         #f"User Input: {user_input}\n"
@@ -2918,6 +3276,8 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
 
         【現在のタスクで未充足の要求項目（これ以外を新たに追加要求しないこと）】\n
         {remaining_criteria_text}\n
+
+        [R4] {_scope_ctx["whiteboard_text"]}\n
     """)
 
     system_prompt += (
@@ -3088,7 +3448,10 @@ def task_planner_node(state: LineageState) -> LineageState:
 Sets the starting phase for subsequent execution steps within the lineage state.
     """
     
-    if state["turn_count"] == 1:
+    # [UX/一時停止再開] checkpointからの再開時、entry_pointが常にtask_planner固定のため
+    # ターン1の途中（既にphasesが確定済み）で止めた場合もこのノードを必ず通る。
+    # turn_count==1だけを見ると計画を毎回再生成してしまうため、phases未確定の場合のみ実処理する。
+    if state["turn_count"] == 1 and not state.get("phases"):
         print("""
               \n------ [task_planner] が思考中 ------\n
               \n------- 最初にゴール達成への道筋を、フェーズとタスクに分解して計画を立てます -------\n
@@ -3151,6 +3514,19 @@ Updates system state with the expert's output, decisions, and conversational his
             state["chat_history"].pop()
             state["expert_retry_count"] += 1
             print(f"♻️ [Expert AI] 差し戻しのため、直前のNG発言を履歴から取り消しました。")
+        # [R4/F-7.3] 直前ターンでExpertがwhiteboard_draftsに新バージョンを書き込んでいた場合、
+        # Detectorのmajor判定を受けてロールバックする（バージョンは巻き戻さず、ロールバック自体を
+        # 新バージョンとして追記する方式。cela_r4_design.md §2.3）。
+        last_edit = state.get("expert_last_whiteboard_edit")
+        if last_edit:
+            issue_log = state.get("constraint_issue_log") or []
+            rollback_reason = issue_log[-1].get("comment", "Detector major判定") if issue_log else "Detector major判定"
+            rollback_whiteboard(
+                get_active_conn(), state["run_id"], last_edit["phase_id"], last_edit["task_id"],
+                reason=rollback_reason
+            )
+            print(f"♻️ [Whiteboard] Detector major判定を受け、phase={last_edit['phase_id']} task={last_edit['task_id']} のホワイトボードをロールバックしました。")
+            state["expert_last_whiteboard_edit"] = None
     else:
         state["expert_retry_count"] = 0
 
@@ -3163,6 +3539,11 @@ Updates system state with the expert's output, decisions, and conversational his
     state["expert_last_python_calls"] = get_last_python_calls()
     # [R3b §3.5.1] 今ターンでwrite_agreementが1回でも成功したかをstateに保存
     state["expert_wrote_agreement"] = get_last_write_agreement_succeeded()
+    # [DEBUG][BL-038調査用/2026-07-22] expert_node内でセットした直後の値を確認する一時計装。
+    print(f"[DEBUG] expert_node: get_last_write_agreement_succeeded()={state['expert_wrote_agreement']!r}")
+    # [R4] 今ターンでwhiteboard_draftsに新バージョンが書き込まれた場合、次ターンのロールバック
+    # 判定のためstateへ保存する（_LAST_WHITEBOARD_EDITはquery_AI呼び出しごとにリセットされるため）。
+    state["expert_last_whiteboard_edit"] = get_last_whiteboard_edit()
     print(f"\n------ 完了 ------")
     decision = make_decision(who=f"expert:{state['selected_expert']}", what="タスクを実行", why=(output or "")[:100])
     state["expert_output"] = output
@@ -3331,6 +3712,13 @@ def decision_extractor_node(state: LineageState) -> LineageState:
         state.get("expert_wrote_agreement", False) if target_role == "expert"
         else state.get("user_wrote_agreement", False)
     )
+    # [DEBUG][BL-038調査用/2026-07-22] wrote_agreement_this_turnがなぜFalse評価されるか切り分けるための一時計装。
+    print(
+        f"[DEBUG] decision_extractor target_role={target_role!r} "
+        f"expert_wrote_agreement={state.get('expert_wrote_agreement')!r} "
+        f"user_wrote_agreement={state.get('user_wrote_agreement')!r} "
+        f"-> wrote_agreement_this_turn={wrote_agreement_this_turn!r}"
+    )
 
     for item in extracted_items:
         action_type = item.get("action_type", "CREATE")
@@ -3402,7 +3790,15 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                             proposed_by = a.get("proposed_by", "Unknown")
                         break
                         
-                if old_content.startswith("FILE_PATH:"):
+                if old_content.startswith("WHITEBOARD:"):
+                    # [BL-038/R4] このフォールバック経路（write_agreement未使用時の安全網）には、
+                    # ホワイトボードへ差分パッチを当てる手段がない。プレーンテキストで無条件に
+                    # 上書きすると、versioned historyごとポインタが失われ、フル本文が孤立する
+                    # （実ドライランで観測: agreements行がSupersededになり短い要約文で置換された事故）。
+                    # 正しい更新経路は write_agreement の edits であり、ここでは常に保護する。
+                    content = old_content
+                    print(f"  🔒 [Whiteboard Protected] 成果物 '{target_topic}' のホワイトボードポインタを保護し、次ターンへ引き継ぎました（フォールバック経路からの上書きを禁止）。")
+                elif old_content.startswith("FILE_PATH:"):
                     if not content or (not content.startswith("FILE_PATH:") and len(content) < 200):
                         content = old_content
                         print(f"  🔒 [File Protected] 成果物 '{target_topic}' のファイルパスを保護し、次ターンへ引き継ぎました。")
@@ -3583,7 +3979,7 @@ def integrator_node(state: LineageState) -> LineageState:
     master_document.append("---\n")
 
     for d in deliverables:
-        # ===== ファイルから内容を読み込む =====
+        # ===== ファイル/ホワイトボードから内容を読み込む =====
         content_data = d['decision_what']
         if content_data.startswith("FILE_PATH:"):
             filepath = content_data.split("FILE_PATH:")[1]
@@ -3592,6 +3988,11 @@ def integrator_node(state: LineageState) -> LineageState:
                     content_text = f.read()
             else:
                 content_text = f"(⚠️ファイルが見つかりません: {filepath})"
+        elif content_data.startswith("WHITEBOARD:"):
+            # [R4] "WHITEBOARD:{phase_id}:{task_id}"（phase_idが空文字の場合もあるためmaxsplit=2で分割）
+            _, wb_phase_id, wb_task_id = content_data.split(":", 2)
+            wb = get_latest_whiteboard(_conn, _run_id, wb_phase_id, wb_task_id)
+            content_text = wb["content"] if wb else f"(⚠️ホワイトボードが見つかりません: phase={wb_phase_id}, task={wb_task_id})"
         else:
             content_text = content_data
         # ==========================================
@@ -3970,19 +4371,17 @@ Otherwise, routing to "user_decision_extractor."
 # 6. AI vs AI 実行用ループ
 # ---------------------------------------------------------------------------
 
-def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.db"):
+def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.db", resume_from: str | None = None):
     """【SLM要約】
     Orchestration of an iterative, goal-driven dialogue loop where multiple AIs collaborate to refine a solution based on predefined constraints and state management.
     SQLite接続（run単位のシングルトン）を初期化し、ループ終了時に必ずクローズする（R1、設計書§3.6.1準拠）。
+    [UX/一時停止再開] resume_fromに_save_checkpointで保存したcheckpoint.jsonのパスを渡すと、
+    そのstate/config/current_turnから再開する（新規run_idは発行しない）。
     """
     global _DB_CONN
 
     app = build_graph()
 
-    #user_always_remembers = pattern in (3, 4)
-    #agent_has_guardrail = pattern in (2, 4)
-
-    run_id = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
     reset_call_seq()
     if REPLAY_MODE == "replay":
         _replay_fixtures.update(_load_replay_fixtures(_REPLAY_FIXTURE_PATH))
@@ -3992,55 +4391,65 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
         os.replace(_REPLAY_FIXTURE_PATH, backup_path)
         print(f"⚠️ [RECORD] 既存のfixtureファイルを {backup_path} に退避しました（前回記録の上書き消失を防止）。")
 
+    if resume_from:
+        state, config, current_turn = _load_checkpoint(resume_from)
+        run_id = state["run_id"]
+        db_path = state["db_path"]
+        print(f"♻️ [Resume] チェックポイント {resume_from} から再開します（run_id={run_id}、turn={current_turn}）。")
+    else:
+        run_id = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        current_turn = 1
+        state: LineageState = {
+            "goal": target_goal,
+            "user_input": "",
+            "current_task_summary": "",
+            "selected_expert": "",
+            "expert_output": "",
+            "run_id": run_id,
+            "db_path": db_path,
+            "chat_history": [],
+            "turn_count": 0,
+            "max_turns":  config["initial_max_turnval"],
+            "reflection_interval": config["reflection_interval"],
+            "risk_flag": "low",
+            "drift_flag": False,
+            "halt": False,
+            "agent_has_guardrail": config["agent_has_guardrail"],
+            "discussion_status": "continuing",
+            "is_stateless_mode": config["is_stateless_mode"],
+            "facilitation_count": 0,
+            "review_count": 0,
+            "is_completed": False,
+            "ready_for_review": False,
+            "constraint_issue": "none",
+            "constraint_issue_log": [],
+            "global_constraints": [],
+            "phases": [],
+            "current_phase": {
+                "phase_id": "phase_0",
+                "title": "初期化待ち",
+                "description": "",
+                "allowed_abstraction_levels": ["concept", "constraint", "design", "impl"],
+                "focus_scope": "global",
+                "expected_time_axis": "assumption",
+                "tasks": [],
+                "budget_hint": {}
+            },
+            "current_task_id": "",
+            "verified_facts": {},
+            "task_criteria_status": {},
+            "expert_last_python_calls": [],
+            "risk_register": [],
+            "needs_revision_phases": [],
+            "phases_to_revise": []
+        }
+
     global _CURRENT_RUN_ID
     _CURRENT_RUN_ID = run_id
     _DB_CONN = get_db_connection(db_path)
     init_db(_DB_CONN)
 
-    state: LineageState = {
-        "goal": target_goal,
-        "user_input": "",
-        "current_task_summary": "",
-        "selected_expert": "",
-        "expert_output": "",
-        "run_id": run_id,
-        "db_path": db_path,
-        "chat_history": [],
-        "turn_count": 0,
-        "max_turns":  config["initial_max_turnval"],
-        "reflection_interval": config["reflection_interval"],
-        "risk_flag": "low",
-        "drift_flag": False,
-        "halt": False,
-        "agent_has_guardrail": config["agent_has_guardrail"],
-        "discussion_status": "continuing",
-        "is_stateless_mode": config["is_stateless_mode"],
-        "facilitation_count": 0,
-        "review_count": 0,
-        "is_completed": False,
-        "ready_for_review": False,
-        "constraint_issue": "none",
-        "constraint_issue_log": [],
-        "global_constraints": [],
-        "phases": [],
-        "current_phase": {
-            "phase_id": "phase_0",
-            "title": "初期化待ち",
-            "description": "",
-            "allowed_abstraction_levels": ["concept", "constraint", "design", "impl"],
-            "focus_scope": "global",
-            "expected_time_axis": "assumption",
-            "tasks": [],
-            "budget_hint": {}
-        },
-        "current_task_id": "",
-        "verified_facts": {},
-        "task_criteria_status": {},
-        "expert_last_python_calls": [],
-        "risk_register": [],
-        "needs_revision_phases": [],
-        "phases_to_revise": []
-    }
+    checkpoint_path = os.path.join(getattr(MultiLogger, "log_dir", "log"), "checkpoint.json")
 
     mode_str = "【ステートレス（決定事項DBによる知識永続化）】" if config["is_stateless_mode"] else "【ステートフル（生ログ全蓄積）】"
 
@@ -4050,9 +4459,9 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
         print(f"⚙️ 実行モード: {mode_str}")
         print(f"🎯 共通目標:\n{target_goal}")
         print(f"⏳ 初期設定ターン数: {config["initial_max_turnval"]} ターン制限")
+        print(f"⏸️  Ctrl+Cでいつでも一時停止できます（{checkpoint_path} に保存されます）")
         print("============================================================")
 
-        current_turn = 1
         while current_turn <= state["max_turns"]:
             print(f"\n\n{'='*60}")
             print(f"🔷 [Turn {current_turn} / {state['max_turns']}]")
@@ -4067,7 +4476,21 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
             prev_decision_count = len(get_decisions_from_db(_DB_CONN, run_id))
 
             #print("\n🤖 Agent AI が思考中...")
-            state = app.invoke(state)
+            # [UX/一時停止再開] app.invoke()（グラフ全体を1回で最後まで実行）の代わりに
+            # app.stream(..., stream_mode="values")を使い、ノード実行後のstateスナップショットを
+            # 都度受け取ってcheckpointへ保存する。BL-005によりturn_countはグラフ内部で
+            # ループバックし続ける限り更新されず、app.invoke()単位のチェックポイントでは
+            # 長時間戻ってこないことがあるため、ノード単位の粒度で保存する。
+            try:
+                for step_state in app.stream(state, stream_mode="values"):
+                    state = step_state
+                    _save_checkpoint(checkpoint_path, state, config, current_turn)
+            except KeyboardInterrupt:
+                _save_checkpoint(checkpoint_path, state, config, current_turn)
+                print("\n\n⏸️ [PAUSE] Ctrl+Cを検知し、ドライランを一時停止しました。")
+                print(f"    直前の状態を {checkpoint_path} に保存しました。")
+                print(f"    再開するには: python cela_main.py --resume \"{checkpoint_path}\"")
+                return
 
             #print("\n--- 🧠 Agent AIの内部思考プロセス (Decision Lineage & Extracted Agreements) ---")
 
@@ -4115,6 +4538,15 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
 
 
 if __name__ == "__main__":
+    # [UX] --resume <checkpoint.jsonのパス> で一時停止したドライランを再開できる。
+    import argparse
+    _cli_parser = argparse.ArgumentParser(description="CELA Lineage Orchestrator")
+    _cli_parser.add_argument(
+        "--resume", metavar="CHECKPOINT_JSON", default=None,
+        help="Ctrl+Cで一時停止した際に保存されたcheckpoint.jsonのパスを指定して再開する。",
+    )
+    _cli_args = _cli_parser.parse_args()
+
     # カスタムロガーを標準出力に設定（importのみでは発火させない。BL-027）
     sys.stdout = MultiLogger()
 
@@ -4175,5 +4607,6 @@ if __name__ == "__main__":
 
     run_ai_vs_ai_loop(
         target_goal=TARGET_GOAL,
-        config= config
+        config= config,
+        resume_from=_cli_args.resume,
     )
