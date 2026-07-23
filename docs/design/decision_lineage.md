@@ -684,6 +684,17 @@
 
 ---
 
+## 論点59: facilitatorがreflectionの判定理由を受け取れず、独立に食い違う状況判断をしていた発見（BL-061、D-043）
+
+- **発端:** ユーザーが`log/2026-07-23/1656`でfacilitatorが発火したログを共有し「確認してください」と依頼。
+- **AIの調査:** 直前のreflectionが`still_aligned=false, discussion_status="stagnant"`と判定し、`note`に5点の具体的な未解決問題（山間部速度28.8km/hへの無断変更、平坦部ルート長6.67kmのでっちあげ疑い、山間部需要88人の根拠不足、リース料480万円/台/年の類推値、待ち時間制約超過の先送り）を明記していたにもかかわらず、後続のfacilitator自身の思考ログでは「膠着していない」「介入はあえて必要ないかもしれません」と、reflectionの判定と明確に矛盾する独自の評価をしていたことを発見。実際に送信されたプロンプト（`log_with_prompt.md` 57021行目）にはreflectionの判定理由が一切含まれておらず、コード調査により`call_facilitator`の`decisions`引数がプロンプトテンプレート内で完全に未使用（デッドパラメータ）だったことを特定した。BL-041が既に指摘している「エスカレーション機構未実装」（検出後の対応が一般的な差し戻しに留まる）とは別種の、より具体的な**伝達漏れ**バグと整理した。
+- **ユーザー判断:** 「このバグは今直してください」と即時修正を指示。
+- **実装:** `LineageState`に`last_reflection_note`を新設し`reflection_node`が保存、`call_facilitator`のシグネチャを`(goal, chat_history, decisions)`から`(goal, chat_history, reflection_note="")`へ変更（未使用だった`decisions`引数を実際に使う`reflection_note`に置き換え）、プロンプトに「あなたが呼ばれた理由」ブロックを追加し最優先の出発点として扱うよう明記。`facilitator_node`の呼び出しも修正。新規`tests/test_bl061_facilitator_reflection_note.py`（4件）を含めオフラインスモークテスト計82件Pass。
+- **決定者:** t-momose（現象の報告・即時修正の指示）、Claude Sonnet 5（ログ調査・根本原因特定・実装）
+- **関連:** [BL-061](issue_backlog.md#bl-061-facilitatorがreflectionの判定理由を一切受け取れず独立に時に食い違う状況判断をしていた)、[D-043](decision_log.md#d-043-facilitatorへreflectionの判定理由noteを明示的に受け渡す未使用のdecisions引数を置き換える)、[BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
