@@ -198,7 +198,11 @@ CREATE INDEX IF NOT EXISTS idx_goal_shift_timestamp ON goal_shift_events(timesta
 
 ### 4.2 既存プロトタイプでの発火ポイント
 
-現状の`arbiter_node`（`call_resource_arbiter`）が、GlobalConstraint超過時の再配分案を提示する箇所は、ゴールそのものの変容（ピボット）ではなく、フェーズ間の資源再配分に留まる。GoalShiftEventが実際に発火すべきは以下のようなケースである。
+**★2026-07-23追記（前提の刷新）**: 本節v2執筆時点（2026-07-17）では、`arbiter_node`は`state["global_constraints"]`が常に空リストのまま（実データを集約する処理自体が存在しなかった）だったため、**一度も発火し得ない死んだコードパス**だった（BL-041、実ドライラン全文検索で`[Resource Arbiter]`0件を確認済み）。R5着手前のBL棚卸しでこれを解消し（BL-041 MVP実装、D-042）、`arbiter_node`は現在、`agreements.resource_claims`から動的に集約された実データに基づき実際に発火する（`tests/test_bl041_bl050.py`のオフラインテストで超過検出→`call_resource_arbiter`到達を確認済み。実ドライランでの発火自体はまだ未確認）。
+
+このMVP実装にあわせて`resource_claims`のスキーマも変更されている（D-042）。旧形式`{"予算": 1000000}`（平坦な`{名前: 数値}`）から、`{"予算": {"phase_id": "task_1_1", "value": 60000000, "total_cap": 100000000}}`という入れ子構造に具体化された。本節4.1のGoalShiftEventスキーマにある`from_goal_state`/`to_goal_state`（`state["global_constraints"]`のJSON化）は、この新スキーマを前提に実装すること。
+
+以下、v2執筆時点の記述（GlobalConstraint超過時の再配分案を提示する箇所は、ゴールそのものの変容（ピボット）ではなく、フェーズ間の資源再配分に留まるという整理）は現在も有効である。GoalShiftEventが実際に発火すべきは以下のようなケースである。
 
 ```python
 def detect_goal_shift(state: LineageState, arbiter_result: dict) -> dict | None:
