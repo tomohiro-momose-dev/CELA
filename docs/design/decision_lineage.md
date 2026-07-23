@@ -709,6 +709,17 @@
 
 ---
 
+## 論点61: R5実装計画策定中に発見した監査ガバナンス欠落（BL-062）と、decision_extractor役割転換・Freeze権限の切り分け
+
+- **発端:** ユーザーが「V2の設計書をもとに実装プランを作成」と依頼。Plan modeでF-2.1/F-3.7/F-8.3/GoalShiftEventの実装計画を検討する中、AIから「decision_extractorの役割転換（BL-050完了条件3）を今回のプランに含めるか」「Freeze機能のトリガー方法（新規専用ツール vs WRITE_AGREEMENT_TOOL拡張）」の2点を確認したところ、ユーザーが後者への回答の中で「ユーザーがFreezeした後にDetectorがひっくり返したらどうする」という懸念と、「そもそもDetectorはユーザー/エキスパートの決定まで破棄できたか？」という、より根本的な疑問を提起した。
+- **AIの調査:** コードを確認した結果、Detector/Reviewer/Arbiter/Integratorの`major`判定・`status='Rejected'`書き込みは、User/Expertが既に書き込んだ`Approved`/`Proposed`なagreementをDB上でSUPERSEDE/無効化する構造的な仕組みを持たないことを確認した（`target_topic`によるSUPERSEDE運用の指示はdecision_extractorの抽出プロンプト側にのみ存在し、Detector自身には無い）。実際の効果は差し戻し（再プロンプト）のみに留まり、「Detector監査を通過した後に抽出する」という旧アーキテクチャの暗黙の監査ゲートが、R3b以降の各ノード自律書き込みへの移行で構造的に失われていることを特定した。
+- **ユーザー判断:** この課題はFreeze固有ではなくwrite_agreement権限モデル全体に及ぶより根深い課題のため、今回のR5実装プランとは切り離し、ドキュメントのみで新規BL（BL-062）として起票するに留める方針を選択（「別BLとして起票のみ（推奨）」を選択）。あわせてF-8.3 Freezeの権限は、既存の`ALLOWED_STATUS_BY_ROLE`で最も広い権限を持つ`user`ロールのみに限定する方針を選択（「user + reviewer」ではなく「userロールのみ」を選択）。decision_extractor役割転換についても「今回は含めない（推奨）」を選択し、F-3.7のコア機能（思考ログの強制記録）はdecision_extractorの役割を変えなくても実装可能という整理のまま進めることとした。
+- **実装計画の確定:** 上記の切り分けを反映した実装計画を`docs/design/r5/cela_r5_impl_Plan.md`として保存（AGENTS.md §4-7準拠）。
+- **決定者:** t-momose（3つの切り分け判断すべて）、Claude Sonnet 5（監査ガバナンス欠落の発見・調査、選択肢の整理・提示）
+- **関連:** [BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)、[cela_r5_impl_Plan.md](r5/cela_r5_impl_Plan.md)、[BL-034](issue_backlog.md#bl-034-deliverableのファイル保存がユーザー承認前に無条件で発生する)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
@@ -768,3 +779,4 @@
 | 2026-07-23 | 論点58を追記。「R5実装前につぶすBLはあるか」との問いから、R5のGoalShiftEventがBL-041の死んだarbiterに、R5のFreeze機能がBL-050の視認性ギャップにそれぞれ依存している発見を記録。既存ドラフト（`cela_facilitator_arbiter_redesign_BL041.md`）のうち§3.1相当のみに絞ったMVPスコープをPlan modeで承認し、`resource_claims`のスキーマ具体化（D-042）・`_aggregate_global_constraints`・`arbiter_node`への配線（BL-041）、`_build_agreements_context`のSuperseded差分表示・reason_why表示・スキーマ変更（BL-050）を実装。新規テスト8件含めオフラインスモークテスト計78件Pass。両BLとも`partial`のまま残し、スコープ外項目（4段階エスカレーションメニュー等）を明記。 |
 | 2026-07-23 | 論点59を追記。ユーザーが`log/2026-07-23/1656`でfacilitatorが発火したログを共有し確認を依頼。直前のreflectionが5点の具体的な未解決問題を検出し`stagnant`と判定していたにもかかわらず、facilitator自身は「膠着していない」と独立に矛盾する評価をしていたことを発見。真因は`call_facilitator`の`decisions`引数がプロンプト内で完全に未使用だったこと。「このバグは今直してください」との指示により、`last_reflection_note`の新設・`call_facilitator`シグネチャ変更（D-043）を即時実装。新規テスト4件含めオフラインスモークテスト計82件Pass（BL-061）。 |
 | 2026-07-23 | 論点60を追記。ユーザーの依頼により`cela_r5_design_v2.md`をBL-041/048/050/051/061の実装内容に合わせて同期。§0（Detectorの2段構成化）、§1（BL-048/051の軽量先行実装とBL-061の配線教訓）、§2（BL-050の一部先行実装とBL-037/043の役割転換方針）、§3（Freezeの実装方式を実際の`_build_agreements_context`に合わせて書き直し）、§4（`arbiter_node`が実際に発火するようになったこと・新`resource_claims`スキーマ）に★2026-07-23追記を反映。コード変更なし、`check_docs_consistency.py`合格。 |
+| 2026-07-23 | 論点61を追記。R5実装計画の策定中、ユーザーが「Detectorはユーザー/エキスパートの決定まで破棄できたか？」と根本的な疑問を提起。調査の結果、Detector等の`major`判定・Rejected書き込みが既存Agreementを構造的にSUPERSEDE/無効化できないことを発見し、R5実装とは切り離しBL-062として起票のみに留める判断、decision_extractor役割転換の見送り、Freeze権限をuserロールのみに限定する判断の3点を記録。実装計画を`docs/design/r5/cela_r5_impl_Plan.md`として保存。 |

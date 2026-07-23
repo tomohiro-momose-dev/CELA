@@ -93,6 +93,7 @@
 | BL-059 | 高 | `cela_main.py` (`_query_AI_live`の例外タプル) | ドライラン中に`httpx.RemoteProtocolError`（"peer closed connection without sending complete message body"）が未捕捉のままプロセス全体をクラッシュさせたことをユーザーが報告。BL-022（`json.JSONDecodeError`が絞り込んだ例外タプルから漏れていた事例）と同種の問題で、streaming応答受信中にプロバイダ側が接続を切った際のhttpx層の生例外が`(APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError)`に含まれていなかった。`httpx.RemoteProtocolError`を追加しリトライ対象化 | P1 |
 | BL-060 | 高 | `cela_main.py` (`_query_AI_live`のツールループ最終iteration) | ドライラン（`log/2026-07-23/1453`）で、Expertが最終許容iteration（15回目）でも`write_agreement`（成功）を呼び、次のiterationが存在しないためMAX_TOOL_ITER非収束クラッシュに至ったことをユーザーが報告。BL-016/BL-056bの「残り回数」通知はあくまで依頼であり、モデルが最終iterationでもツール呼び出しを選ぶと強制力がなかったことが原因。最終iterationのみAPI呼び出しから`tools`を外し、構造的にツール呼び出し不可能にしてテキスト最終応答を強制することでクラッシュを解消 | P1 |
 | BL-061 | 高 | `cela_main.py` (`call_facilitator`/`facilitator_node`/`reflection_node`) | ドライラン（`log/2026-07-23/1656`）で、reflectionが5点の具体的な未解決問題（与条件無断変更・でっちあげ疑い数値等）を検出し`stagnant`と判定したにもかかわらず、`facilitator`自身は「膠着していない」と独立に再判断し、無関係な軽微な論点だけを穏やかに促す食い違ったメッセージを出力していたことをユーザーが発見。真因は`call_facilitator`が受け取る`decisions`引数がプロンプト内で完全に未使用（デッドパラメータ）で、reflectionの判定理由（`note`）がfacilitatorへ一切伝わっていなかったこと。`LineageState`に`last_reflection_note`を新設し`reflection_node`が保存、`call_facilitator`のプロンプトにこれを最優先の出発点として明示する形で修正 | P1 |
+| BL-062 | 高 | `cela_main.py` (`write_agreement`権限モデル全体) | R5実装計画（F-8.3 Freeze）の設計相談中、ユーザーが「Detectorはユーザーまたはエキスパートの決定まで破棄できたか？」と指摘。調査の結果、Detector/Reviewer/Arbiter/Integratorの`major`判定・`status='Rejected'`書き込みは、User/Expertが既に`write_agreement`で書き込んだ`Approved`/`Proposed`なagreementをDB上でSUPERSEDE/無効化する構造的な仕組みを持たず（target_topicでSUPERSEDEする運用ガイドがDetector側に存在しない）、実際の効果は差し戻し（再プロンプト）のみに留まることが判明。旧decision_extractor中心アーキテクチャでは「Detector監査を通過した後に抽出する」という順序が暗黙の監査ゲートだったが、R3b以降の各ノード自律書き込みへの移行でこの保証が構造的に失われている。write_agreementの権限モデル全体の再設計が必要な大きめの課題のため、BL起票のみに留め実装は見送り | P1 |
 
 ---
 
@@ -1927,6 +1928,37 @@ facilitatorは「なぜ自分が呼ばれたか」を一切知らされないま
 
 ---
 
+### BL-062: Detector等の`major`判定・Rejected書き込みが、既存Agreementを構造的に上書き・無効化できない（write_agreement権限モデルの監査ガバナンス欠落）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計相談・BL起票のみ、実装は見送り） |
+| 優先度 | P1 |
+| 依存 | [BL-034](issue_backlog.md#bl-034-deliverableのファイル保存がユーザー承認前に無条件で発生する)（decision_extractorの役目縮小傾向の指摘、同系統） |
+| 関連 | [cela_r5_impl_Plan.md](r5/cela_r5_impl_Plan.md)、[decision_lineage.md 論点61](decision_lineage.md) |
+
+**内容:**
+
+R5実装計画（F-8.3 Freeze機能）の設計相談中、Freezeされた項目をDetectorが後から覆した場合どうなるかという議論の中で、ユーザーが「そもそもDetectorはユーザーまたはエキスパートの決定まで破棄できたか？」と根本的な疑問を提起した。
+
+調査の結果、以下が判明した。
+
+1. `_check_write_permission`（`ALLOWED_STATUS_BY_ROLE`）により、Detector/Reviewer/Arbiter/Integratorは`write_agreement`を`status='Rejected'`でのみ呼び出せる。
+2. しかし、Detector等がこの`Rejected`書き込みを行う際、`target_topic`を指定してUser/Expertが既に書き込んだ対象の`Approved`/`Proposed`なagreementを`SUPERSEDE`/`UPDATE`する運用ガイドがプロンプト上どこにも存在しない（`target_topic`を使ったSUPERSEDE運用の指示は`decision_extractor`の抽出プロンプト側にのみ存在し、Detector自身の指示には無い）。
+3. 実際には、Detectorの`major`判定が引き起こす効果は「差し戻し（再プロンプトによるExpert/User AIへの再考要求）」のみであり、`_build_agreements_context`が表示する「有効な」agreement一覧からは、Detectorに拒否された対象は自動的には外れない。Expert/Userが自発的に該当topicをSUPERSEDE/UPDATEしない限り、Detectorが「却下した」はずの内容がDB上は「承認済み」のまま残り続ける。
+
+これは、R3b以降アーキテクチャが「各ノードが自律的に`write_agreement`で決定を書き込む」方式へ移行した副作用である。旧来のdecision_extractor中心アーキテクチャでは、「Detectorの監査を通過した会話ログからのみ決定を抽出する」という処理順序自体が暗黙の監査ゲートとして機能していたが、各ノードが監査前に直接DBへ書き込めるようになったことで、この暗黙の保証が構造的に失われている。BL-034が既に指摘した「decision_extractorの役目の縮小」と同根の問題だが、対象がより根本的な「監査によるDB内容のガバナンス」である点で区別する。
+
+**実害:** 現時点で具体的な実データ破損は確認されていないが、Detectorが`major`判定を出しても、対応するAgreementがDB上「承認済み」のまま残り、後続タスクや最終統合（integrator）がこれを正当な確定値として参照し続けるリスクがある。F-8.3 Freeze機能は`user`ロールのみに権限を限定することで、この課題があってもFreeze自体の意味（恒久ピン留め）は損なわれないよう設計したが、Freeze対象でない通常のAgreement全般には本課題がそのまま残る。
+
+**完了条件（着手時、未着手）:**
+
+- write_agreementの権限モデルを、「Detector等が明示的にSUPERSEDEできる」設計に拡張するか、「Detectorのmajor判定時に、対象agreementを自動的にSUPERSEDEする」機構を追加するか、設計判断が必要。
+- あるいは、`_build_agreements_context`の表示自体に「直近のDetector判定と矛盾していないか」を突き合わせるロジックを追加する案も検討の余地がある。
+- BL-050の完了条件3（decision_extractorの役割転換：抽出役→理由監査役）と統合して検討するのが筋が良い可能性がある（decision_extractorが「監査済みであることを保証する」役目を再度担う設計）。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -1991,3 +2023,4 @@ facilitatorは「なぜ自分が呼ばれたか」を一切知らされないま
 | 2026-07-23 | ユーザーの依頼により、当日（2026-07-23）の一連のドライラン（`log/1122`〜`1656`）を通しで再レビューし、BL修正の実効性を棚卸しした（[decision_lineage.md 論点57](decision_lineage.md)）。**確認済み**: BL-048（reflectionのround_count発火・ゴール逸脱の実検出、`drift_flag`経由の差し戻しまで機能）、BL-049/054（ドメイン先行監査が数値監査とは異なる種類の欠陥＝Expert自身の検算コードのハードコードバグを独立に発見）、BL-057/060以降のクラッシュ非再発（`1358`/`1656`でTraceback 0件）。**未確認のまま**: BL-058（itertools等の実際の活用、修正後のセッションでは組合せ探索自体が発生せず）、BL-059（httpx.RemoteProtocolErrorの再発自体がなくキャッチの実地確認は未了）、BL-056（`round_count`表示を伴う新規reflection呼び出し自体がまだ観測できていない）。あわせてBL-041に、reflectionの検出精度向上によりエスカレーション機構未実装のギャップがより明確になった旨を追記。 |
 | 2026-07-23 | ユーザーの「R5実装前につぶすBLはあるか」との問いを受け、R5設計書（`cela_r5_design_v2.md`）のGoalShiftEvent（§4）が`call_resource_arbiter`の拡張に依存する一方、BL-041で確認済みの通りarbiterが死んだコードパスであること、R5のFreeze機能（§3）が`_build_agreements_context`と同系統のクエリを拡張する一方、BL-050で確認済みの視認性ギャップ（Superseded除外）がその土台に残っていることを指摘し、R5着手前にBL-041・BL-050を潰す方針で合意。Plan modeで、既存ドラフト`cela_facilitator_arbiter_redesign_BL041.md`のうち§3.1（`global_constraints`の実働化）相当のみに絞ったMVPスコープの実装計画を策定（4段階エスカレーションメニュー・facilitator再設計・BL-005根本修正は今回スコープ外として明示的に据え置き）。`cela_main.py`に`resource_claims`のスキーマ具体化（`{名前: {phase_id, value, total_cap}}`、AGENTS.md§7該当・本Planの承認をもって承認済み）、新規`_aggregate_global_constraints`ヘルパー、`arbiter_node`冒頭での動的再集約配線（BL-041）、`_build_agreements_context`への直前Superseded版差分表示＋現行行自身のreason_why表示、`WRITE_AGREEMENT_TOOL.reason_why`/decision_extractor抽出プロンプトへのUPDATE時変更理由明記要求（BL-050）を実装。新規`tests/test_bl041_bl050.py`（8件）を含めオフラインスモークテスト計78件Pass、`python -m py_compile`合格。両BLとも`partial`のまま残し、実装済み範囲と未着手範囲を完了条件に明記。 |
 | 2026-07-23 | ユーザーが`log/2026-07-23/1656`でfacilitatorが発火したログを報告し確認を依頼。調査の結果、直前のreflectionが5点の具体的な未解決問題（与条件無断変更・でっちあげ疑い数値等）を検出し`stagnant`と判定していたにもかかわらず、facilitator自身は「膠着していない」と独立に再判断し無関係な軽微な論点だけを促す食い違ったメッセージを出力していたことを発見。真因は`call_facilitator`の`decisions`引数がプロンプト内で完全に未使用（デッドパラメータ）で、reflectionの判定理由がfacilitatorへ一切伝わっていなかったこと。「このバグは今直してください」との指示により、`LineageState`に`last_reflection_note`を新設し`reflection_node`が保存、`call_facilitator`のプロンプトにこれを最優先の出発点として明示する形に修正。BL-061として新規起票・`done`化、新規`tests/test_bl061_facilitator_reflection_note.py`（4件）を含めオフラインスモークテスト計82件Pass、`python -m py_compile`合格。 |
+| 2026-07-23 | ユーザーの「R5の設計はV2としてすでにありますが...実装プランを作成」との依頼を受けPlan modeでR5実装計画を策定中、F-8.3 Freeze機能の設計相談で「Detectorがユーザー/エキスパートの決定まで破棄できたか？」というユーザーの根本的な疑問から、Detector等の`major`判定・`Rejected`書き込みが既存Agreementを構造的にSUPERSEDE/無効化する仕組みを持たず、実効果は差し戻しのみに留まることを発見。これはFreeze固有の課題ではなくwrite_agreement権限モデル全体の課題と判断し、R5実装とは切り離しBL-062として新規起票（`open`、実装は見送り）。R5実装計画自体は`docs/design/r5/cela_r5_impl_Plan.md`として保存し、F-8.3 Freezeの権限は`user`ロールのみに限定する設計で確定。 |
