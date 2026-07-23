@@ -1606,7 +1606,7 @@ BL-037（`reason_why`の記載品質が薄い、既存）と同系統だが、�
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（設計相談・BL起票のみ） |
+| 状態 | `partial`（軽量版のみ実装済み。フェーズ終了ゲート等の本格版は`open`のまま） |
 | 優先度 | P2 |
 | 依存 | [BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている) |
 | 関連 | [BL-049](issue_backlog.md#bl-049-f-26検算ゲートによる注意力の偏りを是正する-数値検算とドメイン妥当性レビューの分離)（Detectorの出力拡張と自然に統合できる） |
@@ -1617,15 +1617,28 @@ Detectorは思考過程（`💭 [Detector] 思考`のログ）で数多くの重
 
 ユーザー提案：Detectorの気づきを、このプロジェクト自身の`issue_backlog.md`と同じ発想の構造化リスト（例: `{id, severity, description, resolved: bool, phase_id}`）として蓄積する。フェーズの終了は、このissue_blリストが解消される（全件`resolved`になる）までは完了できないゲートとし、この監視はUserとDetector双方が担う。もし解消せずに次フェーズへ進む（延期する）場合は、明確な理由が必須。
 
-**設計上の論点（未確定）:**
+**軽量版の実装（`cela_main.py`、2026-07-23）:**
+
+フェーズ終了ゲート等の本格版（構造化された`{id, severity, resolved, phase_id}`リスト、フェーズ完了条件への組み込み）は依然として設計未確定のため`open`のまま据え置き、ユーザー指示によりまず以下の軽量版のみ実装：
+
+- `call_detector`の数値監査パス・ドメイン妥当性レビューパスの両方の返却JSONに`observations`（自由記述、無ければ空文字）を追加。`constraint_issue`の判定（none/minor/major）とは独立した任意項目とし、判定を左右しないことをプロンプトで明示。
+- `LineageState`に`detector_observations_log: list[dict]`を新設。`detector_node`で、`constraint_issue`の値に関わらず（`none`の回も含めて）`observations`が非空であれば`{turn, target_role, observations}`として蓄積する（既存の`constraint_issue_log`はminor/majorの回のみ蓄積する点で異なる）。
+- 新規ヘルパー`_build_detector_observations_block`を追加し、`call_expert`・`generate_user_utterance`の両システムプロンプトに、直近3件の気づきを「参考情報（判定を左右するものではない）」として毎ターン提示するよう変更。従来の`constraint_issue_log`表示は差し戻し（`constraint_issue=="major"`）時のみだったのに対し、この気づき欄は差し戻しの有無に関わらず常時提示される点が異なる。
+
+**設計上の論点（本格版・未確定のまま）:**
 
 - issue_blエントリの永続化先（新規DBテーブル or `state`内リスト）。
 - 「フェーズ終了をブロックする」ロジックをどのグラフノード・ルーティング関数に実装するか（BL-041のfacilitator/Arbiter再設計と同格の構造変更になる見込み）。
-- BL-049で新設したDetectorのドメイン妥当性レビューパスの出力（`comment`）を、issue_bl候補として自動的に拾い上げられるか。
+- 軽量版で蓄積された`observations`を、本格版のissue_bl候補（`resolved`管理・フェーズゲート対象）へどう昇格させるか。
 
-**完了条件（着手時）:**
+**完了条件（本格版・着手時）:**
 
 - まず設計ドラフト（BL-041の`cela_facilitator_arbiter_redesign_BL041.md`のような形式）を作成し、ユーザー確認を経てから実装に着手する。
+
+**完了条件（軽量版）:**
+
+- `python -m py_compile cela_main.py`合格、既存オフラインスモークテスト（`test_r3_smoke.py`/`test_r4_smoke.py`/`test_checkpoint_resume.py`計71件）Pass。
+- 実LLM再ドライランで、`none`判定の回でもDetectorの気づきが`detector_observations_log`に蓄積され、後続ターンのUser AI/Expertプロンプトに提示されることを確認する（次回待ち）。
 
 ---
 
