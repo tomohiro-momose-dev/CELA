@@ -105,6 +105,7 @@
 | BL-071 | 高 | `cela_main.py` (`decision_extractor_node`/`integrator_node`/`_build_agreements_context`) | ユーザーの実ドライランで`orchestrator_node`実行中に`TypeError: '<' not supported between instances of 'NoneType' and 'float'`でプロセス全体がクラッシュ。原因は`decision_extractor_node`の2箇所と`integrator_node`のAgreement辞書リテラルが元々`timestamp`キーを持っておらず、`db_append_agreement`のINSERTでDB上`timestamp`列がNULLになっていたこと。R5（BL-063）で追加した`_build_agreements_context`のis_frozen優先ソート（`a.get("timestamp", 0)`）はキーが存在する場合はdefault値を使わないため、None同士・Noneとfloatの比較でクラッシュした | P0 |
 | BL-072 | 高 | `cela_main.py` (`_query_AI_live`) | BL-071修正後の再ドライランで、`expert_node`のstreaming受信中に`httpx.ReadTimeout`が発生しプロセス全体がクラッシュ。BL-059（`httpx.RemoteProtocolError`が絞り込んだ例外タプルから漏れていた事例）と同型で、`httpx.ReadTimeout`もopenai SDKの`APITimeoutError`へラップされず生のまま送出されていた。個別の派生例外を都度追加するのではなく、`ReadTimeout`/`ConnectTimeout`/`WriteTimeout`/`PoolTimeout`を包含する親クラス`httpx.TimeoutException`を例外タプルに追加して解消 | P0 |
 | BL-073 | 中 | `cela_main.py` (`decision_extractor_node`/`_commit_agreement_from_tool`) | `entry_type="Directive"`のagreementは、対応するtask_idのDeliverableが承認されても`status="Proposed"`のまま遷移させる経路が無く永久にDBへ残っていた。`reflection_node`の「未解決」抽出（`status=="Proposed"`の全件、entry_type不問）に既に履行済みの指示がノイズとして出続け、実ドライランでReflectionが毎ターン自問自答を強いられていた（実害はなかったが放置すると誤判定を誘発しうる根本課題）。Deliverableが`Approved`/`Approved_with_Conditions`/`Implicitly_Accepted`へ遷移した際、対応するtask_idのDirectiveも自動的に`Approved`へ解決する`_resolve_directive_for_task`を新設し、`decision_extractor_node`のUPDATE分岐と`_commit_agreement_from_tool`の両経路から呼び出すよう解消 | P2 |
+| BL-074 | 中 | `cela_main.py` (`_commit_agreement_from_tool`/`decision_extractor_node`のtopic文字列一致によるUPDATE/SUPERSEDE対象特定) | ユーザーとログ（`log/2026-07-24/0647`）のtask_2_2（初期導入費用内訳策定）議論の変遷をレビューする中で発見。`entry_type="Deliverable"`のUPDATE/SUPERSEDEは`target_topic`（省略時は`topic`自身）の文字列完全一致でのみ対象行を特定するが、Expert/decision_extractorはバージョンを重ねるたびに新しいtopic文字列（「task_2_2 初期導入費用の内訳策定」→「水ノ守町...ver.2修正版」→「...ver.3」→「初期導入費用の内訳策定（ver.3）承認」）を自由に発明しており、連続性が保証されない。結果としてtask_2_2単一のDeliverableに対し、Supersede漏れの`Proposed`行が複数（実測4行）DBに残存し、LLM向けコンテキスト（`_build_agreements_context`）に亡霊のように出続けた。BL-073（Directiveの永久Proposed残留）と同根だがDeliverable側での顕在化 | P2 |
 
 ---
 
@@ -2253,6 +2254,33 @@ BL-059と同型の問題である。`_query_AI_live`の単一の`try`ブロッ�
 - 新規`tests/test_bl073_directive_auto_resolve.py`（4件）: `_resolve_directive_for_task`の遷移・no-op動作、`_commit_agreement_from_tool`経由でのDeliverable承認に伴うDirective自動解決、両経路のソースへの配線確認。
 - オフラインスモークテスト計107件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。
 - 実LLM再ドライランでの効果確認（Reflectionの未解決リストからApproved済みDirectiveが消えること）は次回待ち。
+
+---
+
+### BL-074: Deliverableのtopic文字列に連続性が保証されず、Supersede漏れの亡霊`Proposed`行がDBに複数残存する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計方針は決定、実装は次回） |
+| 優先度 | P2 |
+| 関連 | [BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)（同根の問題、Directive側の解決） |
+
+**内容:**
+
+ユーザーとtask_2_2（初期導入費用内訳策定）の議論の変遷をログ（`log/2026-07-24/0647`）で追跡する中で発見。`_commit_agreement_from_tool`・`decision_extractor_node`はいずれも、`entry_type="Deliverable"`のUPDATE/SUPERSEDE対象を`target_topic`（省略時は`topic`自身）の文字列完全一致でのみ特定する。しかしExpert/decision_extractorは同一タスクの成果物を改訂するたびに新しいtopic文字列を自由に発明しており（実測: 「task_2_2_初期導入費用内訳策定」→「task_2_2 初期導入費用の内訳策定」→「水ノ守町 自動運転バス導入 初期導入費用内訳（ver.2修正版）」→「...（ver.3：AVキット・認証コスト初期計上版）」→「初期導入費用の内訳策定（ver.3）承認」）、連続性が保証されない。
+
+実ドライランでは、task_2_2という単一のDeliverableに対し、最終承認後もagreements DBに**4行**（うち2行が`Proposed`のまま、1行が`Approved_with_Conditions`）が非Superseded状態で残存し、`_build_agreements_context`経由でLLM向けコンテキストに出続けていることを確認した。whiteboard_drafts側（`phase_id`+`task_id`固定キー）のコンテンツ版管理自体は正しく連続しているため、実害はコンテキストの汚染・混乱に留まるが、BL-073と同根の構造的欠陥である。
+
+**設計方針（決定済み、実装は次回）:**
+
+`topic`はentry_type="Decision"（1タスク内に複数の論点がありうる）には妥当な識別キーだが、entry_type="Deliverable"は本アーキテクチャ上1タスクにつき1つ（whiteboard_draftsが`task_id`単位でバージョン管理している設計と整合）であり、`topic`ではなく`task_id`を識別キーとすべきと判断した。具体的には、`entry_type=="Deliverable"`のCREATE/UPDATE/SUPERSEDEいずれの場合も、`target_topic`の文字列一致に加えて（あるいは代えて）同一`task_id`かつ`entry_type=="Deliverable"`かつ非Supersededの既存行を検索・Supersede化してから新行を追記する。CREATE時（現状は無条件追記のみで既存行の検索を一切行わない）にもこの検索・Supersede化を追加することで、ver.1→ver.2のような「新しいCREATEのつもりで実質的に前バージョンを置き換える」ケースも自動的に解決される。BL-073の`_resolve_directive_for_task`と対になる`_resolve_prior_deliverable_for_task`のような関数を新設し、`_commit_agreement_from_tool`・`decision_extractor_node`の両経路（Deliverableの書き込みが起こりうる箇所）から呼び出す方針。
+
+**完了条件:**
+
+- `_commit_agreement_from_tool`・`decision_extractor_node`の両経路で、`entry_type=="Deliverable"`のCREATE/UPDATE/SUPERSEDEいずれについても、同一`task_id`の既存非Superseded Deliverable行が自動的にSupersede化されること。
+- 回帰テスト: task_2_2型のシナリオ（同一task_idに対し複数回のCREATE/UPDATE/SUPERSEDEが異なるtopic文字列で発生）で、最終的に非Superseded Deliverable行が1件のみになること。
+- オフラインスモークテスト・`py_compile`・`check_docs_consistency.py`の非退行確認。
+- 実装は次回セッションで着手（本ターンは発見・BL起票・設計方針決定のみ）。
 
 ---
 
