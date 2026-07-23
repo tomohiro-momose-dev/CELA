@@ -671,6 +671,19 @@
 
 ---
 
+## 論点58: R5着手前のBL棚卸しから判明したBL-041・BL-050の依存関係と、MVPスコープでの実装
+
+- **発端:** ユーザーが「R5実装前につぶすBLはあるか」と質問。R5設計書（`cela_r5_design_v2.md`）の各機能とBL-041・BL-050の関係を精査した。
+- **AIの分析:** R5のGoalShiftEvent（§4.2-4.3）が`call_resource_arbiter`の拡張（`requires_goal_constraint_change`フィールド追加）に依存する設計になっている一方、BL-041で確認済みの通り`state["global_constraints"]`は`task_planner_node`の初期化以外に書き込み箇所が存在せず常に空で、`arbiter_node`は常に空振りする死んだコードパスだった。GoalShiftEventをこの土台の上に実装しても同じ運命を辿ると指摘。またR5のFreeze機能（§3）が`_build_agreements_context`と同系統のコンテキスト組み立てクエリを拡張する計画である一方、BL-050で確認済みの視認性ギャップ（Superseded版が文脈から除外される）が同じ土台に残っていることも指摘し、両BLをR5着手前（または同時）に解消することを提案した。
+- **ユーザー判断:** 提案に同意し、「BL-041,50の実装計画を立てて」と指示。
+- **スコープの絞り込み（AIの提案・ユーザー承認）:** BL-041には既存ドラフト`cela_facilitator_arbiter_redesign_BL041.md`があるが、そのうち4段階エスカレーションメニュー（§3.2）・facilitatorの3段階制御再設計（§3.3）・BL-005の`turn_count`根本修正は、いずれも独立した大きめの設計判断を要し、かつR5のGoalShiftEventが直接必要とする「arbiterが実際に発火し超過を検出できること」には不要と判断し、ドラフト§3.1（`global_constraints`の実働化）相当のみに絞ったMVPスコープをPlan modeで提示、ユーザーが承認した。
+- **実装内容:** `resource_claims`のスキーマを平坦な`{名前: 数値}`から`{名前: {phase_id, value, total_cap}}`へ具体化（D-042、Plan承認をもってAGENTS.md§7の事前承認とした）。新規`_aggregate_global_constraints`ヘルパーを`arbiter_node`冒頭に配線し、agreements DBから毎回動的に`global_constraints`を再集約するようにした（BL-041）。`_build_agreements_context`に直前Superseded版の差分表示（内容・当時の理由）と、現行行自身のreason_why表示を追加し、`WRITE_AGREEMENT_TOOL.reason_why`・decision_extractor抽出プロンプトにUPDATE時の変更理由明記を要求する文言を追加した（BL-050）。新規`tests/test_bl041_bl050.py`（8件）を含めオフラインスモークテスト計78件Pass。
+- **未解決のまま残した点:** BL-041の残り（4段階エスカレーションメニュー・facilitator再設計・BL-005根本修正）、BL-050完了条件3（decision_extractorの役割転換、BL-043と合わせて実施）は今回のスコープ外として明示的に据え置いた。実ドライランでの効果確認（arbiterの実発火、reason_why記載品質の向上）も次回待ち。
+- **決定者:** t-momose（BL-041/050の優先度判断・Plan承認）、Claude Sonnet 5（R5との依存関係の特定・MVPスコープの提案・実装）
+- **関連:** [BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)、[BL-050](issue_backlog.md#bl-050-decision_extractorの役割転換抽出役理由監査役決定事項の変遷履歴の可視化)、[D-042](decision_log.md#d-042-resource_claimsのスキーマを平坦な名前-数値から入れ子構造名前-phase_id-value-total_capへ具体化する)、[cela_facilitator_arbiter_redesign_BL041.md](r1_r2_r3b_core/cela_facilitator_arbiter_redesign_BL041.md)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
