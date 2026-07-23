@@ -102,6 +102,7 @@
 | BL-068 | 中 | `cela_main.py` (`call_expert`のプロンプト、`current_task_summary`、`chat_history_window`) | `current_task_summary`は元々、docs/refsのHydrate構想（直近Nターン生ログ＋それ以降を定期要約で積み上げる3段グラデーション）に由来する設計だったが、消費側が未実装のまま放置されていたとユーザーが説明。`call_expert`には現在も「5ターン毎に議論のサマリーを出力せよ」という指示（`cela_main.py:2620`）が残るが、この出力を捕捉・蓄積する実装が存在せず、`chat_history_window`は直近N件を生ログのまま渡す固定窓のみで、それ以前のターンは要約されず単純に切り捨てられている | P2 |
 | BL-069 | 中 | `cela_main.py` (`call_expert`のプロンプト、`phases_json`、BL-025スコープガードレール) | ユーザーが「木を見て森を見ず」対策として、決定前にタスク→フェーズへとズームアウトして見渡す思考フレームワーク（L1〜L4）を提案。調査の結果、`call_expert`は既に全フェーズ・全タスクの`phases_json`を毎ターン埋め込んでいる（`cela_main.py:2686-2691`）が、直後のBL-025スコープガードレール（`cela_main.py:2700-2714`）が「他タスクの値を新たに算出・提案しない」と明記しており、Expertは全体表を見えていながら能動的に活用することを事実上禁止されていることが判明。この緊張関係はBL-041自身のコードコメントが既に指摘済みで、現状の緩和策はconfidence='provisional'タグ付けのみ。ユーザーは正式なL1-L4段階分けではなく、「次フェーズのタスクが今の決定の前提を覆しうると気づく」程度の軽量な指示追加で十分と後日補足 | P2 |
 | BL-070 | 中 | `cela_main.py` (`call_reviewer`/`call_resource_arbiter`/`call_integrator`) | BL-062のDetector限定実装（D-045）に伴い分離。Reviewer/Arbiter/Integratorも技術的には`WRITE_AGREEMENT_TOOL`を保有し`status='Rejected'`かつ`action_type='SUPERSEDE'`を呼べる権限を既に持つが、3ロールとも現状agreements DBのtopic一覧をプロンプト上受け取っておらず、かつ成果物全体審査・リソース配分・フェーズ横断統合という別種の役割のため、topic単位のSUPERSEDEが同じ意味を持つかの検討が必要。Detectorでの実運用結果を見てから拡張要否を判断する方針 | P2 |
+| BL-071 | 高 | `cela_main.py` (`decision_extractor_node`/`integrator_node`/`_build_agreements_context`) | ユーザーの実ドライランで`orchestrator_node`実行中に`TypeError: '<' not supported between instances of 'NoneType' and 'float'`でプロセス全体がクラッシュ。原因は`decision_extractor_node`の2箇所と`integrator_node`のAgreement辞書リテラルが元々`timestamp`キーを持っておらず、`db_append_agreement`のINSERTでDB上`timestamp`列がNULLになっていたこと。R5（BL-063）で追加した`_build_agreements_context`のis_frozen優先ソート（`a.get("timestamp", 0)`）はキーが存在する場合はdefault値を使わないため、None同士・Noneとfloatの比較でクラッシュした | P0 |
 
 ---
 
@@ -2160,6 +2161,38 @@ BL-062の対応方針をユーザーと相談する中で、Detector/Reviewer/Ar
 
 - Detectorでの実運用（実LLM再ドライラン）を経て、SUPERSEDE運用が実際に有効に機能するかを確認する。
 - Reviewer/Arbiter/Integratorそれぞれについて、「topic単位のSUPERSEDEが役割上意味を持つか」を個別に設計検討したうえで、必要と判断したロールにのみagreements DBビューの注入とSUPERSEDE運用指示を追加する。
+
+---
+
+### BL-071: `timestamp`キーを持たないAgreement辞書が`_build_agreements_context`のソートでプロセスクラッシュを引き起こす
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P0 |
+| 関連 | [BL-063](issue_backlog.md#bl-063-r5実装f-21拡張f-37f-83-freezegoalshiftevent)（クラッシュの原因となったis_frozeソートの追加元） |
+
+**内容:**
+
+ユーザーが今回の一連の修正（BL-062/064〜070、D-045）を反映した状態で実ドライランを行ったところ、1ターン目の`orchestrator_node`実行中に以下でプロセス全体がクラッシュした。
+
+```
+TypeError: '<' not supported between instances of 'NoneType' and 'float'
+  at _build_agreements_context: decisions_and_deliverables.sort(key=lambda a: (not a.get("is_frozen"), a.get("timestamp", 0)))
+```
+
+調査の結果、`decision_extractor_node`のAgreement辞書リテラル2箇所（UPDATE分岐・新規分岐）と、`integrator_node`の最終統合ドキュメント登録箇所が、いずれも元々`timestamp`キーを持っていなかったことが判明した。`db_append_agreement`のINSERTは`a.get("timestamp")`（デフォルト無し）を使うため、これらの経路で書き込まれるagreementsは常にDB上`timestamp`列がNULLになっていた。この問題自体はR1以来存在していたが、R5（BL-063）で`_build_agreements_context`にis_frozen優先のソートキー`a.get("timestamp", 0)`を追加したことで、初めて実際に比較（`sort`）に使われるようになり顕在化した。`a.get("timestamp", 0)`はキー自体が存在する（値がNoneなだけ）場合はdefault値0が使われないため、None同士・Noneとfloatの比較で`TypeError`となった。なお`_find_prior_superseded`（BL-050）は同種の状況を`a.get("timestamp") or 0`という安全なパターンで既に回避しており、今回のソートだけがこのパターンに従っていなかった。
+
+**対応:**
+
+1. `_build_agreements_context`のソートキーを`a.get("timestamp", 0)`から`a.get("timestamp") or 0`（`_find_prior_superseded`と同じ安全なパターン）に修正。
+2. `decision_extractor_node`のAgreement辞書リテラル2箇所、`integrator_node`の最終統合ドキュメント登録箇所の計3箇所に`"timestamp": time.time()`を追加し、今後この経路で書き込まれるagreementsのタイムスタンプがNULLにならないようにした。
+
+**完了条件:**
+
+- 新規`tests/test_bl071_agreement_timestamp_crash.py`（2件）: `timestamp`キーなしのagreementが混在していても`_build_agreements_context_from_db`がクラッシュしないこと、`decision_extractor_node`のソースが`"timestamp": time.time()`を2箇所以上含むことを確認。
+- オフラインスモークテスト計102件Pass、`python -m py_compile`合格。
+- 実LLM再ドライランでの再発なし確認は次回待ち（ユーザーが同一ドライランを再実行する予定）。
 
 ---
 
