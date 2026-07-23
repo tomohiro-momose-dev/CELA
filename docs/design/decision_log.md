@@ -703,6 +703,20 @@
 
 ---
 
+### D-046: Directiveの永久Proposed残留は対症療法ではなく根本解決（自動Approved遷移）を採用する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-24 |
+| 状態 | `decided` |
+| 決定者 | t-momose（対応方針の選択） / Claude Sonnet 5（原因調査・選択肢の提示） |
+| **決定理由** | ドライラン（`log/2026-07-24/0647`）レビュー中、Reflectionの内省監査が既に完了・承認済みのタスク指示（`entry_type="Directive"`）を「未解決」として繰り返し自問自答している様子から発見。原因は`decision_extractor_node`・`_commit_agreement_from_tool`のいずれにもDirectiveのstatusを`Proposed`から遷移させる経路が存在しないことで、対応するDeliverableが承認されてもDirective自体は永久にDBへ残留する。対症療法（`reflection_node`の未解決抽出条件から`entry_type=="Directive"`を除外する）でも表面上のノイズは消えるが、Directiveのstatus自体が意味を持たなくなるため、他の箇所（将来的な監査・分析）で同じ「Proposedのまま」という不整合が別の形で顕在化する恐れがある。ユーザーは「根本的に解決しないとどこかで問題が顕在化する恐れがある」と判断し、対症療法ではなく根本解決（Deliverable承認に連動してDirective自体をApprovedへ遷移させる）を選択した。 |
+| 決定内容 | 新設`_resolve_directive_for_task(conn, run_id, task_id, phase_id, resolved_by)`が、対応するtask_idの`entry_type="Directive"`かつ`status="Proposed"`の最新agreementを`Superseded`化した上で`status="Approved"`の新レコードとして追記する。新設`RESOLVING_DELIVERABLE_STATUSES = {"Approved", "Approved_with_Conditions", "Implicitly_Accepted"}`のいずれかにDeliverableが遷移した場合のみ発火し、`Rejected`/`Proposed`のままでは指示は未解決のまま残す。`decision_extractor_node`のUPDATE分岐・`_commit_agreement_from_tool`の両経路（Deliverableの状態遷移が起こりうる箇所）から呼び出す。 |
+| 影響 | `cela_main.py`（`_resolve_directive_for_task`新設、`decision_extractor_node`・`_commit_agreement_from_tool`への配線）。新規`tests/test_bl073_directive_auto_resolve.py`（4件）で遷移・no-op・両経路の配線を確認。 |
+| 関連 BL | [BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
