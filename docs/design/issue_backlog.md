@@ -1584,7 +1584,7 @@ AIは当初Detectorのみを2段構成に分割する案（または新規グラ
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（設計相談・BL起票のみ） |
+| 状態 | `partial`（完了条件1・2は実装済み。役割転換は未着手） |
 | 優先度 | P2 |
 | 依存 | [BL-037](issue_backlog.md#bl-037-decisionagreementのreason_whyが薄くdetector自身も後から数値の根拠を辿れない)、[BL-043](issue_backlog.md#bl-043-decision_extractorのjson出力をfunction-calling方式に作り替え既存の自己修復ループd-009に一本化する) |
 | 関連 | [D-041](decision_log.md#d-041-f-26検算ゲートによる注意力の偏りを是正するためdetectoruser-aiexpertの数値検算とドメイン妥当性レビューを分離する)（役割分担の考え方が地続き） |
