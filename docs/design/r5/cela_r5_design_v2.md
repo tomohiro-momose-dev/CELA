@@ -257,5 +257,8 @@ def detect_goal_shift(state: LineageState, arbiter_result: dict) -> dict | None:
 ## 未確定事項まとめ
 
 - 1.2節：使用プロバイダが思考ログ（reasoning_content相当）を返すかどうかの実機確認が必要。
-- 4.2〜4.3節：`call_resource_arbiter`の戻り値スキーマ拡張（`requires_goal_constraint_change`）の追加実装が必要。
+- 4.2〜4.3節：`call_resource_arbiter`の戻り値スキーマ拡張（`requires_goal_constraint_change`）の追加実装が必要。★2026-07-23追記: `arbiter_node`自体が発火しない、というより根本的な前提の欠落はBL-041 MVP実装（D-042）で解消済み。残るのはこのフィールド追加と`goal_shift_events`テーブル・`detect_goal_shift`の新規実装のみ。
 - 5節：思考内エージェント化ループは本フェーズでは実装しない設計検証のみ。
+
+**★2026-07-23追記（BL-041の残スコープとの切り分け）**: BL-041の既存ドラフト（[cela_facilitator_arbiter_redesign_BL041.md](../r1_r2_r3b_core/cela_facilitator_arbiter_redesign_BL041.md)）が提案する4段階エスカレーションメニュー（Substitute/Descope/Force Decision/そもそも論への昇華）・facilitatorの3段階制御再設計・BL-005の`turn_count`根本修正は、R5着手前のMVP実装ではスコープ外として明示的に見送られている（[decision_lineage.md 論点58](../decision_lineage.md)）。これらはGoalShiftEvent（本書4節）の実装には必須ではないが、ドラフト§3.2の「そもそも論への昇華」（stage 4）はGoalShiftEventの`shift_kind="architecture_pivot"`/`"silent_drift"`と概念的に重なる。両ドキュメントが将来的に乖離しないよう、GoalShiftEvent実装時にはドラフト§3.2を必ず参照し、二重設計にならないよう注意すること。
+- BL-061（facilitatorがreflectionの判定理由を受け取れなかったバグ）も、1.4節に記載の通り本書1節（F-2.1）実装時の設計上の教訓として参照すること。
