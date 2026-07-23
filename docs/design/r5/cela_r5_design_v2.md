@@ -145,22 +145,34 @@ def freeze_agreement(db_connection, agreement_id: str, reason: str):
 
 ### 3.3 Hydrateアセンブルへの反映
 
-`assemble_hydrate_context`（R1〜R3設計書4.1節）のクエリを以下のように修正する。
+**★2026-07-23追記（実装との乖離を修正）**: 本節が前提としていた`assemble_hydrate_context`という関数名・生SQLクエリ（`WHERE status IN (...) ORDER BY timestamp ASC`）は、現行コードには存在しない。実際に`【決定事項DB】`のコンテキストを組み立てているのは`cela_main.py`の`_build_agreements_context`（`agreements: list[Agreement]`を受け取り文字列化するPython関数）と、そのDB版ラッパー`_build_agreements_context_from_db`である。DB層（`get_agreements_from_db`）はrun_id一致の全行を素通しで取得するのみで、`status`によるSQL側の絞り込みは行っていない。絞り込み（`status != "Superseded"`かつ`entry_type != "Directive"`）は`_build_agreements_context`内のPythonリスト内包表記で行われている。以下の実装方針は、この実際の構造に合わせて更新したものであり、以下が本節の設計として有効な内容である。
 
 ```python
-# 修正前（R1〜R3設計書）:
-# "SELECT status, topic, decision_what, reason_why, evidence FROM agreements 
-#  WHERE status IN ('Approved', 'Rejected') ORDER BY timestamp ASC"
+# 修正前（現行実装、cela_main.py::_build_agreements_context）:
+decisions_and_deliverables = [
+    a for a in agreements
+    if a.get("entry_type", "Decision") in ("Decision", "Deliverable")
+    and a.get("status") != "Superseded"
+    and a.get("entry_type") != "Directive"
+]
+# → timestamp/挿入順のまま（is_frozenは考慮されない）
 
-# 修正後（★R5）:
-agreements = db_connection.execute(
-    "SELECT status, topic, decision_what, reason_why, evidence, is_frozen FROM agreements "
-    "WHERE status IN ('Approved', 'Rejected') "
-    "ORDER BY is_frozen DESC, timestamp ASC"  # Frozen項目を先頭に配置し、確実にコンテキストへ含める
-)
+# 修正後（★R5、Freeze実装時）:
+decisions_and_deliverables = [
+    a for a in agreements
+    if a.get("entry_type", "Decision") in ("Decision", "Deliverable")
+    and a.get("status") != "Superseded"
+    and a.get("entry_type") != "Directive"
+]
+decisions_and_deliverables.sort(key=lambda a: (not a.get("is_frozen"), a.get("timestamp", 0)))
+# is_frozen=1の項目をFalse(0)扱いでソートキー先頭に、それ以外はtimestamp昇順のまま
 ```
 
-**設計判断の理由**: `chat_history_window`や`expert_history_window`によるトリミング（既存コードの`_build_hydrate_context`）は直近N件を対象とするため、古いFrozen項目が窓の外に押し出されるリスクがある。Frozen項目は件数を問わず常に全件をHydrateコンテキストに含める例外処理とする。
+SQL側でのフィルタ・ソートではなく、既存のPython側リスト処理にキーを1つ追加するだけで済む（SQLクエリの変更は不要）。
+
+**設計判断の理由**: `chat_history_window`や`expert_history_window`によるトリミング（既存コードの`_build_hydrate_context`、decisions専用の別関数）は直近N件を対象とするため、古いFrozen項目が窓の外に押し出されるリスクがある。Frozen項目は件数を問わず常に全件をHydrateコンテキストに含める例外処理とする（この方針自体はv2から変更なし）。
+
+**未決事項（追加）**: BL-050で`_build_agreements_context`に追加された「直前Superseded版の差分表示」機能との相互作用が未設計。Frozen（凍結）されたagreementがSUPERSEDEの対象になった場合（現状、`freeze_agreement`は`is_frozen`フラグを立てるのみで、SUPERSEDE自体を禁止するガードはどこにも存在しない）にどう扱うか（そもそもFreeze済み項目のSUPERSEDEを拒否すべきか、許可した上で旧Frozen版も差分表示に含めるか）は、F-8.3の実装着手時に別途設計判断が必要。
 
 ---
 
