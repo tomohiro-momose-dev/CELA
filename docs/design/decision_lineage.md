@@ -735,6 +735,31 @@
 
 ---
 
+## 論点63: DBスキーマ・stateの「書くが読まない」情報の棚卸し（BL-064〜BL-069）とHydrate 3段グラデーション構想の想起
+
+- **発端:** ユーザーがIDEで`Agreement`TypedDictの`abstraction_level`/`scope`/`time_axis`（3軸区分）を選択し「この情報が活用された形跡はあるか」と質問。
+- **AIの調査と訂正:** 当初`_build_agreements_context`が3軸を参照しないと報告したが、ユーザーが「`phases_json`で提示されていないか」と指摘したことで、Phase側の`allowed_abstraction_levels`等は実際には`call_expert`/`generate_user_utterance`に毎ターン注入されており消費されていたことが判明（前回報告の誤りを訂正）。一方Agreement側（1件ごとの3軸）は、実際にAIが呼ぶ`WRITE_AGREEMENT_TOOL`のパラメータ定義にそもそも存在せず、主経路の書き込みが`"design", "local", "current"`という固定値をハードコードしていたという、より深刻な形骸化を発見した。
+- **範囲拡大:** ユーザーの依頼で、DBスキーマ・`state`（`LineageState`）全体に対象を広げて同型のパターンを棚卸しした結果、`agreements.turn`/`evidence`、`decisions.reason_missing`、`state["risk_flag"]`（BL-064）、R5で新設した`internal_thought_process`/`goal_shift_events`の消費経路欠如（BL-065）、whiteboardの編集履歴非表示（BL-066）、完全未使用の`chat_history`/`current_goal`テーブル（BL-067）を発見。ユーザーから、まとめて1つの大きなBLにせず類似性・依存関係で分類するよう指示があり、BL-064〜BL-068の5件に分けて起票した。
+- **BL-064の解決:** ユーザーと項目ごとに協議し、Agreement3軸は完全削除（Phase側で目的を果たせているため重複と判断）、`turn`/`risk_flag`も完全削除、`evidence`/`reason_missing`は表示への配線を選択。実装中、`integrator_node`の成果物統合ドキュメント生成箇所に`d['turn']`への参照漏れがあることをテスト実行で発見・修正した。
+- **Hydrate構想の想起（BL-068/BL-069）:** `current_task_summary`が「どこからも読まれない」と分かったことを受け、ユーザーが「これは`docs/refs`のHydrate 3段グラデーション構想（直近Nターン生ログ＋それ以降を定期要約）に由来する設計で、消費側が未実装のまま放置されている」と補足し、BL-068として起票。さらにユーザーは「木を見て森を見ず」対策として、L1（タスク内）〜L4（フェーズ超え）というズームアウト思考フレームワークを提案。AIがsequential-thinkingで検討した結果、L3/L4相当のデータ（`resource_claims`/`global_constraints`）は既に存在するが後追いの監査としてのみ機能しており、Expert自身が決定前に能動的にズームアウトする経路が空白だと整理した。調査の結果`call_expert`は既に全フェーズ・全タスクの`phases_json`を注入済みだが、BL-025のスコープガードレールがそれを能動的に使うことを事実上禁止していると判明。ユーザーは正式なL1-L4段階分けは不要とし、「次フェーズのタスクが今の決定の前提を覆しうると気づく」程度の軽量な指示で十分と後日補足し、BL-069として起票した。
+- **決定者:** t-momose（各フィールドの削除/表示配線の判断、BL分類方針、L1-L4提案とその後の簡略化補足）、Claude Sonnet 5（棚卸し調査・sequential-thinkingによる設計整理・実装）
+- **検証:** オフラインスモークテスト計96件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。
+- **関連:** [BL-064](issue_backlog.md#bl-064-合意決定メタデータ3軸区分turnevidencereason_missingrisk_flagが書き込まれるのみで監査ロジック表示のどこからも消費されていない)、[BL-065](issue_backlog.md#bl-065-r5で新設したdb永続化情報internal_thought_processgoal_shift_eventsの消費表示経路が未設計)、[BL-066](issue_backlog.md#bl-066-whiteboard_draftsの編集履歴author_roleedit_summaryがバージョン管理はされるが差分執筆者情報として一切表示されない)、[BL-067](issue_backlog.md#bl-067-未使用のsqlテーブルchat_historycurrent_goalの整理)、[BL-068](issue_backlog.md#bl-068-hydrateスタイルのコンテキスト階層化直近nターン生ログそれ以降の定期要約が設計のみで未実装のまま放置されている)、[BL-069](issue_backlog.md#bl-069-expertが決定前にフェーズタスク表全体を見渡して他フェーズとの資源競合に気づけるよう軽量な指示を追加する)
+
+---
+
+## 論点64: Freeze（D-044）とBL-062のトレードオフ再検討 — Freeze一時休止（D-045）とBL-062のDetector限定解消
+
+- **発端:** BL-065（BL-064から派生した、R5永続化情報の消費経路欠如）とBL-062（open状態のまま残っていたP1案件）を相談する中で、ユーザーが「Freezeは、ユーザーの決定は絶対（ただし検証手段なし）というAIの判断を妄信させることになり得る」と再考。一方「BL-062でDetectorが差し戻した場合にApprovedなagreementを修正できない状態の方が矛盾が生じる（前段のAIが別の考えを提案しさらにApprovedされると、Detectorが否決したagreementが誤ったまま永続化される）」と指摘し、両者を天秤にかけてFreezeを一時休止（実装は削除せず）し、BL-062完了条件の①②案を採用する方針を決めた。
+- **AIの追加調査:** 実装着手前にBL-062完了条件の①案（write_agreementの権限モデル拡張）を再検証したところ、**実装は不要**と判明した。`_check_write_permission`は`status`のみを制限し`action_type`は無制限であり、Detector/Reviewer/Arbiter/Integratorは全員既に`WRITE_AGREEMENT_TOOL`を保有し、最初から`status='Rejected'`かつ`action_type='SUPERSEDE'`を呼べる権限を持っていた。真の欠落は権限ではなく、(a) Detector等がそもそもagreements DBのtopic一覧をプロンプト上受け取っておらずtarget_topicを指定する材料がなかったこと、(b) SUPERSEDEを使えという運用指示がなかったこと、の2点だった。
+- **スコープの絞り込み:** AIから、Reviewer/Arbiter/Integratorは成果物全体審査・リソース配分・フェーズ横断統合という別種の役割であり、Detectorのような個別topic単位のSUPERSEDEが同じ意味を持つか自明でない旨を指摘し、4ロール一括実装かDetector限定かをユーザーに確認したところ、「Detectorのみ今回実装（推奨）」を選択。Reviewer/Arbiter/Integratorへの拡張はBL-070として分離した。
+- **実装内容:** `call_detector`に`_build_agreements_context_from_db`によるagreements DBビューを新規注入し、`constraint_issue="major"`時にwrite_agreementを`action_type="SUPERSEDE"`, `status="Rejected"`, `target_topic=<DBのtopic文字列>`で呼び出すよう明示的に指示する一文を追加。`generate_user_utterance_node`の2箇所の`query_AI`呼び出しから`FREEZE_AGREEMENT_TOOL`を除去し、Freezeを呼び出し不能にした（`freeze_agreement()`本体・`is_frozen`ガード・🔒表示ロジックは削除せず温存、再開時はtools配線を戻すのみ）。
+- **決定者:** t-momose（Freeze休止・BL-062優先の判断、実装範囲をDetector限定に絞る判断）、Claude Sonnet 5（技術調査による①案不要の発見、スコープ分離の提案）
+- **検証:** 新規`tests/test_bl062_detector_supersede.py`（4件）を含め、オフラインスモークテスト計100件Pass。`python -m py_compile`合格。
+- **関連:** [D-044](decision_log.md#d-044-f-83-freeze機能の権限をuserロールのみに限定し独立した専用ツールとして実装する)（`superseded`）、[D-045](decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する)、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)、[BL-070](issue_backlog.md#bl-070-supersede運用指示をreviewerarbiterintegratorにも拡張するかの検討)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
@@ -796,3 +821,5 @@
 | 2026-07-23 | 論点60を追記。ユーザーの依頼により`cela_r5_design_v2.md`をBL-041/048/050/051/061の実装内容に合わせて同期。§0（Detectorの2段構成化）、§1（BL-048/051の軽量先行実装とBL-061の配線教訓）、§2（BL-050の一部先行実装とBL-037/043の役割転換方針）、§3（Freezeの実装方式を実際の`_build_agreements_context`に合わせて書き直し）、§4（`arbiter_node`が実際に発火するようになったこと・新`resource_claims`スキーマ）に★2026-07-23追記を反映。コード変更なし、`check_docs_consistency.py`合格。 |
 | 2026-07-23 | 論点61を追記。R5実装計画の策定中、ユーザーが「Detectorはユーザー/エキスパートの決定まで破棄できたか？」と根本的な疑問を提起。調査の結果、Detector等の`major`判定・Rejected書き込みが既存Agreementを構造的にSUPERSEDE/無効化できないことを発見し、R5実装とは切り離しBL-062として起票のみに留める判断、decision_extractor役割転換の見送り、Freeze権限をuserロールのみに限定する判断の3点を記録。実装計画を`docs/design/r5/cela_r5_impl_Plan.md`として保存。 |
 | 2026-07-23 | 論点62を追記。`cela_r5_impl_Plan.md`に基づきR5実装（F-2.1/F-3.7/F-8.3 Freeze/GoalShiftEvent）を完了。BL-063として新規起票・`done`化、Freeze権限限定の決定をD-044として記録。新規テスト14件含めオフラインスモークテスト計96件Pass。 |
+| 2026-07-23 | 論点63を追記。ユーザーがAgreementの3軸区分の活用有無を質問したことを契機に、DBスキーマ・state全体の「書くが読まない」情報を棚卸し。Phase側3軸は実は`phases_json`経由で消費されていたという前回報告の誤りを訂正しつつ、Agreement側3軸はWRITE_AGREEMENT_TOOLに存在せず主経路がハードコードしていたというより深刻な形骸化を発見。BL-064〜BL-068に分類して起票し、BL-064はユーザーと協議の上完全解決（`done`化）。Hydrate 3段グラデーション構想（BL-068）とズームアウト思考フレームワーク提案（BL-069）も記録。 |
+| 2026-07-24 | 論点64を追記。BL-062・BL-065の相談中、ユーザーがFreeze（D-044）の「検証手段のない絶対視」というリスクを再考し、BL-062の矛盾（Detectorの正しい否決がApprovedを覆せず永続化する）解消を優先する判断をした。実装前調査でBL-062完了条件①（権限モデル拡張）は不要と判明（権限は既に存在、真の欠落はDBビュー未提示とSUPERSEDE運用指示の欠如）。ユーザーの判断でDetector限定に実装範囲を絞り、Reviewer/Arbiter/Integratorへの拡張はBL-070として分離。`call_detector`へのagreements DBビュー注入＋SUPERSEDE指示、Freezeの一時休止（tools配線除去、本体は温存）をD-045として実装。新規テスト4件含めオフラインスモークテスト計100件Pass。 |

@@ -1943,7 +1943,7 @@ facilitatorは「なぜ自分が呼ばれたか」を一切知らされないま
 | 状態 | `partial`（Detector限定で実装済み。Reviewer/Arbiter/Integratorへの拡張はBL-070として分離） |
 | 優先度 | P1 |
 | 依存 | [BL-034](issue_backlog.md#bl-034-deliverableのファイル保存がユーザー承認前に無条件で発生する)（decision_extractorの役目縮小傾向の指摘、同系統） |
-| 関連 | [cela_r5_impl_Plan.md](r5/cela_r5_impl_Plan.md)、[decision_log.md D-045](decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する)、[BL-070](issue_backlog.md#bl-070-supersede運用指示をreviewerarbiterintegratorにも拡張するかの検討)、[decision_lineage.md 論点61](decision_lineage.md)・[論点63](decision_lineage.md) |
+| 関連 | [cela_r5_impl_Plan.md](r5/cela_r5_impl_Plan.md)、[decision_log.md D-045](decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する)、[BL-070](issue_backlog.md#bl-070-supersede運用指示をreviewerarbiterintegratorにも拡張するかの検討)、[decision_lineage.md 論点61](decision_lineage.md)・[論点64](decision_lineage.md) |
 
 **内容:**
 

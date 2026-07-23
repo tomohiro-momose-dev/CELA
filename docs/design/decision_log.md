@@ -699,7 +699,7 @@
 | 決定内容 | (1) `FREEZE_AGREEMENT_TOOL`をUser AIの`query_AI`呼び出し（`generate_user_utterance_node`、2箇所）のtoolsリストから外し、呼び出し不能にする。`freeze_agreement()`/`_freeze_agreement_tool_impl()`/`TOOL_DISPATCH`登録/`is_frozen`ガード/`_build_agreements_context`の🔒表示は一切削除せず温存する（再開時はtools配線を戻すのみで足りる設計）。(2) `call_detector`に`_build_agreements_context_from_db`による既存agreements DBビューを新規に注入し、`constraint_issue="major"`時にはwrite_agreementを`action_type="SUPERSEDE"`, `status="Rejected"`, `target_topic=<DBのtopic文字列>`で呼び出すよう明示的に指示する一文を追加する。(3) Reviewer/Arbiter/Integratorへの同様の拡張は、各ロールの役割（成果物全体審査・リソース配分・フェーズ横断統合）にtopic単位SUPERSEDEが本当に馴染むかの検討が必要なため、BL-070として別途起票し今回は対象外とする。 |
 | 影響 | `cela_main.py`（`call_detector`へのagreements_text注入＋SUPERSEDE指示追加、`generate_user_utterance_node`の2箇所からFREEZE_AGREEMENT_TOOL除去）。新規`tests/test_bl062_detector_supersede.py`（4件）でDetectorへの配線・Freeze休止の両方を確認。 |
 | 関連 BL | [BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)、[BL-063](issue_backlog.md#bl-063-r5実装f-21拡張f-37f-83-freezegoalshiftevent)（F-8.3の実装元）、[BL-070](issue_backlog.md#bl-070-supersede運用指示をreviewerarbiterintegratorにも拡張するかの検討) |
-| 参照 | [decision_lineage.md 論点63](decision_lineage.md) |
+| 参照 | [decision_lineage.md 論点64](decision_lineage.md) |
 
 ---
 
