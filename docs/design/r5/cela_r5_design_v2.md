@@ -113,6 +113,8 @@ def write_agreement_tool_impl_with_thought(raw_args: dict, internal_thought_proc
 
 **運用方針**: 全ての`decisions`/`agreements`レコードに思考ログを保存すると容量・トークンコストが肥大化するため、要件定義書付録A.6での議論を踏まえ、**Detectorが差し戻した際、Reflectionが停滞と判定した際、およびRejected判定が下された際にのみ**思考ログをスナップショット保存する限定運用とする（全件保存はN-3のトークン消費効率改善という非機能要件と矛盾するため）。
 
+**★2026-07-23追記（BL-050との関係）**: BL-050（`partial`）が、本節と隣接する「決定事項の変遷履歴の可視化」を先行して一部実装済み。`_build_agreements_context`に、同一topicの直前Superseded版の内容・`reason_why`を差分表示する仕組み、および現行行自身の`reason_why`表示を追加した（D-050関連コミット、`tests/test_bl041_bl050.py`）。あわせて`WRITE_AGREEMENT_TOOL.reason_why`とdecision_extractor抽出プロンプトに、UPDATE時は「前の値から何故変わったか」を明記するよう要求する文言を追加済み。ただしBL-050自身の完了条件3番目（`decision_extractor`の役割転換：抽出役→理由監査役）は、BL-037の既存の決定通り**本節（F-3.7）の実装に合わせて具体化する**方針のまま据え置かれている。F-3.7に着手する際は、この役割転換をあわせて設計すること（BL-050を読み直したうえで、思考ログの強制記録と理由監査役の両方を一体で設計するのが望ましい）。
+
 ---
 
 ## 3. F-8.3：Freeze機能
