@@ -104,6 +104,7 @@
 | BL-070 | 中 | `cela_main.py` (`call_reviewer`/`call_resource_arbiter`/`call_integrator`) | BL-062のDetector限定実装（D-045）に伴い分離。Reviewer/Arbiter/Integratorも技術的には`WRITE_AGREEMENT_TOOL`を保有し`status='Rejected'`かつ`action_type='SUPERSEDE'`を呼べる権限を既に持つが、3ロールとも現状agreements DBのtopic一覧をプロンプト上受け取っておらず、かつ成果物全体審査・リソース配分・フェーズ横断統合という別種の役割のため、topic単位のSUPERSEDEが同じ意味を持つかの検討が必要。Detectorでの実運用結果を見てから拡張要否を判断する方針 | P2 |
 | BL-071 | 高 | `cela_main.py` (`decision_extractor_node`/`integrator_node`/`_build_agreements_context`) | ユーザーの実ドライランで`orchestrator_node`実行中に`TypeError: '<' not supported between instances of 'NoneType' and 'float'`でプロセス全体がクラッシュ。原因は`decision_extractor_node`の2箇所と`integrator_node`のAgreement辞書リテラルが元々`timestamp`キーを持っておらず、`db_append_agreement`のINSERTでDB上`timestamp`列がNULLになっていたこと。R5（BL-063）で追加した`_build_agreements_context`のis_frozen優先ソート（`a.get("timestamp", 0)`）はキーが存在する場合はdefault値を使わないため、None同士・Noneとfloatの比較でクラッシュした | P0 |
 | BL-072 | 高 | `cela_main.py` (`_query_AI_live`) | BL-071修正後の再ドライランで、`expert_node`のstreaming受信中に`httpx.ReadTimeout`が発生しプロセス全体がクラッシュ。BL-059（`httpx.RemoteProtocolError`が絞り込んだ例外タプルから漏れていた事例）と同型で、`httpx.ReadTimeout`もopenai SDKの`APITimeoutError`へラップされず生のまま送出されていた。個別の派生例外を都度追加するのではなく、`ReadTimeout`/`ConnectTimeout`/`WriteTimeout`/`PoolTimeout`を包含する親クラス`httpx.TimeoutException`を例外タプルに追加して解消 | P0 |
+| BL-073 | 中 | `cela_main.py` (`decision_extractor_node`/`_commit_agreement_from_tool`) | `entry_type="Directive"`のagreementは、対応するtask_idのDeliverableが承認されても`status="Proposed"`のまま遷移させる経路が無く永久にDBへ残っていた。`reflection_node`の「未解決」抽出（`status=="Proposed"`の全件、entry_type不問）に既に履行済みの指示がノイズとして出続け、実ドライランでReflectionが毎ターン自問自答を強いられていた（実害はなかったが放置すると誤判定を誘発しうる根本課題）。Deliverableが`Approved`/`Approved_with_Conditions`/`Implicitly_Accepted`へ遷移した際、対応するtask_idのDirectiveも自動的に`Approved`へ解決する`_resolve_directive_for_task`を新設し、`decision_extractor_node`のUPDATE分岐と`_commit_agreement_from_tool`の両経路から呼び出すよう解消 | P2 |
 
 ---
 
@@ -2226,6 +2227,35 @@ BL-059と同型の問題である。`_query_AI_live`の単一の`try`ブロッ�
 
 ---
 
+### BL-073: `entry_type="Directive"`のagreementが対応タスク完了後もstatus="Proposed"のまま永久残留する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| 関連 | `reflection_node`の未解決抽出（`agreements.status=="Proposed"`の全件、`cela_main.py:3444`） |
+
+**内容:**
+
+ユーザーとログ（`log/2026-07-24/0647`）をレビューする中で発見。`reflection_node`の内省監査プロンプトは「未解決のまま残っている検討中の項目」として`agreements`のうち`status=="Proposed"`の全件（`entry_type`不問）を提示する。ところが`entry_type="Directive"`（Userのタスク指示）は、`decision_extractor_node`のプロンプト仕様上CREATE時に`status="Proposed"`で書き込まれた後、これを`Approved`等へ遷移させる経路が一切存在しなかった。ステータスが更新されるのは同じtask_idの`entry_type="Deliverable"`側のみで、指示そのものはDB上いつまでも`Proposed`のまま残り続ける。
+
+実ドライランでは、既に完了・承認済みのtask_1_1/task_1_3の指示がReflectionの「未解決」リストに出続け、Reflection自身が「もう終わっているのになぜProposedのままか」と長々自問自答した末に「実際の完了証拠を優先すべき」と毎回自己修正していた（致命的ではないが、監査のたびに無駄な思考トークンを消費し、将来的に判断を誤らせるリスクがある構造的ノイズ）。
+
+**対応:** 対症療法（Directiveを未解決抽出から除外する）ではなく根本解決を採用。新規`_resolve_directive_for_task(conn, run_id, task_id, phase_id, resolved_by)`関数を追加し、対応するtask_idの`entry_type="Directive"`かつ`status="Proposed"`の最新agreementを`Superseded`化した上で`status="Approved"`の新レコードとして追記する。この関数を、Deliverableの状態遷移が起こる2つの経路の両方から呼び出す：
+
+1. `decision_extractor_node`のUPDATE分岐（Userの自然言語承認をdecision_extractorが抽出する経路）。
+2. `_commit_agreement_from_tool`（Expert/Userが`write_agreement`ツールを直接呼ぶ経路）。
+
+いずれも新設した`RESOLVING_DELIVERABLE_STATUSES = {"Approved", "Approved_with_Conditions", "Implicitly_Accepted"}`に該当する場合にのみ発火する（`Rejected`/`Proposed`では指示は未解決のままとする）。
+
+**完了条件:**
+
+- 新規`tests/test_bl073_directive_auto_resolve.py`（4件）: `_resolve_directive_for_task`の遷移・no-op動作、`_commit_agreement_from_tool`経由でのDeliverable承認に伴うDirective自動解決、両経路のソースへの配線確認。
+- オフラインスモークテスト計107件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。
+- 実LLM再ドライランでの効果確認（Reflectionの未解決リストからApproved済みDirectiveが消えること）は次回待ち。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -2297,3 +2327,4 @@ BL-059と同型の問題である。`_query_AI_live`の単一の`try`ブロッ�
 | 2026-07-24 | ユーザーとBL-062・BL-065の対応を相談する中で、Freeze機能（D-044）を再考し「検証手段のないままユーザー/AIの決定を絶対視するFreeze」より「Detectorの正しいmajor判定がApproved agreementを覆せず永続化する矛盾（BL-062）」の解消を優先する判断がユーザーからあった。実装前調査で、BL-062完了条件の①案（権限モデル拡張）はそもそも不要（`_check_write_permission`は`status`のみ制限し`action_type`は無制限、Detector等は最初から`status='Rejected'`+`action_type='SUPERSEDE'`を呼べた）と判明し、真の欠落はDetectorがagreements DBのtopic一覧をプロンプト上受け取っていなかったこと・SUPERSEDE運用指示がなかったことの2点と特定。ユーザーの指示によりDetector限定で実装範囲を絞り、Reviewer/Arbiter/Integratorへの拡張はBL-070として分離。`call_detector`への`_build_agreements_context_from_db`注入とSUPERSEDE指示追加、`generate_user_utterance_node`の2箇所から`FREEZE_AGREEMENT_TOOL`除去（本体・ガード・表示は温存）を実装し、D-045として記録（D-044は`superseded`化）。BL-062を`partial`化、BL-070を新規起票。新規`tests/test_bl062_detector_supersede.py`（4件）を含めオフラインスモークテスト計100件Pass、`python -m py_compile`合格。 |
 | 2026-07-24 | ユーザーの依頼により`STATUS.md`・`phase_gates.md`をR4/R5の実態に合わせて更新（Phase 5節新設、P3a-1/P3a-2/P3b-1を実装確認済みとして☑化）。直後、ユーザーが実ドライランを実行し`orchestrator_node`で`TypeError: '<' not supported between instances of 'NoneType' and 'float'`によるプロセスクラッシュを報告。調査の結果、`decision_extractor_node`・`integrator_node`のAgreement辞書リテラルが`timestamp`キーを元々持たずDB上NULLになっていたところ、R5（BL-063）で追加した`_build_agreements_context`のis_frozen優先ソートが初めてこれを比較に使い顕在化したクラッシュと判明（BL-050の`_find_prior_superseded`は同種の状況を`or 0`パターンで既に回避済みだった）。ソートキーを`a.get("timestamp") or 0`に修正し、3箇所のAgreement辞書リテラルに`"timestamp": time.time()`を追加。新規`tests/test_bl071_agreement_timestamp_crash.py`（2件）を含めオフラインスモークテスト計102件Pass。BL-071として新規起票・`done`化。 |
 | 2026-07-24 | BL-071修正後の再ドライランで、`expert_node`のstreaming受信中に`httpx.ReadTimeout`が絞り込んだ例外タプルから漏れ未捕捉のままプロセスクラッシュ（BL-059と同型の問題）。個別の派生例外を都度追加するのではなく、`ReadTimeout`/`ConnectTimeout`/`WriteTimeout`/`PoolTimeout`を包含する親クラス`httpx.TimeoutException`を`_query_AI_live`の例外タプルに追加して解消。新規`tests/test_bl072_httpx_timeout_retry.py`（1件）を含めオフラインスモークテスト計103件Pass。BL-072として新規起票・`done`化。 |
+| 2026-07-24 | ユーザーと同ドライラン（`log/2026-07-24/0647`）のR4/R5機能稼働レビューを行う中で、Reflectionの内省監査ログが完了済みタスクの指示（Directive）を「未解決」として繰り返し自問自答している様子を発見。調査の結果、`entry_type="Directive"`のagreementは`decision_extractor_node`のUPDATE分岐・`_commit_agreement_from_tool`のいずれからも遷移させる経路がなく、CREATE時の`status="Proposed"`のままDBに永久残留する構造的欠陥と判明。ユーザーの指示により、対症療法（未解決抽出からDirectiveを除外）ではなく根本解決（②案）を採用し、新設`_resolve_directive_for_task`をDeliverable承認の両経路（decision_extractor/write_agreementツール）から呼び出しDirectiveを自動的に`Approved`へ遷移させる実装を行った。新規`tests/test_bl073_directive_auto_resolve.py`（4件）を含めオフラインスモークテスト計107件Pass、`check_docs_consistency.py`合格。BL-073として新規起票・`done`化。 |
