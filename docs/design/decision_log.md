@@ -673,6 +673,21 @@
 
 ---
 
+### D-044: F-8.3 Freeze機能の権限を`user`ロールのみに限定し、独立した専用ツールとして実装する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-23 |
+| 状態 | `decided` |
+| 決定者 | t-momose（権限範囲・実装方式の選択） / Claude Sonnet 5（選択肢の提示・監査ガバナンス欠落の調査） |
+| **決定理由** | R5実装計画（F-8.3 Freeze機能）の設計相談中、Freezeのトリガー方法（新規専用ツール vs 既存`WRITE_AGREEMENT_TOOL`拡張）を確認したところ、ユーザーから「Freezeされた項目を後からDetectorがひっくり返したらどうするか」という懸念、および「そもそもDetectorはユーザー/エキスパートの決定まで破棄できたか？」という根本的な疑問が提起された。調査の結果、Detector等の`major`判定・`Rejected`書き込みは既存Agreementを構造的にSUPERSEDE/無効化する仕組みを持たないことが判明した（BL-062として別途起票）。この根深い課題はFreeze機能単体では解消できないため、Freezeの権限を、既存の`ALLOWED_STATUS_BY_ROLE`で最も広い権限を持つ`user`ロール（人間代理としての最終決定権）に限定することで、少なくともFreeze自体の意味（絶対に覆してはならない決定への恒久ピン留め）が損なわれないようにする方針とした。 |
+| 決定内容 | (1) 既存の`WRITE_AGREEMENT_TOOL`（既に14パラメータ）を拡張せず、`agreement_id`と`reason`のみを持つ新規専用ツール`FREEZE_AGREEMENT_TOOL`を追加する。(2) `TOOL_DISPATCH["freeze_agreement"]`は`_CURRENT_CALLER_ROLE == "user"`の場合のみ許可し、それ以外はエラーを返す。(3) User AIのtoolsリストにのみ`FREEZE_AGREEMENT_TOOL`を追加し、Expert/Detector/Reviewer/Arbiter/Integratorには付与しない。(4) unfreeze機構は設けない（Freezeは恒久ピン留めという設計意図のため）。(5) `_commit_agreement_from_tool`のSUPERSEDE/UPDATE分岐に、対象行の`is_frozen==1`チェックを追加し拒否する。 |
+| 影響 | `cela_main.py`（`FREEZE_AGREEMENT_TOOL`新設、`freeze_agreement()`/`_freeze_agreement_tool_impl()`新設、`TOOL_DISPATCH`への登録、User AIのtools配線、`_commit_agreement_from_tool`のガード追加、`_build_agreements_context`の`is_frozen`ソート＋🔒表示）。新規`tests/test_r5_thought_log_freeze_goalshift.py`でFreeze関連5件のテストを確認。 |
+| 関連 BL | [BL-063](issue_backlog.md#bl-063-r5実装f-21拡張f-37f-83-freezegoalshiftevent)、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（本決定の背景にある根深い課題、別途起票のみ） |
+| 参照 | [decision_lineage.md 論点61](decision_lineage.md) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
