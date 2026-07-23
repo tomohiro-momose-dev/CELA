@@ -304,7 +304,7 @@ STRUCTURED_OUTPUT_LABEL_KEYWORDS = ("detector", "decision extractor", "reflectio
 
 
 MAX_TOKENS_BY_ROLE = {
-    "expert": 501000,
+    "expert": 262144,
     "user": 262144,
     "detector": 262144,
     "reflection": 262144,
