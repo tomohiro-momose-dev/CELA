@@ -658,6 +658,21 @@
 
 ---
 
+### D-043: facilitatorへreflectionの判定理由（`note`）を明示的に受け渡す（未使用の`decisions`引数を置き換える）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-23 |
+| 状態 | `decided` |
+| 決定者 | t-momose（現象の報告・即時修正の指示） / Claude Sonnet 5（原因特定・実装） |
+| **決定理由** | ユーザーが`log/2026-07-23/1656`でfacilitatorが発火したログを共有し確認を依頼したところ、直前のreflectionが`still_aligned=false, discussion_status="stagnant"`と判定し`note`に5点の具体的な未解決問題（与条件無断変更・でっちあげ疑い数値等）を記録していたにもかかわらず、facilitator自身の思考ログは「膠着していない」と明確に矛盾する独自の評価をしていたことが判明した。実際に送信されたプロンプト（`log_with_prompt.md` 57021行目）を確認したところ、`goal`と直近chat_historyのみが含まれ、reflectionの判定理由は一切含まれていなかった。コード調査の結果、`call_facilitator(goal, chat_history, decisions)`の`decisions`引数はプロンプトテンプレート内で完全に未使用（デッドパラメータ）であり、reflectionの`note`は`decisions`テーブルの`why`列にしか保存されず`state`上に存在しなかったため、facilitatorへは構造的に伝わりようがなかったことを特定した。 |
+| 決定内容 | `LineageState`に`last_reflection_note: str`を新設し、`reflection_node`が`result["note"]`をここへ保存する。`call_facilitator`のシグネチャを`(goal, chat_history, decisions)`から`(goal, chat_history, reflection_note="")`へ変更し、未使用の`decisions`引数を廃止。プロンプトに「あなたが呼ばれた理由（直前のReflection監査の判定）」ブロックを追加し、これを最優先の出発点として扱い自己判断で無視・軽視しないよう明記する。`reflection_note`が空の場合（旧checkpoint復帰等）はフォールバック文言を使用する。`facilitator_node`の呼び出しを`state.get("last_reflection_note", "")`を渡す形に変更。 |
+| 影響 | `cela_main.py`（`LineageState`、`reflection_node`、`call_facilitator`、`facilitator_node`）。`call_facilitator`の呼び出しシグネチャ変更は本関数の唯一の呼び出し元（`facilitator_node`）のみに影響。新規`tests/test_bl061_facilitator_reflection_note.py`（4件）で、reflection_nodeによる保存・call_facilitatorのプロンプトへの反映・空値時のフォールバック・facilitator_nodeからの受け渡しを確認。 |
+| 関連 BL | [BL-061](issue_backlog.md#bl-061-facilitatorがreflectionの判定理由を一切受け取れず独立に時に食い違う状況判断をしていた)（BL-041が指摘するエスカレーション機構未実装とは別種の、より具体的な伝達漏れバグ） |
+| 参照 | [decision_lineage.md 論点59](decision_lineage.md) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
