@@ -22,9 +22,9 @@ Phase 1（R1）・Phase 2（R2）はともにDone。**R3a（自律的DB/ファ�
 
 | 項目 | 状態 |
 |------|------|
-| **アクティブ Phase** | Phase 4 / R4（ホワイトボード差分パッチ化）— 実装完了、実LLM再ドライランでのA/Bテスト待ち |
-| **Phase 状態** | R3a/R3b: 実装完了（オフラインスモークテスト50件Pass、実ドライランで検証、BL-039/040/038はいずれも`done`）。R4: 実装完了（オフラインスモークテスト計16件Pass、実LLM検証未実施） |
-| **次マイルストーン** | 実LLM再ドライランでのA/Bテスト（トークン消費・矛盾の早期発見率・ロールバック正確性、`cela_r4_design.md` §3） → 指標C実測 → BL-005/BL-041（facilitator/Arbiter再設計）着手 |
+| **アクティブ Phase** | Phase 5 / R5（思考プロセス監査／F-3.7／F-8.3 Freeze／GoalShiftEvent）— 実装完了（BL-063）、後続のBL-062/064〜070対応も完了・一部`open`。実LLM再ドライラン待ち |
+| **Phase 状態** | R3a/R3b: 実装完了（オフラインスモークテスト50件Pass、実ドライランで検証、BL-039/040/038はいずれも`done`）。R4: 実装完了（オフラインスモークテスト計16件Pass、実LLM検証未実施）。R5: 実装完了（オフラインスモークテスト計100件Pass、BL-063`done`、BL-062は`partial`〈Detector限定〉、F-8.3 FreezeはD-045で一時休止、BL-064`done`、BL-065〜070は`open`）。実LLM再ドライラン未実施 |
+| **次マイルストーン** | 実LLM再ドライラン（R4のA/Bテスト＋R5新機能の実効性確認＋BL-062のDetector SUPERSEDE実発火確認、いずれも次アクション） → 指標C実測 → BL-065〜070（GoalShiftEvent消費経路・whiteboard編集履歴表示・Hydrate階層化・Reviewer/Arbiter/Integratorへの拡張検討等）着手判断 |
 
 ---
 
