@@ -101,6 +101,7 @@
 | BL-067 | 低 | `cela_main.py` (`init_db`) | `init_db`で定義される`chat_history`/`current_goal`テーブルが、コード全体でINSERT/SELECTが一件も存在しない完全な死んだスキーマであることが判明。実体は`state["chat_history"]`/`state["goal"]`（インメモリ）とLangGraphのcheckpointerで完結している | P3 |
 | BL-068 | 中 | `cela_main.py` (`call_expert`のプロンプト、`current_task_summary`、`chat_history_window`) | `current_task_summary`は元々、docs/refsのHydrate構想（直近Nターン生ログ＋それ以降を定期要約で積み上げる3段グラデーション）に由来する設計だったが、消費側が未実装のまま放置されていたとユーザーが説明。`call_expert`には現在も「5ターン毎に議論のサマリーを出力せよ」という指示（`cela_main.py:2620`）が残るが、この出力を捕捉・蓄積する実装が存在せず、`chat_history_window`は直近N件を生ログのまま渡す固定窓のみで、それ以前のターンは要約されず単純に切り捨てられている | P2 |
 | BL-069 | 中 | `cela_main.py` (`call_expert`のプロンプト、`phases_json`、BL-025スコープガードレール) | ユーザーが「木を見て森を見ず」対策として、決定前にタスク→フェーズへとズームアウトして見渡す思考フレームワーク（L1〜L4）を提案。調査の結果、`call_expert`は既に全フェーズ・全タスクの`phases_json`を毎ターン埋め込んでいる（`cela_main.py:2686-2691`）が、直後のBL-025スコープガードレール（`cela_main.py:2700-2714`）が「他タスクの値を新たに算出・提案しない」と明記しており、Expertは全体表を見えていながら能動的に活用することを事実上禁止されていることが判明。この緊張関係はBL-041自身のコードコメントが既に指摘済みで、現状の緩和策はconfidence='provisional'タグ付けのみ。ユーザーは正式なL1-L4段階分けではなく、「次フェーズのタスクが今の決定の前提を覆しうると気づく」程度の軽量な指示追加で十分と後日補足 | P2 |
+| BL-070 | 中 | `cela_main.py` (`call_reviewer`/`call_resource_arbiter`/`call_integrator`) | BL-062のDetector限定実装（D-045）に伴い分離。Reviewer/Arbiter/Integratorも技術的には`WRITE_AGREEMENT_TOOL`を保有し`status='Rejected'`かつ`action_type='SUPERSEDE'`を呼べる権限を既に持つが、3ロールとも現状agreements DBのtopic一覧をプロンプト上受け取っておらず、かつ成果物全体審査・リソース配分・フェーズ横断統合という別種の役割のため、topic単位のSUPERSEDEが同じ意味を持つかの検討が必要。Detectorでの実運用結果を見てから拡張要否を判断する方針 | P2 |
 
 ---
 
@@ -1939,10 +1940,10 @@ facilitatorは「なぜ自分が呼ばれたか」を一切知らされないま
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（設計相談・BL起票のみ、実装は見送り） |
+| 状態 | `partial`（Detector限定で実装済み。Reviewer/Arbiter/Integratorへの拡張はBL-070として分離） |
 | 優先度 | P1 |
 | 依存 | [BL-034](issue_backlog.md#bl-034-deliverableのファイル保存がユーザー承認前に無条件で発生する)（decision_extractorの役目縮小傾向の指摘、同系統） |
-| 関連 | [cela_r5_impl_Plan.md](r5/cela_r5_impl_Plan.md)、[decision_lineage.md 論点61](decision_lineage.md) |
+| 関連 | [cela_r5_impl_Plan.md](r5/cela_r5_impl_Plan.md)、[decision_log.md D-045](decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する)、[BL-070](issue_backlog.md#bl-070-supersede運用指示をreviewerarbiterintegratorにも拡張するかの検討)、[decision_lineage.md 論点61](decision_lineage.md)・[論点63](decision_lineage.md) |
 
 **内容:**
 
@@ -1958,11 +1959,17 @@ R5実装計画（F-8.3 Freeze機能）の設計相談中、Freezeされた項目
 
 **実害:** 現時点で具体的な実データ破損は確認されていないが、Detectorが`major`判定を出しても、対応するAgreementがDB上「承認済み」のまま残り、後続タスクや最終統合（integrator）がこれを正当な確定値として参照し続けるリスクがある。F-8.3 Freeze機能は`user`ロールのみに権限を限定することで、この課題があってもFreeze自体の意味（恒久ピン留め）は損なわれないよう設計したが、Freeze対象でない通常のAgreement全般には本課題がそのまま残る。
 
-**完了条件（着手時、未着手）:**
+**2026-07-24追記（解消・Detector限定）:** ユーザーがFreeze機能（D-044）とBL-062のどちらを優先するか再検討し、「検証手段のないままユーザー/AIの決定を絶対視するFreeze」より「Detectorの正しい否決がDBに反映されず永続化する矛盾」の解消を優先する判断をした（[D-045](decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する)）。実装前の再調査で、完了条件の①案（権限モデル拡張）は**そもそも不要**と判明した——`_check_write_permission`は`status`のみを制限し`action_type`は無制限で、Detector/Reviewer/Arbiter/Integratorは全員既に`WRITE_AGREEMENT_TOOL`を保有し`status='Rejected'`かつ`action_type='SUPERSEDE'`を呼べる権限を最初から持っていた。真の欠落は権限ではなく、(a) Detector等がそもそも既存agreements DBのtopic一覧をプロンプト上受け取っておらず`target_topic`を指定する材料がなかったこと、(b) SUPERSEDEを使えという運用指示がなかったこと、の2点だった。
 
-- write_agreementの権限モデルを、「Detector等が明示的にSUPERSEDEできる」設計に拡張するか、「Detectorのmajor判定時に、対象agreementを自動的にSUPERSEDEする」機構を追加するか、設計判断が必要。
-- あるいは、`_build_agreements_context`の表示自体に「直近のDetector判定と矛盾していないか」を突き合わせるロジックを追加する案も検討の余地がある。
-- BL-050の完了条件3（decision_extractorの役割転換：抽出役→理由監査役）と統合して検討するのが筋が良い可能性がある（decision_extractorが「監査済みであることを保証する」役目を再度担う設計）。
+`call_detector`に`_build_agreements_context_from_db`によるDBビューを新規注入し、`constraint_issue="major"`時にはwrite_agreementを`action_type="SUPERSEDE"`, `status="Rejected"`, `target_topic=<DBのtopic文字列>`で呼び出すよう明示的に指示する一文を追加した。Reviewer/Arbiter/Integratorは成果物全体審査・リソース配分・フェーズ横断統合という別種の役割であり、topic単位のSUPERSEDEが同じ意味を持つか自明でないため、ユーザーの判断で今回はDetector限定とし、他3ロールへの拡張検討はBL-070として分離した。
+
+**完了条件:**
+
+- ~~write_agreementの権限モデルを拡張するか、自動SUPERSEDE機構を追加するか、設計判断~~ → 権限は既に存在したため権限モデル変更は不要と判明。
+- `call_detector`へのagreements DBビュー注入＋SUPERSEDE運用指示の追加 → `done`（本節参照）。
+- Reviewer/Arbiter/Integratorへの同様の拡張 → BL-070として分離、未着手。
+- BL-050の完了条件3（decision_extractorの役割転換）との統合検討は、引き続き保留。
+- オフラインテスト`tests/test_bl062_detector_supersede.py`（4件）で配線を確認。`python -m py_compile`合格。実LLM再ドライランでの実発火確認は次回待ち。
 
 ---
 
@@ -1980,7 +1987,7 @@ R5実装計画（F-8.3 Freeze機能）の設計相談中、Freezeされた項目
 
 1. **F-2.1拡張（思考プロセス監査）**: `_query_AI_live`のstreaming処理が受け取る`delta.reasoning`を、従来は💭表示で印字するのみで破棄していたが、新規モジュールグローバル`_LAST_REASONING_TEXT`（`get_last_reasoning_text()`ゲッター、BL-033の`_LAST_PYTHON_CALLS`と同型パターン）へ蓄積するよう変更。`LineageState`に`expert_last_reasoning`/`user_last_reasoning`を新設し、`expert_node`/`generate_user_utterance_node`がそれぞれセット。`call_detector`に「思考プロセス監査」ブロックを追加し、target_roleに応じてExpert/User AIいずれかのreasoningを提示する（数値監査パスに配線、v2設計書§1.3）。
 2. **F-3.7（思考ログの強制記録）**: `make_decision`に`internal_thought_process`パラメータを追加（既存呼び出しは省略可、後方互換）。トークンコスト抑制のため全件記録はせず、Detectorの`major`判定時・Reflectionの`stagnant`判定時・agreementsの`status='Rejected'`書き込み時のみ`get_last_reasoning_text()`をスナップショット保存する限定運用とした（v2設計書§2の方針通り）。
-3. **F-8.3 Freeze機能**: 新規`freeze_agreement()`関数＋専用ツール`FREEZE_AGREEMENT_TOOL`（`agreement_id`, `reason`のみのシンプルなスキーマ、既存`WRITE_AGREEMENT_TOOL`は汚さない）を追加し、User AIのtoolsリストにのみ配線（`user`ロール限定、D-044）。`_commit_agreement_from_tool`のSUPERSEDE/UPDATE分岐に、対象行が`is_frozen==1`の場合は処理を拒否するガードを追加（unfreeze機構は設けない、恒久ピン留め）。`_build_agreements_context`に`is_frozen`優先のソートキーと🔒アイコン表示を追加。
+3. **F-8.3 Freeze機能**: 新規`freeze_agreement()`関数＋専用ツール`FREEZE_AGREEMENT_TOOL`（`agreement_id`, `reason`のみのシンプルなスキーマ、既存`WRITE_AGREEMENT_TOOL`は汚さない）を追加し、User AIのtoolsリストにのみ配線（`user`ロール限定、D-044）。`_commit_agreement_from_tool`のSUPERSEDE/UPDATE分岐に、対象行が`is_frozen==1`の場合は処理を拒否するガードを追加（unfreeze機構は設けない、恒久ピン留め）。`_build_agreements_context`に`is_frozen`優先のソートキーと🔒アイコン表示を追加。**2026-07-24追記**: [D-045](decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する)によりFreezeは一時休止（User AIのtoolsリストから`FREEZE_AGREEMENT_TOOL`を除去。本体・ガード・表示ロジックは温存）。BL-062（Detectorの誤判定がApprovedを覆せず永続化する矛盾）の解消を優先した判断のため。
 4. **GoalShiftEvent**: `init_db`に`goal_shift_events`テーブルを新規追加（v2設計書§4.1のDDLに`run_id`列を追加、他テーブルとの一貫性のため）。`call_resource_arbiter`のプロンプト・JSON出力スキーマに`requires_goal_constraint_change`を追加。新規`detect_goal_shift()`関数（v2設計書§4.2の擬似コード通り）と`db_append_goal_shift_event()`ヘルパーを追加し、`arbiter_node`が`call_resource_arbiter`呼び出し直後に配線。
 
 **今回のスコープ外（Plan mode相談で確定）:**
@@ -2131,6 +2138,28 @@ BL-064（Agreementの3軸区分）の議論の中で、ユーザーが直近で�
 - 新規のDBフィールド・ツールは追加せず、既存の`phases_json`埋め込み（`cela_main.py:2686-2691`）またはresource_claims関連の指示（`cela_main.py:2724-2735`）の近くに、「resource_claimsを伴う決定を確定させる前に、上記フェーズ・タスク表を見渡し、同じ制約名（total_cap）を主張しうる他のフェーズ・タスクがないか一度確認せよ」という軽量な指示文を追加する。
 - BL-025のスコープガードレール文言（他タスクの値を算出・提案しない）と矛盾しないよう、「提案・算出はしないが、気づきをreason_why/evidenceに書き添える、またはconfidence='provisional'に倒す」という着地点にする。
 - 実LLM再ドライランで、実際にこの気づきが発生するかを確認する（BL-041の完了条件と同様、次回ドライラン待ち）。
+
+---
+
+### BL-070: SUPERSEDE運用指示をReviewer/Arbiter/Integratorにも拡張するかの検討
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P2 |
+| 依存 | [BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（Detector限定で先行実装済み）、[decision_log.md D-045](decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する) |
+
+**内容:**
+
+BL-062の対応方針をユーザーと相談する中で、Detector/Reviewer/Arbiter/Integratorは全員技術的には既に`WRITE_AGREEMENT_TOOL`を保有し、`status='Rejected'`かつ`action_type='SUPERSEDE'`を呼べる権限を最初から持っていることが判明した。しかし、以下の理由からReviewer/Arbiter/Integratorへの拡張は今回のBL-062実装（D-045）のスコープから分離した。
+
+1. Reviewer/Arbiter/Integratorの3ロールとも、現状agreements DBのtopic一覧（`_build_agreements_context`相当）をプロンプト上受け取っておらず、`target_topic`を指定する材料がない（Detectorも同じ状態だったが、今回Detector限定でこれを解消した）。
+2. Reviewer（成果物全体のpassed/failed判定）・Arbiter（リソース配分の再調停）・Integrator（フェーズ横断の矛盾検知）は、Detectorのような「個別の会話ターンを1件ずつ監査する」役割とは異なり、topic単位のSUPERSEDEが同じ意味を持つかが自明ではない。例えばIntegratorが検知する「矛盾」は`affected_phases`（フェーズ単位）でありtopic単位ではないため、そのままSUPERSEDE指示を移植できるとは限らない。
+
+**完了条件（着手時、未着手）:**
+
+- Detectorでの実運用（実LLM再ドライラン）を経て、SUPERSEDE運用が実際に有効に機能するかを確認する。
+- Reviewer/Arbiter/Integratorそれぞれについて、「topic単位のSUPERSEDEが役割上意味を持つか」を個別に設計検討したうえで、必要と判断したロールにのみagreements DBビューの注入とSUPERSEDE運用指示を追加する。
 
 ---
 

@@ -678,13 +678,28 @@
 | 項目 | 内容 |
 |------|------|
 | 日付 | 2026-07-23 |
-| 状態 | `decided` |
+| 状態 | `superseded`（[D-045](#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する)により、Freeze自体を一時休止） |
 | 決定者 | t-momose（権限範囲・実装方式の選択） / Claude Sonnet 5（選択肢の提示・監査ガバナンス欠落の調査） |
 | **決定理由** | R5実装計画（F-8.3 Freeze機能）の設計相談中、Freezeのトリガー方法（新規専用ツール vs 既存`WRITE_AGREEMENT_TOOL`拡張）を確認したところ、ユーザーから「Freezeされた項目を後からDetectorがひっくり返したらどうするか」という懸念、および「そもそもDetectorはユーザー/エキスパートの決定まで破棄できたか？」という根本的な疑問が提起された。調査の結果、Detector等の`major`判定・`Rejected`書き込みは既存Agreementを構造的にSUPERSEDE/無効化する仕組みを持たないことが判明した（BL-062として別途起票）。この根深い課題はFreeze機能単体では解消できないため、Freezeの権限を、既存の`ALLOWED_STATUS_BY_ROLE`で最も広い権限を持つ`user`ロール（人間代理としての最終決定権）に限定することで、少なくともFreeze自体の意味（絶対に覆してはならない決定への恒久ピン留め）が損なわれないようにする方針とした。 |
 | 決定内容 | (1) 既存の`WRITE_AGREEMENT_TOOL`（既に14パラメータ）を拡張せず、`agreement_id`と`reason`のみを持つ新規専用ツール`FREEZE_AGREEMENT_TOOL`を追加する。(2) `TOOL_DISPATCH["freeze_agreement"]`は`_CURRENT_CALLER_ROLE == "user"`の場合のみ許可し、それ以外はエラーを返す。(3) User AIのtoolsリストにのみ`FREEZE_AGREEMENT_TOOL`を追加し、Expert/Detector/Reviewer/Arbiter/Integratorには付与しない。(4) unfreeze機構は設けない（Freezeは恒久ピン留めという設計意図のため）。(5) `_commit_agreement_from_tool`のSUPERSEDE/UPDATE分岐に、対象行の`is_frozen==1`チェックを追加し拒否する。 |
 | 影響 | `cela_main.py`（`FREEZE_AGREEMENT_TOOL`新設、`freeze_agreement()`/`_freeze_agreement_tool_impl()`新設、`TOOL_DISPATCH`への登録、User AIのtools配線、`_commit_agreement_from_tool`のガード追加、`_build_agreements_context`の`is_frozen`ソート＋🔒表示）。新規`tests/test_r5_thought_log_freeze_goalshift.py`でFreeze関連5件のテストを確認。 |
 | 関連 BL | [BL-063](issue_backlog.md#bl-063-r5実装f-21拡張f-37f-83-freezegoalshiftevent)、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（本決定の背景にある根深い課題、別途起票のみ） |
 | 参照 | [decision_lineage.md 論点61](decision_lineage.md) |
+
+---
+
+### D-045: F-8.3 Freeze機能を一時休止し、BL-062をDetector限定で先に解消する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-24 |
+| 状態 | `decided` |
+| 決定者 | t-momose（Freeze休止・優先順位の判断） / Claude Sonnet 5（技術調査・選択肢の提示） |
+| **決定理由** | BL-064（合意メタデータの棚卸し）に続きBL-062の対応を検討する中で、ユーザーが「Freezeはユーザーの決定を絶対視するが検証手段がなく、AIの判断を妄信させることになりかねない」と再考した。一方、BL-062が指摘する逆方向の矛盾（Detectorがmajor判定を出しても、対応するApproved agreementがDB上に誤って残り続け、後続タスク・最終統合がそれを正当な確定値として参照し続ける）は既に実害が具体的に想定される問題であり、ユーザーは両者を天秤にかけてFreezeを一時休止しBL-062の解消を優先する判断をした。調査の結果、BL-062完了条件の①案（write_agreementの権限モデル拡張）は実装不要と判明した——`_check_write_permission`は`status`のみを制限し`action_type`は無制限であり、Detector/Reviewer/Arbiter/Integratorは全員既に`WRITE_AGREEMENT_TOOL`を保有し`status='Rejected'`かつ`action_type='SUPERSEDE'`を呼べる権限を最初から持っていた。真の欠落は権限ではなく、(a) Detector等がそもそも既存agreements DBのtopic一覧をプロンプト上受け取っておらず`target_topic`を指定する材料がなかったこと、(b) SUPERSEDEを使えという運用指示がプロンプトに存在しなかったこと、の2点だった。さらに調査の結果、Reviewer/Arbiter/Integratorは成果物全体・リソース配分・フェーズ横断矛盾を扱う設計であり、Detectorのような個別topic単位のSUPERSEDEが同じ意味を持つかは自明でないため、ユーザーの判断で今回はDetector限定に実装範囲を絞った（[BL-070](issue_backlog.md#bl-070-supersede運用指示をreviewerarbiterintegratorにも拡張するかの検討)として他3ロールへの拡張検討は別途起票）。 |
+| 決定内容 | (1) `FREEZE_AGREEMENT_TOOL`をUser AIの`query_AI`呼び出し（`generate_user_utterance_node`、2箇所）のtoolsリストから外し、呼び出し不能にする。`freeze_agreement()`/`_freeze_agreement_tool_impl()`/`TOOL_DISPATCH`登録/`is_frozen`ガード/`_build_agreements_context`の🔒表示は一切削除せず温存する（再開時はtools配線を戻すのみで足りる設計）。(2) `call_detector`に`_build_agreements_context_from_db`による既存agreements DBビューを新規に注入し、`constraint_issue="major"`時にはwrite_agreementを`action_type="SUPERSEDE"`, `status="Rejected"`, `target_topic=<DBのtopic文字列>`で呼び出すよう明示的に指示する一文を追加する。(3) Reviewer/Arbiter/Integratorへの同様の拡張は、各ロールの役割（成果物全体審査・リソース配分・フェーズ横断統合）にtopic単位SUPERSEDEが本当に馴染むかの検討が必要なため、BL-070として別途起票し今回は対象外とする。 |
+| 影響 | `cela_main.py`（`call_detector`へのagreements_text注入＋SUPERSEDE指示追加、`generate_user_utterance_node`の2箇所からFREEZE_AGREEMENT_TOOL除去）。新規`tests/test_bl062_detector_supersede.py`（4件）でDetectorへの配線・Freeze休止の両方を確認。 |
+| 関連 BL | [BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)、[BL-063](issue_backlog.md#bl-063-r5実装f-21拡張f-37f-83-freezegoalshiftevent)（F-8.3の実装元）、[BL-070](issue_backlog.md#bl-070-supersede運用指示をreviewerarbiterintegratorにも拡張するかの検討) |
+| 参照 | [decision_lineage.md 論点63](decision_lineage.md) |
 
 ---
 
