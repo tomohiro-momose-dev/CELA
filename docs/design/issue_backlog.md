@@ -1334,6 +1334,8 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 - 提案1（すり合わせタスクを最初に置く／上書き機構）は、facilitator再設計とあわせて検討する将来課題として保留。
 - `agreements.resource_claims`を`state["global_constraints"]`へ集約するタイミング、`arbiter_node`の発火条件の設計は上記facilitator再設計と統合して検討する（未着手）。
 
+**2026-07-23追記（優先度の再確認）:** BL-048（reflection復旧）・BL-054/055（ドメイン先行監査・真の制約/条件の区別）の実装後、`log/2026-07-23/1656`でreflectionが実際に「ゴール・ドリフト検出（`aligned=False, status=stagnant`）」を正しく捕捉する場面を確認した（Expertが与条件の速度を無断で20km/h→28.8km/hに変更していた事例）。しかし、この検出の後に起きるのは`drift_flag=True`によるExpert/User AIへの**同じ形の差し戻し**（Detectorのmajorと同じ再プロンプト）のみで、提案3が想定していた「これ以上代替案を探すより、Userに『どの前提を崩すか』の決定を仰ぐ」という**エスカレーション**の役目は依然として存在しない。task_1_1が今も長時間収束しない一因はここにあり、reflectionの検出精度が上がったことで、逆にこのエスカレーション未実装のギャップがより明確になった（設計判断待ち、着手は引き続き保留）。
+
 ---
 
 ### BL-042: Detectorのconstraint_issue判定（minor/major境界）でツールループが同じ論点を延々再検討し、トークンを浪費する
