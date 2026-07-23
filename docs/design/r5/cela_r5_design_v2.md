@@ -256,9 +256,11 @@ def detect_goal_shift(state: LineageState, arbiter_result: dict) -> dict | None:
 
 ## 未確定事項まとめ
 
-- 1.2節：使用プロバイダが思考ログ（reasoning_content相当）を返すかどうかの実機確認が必要。
-- 4.2〜4.3節：`call_resource_arbiter`の戻り値スキーマ拡張（`requires_goal_constraint_change`）の追加実装が必要。★2026-07-23追記: `arbiter_node`自体が発火しない、というより根本的な前提の欠落はBL-041 MVP実装（D-042）で解消済み。残るのはこのフィールド追加と`goal_shift_events`テーブル・`detect_goal_shift`の新規実装のみ。
-- 5節：思考内エージェント化ループは本フェーズでは実装しない設計検証のみ。
+**★2026-07-23追記（実装完了）**: 本節が挙げていた1.2節・4.2〜4.3節の追加実装は、[cela_r5_impl_Plan.md](cela_r5_impl_Plan.md)に基づき実装完了した（BL-063、D-044）。`_query_AI_live`のreasoning捕捉（`get_last_reasoning_text()`）、`call_detector`への思考プロセス監査ブロック配線、`make_decision`のinternal_thought_process限定記録（F-3.7）、`freeze_agreement`/`FREEZE_AGREEMENT_TOOL`（F-8.3、userロール限定）、`goal_shift_events`テーブル・`requires_goal_constraint_change`・`detect_goal_shift`（GoalShiftEvent）を実装。新規`tests/test_r5_thought_log_freeze_goalshift.py`（14件）含めオフラインスモークテスト計96件Pass。実LLM再ドライランでの効果確認（Detectorの思考プロセス監査の実際の発火、Freeze運用、GoalShiftEventの実発火）は次回待ち。
+
+- ~~1.2節：使用プロバイダが思考ログ（reasoning_content相当）を返すかどうかの実機確認が必要。~~ → 実装完了（コードとしては`getattr(delta, "reasoning", None)`で対応済み。プロバイダが返さない場合は「(思考ログ取得不可)」表示にフォールバックする設計のため、機能停止はしない。実際にreasoningが返るかの実機確認は次回ドライラン待ち）。
+- ~~4.2〜4.3節：`call_resource_arbiter`の戻り値スキーマ拡張（`requires_goal_constraint_change`）の追加実装が必要。~~ → 実装完了。`arbiter_node`自体が発火しないという根本的な前提の欠落はBL-041 MVP実装（D-042）で既に解消済みで、本フィールド追加と`goal_shift_events`テーブル・`detect_goal_shift`もBL-063で実装完了。
+- 5節：思考内エージェント化ループは本フェーズでは実装しない設計検証のみ（変更なし、引き続き対象外）。
 
 **★2026-07-23追記（BL-041の残スコープとの切り分け）**: BL-041の既存ドラフト（[cela_facilitator_arbiter_redesign_BL041.md](../r1_r2_r3b_core/cela_facilitator_arbiter_redesign_BL041.md)）が提案する4段階エスカレーションメニュー（Substitute/Descope/Force Decision/そもそも論への昇華）・facilitatorの3段階制御再設計・BL-005の`turn_count`根本修正は、R5着手前のMVP実装ではスコープ外として明示的に見送られている（[decision_lineage.md 論点58](../decision_lineage.md)）。これらはGoalShiftEvent（本書4節）の実装には必須ではないが、ドラフト§3.2の「そもそも論への昇華」（stage 4）はGoalShiftEventの`shift_kind="architecture_pivot"`/`"silent_drift"`と概念的に重なる。両ドキュメントが将来的に乖離しないよう、GoalShiftEvent実装時にはドラフト§3.2を必ず参照し、二重設計にならないよう注意すること。
 - BL-061（facilitatorがreflectionの判定理由を受け取れなかったバグ）も、1.4節に記載の通り本書1節（F-2.1）実装時の設計上の教訓として参照すること。
