@@ -71,6 +71,15 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
 """
 ```
 
+### 1.4 ★2026-07-23追記：軽量版の先行実装とBL-061の教訓
+
+本節のフル実装（`query_AI_with_reasoning`による`internal_thought_process`の正式なキャプチャ・配線）はまだ着手していないが、同じ「AIの気づき・判断過程を後続ノードへ渡す」という目的の軽量な代替が既に2件実装され、実運用で価値を確認している。
+
+- **BL-048**（D-040）: `call_reflection`に、`internal_thought_process`ではなく既存の`chat_history`と`decisions`テーブルの決定タイムラインのみを材料にした軽量版「でっちあげ監査」プロンプトを追加済み。実ドライラン（`log/2026-07-23/1656`）で、Expertの与条件無断変更を実際に検出できることを確認済み（[decision_lineage.md 論点57](../decision_lineage.md)）。
+- **BL-051**: `call_detector`の出力に`observations`（気づき・懸念の自由記述）を追加し、`state["detector_observations_log"]`として蓄積、後続ノードのプロンプトへ直近3件を常時提示する仕組みを実装済み。本節が目指す「思考プロセスそのものの監査」ではなく「判定結果に現れなかった気づきの保存」という、より狭いスコープの対策だが、Detectorがconstraint_issueの単一判定に握り潰していた懸念を拾えるようになった。
+
+**設計上の教訓（BL-061）**: 本節のフル実装時は「思考ログをどこかに保存する」だけでは不十分であることに注意する。BL-061では、`reflection_node`がreflectionの判定理由（`note`）を`decisions`テーブルへは保存していたにもかかわらず、それを実際に消費すべき`facilitator_node`へは配線されておらず（`call_facilitator`の`decisions`引数がプロンプト内で完全に未使用というデッドパラメータだった）、facilitatorが独自に（時に矛盾する）判断をしてしまうバグが実ドライランで発生した（[decision_lineage.md 論点59](../decision_lineage.md)、D-043）。修正はBL-038の教訓（`LineageState`に未宣言のキーはノード間で伝播しない）に従い、`last_reflection_note`を`LineageState`へ明示的に宣言し、消費側ノードのプロンプトへ直接埋め込む形で行った。本節で`internal_thought_process`を配線する際も、「どのノードが実際にこれを読むのか」を先に特定し、そのノードのプロンプト構築コードに明示的に埋め込まれていることを個別に確認すること（保存箇所の存在だけでは配線の保証にならない）。
+
 ---
 
 ## 2. F-3.7：思考ログの強制記録（★v2で対象テーブルを両方に修正：Cline/hy3レビュー指摘⑨への回答）
