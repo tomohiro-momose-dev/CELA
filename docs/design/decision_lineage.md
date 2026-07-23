@@ -760,6 +760,18 @@
 
 ---
 
+## 論点65: R4/R5機能稼働レビュー中に発見したDirective永久Proposed残留（BL-073・D-046）— 対症療法ではなく根本解決を選択
+
+- **発端:** ユーザーの依頼で実ドライラン（`log/2026-07-24/0647`）をレビューし、R4/R5各機能（BL-062のSUPERSEDE、F-2.1思考プロセス監査、F-3.7強制記録、Freeze、GoalShiftEvent）が実際に稼働しているかを確認する中で、Reflectionの内省監査ログ（07:09台）を読んでいたAIが、既に完了・承認済みのtask_1_1/task_1_3の指示（Directive）が「未解決のまま残っている検討中の項目」リストに`Proposed`のまま出続け、Reflection自身が「もう終わっているのになぜProposedのままか」と長々自問自答した末に自己修正している箇所を発見。ユーザーから「その他気になった事、発見は？」と問われたことを受けてAIが報告した。
+- **AIの原因調査:** `reflection_node`の未解決抽出（`unresolved_critical = [a for a in agreements if a["status"] == "Proposed"]`、`cela_main.py:3444`）は`entry_type`を問わず`status=="Proposed"`の全件を対象とする。一方、`entry_type="Directive"`はCREATE時に`status="Proposed"`で書き込まれた後、これを遷移させる経路が`decision_extractor_node`・`_commit_agreement_from_tool`のいずれにも存在しないため、対応するDeliverableが承認されても指示自体は永久にDBへ残り続けると特定した。
+- **対応案の提示と選択:** AIは①未解決抽出の条件から`entry_type != "Directive"`を除外する対症療法と、②Deliverable承認に連動してDirective自体をApprovedへ遷移させる根本解決の2案を提示した。ユーザーは「BL化し②を採用。根本的に解決しないとどこかで問題が顕在化する恐れがある」として②を明確に選択した。
+- **実装内容:** 新設`_resolve_directive_for_task(conn, run_id, task_id, phase_id, resolved_by)`が、対応するtask_idの`entry_type="Directive"`かつ`status="Proposed"`の最新agreementを`Superseded`化した上で`status="Approved"`の新レコードとして追記する。新設`RESOLVING_DELIVERABLE_STATUSES = {"Approved", "Approved_with_Conditions", "Implicitly_Accepted"}`のいずれかにDeliverableが遷移した場合のみ発火するようガードし、Deliverableの状態遷移が起こりうる両経路（`decision_extractor_node`のUPDATE分岐、`_commit_agreement_from_tool`）から呼び出した。
+- **決定者:** t-momose（対症療法ではなく根本解決②の選択）、Claude Sonnet 5（原因調査・両案の提示・実装）
+- **検証:** 新規`tests/test_bl073_directive_auto_resolve.py`（4件）を含め、オフラインスモークテスト計107件Pass。`python -m py_compile`合格、`check_docs_consistency.py`合格。実LLM再ドライランでの効果確認（未解決リストからApproved済みDirectiveが消えること）は次回待ち。
+- **関連:** [D-046](decision_log.md#d-046-directiveの永久proposed残留は対症療法ではなく根本解決自動approved遷移を採用する)、[BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
