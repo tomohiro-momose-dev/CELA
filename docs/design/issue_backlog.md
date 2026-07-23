@@ -100,6 +100,7 @@
 | BL-066 | 低 | `cela_main.py` (`apply_whiteboard_patch`/`get_latest_whiteboard`) | `whiteboard_drafts`テーブルの`author_role`/`edit_summary`列はバージョンごとにINSERTされるが、`get_latest_whiteboard`は`version`/`content`のみをSELECTしており、誰が・どんな要約で編集したかが一切読み出されない。BL-050がagreements側に実装した差分表示と同種の仕組みがwhiteboard側に存在しない | P3 |
 | BL-067 | 低 | `cela_main.py` (`init_db`) | `init_db`で定義される`chat_history`/`current_goal`テーブルが、コード全体でINSERT/SELECTが一件も存在しない完全な死んだスキーマであることが判明。実体は`state["chat_history"]`/`state["goal"]`（インメモリ）とLangGraphのcheckpointerで完結している | P3 |
 | BL-068 | 中 | `cela_main.py` (`call_expert`のプロンプト、`current_task_summary`、`chat_history_window`) | `current_task_summary`は元々、docs/refsのHydrate構想（直近Nターン生ログ＋それ以降を定期要約で積み上げる3段グラデーション）に由来する設計だったが、消費側が未実装のまま放置されていたとユーザーが説明。`call_expert`には現在も「5ターン毎に議論のサマリーを出力せよ」という指示（`cela_main.py:2620`）が残るが、この出力を捕捉・蓄積する実装が存在せず、`chat_history_window`は直近N件を生ログのまま渡す固定窓のみで、それ以前のターンは要約されず単純に切り捨てられている | P2 |
+| BL-069 | 中 | `cela_main.py` (`call_expert`のプロンプト、`phases_json`、BL-025スコープガードレール) | ユーザーが「木を見て森を見ず」対策として、決定前にタスク→フェーズへとズームアウトして見渡す思考フレームワーク（L1〜L4）を提案。調査の結果、`call_expert`は既に全フェーズ・全タスクの`phases_json`を毎ターン埋め込んでいる（`cela_main.py:2686-2691`）が、直後のBL-025スコープガードレール（`cela_main.py:2700-2714`）が「他タスクの値を新たに算出・提案しない」と明記しており、Expertは全体表を見えていながら能動的に活用することを事実上禁止されていることが判明。この緊張関係はBL-041自身のコードコメントが既に指摘済みで、現状の緩和策はconfidence='provisional'タグ付けのみ。ユーザーは正式なL1-L4段階分けではなく、「次フェーズのタスクが今の決定の前提を覆しうると気づく」程度の軽量な指示追加で十分と後日補足 | P2 |
 
 ---
 
@@ -2001,24 +2002,28 @@ R5実装計画（F-8.3 Freeze機能）の設計相談中、Freezeされた項目
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open` |
+| 状態 | `done` |
 | 優先度 | P2 |
-| 関連 | [BL-063](issue_backlog.md#bl-063-r5実装f-21拡張f-37f-83-freezegoalshiftevent) |
+| 関連 | [BL-063](issue_backlog.md#bl-063-r5実装f-21拡張f-37f-83-freezegoalshiftevent)、[BL-069](issue_backlog.md#bl-069-expertが決定前にフェーズタスク表全体を見渡して他フェーズとの資源競合に気づけるよう軽量な指示を追加する) |
 
 **内容:**
 
-ユーザーが`cela_main.py`の`Agreement`TypedDict（`abstraction_level`/`scope`/`time_axis`の3軸区分）を選択し「この情報が活用された形跡はあるか」と質問したことをきっかけに調査した結果、以下5点が判明した。いずれも「書き込み・DB保存・print表示は存在するが、LLM向けコンテキストを組み立てる関数や他ノードの判定ロジックが一度も読まない」という同型のパターンである。
+ユーザーが`cela_main.py`の`Agreement`TypedDict（`abstraction_level`/`scope`/`time_axis`の3軸区分）を選択し「この情報が活用された形跡はあるか」と質問したことをきっかけに調査した結果、以下5点が判明した。
 
-1. **`agreements.abstraction_level`/`scope`/`time_axis`**: `WRITE_AGREEMENT_TOOL`のプロンプト説明文でLLMに指定させ、DBにも保存し、コンソールprint（`cela_main.py:4424`）でも表示するが、`_build_agreements_context`（agreementsをLLM向けに整形する唯一の関数）は一切参照しない。対応する`Phase.allowed_abstraction_levels`/`focus_scope`/`expected_time_axis`も、Task Plannerのプロンプト例として提示されるのみで、実際のフェーズがこの範囲を逸脱していないかを検証する消費ロジックが存在しない。
-2. **`agreements.turn`**: 保存されるがどこからも`.get("turn")`で読まれない。
-3. **`agreements.evidence`**: `WRITE_AGREEMENT_TOOL`の説明文でLLMに入力させるが、INSERT時に書き込まれるのみで`_build_agreements_context`を含めどこからも表示・参照されない。Proof（証拠）を残す設計意図が、消費側が実装されずに終わっている。
-4. **`decisions.reason_missing`**: `make_decision`で計算されDB保存されるが、`_build_hydrate_context`（decisionsをLLM向けに整形する唯一の関数）は`who`/`what`/`why`のみを使い、理由欠落フラグを一切表示に反映しない。
-5. **`state["risk_flag"]`**: `detector_node`が`result["risk"]`をコピーして保存するが（`cela_main.py:4169`）、halt/drift判定自体は`result["risk"]`というローカル変数を直接参照しており（`cela_main.py:4194-4199`）、他のどのノードも`state["risk_flag"]`を一度も読まない。
+1. **`agreements.abstraction_level`/`scope`/`time_axis`**: 当初「`_build_agreements_context`が参照せず、対応する`Phase.allowed_abstraction_levels`等も消費ロジックが無い」と報告したが、ユーザーの指摘で追加調査した結果、**Phase側の`allowed_abstraction_levels`/`focus_scope`/`expected_time_axis`は`phases_json`として`call_expert`（`cela_main.py:2686-2691`）・`generate_user_utterance`（`cela_main.py:3771`）に毎ターン丸ごと埋め込まれており、実際には消費されていた**（前回報告の誤り、訂正済み）。一方、Agreement側（1件ごとの`abstraction_level`/`scope`/`time_axis`）はより深刻で、実際にAIが呼ぶ`write_agreement`ツール（`WRITE_AGREEMENT_TOOL`）のパラメータ定義にはこの3軸が**そもそも存在せず**、主経路の書き込み処理`_commit_agreement_from_tool`は`"design", "local", "current"`という固定文字列を常にINSERTしていた（R3b以降、decision_extractor経由でない直接書き込みが主流になったため、本来LLMに分類させる設計だったものが形骸化していた）。ユーザーと相談の結果、この per-Agreement 3軸は「視座のガードレール」という本来の意図（Phase単位で持たせるべきもの）とは粒度が異なる重複実装であり、Phase側で目的を果たせているため**完全削除**を決定。なお「木を見て森を見ず」への対策としてのより具体的な提案（ズームアウト思考）はBL-069として別途起票した。
+2. **`agreements.turn`**: 保存されるがどこからも`.get("turn")`で読まれない。`timestamp`で順序は取れるため**削除**を決定。
+3. **`agreements.evidence`**: `_build_agreements_context`に`reason_why`と同様の形式で**表示に配線**することを決定。
+4. **`decisions.reason_missing`**: `_build_hydrate_context`に理由欠落フラグとして**表示に配線**することを決定。
+5. **`state["risk_flag"]`**: `detector_node`が`result["risk"]`をコピーして保存するが、halt/drift判定自体は`result["risk"]`というローカル変数を直接参照しており、他のどのノードも`state["risk_flag"]`を一度も読まない完全な重複。**削除**を決定。
 
-**完了条件（着手時、未着手）:**
+**完了条件:**
 
-- 上記5項目それぞれについて「実際に消費させるよう配線するか、意図的に不要と判断してフィールド自体を削除するか」を個別に判断する。
-- 消費すると判断したものは、対応する表示関数（`_build_agreements_context`/`_build_hydrate_context`等）に配線する。
+- `Agreement`TypedDict・DBスキーマ・`WRITE_AGREEMENT_TOOL`プロンプト記述・`_commit_agreement_from_tool`・decision_extractorの分類ロジック・print文から`abstraction_level`/`scope`/`time_axis`（Agreement側）を削除。
+- `agreements.turn`をTypedDict・DBスキーマ・INSERT文・Agreement構築箇所から削除。
+- `agreements.evidence`を`_build_agreements_context`に表示するよう配線。
+- `decisions.reason_missing`を`_build_hydrate_context`に表示するよう配線。
+- `state["risk_flag"]`を`LineageState`・`detector_node`・初期state辞書から削除。
+- オフラインスモークテストで非退行確認、`python -m py_compile`合格。
 
 ---
 
@@ -2098,6 +2103,34 @@ BL-064と同じ調査の流れで、R5（BL-063）実装そのものにも同型
 
 - 5ターンごとのExpert要約出力を実際に捕捉し、`chat_history_window`の外側にあるターンをこの要約で置き換える階層化ロジックを設計・実装する。
 - または、この機能自体を今回のCELAのスコープでは実装しないと明示的に決定し、`current_task_summary`と該当プロンプト指示（`cela_main.py:2620`）を削除する。
+
+---
+
+### BL-069: Expertが決定前にフェーズ・タスク表全体を見渡して他フェーズとの資源競合に気づけるよう、軽量な指示を追加する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P2 |
+| 関連 | [BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)（同一の「木を見て森を見ず」現象を先に診断済み。facilitator再設計等の大きな解決策とは別に、より軽量なプロンプト改善のみを提案）、[BL-025](issue_backlog.md#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする)（現在のスコープ制限指示との緊張関係） |
+
+**内容:**
+
+BL-064（Agreementの3軸区分）の議論の中で、ユーザーが直近で「AIが同じ検証を何度も繰り返す」「木を見て森を見ず」的な挙動を見かけたと述べ、対策として「L1（タスク内トピック）→L2（タスク内の影響）→L3（同フェーズのタスク間）→L4（フェーズ超え）」というズームアウト思考フレームワークを提案した。
+
+調査の結果、以下が判明した。
+
+1. `call_expert`は既に全フェーズ・全タスクを含む`phases_json`を毎ターンシステムプロンプトに埋め込んでいる（`cela_main.py:2686-2691`、「指示があったフェーズ、タスクに関しては、必ずこの計画を参照し、逸脱や矛盾がないよう思考してください」という指示付き）。ユーザーは「現在は集中すべき現在のタスクのみが見せられている」と認識していたが、実際には全体表は既に毎ターン渡っている。
+2. しかし直後（`cela_main.py:2700-2714`）に、BL-025のスコープガードレールが「あなたの回答で扱ってよい内容は、以下の『現在のタスク』のacceptance_criteriaの範囲に厳密に限定してください」「他タスクがowns_variablesとして所有する値は、たとえ関連性が高く見えても新たに算出・提案しないでください」と明記しており、Expertは全体表を見えていながら、それに基づいて能動的に行動することを事実上禁止されている。
+3. この緊張関係はBL-041自身のコードコメント（`cela_main.py:2718-2723`、「[BL-041] 『木を見て森を見ず』対策」）が既に名指しで言及済みであり、現状の緩和策は「他タスクの制約とまだ突き合わせていない数値はconfidence='provisional'にする」というタグ付けのみで、実際に他フェーズ・他タスクの内容を能動的に見渡させる指示にはなっていない（BL-041の完了条件にも「write_agreementのSUPERSEDEも自発的には使われない」と明記済み）。
+
+ユーザーは後日、正式なL1〜L4の段階分けラベルまでは不要で、「次のフェーズに自動運転監視システムの設計というタスクがある→これは初期費用に含まれる可能性がある→バスの台数決定に影響するかも」程度の気づきを促す軽量な指示があれば十分だと補足した。また、フェーズ・タスク表をDBから呼び出す専用の手段（ツール）を求めていたが、実際には`phases_json`として既に毎ターン渡っていることが今回の調査で判明したため、新規ツールの追加は不要と考えられる。
+
+**完了条件（着手時、未着手）:**
+
+- 新規のDBフィールド・ツールは追加せず、既存の`phases_json`埋め込み（`cela_main.py:2686-2691`）またはresource_claims関連の指示（`cela_main.py:2724-2735`）の近くに、「resource_claimsを伴う決定を確定させる前に、上記フェーズ・タスク表を見渡し、同じ制約名（total_cap）を主張しうる他のフェーズ・タスクがないか一度確認せよ」という軽量な指示文を追加する。
+- BL-025のスコープガードレール文言（他タスクの値を算出・提案しない）と矛盾しないよう、「提案・算出はしないが、気づきをreason_why/evidenceに書き添える、またはconfidence='provisional'に倒す」という着地点にする。
+- 実LLM再ドライランで、実際にこの気づきが発生するかを確認する（BL-041の完了条件と同様、次回ドライラン待ち）。
 
 ---
 
