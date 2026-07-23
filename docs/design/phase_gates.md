@@ -75,14 +75,50 @@
 
 | # | Exit 条件 | 検証方法 | 状態 |
 |---|-----------|----------|------|
-| P3a-1 | F-3.8（自律的DB/ファイル読み取りツール）実装 | `cela_r1_r2_r3b_design_v7.md`（該当節追記予定）、`cela_r4_design.md`冒頭の前提注記 | ☐ |
-| P3a-2 | F-3.9（構造化ファクトストア、`{topic, value, reason, citations}`、confirmed/provisional区別）実装 | 同上 | ☐ |
-| P3a-3 | BL-035/BL-036/BL-037と同一構成での再ドライランを実施し、Phase 6最終統合での財務・需要数値ドリフトが解消されていること、Detectorの「根拠が不明」判定頻度が有意に減少していることを確認 | `traceability.md` T-* | ☐ |
-| P3a-4 | 指標C（収束性とコストのトレードオフ、R2版とR3a版の比較、最低5試行）の実測比較 | `traceability.md` T-*（P2-2から振り替え） | ☐ |
-| P3b-1 | `write_agreement_tool`（F-3.1・F-3.2）実装、`decision_extractor_node`を予備的セーフティネットへ格下げ | `cela_r1_r2_r3b_design_v7.md §3.2〜3.4.1` | ☐ |
-| P3b-2 | 指標A・E・F（自律書き込みカバレッジ80%以上、取りこぼし率20%以下等）の実測比較 | `traceability.md` T-* | ☐ |
+| P3a-1 | F-3.8（自律的DB/ファイル読み取りツール）実装 | `cela_r1_r2_r3b_design_v7.md`（該当節追記予定）、`cela_r4_design.md`冒頭の前提注記 | ☑（2026-07-24確認: `READ_VERIFIED_FACT_TOOL`/`READ_DELIVERABLE_FILE_TOOL`と`_read_verified_fact_handler`/`_read_deliverable_file_handler`が実装済み、Expert/Detector/Reviewer/Arbiter/Integrator/User AI全員のtoolsに配線済み。STATUS.md「R3a/R3b実装完了」と整合） |
+| P3a-2 | F-3.9（構造化ファクトストア、`{topic, value, reason, citations}`、confirmed/provisional区別）実装 | 同上 | ☑（2026-07-24確認: `verified_facts`テーブルに`reason`/`citations`/`confidence`列実装済み、`upsert_verified_fact`/`get_verified_facts_from_db`で読み書き確認） |
+| P3a-3 | BL-035/BL-036/BL-037と同一構成での再ドライランを実施し、Phase 6最終統合での財務・需要数値ドリフトが解消されていること、Detectorの「根拠が不明」判定頻度が有意に減少していることを確認 | `traceability.md` T-* | ☐（未実施。BL-035/036/037は`issue_backlog.md`上も引き続き`open`のまま） |
+| P3a-4 | 指標C（収束性とコストのトレードオフ、R2版とR3a版の比較、最低5試行）の実測比較 | `traceability.md` T-*（P2-2から振り替え） | ☐（未実施） |
+| P3b-1 | `write_agreement_tool`（F-3.1・F-3.2）実装、`decision_extractor_node`を予備的セーフティネットへ格下げ | `cela_r1_r2_r3b_design_v7.md §3.2〜3.4.1` | ☑（2026-07-24確認: `WRITE_AGREEMENT_TOOL`/`_check_write_permission`/`_commit_agreement_from_tool`実装済み。decision_extractor_nodeは`wrote_agreement_this_turn`判定によりwrite_agreement未使用時のみ書き込む安全網へ格下げ済み、R3b §3.5.1） |
+| P3b-2 | 指標A・E・F（自律書き込みカバレッジ80%以上、取りこぼし率20%以下等）の実測比較 | `traceability.md` T-* | ☐（未実施） |
 
-**Phase 3 Done = P3a-1〜P3a-4、P3b-1〜P3b-2 すべて ☑**（**R3aが先に完了し次第、R3aのみでR4着手判断は行わない** — R4はR3a＋R3bの両方の完了を前提とする、`cela_r4_design.md`参照）
+**Phase 3 Done = P3a-1〜P3a-4、P3b-1〜P3b-2 すべて ☑**（**R3aが先に完了し次第、R3aのみでR4着手判断は行わない** — R4はR3a＋R3bの両方の完了を前提とする、`cela_r4_design.md`参照）。**2026-07-24時点: 実装系（P3a-1・P3a-2・P3b-1）は☑だが、測定・再検証系（P3a-3・P3a-4・P3b-2）は未実施のためPhase 3自体はまだDoneではない。**
+
+---
+
+## Phase 4 — R4: ホワイトボード差分パッチ化
+
+**目的**: Deliverableの更新をファイル全文の再生成ではなく、`whiteboard_drafts`テーブルへの差分パッチ（Claude Code Editツール方式）で管理する。
+
+**スコープ外:** 思考プロセス監査・Freeze・GoalShiftEvent（R5）
+
+| # | Exit 条件 | 検証方法 | 状態 |
+|---|-----------|----------|------|
+| P4-1 | `whiteboard_drafts`のCRUD（`get_latest_whiteboard`/`apply_whiteboard_patch`/`rollback_whiteboard`）・`_apply_text_edits`実装 | `cela_r4_design.md`、`tests/test_r4_smoke.py` | ☑ |
+| P4-2 | `WRITE_AGREEMENT_TOOL`への`edits`パラメータ追加、Deliverable主経路のwhiteboard方式への全面移行 | 同上 | ☑ |
+| P4-3 | ロールバック機構（F-7.3、Detectorのmajor判定と連携） | 同上 | ☑ |
+| P4-4 | オフラインスモークテスト合格 | `tests/test_r4_smoke.py`（14件）＋`test_r3_smoke.py`更新分、計64件Pass | ☑ |
+| P4-5 | 実LLM再ドライランでのA/Bテスト（トークン消費・矛盾の早期発見率・ロールバック正確性） | `traceability.md` T-*（未記入） | ☐（未実施） |
+
+**Phase 4 Done = P4-1〜P4-5 すべて ☑**（2026-07-24時点: 実装系P4-1〜P4-4は☑、P4-5は未実施のためPhase 4自体はまだDoneではない）
+
+---
+
+## Phase 5 — R5: 思考プロセス監査／F-3.7思考ログ強制記録／F-8.3 Freeze／GoalShiftEvent
+
+**目的**: `cela_r5_design_v2.md`が定義する新規要件群（要件定義書の実証実験・付録Aから生まれた要件）を実装する。
+
+| # | Exit 条件 | 検証方法 | 状態 |
+|---|-----------|----------|------|
+| P5-1 | F-2.1拡張（`_query_AI_live`のreasoning捕捉、Detectorへの思考プロセス監査ブロック）実装 | `cela_r5_design_v2.md` §1、`tests/test_r5_thought_log_freeze_goalshift.py` | ☑ |
+| P5-2 | F-3.7（`internal_thought_process`の限定記録: Detector major・Reflection stagnant・agreements Rejected時のみ）実装 | 同上 §2 | ☑ |
+| P5-3 | F-8.3 Freeze（専用ツール、`user`ロール限定、SUPERSEDE/UPDATEガード）実装 | 同上 §3、D-044 | ☑（**2026-07-24、D-045によりFreezeは一時休止中** — 本体・ガード・表示ロジックは温存、User AIのtoolsからは除去） |
+| P5-4 | GoalShiftEvent（`goal_shift_events`テーブル、`detect_goal_shift`、`arbiter_node`配線）実装 | 同上 §4 | ☑（書き込みのみ。読み出し・Hydrate表示への反映はBL-065として分離、未着手） |
+| P5-5 | BL-062（Detectorのmajor判定が既存Approved agreementを構造的に無効化できない問題）の解消 | `tests/test_bl062_detector_supersede.py` | ☑（**Detector限定**。Reviewer/Arbiter/Integratorへの拡張はBL-070として分離、未着手） |
+| P5-6 | オフラインスモークテスト合格 | `tests/test_r5_thought_log_freeze_goalshift.py`（14件）＋`test_bl062_detector_supersede.py`（4件）含め計100件Pass、`python -m py_compile`合格 | ☑ |
+| P5-7 | 実LLM再ドライランでの効果確認（Detector SUPERSEDEの実発火、Freeze不使用の確認、GoalShiftEventの実発火、思考プロセス監査の実効性） | `traceability.md` T-*（未記入） | ☐（未実施） |
+
+**Phase 5 Done = P5-1〜P5-7 すべて ☑**（2026-07-24時点: 実装・オフライン検証系P5-1〜P5-6は☑、P5-7は未実施のためPhase 5自体はまだDoneではない。BL-065〜070は本Phaseの後続課題として`open`のまま`issue_backlog.md`に記録）
 
 ---
 
