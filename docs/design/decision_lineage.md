@@ -720,6 +720,21 @@
 
 ---
 
+## 論点62: R5実装完了（F-2.1拡張／F-3.7／F-8.3 Freeze／GoalShiftEvent、BL-063、D-044）
+
+- **発端:** ユーザーが「実装プランをR5フォルダに保存し、実装開始」と指示。論点61で確定したスコープ（decision_extractor役割転換は含めない、監査ガバナンス欠落はBL-062として分離、Freeze権限はuserのみ）に従い、`cela_r5_impl_Plan.md`を`docs/design/r5/`へ保存した上で実装に着手した。
+- **実装内容:**
+  - F-2.1: `_query_AI_live`のreasoning捕捉（`_LAST_REASONING_TEXT`/`get_last_reasoning_text()`、BL-033の`_LAST_PYTHON_CALLS`と同型パターン）。`LineageState`に`expert_last_reasoning`/`user_last_reasoning`を新設し、`call_detector`に思考プロセス監査ブロックを配線。
+  - F-3.7: `make_decision`に`internal_thought_process`パラメータを追加し、Detector major・Reflection stagnant・agreements Rejected時のみ限定記録する（トークンコスト抑制、v2設計書の方針通り）。
+  - F-8.3 Freeze: `freeze_agreement()`＋独立した専用ツール`FREEZE_AGREEMENT_TOOL`（D-044、userロール限定）、SUPERSEDE/UPDATEガード、`_build_agreements_context`のis_frozenソート＋🔒表示。
+  - GoalShiftEvent: `goal_shift_events`テーブル新設、`call_resource_arbiter`への`requires_goal_constraint_change`追加、`detect_goal_shift()`、`arbiter_node`への配線。
+- **実装中の細部判断:** `_query_AI_live`内で同名変数`_LAST_REASONING_TEXT`に対し`global`文を2箇所で重複宣言するとPythonの`SyntaxError`（"assigned to before global declaration"）になることが判明し、2つ目の`global`宣言から該当変数名を除去して修正（純粋な実装上のバグ、設計判断ではない）。
+- **決定者:** t-momose（実装開始の指示）、Claude Sonnet 5（実装・テスト・ドキュメント更新）
+- **検証:** 新規`tests/test_r5_thought_log_freeze_goalshift.py`（14件）を含め、オフラインスモークテスト計96件Pass。`python -m py_compile`合格。`python scripts/check_docs_consistency.py`合格。
+- **関連:** [BL-063](issue_backlog.md#bl-063-r5実装f-21拡張f-37f-83-freezegoalshiftevent)、[D-044](decision_log.md#d-044-f-83-freeze機能の権限をuserロールのみに限定し独立した専用ツールとして実装する)、[cela_r5_impl_Plan.md](r5/cela_r5_impl_Plan.md)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
