@@ -92,6 +92,7 @@
 | BL-058 | 中 | `cela_main.py` (`_ALLOWED_IMPORTS`) | 同ドライラン（`log/2026-07-23/1256`）で、Expertが組合せ探索に`import itertools`を試みたがホワイトリスト（`_ALLOWED_IMPORTS`）に含まれず`[REPL Error]`で拒否されていたことをユーザーが発見。「サンドボックスから抜け出せないような標準的なツール群は許可したらどうか」と提案。I/O・ファイルシステム・OS・ネットワークアクセスを一切持たない純粋計算ユーティリティ（itertools/functools/collections/operator/re）をD-007と同じ承認プロセス（AGENTS.md§7）で追加 | P3 |
 | BL-059 | 高 | `cela_main.py` (`_query_AI_live`の例外タプル) | ドライラン中に`httpx.RemoteProtocolError`（"peer closed connection without sending complete message body"）が未捕捉のままプロセス全体をクラッシュさせたことをユーザーが報告。BL-022（`json.JSONDecodeError`が絞り込んだ例外タプルから漏れていた事例）と同種の問題で、streaming応答受信中にプロバイダ側が接続を切った際のhttpx層の生例外が`(APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError)`に含まれていなかった。`httpx.RemoteProtocolError`を追加しリトライ対象化 | P1 |
 | BL-060 | 高 | `cela_main.py` (`_query_AI_live`のツールループ最終iteration) | ドライラン（`log/2026-07-23/1453`）で、Expertが最終許容iteration（15回目）でも`write_agreement`（成功）を呼び、次のiterationが存在しないためMAX_TOOL_ITER非収束クラッシュに至ったことをユーザーが報告。BL-016/BL-056bの「残り回数」通知はあくまで依頼であり、モデルが最終iterationでもツール呼び出しを選ぶと強制力がなかったことが原因。最終iterationのみAPI呼び出しから`tools`を外し、構造的にツール呼び出し不可能にしてテキスト最終応答を強制することでクラッシュを解消 | P1 |
+| BL-061 | 高 | `cela_main.py` (`call_facilitator`/`facilitator_node`/`reflection_node`) | ドライラン（`log/2026-07-23/1656`）で、reflectionが5点の具体的な未解決問題（与条件無断変更・でっちあげ疑い数値等）を検出し`stagnant`と判定したにもかかわらず、`facilitator`自身は「膠着していない」と独立に再判断し、無関係な軽微な論点だけを穏やかに促す食い違ったメッセージを出力していたことをユーザーが発見。真因は`call_facilitator`が受け取る`decisions`引数がプロンプト内で完全に未使用（デッドパラメータ）で、reflectionの判定理由（`note`）がfacilitatorへ一切伝わっていなかったこと。`LineageState`に`last_reflection_note`を新設し`reflection_node`が保存、`call_facilitator`のプロンプトにこれを最優先の出発点として明示する形で修正 | P1 |
 
 ---
 
@@ -1893,6 +1894,36 @@ BL-057で「残り回数」通知のしきい値を前倒し（残り3回・2回
 
 - `python -m py_compile cela_main.py`合格、既存オフラインスモークテスト計71件Pass（本クラッシュ経路に依存するテストは存在しないことを確認済み）。
 - 実LLM再ドライランで、最終iterationまでツール呼び出しが続いた場合でもクラッシュせずテキスト最終応答が返ることを確認する（次回待ち）。 → **部分確認**。本修正適用後に開始した`log/2026-07-23/1358`（7,021行）・`1656`（3,141行、継続中）のいずれも非収束クラッシュ（Traceback・「非収束」ログ）が0件。ただし「最終iterationで実際にツール呼び出しが発生し、tools除去で救済された」場面自体はまだ観測できていない（発生すれば確実に救済される設計だが、その発火自体の実例待ち）。
+
+---
+
+### BL-061: facilitatorがreflectionの判定理由を一切受け取れず、独立に（時に食い違う）状況判断をしていた
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | [BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)（facilitatorのエスカレーション機構未実装という既存の指摘とは別種・より具体的な伝達漏れバグ）、[decision_lineage.md 論点59](decision_lineage.md) |
+
+**内容:**
+
+ユーザーがドライラン（`log/2026-07-23/1656`、`log_no_prompt.md` 25134行目付近）で「facilitatorが発火した」と報告。ログを確認したところ、直前のreflectionが`still_aligned=false, discussion_status="stagnant"`と判定し、`note`に5点の具体的な未解決問題（山間部速度28.8km/hへの無断変更＝与条件違反、平坦部ルート長6.67kmのでっちあげ疑い、山間部需要88人の根拠不足、リース料480万円/台/年の類推値、待ち時間制約超過の先送り）を明記していたにもかかわらず、後続の`facilitator`自身の思考ログでは「現時点では議論が膠着しているわけではなく、順調にタスクが進行しています」「ファシリテーターの介入は、あえて必要ないかもしれません」と、reflectionの判定と明確に矛盾する独自の（より甘い）評価をしていたことを発見した。
+
+実際に送信されたプロンプト（`log_with_prompt.md` 57021行目）を確認したところ、`goal`と直近10件の`chat_history`のみが含まれ、reflectionの`note`（具体的な5点の指摘）は一切含まれていなかった。コード側を調査した結果、`call_facilitator(goal, chat_history, decisions)`は`decisions`引数を受け取っているが、プロンプトテンプレート内では`goal`と`history_text`しか使われておらず、**`decisions`は完全に未使用（デッドパラメータ）**だったことを確認した。reflectionの判定理由（`result["note"]`）は`decisions`テーブルの`why`列にしか保存されず（`reflection_node`の`make_decision`呼び出し経由）、`state`上の直接のフィールドとしては存在しなかったため、facilitatorへは構造的に伝わりようがなかった。
+
+facilitatorは「なぜ自分が呼ばれたか」を一切知らされないまま、直近のchat_historyだけから独自に状況を再判定するほかなく、今回はreflectionの深刻な判定と食い違う、的外れで弱いメッセージを生成する結果になった。さらに`facilitator_node`はこの1回の（内容が的外れであっても）介入だけで`drift_flag=False`・`discussion_status="continuing"`を無条件にリセットするため、reflectionが検出した未解決の問題は実質的に握り潰される構造になっていた。BL-041が既に指摘している「エスカレーション機構未実装」（reflectionの検出後の対応がDetectorのmajorと同じ一般的な差し戻しに留まる）とは別種の、より具体的な**伝達漏れ**バグである。
+
+**実装（`cela_main.py`）:**
+
+1. `LineageState`に`last_reflection_note: str`を新設（BL-038の教訓通り、TypedDictへの宣言漏れはノード間で値が消えるため必須）。
+2. `reflection_node`が`result["note"]`をこのフィールドへ保存するよう変更。
+3. `call_facilitator`のシグネチャを`(goal, chat_history, decisions)`から`(goal, chat_history, reflection_note="")`へ変更し、未使用だった`decisions`引数を、実際にプロンプトへ埋め込む`reflection_note`に置き換えた。プロンプトに「あなたが呼ばれた理由（直前のReflection監査の判定）」ブロックを追加し、「これを最優先の出発点として扱い、自分で独自に再判定してその理由を無視・軽視することは避けてください」という指示を追加。`reflection_note`が空（旧checkpointからの復帰等）の場合は「特筆すべき懸念なし」のフォールバック文言を使用。
+4. `facilitator_node`の呼び出しを`call_facilitator(state["goal"], state["chat_history"], state.get("last_reflection_note", ""))`に変更（従来の`get_decisions_from_db(...)`呼び出しは不要になったため削除）。
+
+**完了条件:**
+
+- `python -m py_compile cela_main.py`合格、オフラインスモークテスト計82件Pass（新規`tests/test_bl061_facilitator_reflection_note.py`4件を含む: reflection_nodeが`last_reflection_note`を保存すること、`call_facilitator`のプロンプトに実際にreflection_noteの内容が含まれること、空の場合のフォールバック、`facilitator_node`が正しく引き渡すこと、をそれぞれ確認）。
+- 実LLM再ドライランで、reflectionが深刻な問題を検出した際にfacilitatorのメッセージがその内容と整合する（独自に軽い判定へすり替えない）ことを確認する（次回待ち）。
 
 ---
 
