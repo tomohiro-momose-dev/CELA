@@ -2,7 +2,9 @@
 # (Cognitive Experience Lineage-driven Agent System - Refactor R5)
 
 > **目的**: 要件定義書の実証実験（付録A）から新たに生まれた要件（F-2.1拡張、F-3.7、F-8.3、GoalShiftEvent）を、R1〜R4完了後の既存プロトタイプに追加する。
-> **最終更新**: 2026-07-17
+> **最終更新**: 2026-07-23（v2本文は2026-07-17時点のまま維持し、それ以降に判明したBL-041/048/050/051/061等との整合を各節に★2026-07-23追記として反映）
+
+**★2026-07-23追記（前提の更新）**: 本書v2の作成後、R5着手前のBL棚卸し（[issue_backlog.md](../issue_backlog.md)、[decision_lineage.md 論点57・58・59](../decision_lineage.md)）により、本書が前提としていた既存コードの一部が変化した。特に重要なのは、4節GoalShiftEventが依存する`arbiter_node`が、BL-041のMVP実装（D-042）により**実際に発火するようになった**こと（従来は`state["global_constraints"]`が常に空で死んだコードパスだった）。各節の該当箇所に個別の追記を残す。
 
 ---
 
