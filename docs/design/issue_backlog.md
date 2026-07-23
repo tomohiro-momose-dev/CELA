@@ -91,6 +91,7 @@
 | BL-057 | 高 | `cela_main.py` (`_query_AI_live`のツールループ残り回数通知、BL-016) | ドライラン（`log/2026-07-23/1256`）で、複数の代替案を数値検討する組合せ最適化的なExpertターンがMAX_TOOL_ITER=15回の非収束クラッシュで打ち切られたことをユーザーが報告（成果物のホワイトボード自体はwrite_agreement実行済みのため保存されていた）。BL-016の「残り2回」通知では、長い最終回答（成果物の書き出しを含む）を書き切る前に上限を超えてしまうケースがあると判明。通知しきい値を「残り3回」に前倒しし、残り1回の通知文言もより強い断定的な指示に強化 | P1 |
 | BL-058 | 中 | `cela_main.py` (`_ALLOWED_IMPORTS`) | 同ドライラン（`log/2026-07-23/1256`）で、Expertが組合せ探索に`import itertools`を試みたがホワイトリスト（`_ALLOWED_IMPORTS`）に含まれず`[REPL Error]`で拒否されていたことをユーザーが発見。「サンドボックスから抜け出せないような標準的なツール群は許可したらどうか」と提案。I/O・ファイルシステム・OS・ネットワークアクセスを一切持たない純粋計算ユーティリティ（itertools/functools/collections/operator/re）をD-007と同じ承認プロセス（AGENTS.md§7）で追加 | P3 |
 | BL-059 | 高 | `cela_main.py` (`_query_AI_live`の例外タプル) | ドライラン中に`httpx.RemoteProtocolError`（"peer closed connection without sending complete message body"）が未捕捉のままプロセス全体をクラッシュさせたことをユーザーが報告。BL-022（`json.JSONDecodeError`が絞り込んだ例外タプルから漏れていた事例）と同種の問題で、streaming応答受信中にプロバイダ側が接続を切った際のhttpx層の生例外が`(APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError)`に含まれていなかった。`httpx.RemoteProtocolError`を追加しリトライ対象化 | P1 |
+| BL-060 | 高 | `cela_main.py` (`_query_AI_live`のツールループ最終iteration) | ドライラン（`log/2026-07-23/1453`）で、Expertが最終許容iteration（15回目）でも`write_agreement`（成功）を呼び、次のiterationが存在しないためMAX_TOOL_ITER非収束クラッシュに至ったことをユーザーが報告。BL-016/BL-056bの「残り回数」通知はあくまで依頼であり、モデルが最終iterationでもツール呼び出しを選ぶと強制力がなかったことが原因。最終iterationのみAPI呼び出しから`tools`を外し、構造的にツール呼び出し不可能にしてテキスト最終応答を強制することでクラッシュを解消 | P1 |
 
 ---
 
@@ -1861,6 +1862,32 @@ BL-022（`response.json()`内部で送出される生の`json.JSONDecodeError`�
 
 - `python -m py_compile cela_main.py`合格、既存オフラインスモークテスト計71件Pass。
 - 実LLM再ドライランで、同種の接続切断が発生してもプロセスがクラッシュせずリトライされることを確認する（次回待ち）。
+
+---
+
+### BL-060: ツールループ最終iterationでのツール呼び出しによる非収束クラッシュ
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 依存 | BL-016, BL-057 |
+| 関連 | [BL-016](issue_backlog.md#bl-016-detectorの完全性判定の硬直性により探索的タスクでツールループが非収束クラッシュする), [BL-057](issue_backlog.md#bl-057-ツールループ残り回数通知のしきい値を前倒しbl-016の追加調整) |
+
+**内容:**
+
+BL-057で「残り回数」通知のしきい値を前倒し（残り3回・2回・1回で通知）したにもかかわらず、ドライラン（`log/2026-07-23/1453`）でExpertが最終許容iteration（15回目、MAX_TOOL_ITER到達）でも`write_agreement`ツールを呼び出し（成功はした）、その後に「テキストのみの最終応答」を返す機会となる次のiterationが存在しないため、そのままMAX_TOOL_ITER非収束クラッシュに至った。
+
+根本原因は、BL-016/BL-057の「残り回数」通知はあくまでプロンプト上の**依頼**に過ぎず、モデルが最終iterationでもツール呼び出しを選択すること自体を構造的に禁止していなかったこと。通知を強めるだけでは、モデルが指示に従わない限りいつでも同じ形でクラッシュしうるという限界があった。
+
+**実装（`cela_main.py::_query_AI_live`）:**
+
+ツールループの最終iteration（`iteration == MAX_TOOL_ITER`）でのAPI呼び出しのみ、`create_kwargs`から`tools`キーを除いた`call_kwargs`を使用するよう変更。ツールスキーマ自体を提示しないため、モデルは構造的にツール呼び出しができず、必ずテキスト応答（`msg.tool_calls`が空）が返る。これにより、既存の「`tool_calls`が空なら正常終了として`content`を返す」分岐（L1399〜）に必ず到達し、非収束クラッシュのraise文（L1495相当）は事実上到達しなくなる。
+
+**完了条件:**
+
+- `python -m py_compile cela_main.py`合格、既存オフラインスモークテスト計71件Pass（本クラッシュ経路に依存するテストは存在しないことを確認済み）。
+- 実LLM再ドライランで、最終iterationまでツール呼び出しが続いた場合でもクラッシュせずテキスト最終応答が返ることを確認する（次回待ち）。
 
 ---
 
