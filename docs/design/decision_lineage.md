@@ -620,6 +620,18 @@
 
 ---
 
+## 論点54: python_repl許可モジュールへのitertools等の追加（BL-058、D-007と同じ承認プロセス）
+
+- **発端:** 論点53の続きで、ユーザーが同ドライラン（`log/2026-07-23/1256`）で「expertがimport itertoolsを読んでいました」と発見・報告し、「サンドボックスから抜け出せないような標準的なツール群は許可したらどうか」と提案。
+- **AIの確認:** `_ALLOWED_IMPORTS`（`cela_main.py:378`、D-007で`fractions`/`decimal`を承認済み追加した既存のホワイトリスト）に`itertools`が含まれておらず、`_check_repl_code_safety`が`[REPL Error] import of 'itertools' is not allowed`で拒否していたことを確認。まさに「4台制約下では解なし」問題の組合せ探索でExpertが`itertools.product`等を使いたかった場面と特定。
+- **AIの提案:** AGENTS.md§7（定数変更は事前承認必須）に従い、勝手に追加はせず、I/O・ファイルシステム・OS・ネットワークアクセスを一切持たない純粋計算・データ構造ユーティリティという基準で候補を絞り、`itertools`・`functools`・`collections`・`operator`・`re`の5つをAskUserQuestionで提示。
+- **ユーザーの決定:** 個別追加ではなく「まとめて追加」を選択。
+- **実装:** `_ALLOWED_IMPORTS`に5モジュールを追加。手動検証（`_check_repl_code_safety`・`_run_python_repl`双方で`import itertools`が動作すること）で確認。
+- **決定者:** t-momose（現象の発見と一般化した提案、まとめて追加の選択）、Claude Sonnet 5（安全基準の提示・候補選定・実装・動作確認）
+- **関連:** [BL-058](issue_backlog.md#bl-058-python_replの許可モジュールにitertools等の純粋計算ユーティリティを追加)、D-007（同種の承認済み前例）
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
