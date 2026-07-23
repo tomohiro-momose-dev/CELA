@@ -1535,8 +1535,8 @@ Web検索ツールを与えて実在地域のデータで裏取りする代替�
 **完了条件:**
 
 - オフラインスモークテスト（既存74件）が非退行でPass。
-- 実LLM再ドライランで、`round_count`ベースのreflection/facilitatorが実際に周期発火することを確認する（次回待ち）。
-- reflectionの「でっちあげ監査」が実際に今回のようなパターンを検出できるかを確認する（次回待ち）。フル版（F-2.1、`internal_thought_process`配線）が必要かはこの結果を見て判断する。
+- 実LLM再ドライランで、`round_count`ベースのreflection/facilitatorが実際に周期発火することを確認する（次回待ち）。 → **確認済み**（`log/2026-07-23/1336`〜`1656`にわたり複数回発火）。
+- reflectionの「でっちあげ監査」が実際に今回のようなパターンを検出できるかを確認する（次回待ち）。フル版（F-2.1、`internal_thought_process`配線）が必要かはこの結果を見て判断する。 → **確認済み・軽量版で十分機能**。`log/2026-07-23/1656`で、Expertが与条件「山間部平均時速20km/h」を無断で28.8km/hに変更したまま帳尻を合わせていた事例をreflectionが`aligned=False, status=stagnant`（ゴール・ドリフト検出）として正しく捕捉し、`drift_flag=True`経由でExpert/User AIへの差し戻しにも実際につながった（軽量版＝chat_history/決定タイムラインのみで検出できており、フル版internal_thought_process配線は現時点で不要と判断）。
 
 ---
 
