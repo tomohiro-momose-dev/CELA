@@ -581,7 +581,8 @@
 
 - **発端:** 論点49（BL-054）の直後、ユーザーが「BL-051の軽量版として、`{risk, constraint_issue: none/minor/major, comment}`に思考過程で気づいたこと・懸念事項を自由記述させる欄を追加。後続のノードのプロンプトで見せる」と指示。論点48で起票したBL-051の本格版（issue_bl的な構造化リスト、`resolved`管理、フェーズ終了ゲート）はスコープが大きく設計未確定のままだったため、まずその効果の一部だけを小さく実装する提案。
 - **AIの実装方針:** 本格版の設計（永続化先・フェーズゲートの実装位置）には一切手を付けず、`call_detector`の両監査パス（数値・ドメイン）の返却JSONに`observations`（自由記述、`constraint_issue`の判定とは独立・判定を左右しない）を追加。`LineageState`に`detector_observations_log`を新設し、既存の`constraint_issue_log`（minor/majorの回のみ蓄積）とは異なり、`none`判定の回でも`observations`が非空であれば蓄積するようにした。新規ヘルパー`_build_detector_observations_block`を設け、`call_expert`・`generate_user_utterance`の両プロンプトに直近3件を「参考情報（判定を左右するものではない）」として毎ターン提示するよう配線した。従来の`constraint_issue_log`表示は`constraint_issue=="major"`の差し戻し時のみだったのに対し、この気づき欄は差し戻しの有無に関わらず常時提示される点が新規性。
-- **決定者:** t-momose（軽量版という範囲指定の指示）、Claude Sonnet 5（既存ログ機構との対比を踏まえた実装設計）
+- **ユーザーによる位置づけの明確化:** 実装完了後、ユーザーが「自由記述欄はとりあえずの対処で、issue_bl化路線はもとのまま維持して」と明言。AIが当初issue_backlog.mdの状態を`partial`（軽量版実装済み扱い）と記載していたのを、ユーザーの意図（`observations`欄は本来の方針を代替・縮小するものではなく、気づきの消失を当面緩和するだけの暫定のつなぎ）に合わせて`open`へ差し戻し、本文にもその位置づけを明記した。
+- **決定者:** t-momose（軽量版という範囲指定の指示、および実装後にその位置づけを「暫定のつなぎ・本来の方針は維持」と明確化）、Claude Sonnet 5（既存ログ機構との対比を踏まえた実装設計、ユーザーの明確化を受けたissue_backlog.mdの状態表記修正）
 - **関連:** [BL-051](issue_backlog.md#bl-051-detectorの気づきをissue_blリストとして蓄積しフェーズ終了条件とする)、[論点48](decision_lineage.md#論点48-決定理由の追跡性detectorの気づきの活用不足ホワイトボードへのid埋め込みbl-050052起票)、[論点49](decision_lineage.md#論点49-detector2段監査パスの実行順序-ドメイン監査を数値検算より先に行うbl-054)
 
 ---
