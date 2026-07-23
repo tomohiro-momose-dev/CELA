@@ -103,6 +103,7 @@
 | BL-069 | 中 | `cela_main.py` (`call_expert`のプロンプト、`phases_json`、BL-025スコープガードレール) | ユーザーが「木を見て森を見ず」対策として、決定前にタスク→フェーズへとズームアウトして見渡す思考フレームワーク（L1〜L4）を提案。調査の結果、`call_expert`は既に全フェーズ・全タスクの`phases_json`を毎ターン埋め込んでいる（`cela_main.py:2686-2691`）が、直後のBL-025スコープガードレール（`cela_main.py:2700-2714`）が「他タスクの値を新たに算出・提案しない」と明記しており、Expertは全体表を見えていながら能動的に活用することを事実上禁止されていることが判明。この緊張関係はBL-041自身のコードコメントが既に指摘済みで、現状の緩和策はconfidence='provisional'タグ付けのみ。ユーザーは正式なL1-L4段階分けではなく、「次フェーズのタスクが今の決定の前提を覆しうると気づく」程度の軽量な指示追加で十分と後日補足 | P2 |
 | BL-070 | 中 | `cela_main.py` (`call_reviewer`/`call_resource_arbiter`/`call_integrator`) | BL-062のDetector限定実装（D-045）に伴い分離。Reviewer/Arbiter/Integratorも技術的には`WRITE_AGREEMENT_TOOL`を保有し`status='Rejected'`かつ`action_type='SUPERSEDE'`を呼べる権限を既に持つが、3ロールとも現状agreements DBのtopic一覧をプロンプト上受け取っておらず、かつ成果物全体審査・リソース配分・フェーズ横断統合という別種の役割のため、topic単位のSUPERSEDEが同じ意味を持つかの検討が必要。Detectorでの実運用結果を見てから拡張要否を判断する方針 | P2 |
 | BL-071 | 高 | `cela_main.py` (`decision_extractor_node`/`integrator_node`/`_build_agreements_context`) | ユーザーの実ドライランで`orchestrator_node`実行中に`TypeError: '<' not supported between instances of 'NoneType' and 'float'`でプロセス全体がクラッシュ。原因は`decision_extractor_node`の2箇所と`integrator_node`のAgreement辞書リテラルが元々`timestamp`キーを持っておらず、`db_append_agreement`のINSERTでDB上`timestamp`列がNULLになっていたこと。R5（BL-063）で追加した`_build_agreements_context`のis_frozen優先ソート（`a.get("timestamp", 0)`）はキーが存在する場合はdefault値を使わないため、None同士・Noneとfloatの比較でクラッシュした | P0 |
+| BL-072 | 高 | `cela_main.py` (`_query_AI_live`) | BL-071修正後の再ドライランで、`expert_node`のstreaming受信中に`httpx.ReadTimeout`が発生しプロセス全体がクラッシュ。BL-059（`httpx.RemoteProtocolError`が絞り込んだ例外タプルから漏れていた事例）と同型で、`httpx.ReadTimeout`もopenai SDKの`APITimeoutError`へラップされず生のまま送出されていた。個別の派生例外を都度追加するのではなく、`ReadTimeout`/`ConnectTimeout`/`WriteTimeout`/`PoolTimeout`を包含する親クラス`httpx.TimeoutException`を例外タプルに追加して解消 | P0 |
 
 ---
 
@@ -2193,6 +2194,35 @@ TypeError: '<' not supported between instances of 'NoneType' and 'float'
 - 新規`tests/test_bl071_agreement_timestamp_crash.py`（2件）: `timestamp`キーなしのagreementが混在していても`_build_agreements_context_from_db`がクラッシュしないこと、`decision_extractor_node`のソースが`"timestamp": time.time()`を2箇所以上含むことを確認。
 - オフラインスモークテスト計102件Pass、`python -m py_compile`合格。
 - 実LLM再ドライランでの再発なし確認は次回待ち（ユーザーが同一ドライランを再実行する予定）。
+
+---
+
+### BL-072: `httpx.ReadTimeout`が絞り込んだ例外タプルから漏れ、streaming受信中にプロセスクラッシュを引き起こす
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P0 |
+| 関連 | [BL-059](issue_backlog.md#bl-059-streaming受信中のhttpxremoteprotocolerrorが未捕捉でプロセスクラッシュする)（同型の問題、`httpx.RemoteProtocolError`が漏れていた事例） |
+
+**内容:**
+
+BL-071修正後、ユーザーが同一ドライランを再実行したところ、`expert_node`（`call_expert`のstreaming受信中）で以下によりプロセス全体がクラッシュした。
+
+```
+httpx.ReadTimeout: The read operation timed out
+  at _query_AI_live: for chunk in stream:
+```
+
+BL-059と同型の問題である。`_query_AI_live`の単一の`try`ブロック（tools有無どちらの分岐も内包、`for attempt in range(len(delays) + 1):`直下）を包む`except`タプルは`(APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError, httpx.RemoteProtocolError)`に限定されていたが、プロバイダ側のタイムアウトに由来する生の`httpx.ReadTimeout`はopenai SDKの`APITimeoutError`へラップされず、この例外タプルに含まれないまま素通りしていた。
+
+**対応:** BL-059のように個別の派生例外（`httpx.ReadTimeout`）だけを都度追加するのではなく、`httpx.ReadTimeout`/`ConnectTimeout`/`WriteTimeout`/`PoolTimeout`をすべて包含する親クラス`httpx.TimeoutException`を例外タプルに追加した。これにより、今回未発生の他のタイムアウト種別（接続確立時のタイムアウト等）についても同種の未捕捉クラッシュが予防される。
+
+**完了条件:**
+
+- 新規`tests/test_bl072_httpx_timeout_retry.py`（1件）: `_query_AI_live`のソースが`httpx.TimeoutException`を例外タプルに含むことを確認。
+- オフラインスモークテスト計103件Pass、`python -m py_compile`合格。
+- 実LLM再ドライランでの再発なし確認は次回待ち。
 
 ---
 
