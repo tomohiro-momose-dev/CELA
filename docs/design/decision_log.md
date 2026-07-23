@@ -643,6 +643,21 @@
 
 ---
 
+### D-042: `resource_claims`のスキーマを平坦な`{名前: 数値}`から入れ子構造`{名前: {phase_id, value, total_cap}}`へ具体化する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-23 |
+| 状態 | `decided` |
+| 決定者 | t-momose（Plan承認をもって決定） / Claude Sonnet 5（原因特定・構造案の提示） |
+| **決定理由** | R5設計書（`cela_r5_design_v2.md`）のGoalShiftEvent機能がBL-041の`call_resource_arbiter`拡張に依存する一方、BL-041の既存ドラフト（`cela_facilitator_arbiter_redesign_BL041.md`）が調査した通り、`state["global_constraints"]`への実データ集約処理自体が存在せず`arbiter_node`は常に空振りしていた。集約処理を実装しようとしたところ、当時の`resource_claims`は`{"予算": 1000000}`という平坦な`{名前: 数値}`形式で、資源の絶対上限（`total_cap`）を持たないため、これ単体では超過判定ができないことが判明した。上限値をどこか別の場所（ゴール文やverified_facts）から名前文字列でマッチングして補う代替案も検討したが、LLMが生成する資源名の表記ゆれに対して脆弱であるため不採用とし、ドラフト§3.1が既に提案していた入れ子構造への具体化を採用した。 |
+| 決定内容 | `resource_claims`の期待する値の形を`{"<制約名>": {"phase_id": "<このphaseのID>", "value": <このphaseが要求する量>, "total_cap": <全phase共通の絶対上限>}}`に変更する。`WRITE_AGREEMENT_TOOL`スキーマの`resource_claims`フィールドの`description`と、decision_extractor抽出プロンプトの例示・共通ルールの両方をこの構造に合わせて更新する。DB層（`agreements.resource_claims`列）はJSON文字列としてそのまま素通しで保存するのみで、書き込み時にキー構造をパースする既存コードは存在しないため、この変更によるDB破壊的影響はない。新規`_aggregate_global_constraints`ヘルパーは、旧形式（平坦な数値）や壊れたJSONを`isinstance`チェックで静かにスキップし、混在期間中もクラッシュしないようにする。 |
+| 影響 | `cela_main.py`（`WRITE_AGREEMENT_TOOL.resource_claims`のdescription、decision_extractor抽出プロンプトの例示、新規`_aggregate_global_constraints`）。既存agreementsデータに旧形式の`resource_claims`が残っていても、集約対象から静かに除外されるだけで読み込みエラーにはならない。 |
+| 関連 BL | [BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている) |
+| 参照 | [decision_lineage.md 論点58](decision_lineage.md) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
