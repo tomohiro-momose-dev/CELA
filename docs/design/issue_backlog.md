@@ -95,6 +95,11 @@
 | BL-061 | 高 | `cela_main.py` (`call_facilitator`/`facilitator_node`/`reflection_node`) | ドライラン（`log/2026-07-23/1656`）で、reflectionが5点の具体的な未解決問題（与条件無断変更・でっちあげ疑い数値等）を検出し`stagnant`と判定したにもかかわらず、`facilitator`自身は「膠着していない」と独立に再判断し、無関係な軽微な論点だけを穏やかに促す食い違ったメッセージを出力していたことをユーザーが発見。真因は`call_facilitator`が受け取る`decisions`引数がプロンプト内で完全に未使用（デッドパラメータ）で、reflectionの判定理由（`note`）がfacilitatorへ一切伝わっていなかったこと。`LineageState`に`last_reflection_note`を新設し`reflection_node`が保存、`call_facilitator`のプロンプトにこれを最優先の出発点として明示する形で修正 | P1 |
 | BL-062 | 高 | `cela_main.py` (`write_agreement`権限モデル全体) | R5実装計画（F-8.3 Freeze）の設計相談中、ユーザーが「Detectorはユーザーまたはエキスパートの決定まで破棄できたか？」と指摘。調査の結果、Detector/Reviewer/Arbiter/Integratorの`major`判定・`status='Rejected'`書き込みは、User/Expertが既に`write_agreement`で書き込んだ`Approved`/`Proposed`なagreementをDB上でSUPERSEDE/無効化する構造的な仕組みを持たず（target_topicでSUPERSEDEする運用ガイドがDetector側に存在しない）、実際の効果は差し戻し（再プロンプト）のみに留まることが判明。旧decision_extractor中心アーキテクチャでは「Detector監査を通過した後に抽出する」という順序が暗黙の監査ゲートだったが、R3b以降の各ノード自律書き込みへの移行でこの保証が構造的に失われている。write_agreementの権限モデル全体の再設計が必要な大きめの課題のため、BL起票のみに留め実装は見送り | P1 |
 | BL-063 | 中 | `cela_main.py` (R5全体: F-2.1/F-3.7/F-8.3/GoalShiftEvent) | `cela_r5_design_v2.md`が定義するR5新規要件を実装。F-2.1（Detectorへの思考プロセス監査、`_query_AI_live`のreasoning捕捉＋`expert_last_reasoning`/`user_last_reasoning`配線）、F-3.7（`make_decision`/`_commit_agreement_from_tool`へのinternal_thought_process限定記録、Detector major・Reflection stagnant・Rejected判定時のみ）、F-8.3 Freeze（新規`freeze_agreement`＋`FREEZE_AGREEMENT_TOOL`、user限定、SUPERSEDE/UPDATEガード、`_build_agreements_context`のis_frozenソート＋🔒表示）、GoalShiftEvent（`goal_shift_events`テーブル新設、`call_resource_arbiter`への`requires_goal_constraint_change`追加、`detect_goal_shift`、`arbiter_node`配線）を実装。decision_extractorの役割転換（BL-050完了条件3）は今回スコープ外のまま。Detectorの監査ガバナンス欠落（BL-062）はFreeze権限をuser限定にすることで影響を限定 | P2 |
+| BL-064 | 中 | `cela_main.py` (Agreement/Phase/Decision TypedDict, `_build_agreements_context`, `_build_hydrate_context`, `detector_node`) | 合意・決定メタデータ（`abstraction_level`/`scope`/`time_axis`の3軸区分、`turn`、`evidence`、`reason_missing`、`state["risk_flag"]`）が、書き込みロジック（WRITE_AGREEMENT_TOOL・make_decision・detector_node）とDB保存・print表示は存在するのに、実際にLLM向けコンテキストを組み立てる`_build_agreements_context`/`_build_hydrate_context`や他ノードの判定ロジックからは一度も読まれていないことをユーザーの質問により発見 | P2 |
+| BL-065 | 中 | `cela_main.py` (`make_decision`/`_commit_agreement_from_tool`/`goal_shift_events`) | R5（BL-063）で新設した2つのDB永続化情報（`internal_thought_process`列、`goal_shift_events`テーブル）が、書き込みロジックのみ実装され、読み返して何かに反映する消費経路が存在しないことが判明。F-2.1の思考監査プロンプトが実際に使うのは同一ターン限りの`state["expert_last_reasoning"]`であり、DBへ永続化した`internal_thought_process`とは別物 | P2 |
+| BL-066 | 低 | `cela_main.py` (`apply_whiteboard_patch`/`get_latest_whiteboard`) | `whiteboard_drafts`テーブルの`author_role`/`edit_summary`列はバージョンごとにINSERTされるが、`get_latest_whiteboard`は`version`/`content`のみをSELECTしており、誰が・どんな要約で編集したかが一切読み出されない。BL-050がagreements側に実装した差分表示と同種の仕組みがwhiteboard側に存在しない | P3 |
+| BL-067 | 低 | `cela_main.py` (`init_db`) | `init_db`で定義される`chat_history`/`current_goal`テーブルが、コード全体でINSERT/SELECTが一件も存在しない完全な死んだスキーマであることが判明。実体は`state["chat_history"]`/`state["goal"]`（インメモリ）とLangGraphのcheckpointerで完結している | P3 |
+| BL-068 | 中 | `cela_main.py` (`call_expert`のプロンプト、`current_task_summary`、`chat_history_window`) | `current_task_summary`は元々、docs/refsのHydrate構想（直近Nターン生ログ＋それ以降を定期要約で積み上げる3段グラデーション）に由来する設計だったが、消費側が未実装のまま放置されていたとユーザーが説明。`call_expert`には現在も「5ターン毎に議論のサマリーを出力せよ」という指示（`cela_main.py:2620`）が残るが、この出力を捕捉・蓄積する実装が存在せず、`chat_history_window`は直近N件を生ログのまま渡す固定窓のみで、それ以前のターンは要約されず単純に切り捨てられている | P2 |
 
 ---
 
@@ -1989,6 +1994,110 @@ R5実装計画（F-8.3 Freeze機能）の設計相談中、Freezeされた項目
 - 新規`tests/test_r5_thought_log_freeze_goalshift.py`（14件）を含め、オフラインスモークテスト計96件Pass。
 - `python scripts/check_docs_consistency.py`合格。
 - 実LLM再ドライランでの効果確認（Detectorの思考プロセス監査の実際の発火、Freeze機能の実運用、GoalShiftEventの実発火）は次回待ち。
+
+---
+
+### BL-064: 合意・決定メタデータ（3軸区分／turn／evidence／reason_missing／risk_flag）が書き込まれるのみで、監査ロジック・表示のどこからも消費されていない
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P2 |
+| 関連 | [BL-063](issue_backlog.md#bl-063-r5実装f-21拡張f-37f-83-freezegoalshiftevent) |
+
+**内容:**
+
+ユーザーが`cela_main.py`の`Agreement`TypedDict（`abstraction_level`/`scope`/`time_axis`の3軸区分）を選択し「この情報が活用された形跡はあるか」と質問したことをきっかけに調査した結果、以下5点が判明した。いずれも「書き込み・DB保存・print表示は存在するが、LLM向けコンテキストを組み立てる関数や他ノードの判定ロジックが一度も読まない」という同型のパターンである。
+
+1. **`agreements.abstraction_level`/`scope`/`time_axis`**: `WRITE_AGREEMENT_TOOL`のプロンプト説明文でLLMに指定させ、DBにも保存し、コンソールprint（`cela_main.py:4424`）でも表示するが、`_build_agreements_context`（agreementsをLLM向けに整形する唯一の関数）は一切参照しない。対応する`Phase.allowed_abstraction_levels`/`focus_scope`/`expected_time_axis`も、Task Plannerのプロンプト例として提示されるのみで、実際のフェーズがこの範囲を逸脱していないかを検証する消費ロジックが存在しない。
+2. **`agreements.turn`**: 保存されるがどこからも`.get("turn")`で読まれない。
+3. **`agreements.evidence`**: `WRITE_AGREEMENT_TOOL`の説明文でLLMに入力させるが、INSERT時に書き込まれるのみで`_build_agreements_context`を含めどこからも表示・参照されない。Proof（証拠）を残す設計意図が、消費側が実装されずに終わっている。
+4. **`decisions.reason_missing`**: `make_decision`で計算されDB保存されるが、`_build_hydrate_context`（decisionsをLLM向けに整形する唯一の関数）は`who`/`what`/`why`のみを使い、理由欠落フラグを一切表示に反映しない。
+5. **`state["risk_flag"]`**: `detector_node`が`result["risk"]`をコピーして保存するが（`cela_main.py:4169`）、halt/drift判定自体は`result["risk"]`というローカル変数を直接参照しており（`cela_main.py:4194-4199`）、他のどのノードも`state["risk_flag"]`を一度も読まない。
+
+**完了条件（着手時、未着手）:**
+
+- 上記5項目それぞれについて「実際に消費させるよう配線するか、意図的に不要と判断してフィールド自体を削除するか」を個別に判断する。
+- 消費すると判断したものは、対応する表示関数（`_build_agreements_context`/`_build_hydrate_context`等）に配線する。
+
+---
+
+### BL-065: R5で新設したDB永続化情報（internal_thought_process／goal_shift_events）の消費・表示経路が未設計
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P2 |
+| 依存 | [BL-063](issue_backlog.md#bl-063-r5実装f-21拡張f-37f-83-freezegoalshiftevent)（本BLが指摘する両フィールドはBL-063で新設） |
+| 関連 | `docs/refs/lineage-human-intent-spec.md` §9.2、`docs/refs/hydrate-refresh-5-section-template.md` |
+
+**内容:**
+
+BL-064と同じ調査の流れで、R5（BL-063）実装そのものにも同型の「書くが読み返さない」ギャップが2件見つかった。
+
+1. **`decisions`/`agreements.internal_thought_process`（F-3.7）**: Detectorの`major`判定時・Reflectionの`stagnant`判定時・agreementsの`status='Rejected'`書き込み時のみ限定的にDB保存する設計（`cela_r5_design_v2.md`§2、トークンコスト抑制のため）自体は意図通り実装されているが、これを後から読み返して何らかのプロンプト・表示に反映する消費経路が存在しない。F-2.1の思考監査プロンプト（`call_detector`内、`cela_main.py:2855-2858`）が実際に使っているのは同一ターン限りの`state["expert_last_reasoning"]`/`state["user_last_reasoning"]`であり、DBに永続化された`internal_thought_process`とは別物である。永続化した意味（後から振り返れる監査trail）が現状活きていない。
+2. **`goal_shift_events`テーブル**: `detect_goal_shift`/`db_append_goal_shift_event`によるINSERTのみが実装され、対応するSELECT関数（`get_goal_shift_events_from_db`相当）がコード中に一件も存在しない。`docs/refs/lineage-human-intent-spec.md`§9.2や`docs/refs/hydrate-refresh-5-section-template.md`が想定していた「HydrateのWhatセクション末尾にGoal evolutionを表示する」という消費側の設計は、`cela_r5_design_v2.md`にも移植されないまま、今回のR5実装では書き込み側のみが着手された。
+
+**完了条件（着手時、未着手）:**
+
+- `internal_thought_process`をいつ・どのノード・どんな形で読み返すべきかを設計する（例: Detectorが次に同種の判定をする際、過去の類似判定理由を参照材料にする／人間向けの監査ログ表示に留める、等の方針決定が必要）。
+- `goal_shift_events`の読み出し関数を実装し、少なくとも1つの消費先（例: Hydrateコンテキストへの直近1〜3件の表示）を実装する。
+
+---
+
+### BL-066: whiteboard_draftsの編集履歴（author_role/edit_summary）がバージョン管理はされるが、差分・執筆者情報として一切表示されない
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P3 |
+| 依存 | [BL-050](issue_backlog.md#bl-050-decision_extractorの役割転換抽出役理由監査役決定事項の変遷履歴の可視化)（agreements側に同種の差分表示を先行実装済み） |
+
+**内容:**
+
+`apply_whiteboard_patch`は`author_role`/`edit_summary`を含めてINSERTするが（`cela_main.py:1902-1913`）、`get_latest_whiteboard`は`version`/`content`のみをSELECTする（`cela_main.py:1892-1899`）。誰が・どんな要約でこのバージョンを編集したかはDBに保存されているのに一切読み出されない。BL-050がagreements側に実装した「直前Superseded版との差分＋reason_why表示」と同種の仕組みが、whiteboard_draftsには存在しない。
+
+**完了条件（着手時、未着手）:**
+
+- `get_latest_whiteboard`、または新規のwhiteboard履歴表示関数に、直前バージョンとの`author_role`/`edit_summary`を含めた差分表示を追加する。
+
+---
+
+### BL-067: 未使用のSQLテーブル（chat_history／current_goal）の整理
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P3 |
+
+**内容:**
+
+`init_db`でスキーマ定義されている`chat_history`テーブルと`current_goal`テーブルは、コード全体を検索しても`INSERT INTO`/`SELECT ... FROM`が一件も存在しない。実際の会話履歴・ゴールは`state["chat_history"]`/`state["goal"]`（インメモリ）とLangGraphのcheckpointerで完結しており、これら2テーブルは完全に死んだスキーマである。
+
+**完了条件（着手時、未着手）:**
+
+- 両テーブルを削除するか、将来的な用途（例: プロセス再起動をまたいだ会話ログの独立永続化）が本当にあるならその用途を明記した上で実装するかを判断する。
+
+---
+
+### BL-068: Hydrateスタイルのコンテキスト階層化（直近Nターン生ログ＋それ以降の定期要約）が設計のみで未実装のまま放置されている
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P2 |
+| 関連 | `docs/refs/hydrate-index-expand-spec.md`（Zone A/B/C 3段グラデーション設計） |
+
+**内容:**
+
+`state["current_task_summary"]`（`cela_main.py:4109`で書き込み、BL-064で「どこからも読まれない」と判明済み）について、ユーザーから「これはHydrateの思想（`docs/refs/hydrate-index-expand-spec.md`のZone A/B/C 3段グラデーション）から来ており、AIのコンテキストに載せる直近Nターンは生ログ、それ以降は5ターン分の会話要約を積んでいく予定だったが、その部分が実装されずに放置されている」との説明があった。
+
+実際、`call_expert`のシステムプロンプトには現在も「5ターン毎に議論のサマリーを出力せよ。数値などは消さず明示的に示すこと」という指示（`cela_main.py:2620`）が残っている。しかしこの指示に対応するExpertの出力を捕捉・蓄積し、Zone B相当の「古いターンの圧縮コンテキスト」として使う実装が一切ない。`state["current_task_summary"]`はExpertの生出力を200文字に切り詰めて保存するだけの別物で、しかもどこからも読まれない。現状の`chat_history_window`（既定4）による文脈構築は、直近N件を生ログのまま渡す固定窓のみであり、それ以前のターンは要約されず単純に切り捨てられている。
+
+**完了条件（着手時、未着手）:**
+
+- 5ターンごとのExpert要約出力を実際に捕捉し、`chat_history_window`の外側にあるターンをこの要約で置き換える階層化ロジックを設計・実装する。
+- または、この機能自体を今回のCELAのスコープでは実装しないと明示的に決定し、`current_task_summary`と該当プロンプト指示（`cela_main.py:2620`）を削除する。
 
 ---
 
