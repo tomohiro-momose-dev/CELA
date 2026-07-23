@@ -304,7 +304,7 @@ STRUCTURED_OUTPUT_LABEL_KEYWORDS = ("detector", "decision extractor", "reflectio
 
 
 MAX_TOKENS_BY_ROLE = {
-    "expert": 524288,
+    "expert": 501000,
     "user": 262144,
     "detector": 262144,
     "reflection": 262144,
@@ -779,7 +779,14 @@ WRITE_AGREEMENT_TOOL = {
                         "(or leave it empty) if you provide 'edits' instead — see 'edits' below."
                     )
                 },
-                "reason_why": {"type": "string", "description": "Why adopted or rejected"},
+                "reason_why": {
+                    "type": "string",
+                    "description": (
+                        "Why adopted or rejected. [BL-050] For UPDATE/SUPERSEDE: must explicitly state what "
+                        "changed from the previous value and why (not just why the new value itself is valid) "
+                        "-- e.g. '3->2 because task_4_1 found budget insufficient for 3', not just '2 is enough'."
+                    )
+                },
                 "evidence": {"type": "string", "description": "Objective evidence (F-2.6: include Python REPL results for numeric claims)"},
                 "entry_type": {
                     "type": "string",
@@ -799,7 +806,17 @@ WRITE_AGREEMENT_TOOL = {
                         "you have no specific prior agreements-DB entry to cite."
                     ),
                 },
-                "resource_claims": {"type": "object"},
+                "resource_claims": {
+                    "type": "object",
+                    "description": (
+                        "[BL-041] Optional. Only for entries that consume a shared, capped resource "
+                        "(e.g. budget, vehicle count) that could conflict with other phases' claims. "
+                        "Shape: {\"<constraint name>\": {\"phase_id\": \"<this phase's id>\", "
+                        "\"value\": <amount this phase is claiming>, \"total_cap\": <the absolute upper limit "
+                        "for this constraint, same across all phases claiming it>}}. Omit entirely if this "
+                        "entry does not claim a capped shared resource."
+                    )
+                },
                 "target_topic": {"type": "string", "description": "For UPDATE: the topic to update"},
                 "confirmed_variables": {
                     "type": "array",
@@ -850,6 +867,63 @@ WRITE_AGREEMENT_TOOL = {
 }
 
 
+# [R5 F-8.3] Freeze専用ツール。WRITE_AGREEMENT_TOOL（既に14パラメータで複雑）を汚さない
+# 独立した小さなツールとして追加する。「絶対に覆してはならない決定」への恒久ピン留めであり、
+# unfreeze機構は設けない（D-044、AGENTS.md§7準拠）。
+FREEZE_AGREEMENT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "freeze_agreement",
+        "description": (
+            "[R5 F-8.3] Permanently pin an existing agreement so it can never be superseded or "
+            "updated again. Use only for decisions that must never be reversed (e.g. absolute "
+            "budget/constraint values explicitly finalized by the human). This is irreversible "
+            "-- there is no unfreeze."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "agreement_id": {
+                    "type": "string",
+                    "description": "The bracketed ID shown before the agreement in your system prompt, e.g. '[42] ...' -> '42'.",
+                },
+                "reason": {"type": "string", "description": "Why this decision must be permanently pinned."},
+            },
+            "required": ["agreement_id", "reason"],
+        },
+    },
+}
+
+
+def freeze_agreement(conn: sqlite3.Connection, run_id: str, agreement_id: str, reason: str) -> dict:
+    """【SLM要約】
+    [R5 F-8.3] 指定されたagreementのis_frozenを1に更新し、Freeze自体を監査ログ（decisions）として記録する。
+    """
+    cur = conn.execute(
+        "UPDATE agreements SET is_frozen = 1 WHERE id = ? AND run_id = ?", (agreement_id, run_id)
+    )
+    if cur.rowcount == 0:
+        return {"success": False, "error": f"agreement_id '{agreement_id}' が見つかりません"}
+    decision = make_decision(
+        who="system_freeze",
+        what=f"Agreement {agreement_id} をFreeze（永久ピン留め）",
+        why=reason,
+    )
+    db_append_decision(decision, conn, run_id)
+    return {"success": True, "agreement_id": agreement_id}
+
+
+def _freeze_agreement_tool_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str) -> dict:
+    """[R5 F-8.3] freeze_agreementツールの実体。userロールのみ許可（D-044）。"""
+    if caller_role != "user":
+        return {"success": False, "error": f"{caller_role}はfreeze_agreementを呼び出せません（userロールのみ許可）"}
+    agreement_id = args.get("agreement_id", "")
+    reason = args.get("reason", "")
+    if not agreement_id:
+        return {"success": False, "error": "agreement_idは必須です"}
+    return freeze_agreement(conn, run_id, agreement_id, reason)
+
+
 def _check_write_permission(args: dict, caller_role: str) -> str | None:
     """[F-3.2] 権限チェック: ロール×status許可表を全組み合わせで判定する。
     ExpertはProposedのみ、User AIは全status、Detector/Reviewer/Arbiter/IntegratorはRejectedのみ。
@@ -897,6 +971,10 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
         target_topic = args.get("target_topic", topic)
         for a in reversed(get_agreements_from_db(conn, run_id)):
             if a["topic"] == target_topic and a.get("status") != "Superseded":
+                # [R5 F-8.3/D-044] Freeze済み（is_frozen=1）のagreementは恒久ピン留めのため、
+                # SUPERSEDEを拒否する（unfreeze機構は設けない設計）。
+                if a.get("is_frozen"):
+                    return f"topic '{target_topic}' はFreeze済みのため変更できません（agreement_id={a['id']}）"
                 db_supersede_agreement(a["id"], conn, run_id)
                 break
         return None
@@ -918,6 +996,9 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
         old_content = ""
         for a in reversed(get_agreements_from_db(conn, run_id)):
             if a["topic"] == target_topic and a.get("status") != "Superseded":
+                # [R5 F-8.3/D-044] Freeze済みのagreementはUPDATEも拒否する（SUPERSEDEと同様）。
+                if a.get("is_frozen"):
+                    return f"topic '{target_topic}' はFreeze済みのため変更できません（agreement_id={a['id']}）"
                 old_content = a["decision_what"]
                 break
         if entry_type == "Deliverable":
@@ -964,6 +1045,9 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
                 db_supersede_agreement(a["id"], conn, run_id)
                 break
 
+    # [R5 F-3.7] トークンコスト抑制のため全件記録はせず、status='Rejected'の場合のみ
+    # 直前呼び出しのreasoningをスナップショット保存する。
+    _agreement_thought = get_last_reasoning_text() if args.get("status") == "Rejected" else None
     conn.execute(
         "INSERT INTO agreements (id, turn, action_type, status, topic, decision_what, reason_why, proposed_by, "
         "entry_type, phase_id, task_id, abstraction_level, scope, time_axis, depends_on, resource_claims, timestamp, "
@@ -975,7 +1059,7 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
             phase_id, tid,
             "design", "local", "current",
             depends_on_val, resource_claims_val, time.time(),
-            args.get("evidence", ""), 0, None, run_id
+            args.get("evidence", ""), 0, _agreement_thought, run_id
         )
     )
     return None
@@ -1053,6 +1137,9 @@ TOOL_DISPATCH = {
     "write_agreement": lambda args: _write_agreement_impl(
         args, get_active_conn(), _CURRENT_RUN_ID, _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
     ),
+    "freeze_agreement": lambda args: _freeze_agreement_tool_impl(
+        args, get_active_conn(), _CURRENT_RUN_ID, _CURRENT_CALLER_ROLE
+    ),
 }
 
 # BL-033: 直前のquery_AI呼び出しでLLMが実際に実行したpython_replの(code, result)記録。
@@ -1072,6 +1159,12 @@ _LAST_WRITE_AGREEMENT_SUCCEEDED: bool = False
 # _LAST_PYTHON_CALLSと同じ「LangGraph単一プロセス同期実行前提」パターン）。
 # Detectorがmajor判定を出した場合、expert_nodeの差し戻し処理からロールバックするために使う。
 _LAST_WHITEBOARD_EDIT: dict | None = None
+
+# [R5 F-2.1] 直前のquery_AI呼び出しでモデルが出力したreasoning（思考過程）の全文。
+# 従来はstreaming中に💭表示で印字するのみで保存されずに破棄されていた（プロバイダが
+# reasoningを返さない場合は空文字のまま）。_LAST_PYTHON_CALLSと同じパターンで、
+# 呼び出し元（expert_node等）がstateへコピーする前提の一時バッファ。
+_LAST_REASONING_TEXT: str = ""
 
 
 def get_last_python_calls() -> list[dict]:
@@ -1098,16 +1191,25 @@ def get_last_whiteboard_edit() -> dict | None:
     return dict(_LAST_WHITEBOARD_EDIT) if _LAST_WHITEBOARD_EDIT else None
 
 
+def get_last_reasoning_text() -> str:
+    """【SLM要約】
+    [R5 F-2.1] 直前のquery_AI呼び出しでモデルが出力したreasoning（思考過程）の全文を返す。
+    プロバイダがreasoningを返さない場合は空文字列。
+    """
+    return _LAST_REASONING_TEXT
+
+
 def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unknown Node", tools: list[dict] | None = None,
              light_system_prompt: str | None = None) -> str:
     """【SLM要約】
     Orchestration of external AI API calls with Record/Replay stub support (keyed by (label, call_seq)),
     delegating the actual retry/provider-selection logic to _query_AI_live.
     """
-    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WHITEBOARD_EDIT
+    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT
     _LAST_PYTHON_CALLS = []
     _LAST_WRITE_AGREEMENT_SUCCEEDED = False
     _LAST_WHITEBOARD_EDIT = None
+    _LAST_REASONING_TEXT = ""
 
     call_seq = _call_seq_counter
     _call_seq_counter += 1
@@ -1316,6 +1418,8 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                 if finish_reason == "length":
                     print(f" [{label_lower}] ⚠️ max_tokens超過により出力が打ち切られました")
                     raise ValueError("Output truncated due to max_tokens limit")
+                global _LAST_REASONING_TEXT
+                _LAST_REASONING_TEXT = "".join(reasoning_parts)
                 content = "".join(content_parts)
                 return content if content else "(APIから空の応答が返されました)"
 
@@ -1334,6 +1438,7 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
             create_kwargs["stream"] = True  # [UX] ツールループもstreamingで「思考中」感を出す
             tool_calls_used = 0
             python_calls_log: list[dict] = []  # BL-033: 実行したpython_replのcode/resultを蓄積
+            reasoning_parts_all: list[str] = []  # [R5 F-2.1] 全iterationのreasoningを蓄積
             # [CONSTRAINT] BL-014原因A: python_replは1回のツールループの間だけ状態を保持する
             # 対話セッションとする（ノード・リトライをまたいだ状態共有はしない、毎回新規生成）。
             # try/finallyで、成功・非収束・例外いずれの終了経路でも子プロセスを確実に終了させる。
@@ -1371,6 +1476,7 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                                 print(f"💭 [{label}] 思考（iter={iteration}）:\n", end="", flush=True)
                                 reasoning_started = True
                             print(delta_reasoning, end="", flush=True)
+                            reasoning_parts_all.append(delta_reasoning)
                         if delta.content:
                             if not content_started:
                                 if reasoning_started:
@@ -1412,6 +1518,7 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                             print(f"⚠️ [{label}] python_replを一度も使わずに応答しました（F-2.6監査対象）")
                         global _LAST_PYTHON_CALLS
                         _LAST_PYTHON_CALLS = python_calls_log
+                        _LAST_REASONING_TEXT = "".join(reasoning_parts_all)
                         content = msg.content
                         return content if content is not None else "(APIから空の応答が返されました)"
                     loop_messages.append(msg.model_dump())
@@ -1677,6 +1784,22 @@ def init_db(conn: sqlite3.Connection) -> None:
         run_id TEXT NOT NULL,
         PRIMARY KEY (run_id, variable_name)
     );
+
+    CREATE TABLE IF NOT EXISTS goal_shift_events (
+        shift_id TEXT PRIMARY KEY,
+        timestamp REAL NOT NULL,
+        shift_kind TEXT NOT NULL,
+        from_goal_state TEXT NOT NULL,
+        to_goal_state TEXT NOT NULL,
+        reason_why TEXT NOT NULL,
+        evidence TEXT,
+        triggered_by TEXT NOT NULL,
+        triggering_agreement_id TEXT,
+        run_id TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_goal_shift_kind ON goal_shift_events(shift_kind);
+    CREATE INDEX IF NOT EXISTS idx_goal_shift_timestamp ON goal_shift_events(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_goal_shift_run ON goal_shift_events(run_id);
     """)
     _ensure_agreements_task_id_column(conn)
     _ensure_verified_facts_r3a_columns(conn)
@@ -1715,6 +1838,22 @@ def db_append_decision(d: dict, conn: sqlite3.Connection, run_id: str) -> None:
         "VALUES (?,?,?,?,?,?,?,?)",
         (d.get("id"), d.get("timestamp"), d.get("who"), d.get("what"), d.get("why"),
          1 if d.get("reason_missing") else 0, d.get("internal_thought_process"), run_id)
+    )
+
+
+def db_append_goal_shift_event(shift: dict, conn: sqlite3.Connection, run_id: str) -> None:
+    """【SLM要約】
+    [R5 GoalShiftEvent] detect_goal_shiftが返したイベントをgoal_shift_eventsテーブルへコミットする。
+    """
+    conn.execute(
+        "INSERT INTO goal_shift_events (shift_id, timestamp, shift_kind, from_goal_state, to_goal_state, "
+        "reason_why, evidence, triggered_by, triggering_agreement_id, run_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            f"GS-{int(time.time() * 1000)}", time.time(), shift.get("shift_kind"),
+            shift.get("from_goal_state"), shift.get("to_goal_state"), shift.get("reason_why"),
+            shift.get("evidence"), shift.get("triggered_by"), shift.get("triggering_agreement_id"),
+            run_id,
+        )
     )
 
 
@@ -1906,6 +2045,7 @@ class Decision(TypedDict):
     what: str
     why: str
     reason_missing: bool
+    internal_thought_process: str  # [R5 F-3.7]
 
 class Task(TypedDict):
     """[CONSTRAINT] BL-023: acceptance_criteriaは最大3個。超える場合はtask_planner側でタスクを分割する。"""
@@ -2028,6 +2168,9 @@ class LineageState(TypedDict):
     user_retry_count: int
     expert_retry_count: int
     expert_last_python_calls: list[dict]  # BL-033: 直前Expert呼び出しのpython_repl実行記録（code/result）
+    # [R5 F-2.1] 直前Expert/User AI呼び出しのreasoning（思考過程）全文。Detectorの思考プロセス監査に使う。
+    expert_last_reasoning: str
+    user_last_reasoning: str
     # [BL-038] LangGraphはTypedDictスキーマに宣言されていないキーをノード間で伝播しない
     # （未宣言キーへの書き込みは次ノードに渡る前に消える）。expert_wrote_agreement/
     # user_wrote_agreement/expert_last_whiteboard_editはR3b/R4で導入されて以来ここへの
@@ -2035,6 +2178,9 @@ class LineageState(TypedDict):
     expert_wrote_agreement: bool
     user_wrote_agreement: bool
     expert_last_whiteboard_edit: dict | None
+    # [BL-061] reflectionが検出した具体的な停滞・ドリフト理由（call_reflectionのnote）。
+    # facilitator_nodeがなぜ自分が呼ばれたかを把握できるよう、reflection_nodeが都度上書きする。
+    last_reflection_note: str
 
 class Appconfig(TypedDict): 
     pattern: int
@@ -2086,18 +2232,24 @@ Filters out superseded or directive items and applies status-based formatting/la
     
     if not decisions_and_deliverables:
         return "(まだ合意・決定・提案された事項はありません)"
-        
+
+    # [R5 F-8.3] Freeze済み（is_frozen=1）の項目を先頭に配置する。chat_history_window等の
+    # トリミングでFrozen項目が窓の外へ押し出されないよう、常に確実にコンテキスト上位へ含める。
+    decisions_and_deliverables.sort(key=lambda a: (not a.get("is_frozen"), a.get("timestamp", 0)))
+
     lines = []
     for a in decisions_and_deliverables:
         status = a.get("status", "Proposed")
         entry_type = a.get("entry_type", "Decision")
-        
+
         # LLMが勝手に topic の先頭に "[合意]" や "[決定]" を付けて抽出するのを防ぐ
         raw_topic = a.get('topic', 'Unknown Topic')
         clean_topic = re.sub(r'^\[.*?\]\s*', '', raw_topic)
-        
-        # 1. アイコンの判定（成果物は専用アイコンを使用）
-        if entry_type == "Deliverable":
+
+        # 1. アイコンの判定（成果物は専用アイコンを使用。Freeze済みは🔒を最優先）
+        if a.get("is_frozen"):
+            icon = "🔒"
+        elif entry_type == "Deliverable":
             icon = "📄" if status == "Proposed" else "✅"
         elif status == "Approved":
             icon = "✅"
@@ -2131,10 +2283,65 @@ Filters out superseded or directive items and applies status-based formatting/la
             content_preview = content_preview[:150]
 
         # [R3b対応] LLMがdepends_onにどのagreements.idを指定すればよいか本文中から読み取れるようidを追記
+        # [BL-050] reason_whyも表示する。UPDATE/SUPERSEDE時はここに「前の値から何故変わったか」が
+        # 書かれる想定（WRITE_AGREEMENT_TOOLのreason_why説明文で要求）。
         agreement_id = a.get('id', '?')
-        lines.append(f"[{agreement_id}] {icon}{type_label} {clean_topic}: {content_preview}")
+        reason_preview = (a.get('reason_why') or '')[:100]
+        reason_suffix = f"（理由: {reason_preview}）" if reason_preview else ""
+        lines.append(f"[{agreement_id}] {icon}{type_label} {clean_topic}: {content_preview}{reason_suffix}")
+
+        # [BL-050] 直近1件のSuperseded版（同一topic・同一entry_type）を差分として1行追記。
+        # 全履歴を出すとトークンコストが膨らむため、直前版のみに絞る。
+        prior = _find_prior_superseded(agreements, raw_topic, entry_type)
+        if prior is not None:
+            old_what = (prior.get("decision_what") or "")[:80]
+            old_why = (prior.get("reason_why") or "")[:80]
+            lines.append(f"　└ (前版 Superseded): {old_what} — 当時の理由: {old_why}")
 
     return "\n".join(lines)
+
+
+def _find_prior_superseded(agreements: list[Agreement], topic: str, entry_type: str) -> Agreement | None:
+    """[BL-050] 同一topic・entry_typeを持つSuperseded行のうち、timestampが最も新しい1件を返す。
+    現行（非Superseded）行はstatusフィルタだけで既に除外されるため、idによる除外は行わない
+    （AG-IDはミリ秒タイムスタンプ由来で、高速連続書き込み時に現行行と旧版行のIDが衝突しうるため、
+    idベースの除外は誤って正当な旧版を取りこぼす）。"""
+    candidates = [
+        a for a in agreements
+        if a.get("topic") == topic
+        and a.get("entry_type", "Decision") == entry_type
+        and a.get("status") == "Superseded"
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda a: a.get("timestamp") or 0)
+
+
+def _aggregate_global_constraints(agreements: list[Agreement]) -> list["GlobalConstraint"]:
+    """[BL-041] resource_claims（{name: {phase_id, value, total_cap}}構造）を持つagreements
+    （Superseded除く）をname単位で集約し、GlobalConstraint配列を構築する。
+    旧形式（平坦な{name: 数値}）や壊れたJSONは静かにスキップする（混在期間の後方互換）。
+    """
+    by_name: dict[str, dict] = {}
+    for a in agreements:
+        if a.get("status") == "Superseded":
+            continue
+        try:
+            claims = json.loads(a.get("resource_claims") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(claims, dict):
+            continue
+        for name, claim in claims.items():
+            if not isinstance(claim, dict):
+                continue
+            entry = by_name.setdefault(name, {"name": name, "unit": "", "claims": {}, "total_cap": None})
+            phase_key = claim.get("phase_id") or a.get("phase_id") or "unknown"
+            if "value" in claim:
+                entry["claims"][phase_key] = claim["value"]
+            if claim.get("total_cap") is not None:
+                entry["total_cap"] = claim["total_cap"]
+    return [e for e in by_name.values() if e["total_cap"] is not None]
 
 
 def _build_hydrate_context_from_db(conn: sqlite3.Connection, run_id: str, config: Appconfig) -> str:
@@ -2643,6 +2850,26 @@ def call_detector(state: LineageState, target_role: str) -> dict:
             f"必ずあなた自身がpython_replで独立して検算してください。\n"
         )
 
+    # [R5 F-2.1] Expert/User AIのreasoning（思考過程）を提示し、最終出力だけでなく思考過程自体も
+    # 監査対象にする。プロバイダがreasoningを返さない場合は「(思考ログ取得不可)」を表示する。
+    _reasoning_source = state.get("expert_last_reasoning" if target_role == "expert" else "user_last_reasoning", "")
+    thought_process_audit = f"""
+【思考プロセス監査（★R5追加）】
+以下はExpert/User AIの内部思考過程（internal_thought_process）です。
+最終出力の内容だけでなく、この思考過程も確認してください。
+- 「計算ツールを使っていないのに適当な数字を出している」
+- 「都合の悪い制約から意図的に目を逸らして結論を急いでいる」
+このようなAIの事後正当化（取り繕い）が見られる場合、重度のハルシネーションと
+判定して強制差し戻し（major）としてください。
+
+【重要な限界】ただし、思考ログ内で正しく検算していたとしても、それを読むあなた自身も
+LLMである以上、暗算による検証には誤りのリスクが伴います。数値的主張の妥当性は、
+本監査だけに依拠せず、必ず上記のBL-033機械的検算記録と突き合わせて判断してください。
+
+【Expert/User AIの思考過程】
+{_reasoning_source or "(思考ログ取得不可)"}
+"""
+
 # [BL-049/BL-054] 検算（数値監査）とは別視点のドメイン妥当性レビュー用instruction。
     # F-2.6検算ゲート導入以降、role_specific_instructionが「検算結果」を主なmajorトリガーに
     # しているため、Detectorの注意力が数値の辻褄合わせに強く誘導され、法規制・物理的運用可能性
@@ -2800,6 +3027,7 @@ def call_detector(state: LineageState, target_role: str) -> dict:
         f"必ず python_repl ツールで機械的に再計算し、一致を確認してからでなければ constraint_issue=\"major\" としないでください。"
         f"暗算での承認・却下判定は禁止します。\n\n"
         f"{python_calls_block}\n"
+        f"{thought_process_audit}\n"
         f"System Goal: {goal}\n"
         f"Recent Decisions（参考程度）: {recent_decitions}\n\n"
         f"【BL-023: 現在タスクのacceptance_criteria充足チェック】\n"
@@ -3038,7 +3266,7 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
             "scope": "global/phase/local",
             "time_axis": "assumption/current/risk/validated",
             "depends_on": ["依存する既存topic名があれば配列で"],
-            "resource_claims": {{"予算": 1000000}} // リソース消費があれば記述
+            "resource_claims": {{"予算": {{"phase_id": "task_1_1", "value": 1000000, "total_cap": 100000000}}}} // 上限のある共有リソースを消費する場合のみ記述
             }}
         ]
         }}
@@ -3063,6 +3291,9 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
     - abstraction_level: "concept"(概念) / "constraint"(制約) / "design"(設計) / "impl"(実装・PoC)
     - scope: "global"(全体) / "phase"(フェーズ内) / "local"(限定的)
     - time_axis: "assumption"(仮定) / "current"(確定) / "risk"(未検証リスク) / "validated"(検証済)
+
+    [BL-050] action_type="UPDATE"（既存topicの値を変更する）の場合、rationale には
+    「新しい値が何故妥当か」だけでなく「前の値から何故・どう変わったのか」を必ず明記してください。
     """
 
     # 共通のフォーマット指定（JSON出力部分など）
@@ -3145,12 +3376,19 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict]) -> 
 
     【F-2.6 機械的検算ゲート（必須）】予算超過判定は python_repl ツールで機械的に合計・比較してから行うこと。
 
+    【ゴール変容の検知（★R5 GoalShiftEvent）】
+    提示する再配分案が、当初の絶対制約（このリソースのtotal_cap自体）を
+    変更する必要があると判断した場合、requires_goal_constraint_change: true を
+    含めて返答してください。単なるフェーズ間の配分見直し（total_capは維持）で
+    あれば false としてください。
+
     Return ONLY JSON:
     {{
         "priority_ranking": ["phase_id順に重要な順"],
         "new_allocation": {{"phase_id": new_amount, ...}},
         "phases_to_revise": ["再検討が必要なphase_idのリスト"],
-        "rationale": "判断理由"
+        "rationale": "判断理由",
+        "requires_goal_constraint_change": true または false
     }}
     """
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
@@ -3158,6 +3396,23 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict]) -> 
     _CURRENT_TASK_ID = ""
     res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Resource Arbiter", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL])
     return _safe_json_parse(res, fallback={})
+
+
+def detect_goal_shift(state: "LineageState", arbiter_result: dict) -> dict | None:
+    """【SLM要約】
+    [R5 GoalShiftEvent] arbiter_nodeの再配分案が、当初のcurrent_goalのabsolute_constraints自体を
+    変更するレベルに達した場合（例: 予算上限そのものの見直しが提案された場合）、
+    GoalShiftEventとして記録すべきイベントdictを返す。該当しなければNone。
+    """
+    if arbiter_result.get("requires_goal_constraint_change"):
+        return {
+            "shift_kind": "constraint_hit",
+            "from_goal_state": json.dumps(state.get("global_constraints", []), ensure_ascii=False),
+            "to_goal_state": json.dumps(arbiter_result.get("new_allocation", {}), ensure_ascii=False),
+            "reason_why": arbiter_result.get("rationale", ""),
+            "triggered_by": "Arbiter_Resource_Overrun",
+        }
+    return None
 
 
 def call_reflection(state: LineageState, config: Appconfig) -> dict:
@@ -3286,27 +3541,43 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
         "note": parsed.get("note", ""),
     }
 
-def call_facilitator(goal: str, chat_history: list[dict], decisions: list[Decision]) -> str:
+def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str = "") -> str:
     """【SLM要約】
     Generates a guiding prompt to help AI agents refocus discussions on key unresolved issues toward achieving the overall system goal.
     """
     recent_history = chat_history[-10:]
     history_text = "\n".join([f"{'User' if m['role']=='user' else 'AI'}: {m['content']}" for m in recent_history])
-    
+
+    # [BL-061] facilitatorはreflectionの"stagnant"/drift判定を契機に呼ばれるが、従来は
+    # なぜ呼ばれたか（具体的にどの論点が未解決か）を一切知らされず、直近10件のchat_history
+    # のみから独自に状況を再判定していた。その結果、reflectionが「でっちあげ数値・与条件違反」
+    # を明確に指摘していても、facilitatorが「膠着していない」と独立に判断し、無関係な軽微な
+    # 論点だけを穏やかに促す食い違ったメッセージを出す事例が実ドライランで確認された
+    # （log/2026-07-23/1656）。reflectionの判定理由をそのまま提示し、これを出発点として
+    # 扱わせることで、この食い違いを防ぐ。
+    reflection_block = (
+        f"■ あなたが呼ばれた理由（直前のReflection監査の判定）:\n{reflection_note}\n"
+        if reflection_note else
+        "■ あなたが呼ばれた理由（直前のReflection監査の判定）: (特筆すべき懸念なし。周期的な確認です)\n"
+    )
+
     prompt = f"""
     あなたはAI同士の議論をサポートする優秀な「ファシリテーター」です。
     現在、AI同士の議論が目標(Goal)から脱線しそうになっているか、同じ論点で少し停滞しているようです。\n
-    
+
     彼らが再び目標に向かって、自律的かつ建設的な議論を進められるように、
     議論の焦点となるべき「未決着の論点」や「次に深掘りすべきテーマ」を優しく提示するメッセージを1つ作成してください。\n
     また、議論が膠着状態である時は、視座を上げ目標と、制約、条件、AI同士の議論を見渡し、そもそも目標が達成しようとしている本質的な課題は何か
     その課題を解決するための手段は他にないのか、AI（ユーザーとエージェント/エキスパート）は視野が狭くなっていないか、
-    また、守らなければならない制約と、見直し可能な条件は何かという視点で思考してください。    
+    また、守らなければならない制約と、見直し可能な条件は何かという視点で思考してください。
 
     ※以上の事から「〇〇について直ちに決定してください」といった強制的な表現は避け、AI達の視野狭窄を解き、本質的な課題解決の視座と発想、思考を与える
     ようアドバイスしてください。
-  
+    ※あなたが呼ばれた理由（下記）は必ず最優先の出発点として扱ってください。自分で独自に「膠着していない」等と再判定し、
+    その理由を無視・軽視することは避けてください。
+
     ■ プロジェクトの目標(Goal): {goal}
+    {reflection_block}
     ■ 直近の会話:
     {history_text}
 
@@ -3614,7 +3885,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
     _CURRENT_CALLER_ROLE = "user"
     _CURRENT_TASK_ID = state.get("current_task_id", "")
-    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL])
+    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, FREEZE_AGREEMENT_TOOL])
 
     if content is None or content.strip() == "" or content == "(APIから空の応答が返されました)":
         for retry in range(3):
@@ -3622,7 +3893,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             # global宣言は既に上の行で完了しているため再宣言不要
             _CURRENT_CALLER_ROLE = "user"
             _CURRENT_TASK_ID = state.get("current_task_id", "")
-            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL])
+            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, FREEZE_AGREEMENT_TOOL])
             if content and content.strip() and content != "(APIから空の応答が返されました)":
                 break
         else:
@@ -3651,21 +3922,32 @@ def arbiter_node(state: LineageState) -> LineageState:
     """【SLM要約】
     Constraint violation detection and resource arbitration, deciding on necessary phase revisions when system limits are exceeded.
     """
+    # [BL-041] global_constraintsはこれまでどこにも実データが書き込まれず常に空だったため
+    # 常に空振りしていた。ここでagreements DBから毎回動的に再集約し、実データを反映させる。
+    state["global_constraints"] = _aggregate_global_constraints(
+        get_agreements_from_db(get_active_conn(), state["run_id"])
+    )
     overruns = check_global_constraint_overrun(state)
     if not overruns:
         state["phases_to_revise"] = []
         return state
-    
-    overrun = overruns[0] 
+
+    overrun = overruns[0]
     result = call_resource_arbiter(state["goal"], overrun, state["phases"])
     
     state["phases_to_revise"] = result.get("phases_to_revise", [])
     decision = make_decision(
-        who="arbiter", 
-        what=f"リソース超過調停: {overrun['constraint']}", 
+        who="arbiter",
+        what=f"リソース超過調停: {overrun['constraint']}",
         why=result.get("rationale", "再配分案を提示")
     )
     db_append_decision(decision, get_active_conn(), state["run_id"])
+
+    # [R5 GoalShiftEvent] 再配分案が絶対制約自体の変更を要求している場合、ゴール変容として記録する。
+    shift = detect_goal_shift(state, result)
+    if shift is not None:
+        db_append_goal_shift_event(shift, get_active_conn(), state["run_id"])
+
     return state
 
 # ---------------------------------------------------------------------------
@@ -3692,12 +3974,14 @@ def generate_user_utterance_node(state: LineageState) -> LineageState:
     user_input = generate_user_utterance(state, config)
     # [R3b §3.5.1] 今ターンでwrite_agreementが1回でも成功したかをstateに保存
     state["user_wrote_agreement"] = get_last_write_agreement_succeeded()
+    # [R5 F-2.1] User AIのreasoningを、次のDetectorが思考プロセス監査に使えるようstateへ保存する。
+    state["user_last_reasoning"] = get_last_reasoning_text()
     print(f"\n>>> 👤 User AIの発言:\n{user_input}")
     state["user_input"] = user_input
     state["chat_history"].append({"role": "user", "content": state["user_input"]})
     return state
 
-def make_decision(who: str, what: str, why: str | None) -> Decision:
+def make_decision(who: str, what: str, why: str | None, internal_thought_process: str | None = None) -> Decision:
     """【SLM要約】
     Decision creation by structuring input parameters into a standardized, time-stamped record.
     """
@@ -3708,6 +3992,9 @@ def make_decision(who: str, what: str, why: str | None) -> Decision:
         "what": what,
         "why": why if why else "(Reason: Missing)",
         "reason_missing": why is None,
+        # [R5 F-3.7] トークンコスト抑制のため全件記録はせず、呼び出し元が意図的に渡した場合のみ
+        # スナップショット保存する（Detector major判定・Reflection stagnant判定時のみ）。
+        "internal_thought_process": internal_thought_process or "(記録なし)",
     }
 
 def task_planner_node(state: LineageState) -> LineageState:
@@ -3805,6 +4092,8 @@ Updates system state with the expert's output, decisions, and conversational his
     )
     # BL-033: Expertが実際に実行したpython_replのcode/resultを、次のDetectorが参照できるようstateへ保存する。
     state["expert_last_python_calls"] = get_last_python_calls()
+    # [R5 F-2.1] Expertのreasoningを、次のDetectorが思考プロセス監査に使えるようstateへ保存する。
+    state["expert_last_reasoning"] = get_last_reasoning_text()
     # [R3b §3.5.1] 今ターンでwrite_agreementが1回でも成功したかをstateに保存
     state["expert_wrote_agreement"] = get_last_write_agreement_succeeded()
     # [DEBUG][BL-038調査用/2026-07-22] expert_node内でセットした直後の値を確認する一時計装。
@@ -3911,10 +4200,13 @@ Manages state updates including risk levels, constraint logging, and decision re
     else:
         state["medium_risk_streak"] = 0
 
+    # [R5 F-3.7] トークンコスト抑制のため、major判定時のみ思考ログをスナップショット保存する。
+    _detector_thought = get_last_reasoning_text() if result["constraint_issue"] == "major" else None
     decision = make_decision(
         who="detector",
         what=f"risk={result['risk']}, constraint_issue={result['constraint_issue']}",
-        why=result["comment"]
+        why=result["comment"],
+        internal_thought_process=_detector_thought,
     )
     _conn = get_active_conn()
     db_append_decision(decision, _conn, state["run_id"])
@@ -4168,6 +4460,9 @@ It generates a formal decision based on reflection results, updating the overall
 
     print(f"\n------ 完了 ------")
     state["discussion_status"] = result["discussion_status"]
+    # [BL-061] facilitatorがこのreflectionの判定理由を参照できるよう保存する。
+    # 従来はdecisionsテーブルのwhy列にしか残らず、facilitator_nodeに渡っていなかった。
+    state["last_reflection_note"] = result.get("note", "")
     stop_reason_label = "継続中"
     if (result["discussion_status"] == "stagnant") or (not result["still_aligned"]):
         state["drift_flag"] = True
@@ -4177,10 +4472,13 @@ It generates a formal decision based on reflection results, updating the overall
     elif result["discussion_status"] == "completed":
         stop_reason_label = "目標達成（完了）申告を検出"
 
+    # [R5 F-3.7] トークンコスト抑制のため、stagnant判定時のみ思考ログをスナップショット保存する。
+    _reflection_thought = get_last_reasoning_text() if result["discussion_status"] == "stagnant" else None
     decision = make_decision(
         who="reflection",
         what=f"内省監査実行: aligned={result['still_aligned']}, status={result['discussion_status']}",
         why=f"【判定: {stop_reason_label}】 {result['note']}",
+        internal_thought_process=_reflection_thought,
     )
     db_append_decision(decision, get_active_conn(), state["run_id"])
     return state
@@ -4198,7 +4496,7 @@ def facilitator_node(state: LineageState) -> LineageState:
         return state
 
     print(f"\n------ [facilitator] が思考中 ------")
-    feedback = call_facilitator(state["goal"], state["chat_history"], get_decisions_from_db(get_active_conn(), state["run_id"]))
+    feedback = call_facilitator(state["goal"], state["chat_history"], state.get("last_reflection_note", ""))
     print(f"\n------ 完了 ------")
     
     if state["chat_history"] and state["chat_history"][-1]["role"] == "assistant":
@@ -4728,9 +5026,12 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
             "verified_facts": {},
             "task_criteria_status": {},
             "expert_last_python_calls": [],
+            "expert_last_reasoning": "",
+            "user_last_reasoning": "",
             "risk_register": [],
             "needs_revision_phases": [],
-            "phases_to_revise": []
+            "phases_to_revise": [],
+            "last_reflection_note": ""
         }
 
     global _CURRENT_RUN_ID
