@@ -1606,8 +1606,10 @@ BL-037（`reason_why`の記載品質が薄い、既存）と同系統だが、�
 **完了条件（着手時）:**
 
 - `【決定事項DB】`コンテキストに、SUPERSEDEされた直前versionとその`reason_why`を差分表示する仕組みを追加する（Detectorが「前は何だったか」を即座に参照できるようにする）。
+  → **確認済み（2026-07-23実装）**: `_build_agreements_context`（`cela_main.py`）に、同一topic・entry_typeの直近1件のSuperseded行を「└ (前版 Superseded): {内容} — 当時の理由: {理由}」として追記する処理を追加。あわせて現行行自身のreason_whyも「（理由: ...）」として表示するよう変更（従来はreason_why自体がこのコンテキストに一切出ていなかったため、変更理由の可視化にはこちらも必要と判断）。オフラインテスト`tests/test_bl041_bl050.py`で確認。
 - `write_agreement`のUPDATE/SUPERSEDE時、`reason_why`に「前の値から何故変わったか」の明示を求めるスキーマ・プロンプト変更を検討する。
-- `decision_extractor`の役割転換（抽出役→理由監査役）は、BL-043（Function Calling化）の設計確定と合わせて具体化する。
+  → **確認済み（2026-07-23実装）**: `WRITE_AGREEMENT_TOOL.reason_why`のdescriptionおよびdecision_extractor抽出プロンプトの共通ルールに、UPDATE時は「前の値から何故・どう変わったか」を明示する要求を追加（`cela_main.py`）。実ドライランでの記載品質向上は別途要確認（プロンプト指示であり強制ではないため）。
+- `decision_extractor`の役割転換（抽出役→理由監査役）は、BL-043（Function Calling化）の設計確定と合わせて具体化する。→ 今回のスコープ外、未着手のまま。
 
 ---
 
