@@ -94,6 +94,7 @@
 | BL-060 | 高 | `cela_main.py` (`_query_AI_live`のツールループ最終iteration) | ドライラン（`log/2026-07-23/1453`）で、Expertが最終許容iteration（15回目）でも`write_agreement`（成功）を呼び、次のiterationが存在しないためMAX_TOOL_ITER非収束クラッシュに至ったことをユーザーが報告。BL-016/BL-056bの「残り回数」通知はあくまで依頼であり、モデルが最終iterationでもツール呼び出しを選ぶと強制力がなかったことが原因。最終iterationのみAPI呼び出しから`tools`を外し、構造的にツール呼び出し不可能にしてテキスト最終応答を強制することでクラッシュを解消 | P1 |
 | BL-061 | 高 | `cela_main.py` (`call_facilitator`/`facilitator_node`/`reflection_node`) | ドライラン（`log/2026-07-23/1656`）で、reflectionが5点の具体的な未解決問題（与条件無断変更・でっちあげ疑い数値等）を検出し`stagnant`と判定したにもかかわらず、`facilitator`自身は「膠着していない」と独立に再判断し、無関係な軽微な論点だけを穏やかに促す食い違ったメッセージを出力していたことをユーザーが発見。真因は`call_facilitator`が受け取る`decisions`引数がプロンプト内で完全に未使用（デッドパラメータ）で、reflectionの判定理由（`note`）がfacilitatorへ一切伝わっていなかったこと。`LineageState`に`last_reflection_note`を新設し`reflection_node`が保存、`call_facilitator`のプロンプトにこれを最優先の出発点として明示する形で修正 | P1 |
 | BL-062 | 高 | `cela_main.py` (`write_agreement`権限モデル全体) | R5実装計画（F-8.3 Freeze）の設計相談中、ユーザーが「Detectorはユーザーまたはエキスパートの決定まで破棄できたか？」と指摘。調査の結果、Detector/Reviewer/Arbiter/Integratorの`major`判定・`status='Rejected'`書き込みは、User/Expertが既に`write_agreement`で書き込んだ`Approved`/`Proposed`なagreementをDB上でSUPERSEDE/無効化する構造的な仕組みを持たず（target_topicでSUPERSEDEする運用ガイドがDetector側に存在しない）、実際の効果は差し戻し（再プロンプト）のみに留まることが判明。旧decision_extractor中心アーキテクチャでは「Detector監査を通過した後に抽出する」という順序が暗黙の監査ゲートだったが、R3b以降の各ノード自律書き込みへの移行でこの保証が構造的に失われている。write_agreementの権限モデル全体の再設計が必要な大きめの課題のため、BL起票のみに留め実装は見送り | P1 |
+| BL-063 | 中 | `cela_main.py` (R5全体: F-2.1/F-3.7/F-8.3/GoalShiftEvent) | `cela_r5_design_v2.md`が定義するR5新規要件を実装。F-2.1（Detectorへの思考プロセス監査、`_query_AI_live`のreasoning捕捉＋`expert_last_reasoning`/`user_last_reasoning`配線）、F-3.7（`make_decision`/`_commit_agreement_from_tool`へのinternal_thought_process限定記録、Detector major・Reflection stagnant・Rejected判定時のみ）、F-8.3 Freeze（新規`freeze_agreement`＋`FREEZE_AGREEMENT_TOOL`、user限定、SUPERSEDE/UPDATEガード、`_build_agreements_context`のis_frozenソート＋🔒表示）、GoalShiftEvent（`goal_shift_events`テーブル新設、`call_resource_arbiter`への`requires_goal_constraint_change`追加、`detect_goal_shift`、`arbiter_node`配線）を実装。decision_extractorの役割転換（BL-050完了条件3）は今回スコープ外のまま。Detectorの監査ガバナンス欠落（BL-062）はFreeze権限をuser限定にすることで影響を限定 | P2 |
 
 ---
 
@@ -1956,6 +1957,38 @@ R5実装計画（F-8.3 Freeze機能）の設計相談中、Freezeされた項目
 - write_agreementの権限モデルを、「Detector等が明示的にSUPERSEDEできる」設計に拡張するか、「Detectorのmajor判定時に、対象agreementを自動的にSUPERSEDEする」機構を追加するか、設計判断が必要。
 - あるいは、`_build_agreements_context`の表示自体に「直近のDetector判定と矛盾していないか」を突き合わせるロジックを追加する案も検討の余地がある。
 - BL-050の完了条件3（decision_extractorの役割転換：抽出役→理由監査役）と統合して検討するのが筋が良い可能性がある（decision_extractorが「監査済みであることを保証する」役目を再度担う設計）。
+
+---
+
+### BL-063: R5実装（F-2.1拡張／F-3.7／F-8.3 Freeze／GoalShiftEvent）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| 関連 | [cela_r5_design_v2.md](r5/cela_r5_design_v2.md)、[cela_r5_impl_Plan.md](r5/cela_r5_impl_Plan.md)、[BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)、[BL-050](issue_backlog.md#bl-050-decision_extractorの役割転換抽出役理由監査役決定事項の変遷履歴の可視化)、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)、[decision_log.md D-044](decision_log.md)、[decision_lineage.md 論点61](decision_lineage.md) |
+
+**内容:**
+
+`cela_r5_impl_Plan.md`の計画通り、以下4機能を`cela_main.py`に実装した。
+
+1. **F-2.1拡張（思考プロセス監査）**: `_query_AI_live`のstreaming処理が受け取る`delta.reasoning`を、従来は💭表示で印字するのみで破棄していたが、新規モジュールグローバル`_LAST_REASONING_TEXT`（`get_last_reasoning_text()`ゲッター、BL-033の`_LAST_PYTHON_CALLS`と同型パターン）へ蓄積するよう変更。`LineageState`に`expert_last_reasoning`/`user_last_reasoning`を新設し、`expert_node`/`generate_user_utterance_node`がそれぞれセット。`call_detector`に「思考プロセス監査」ブロックを追加し、target_roleに応じてExpert/User AIいずれかのreasoningを提示する（数値監査パスに配線、v2設計書§1.3）。
+2. **F-3.7（思考ログの強制記録）**: `make_decision`に`internal_thought_process`パラメータを追加（既存呼び出しは省略可、後方互換）。トークンコスト抑制のため全件記録はせず、Detectorの`major`判定時・Reflectionの`stagnant`判定時・agreementsの`status='Rejected'`書き込み時のみ`get_last_reasoning_text()`をスナップショット保存する限定運用とした（v2設計書§2の方針通り）。
+3. **F-8.3 Freeze機能**: 新規`freeze_agreement()`関数＋専用ツール`FREEZE_AGREEMENT_TOOL`（`agreement_id`, `reason`のみのシンプルなスキーマ、既存`WRITE_AGREEMENT_TOOL`は汚さない）を追加し、User AIのtoolsリストにのみ配線（`user`ロール限定、D-044）。`_commit_agreement_from_tool`のSUPERSEDE/UPDATE分岐に、対象行が`is_frozen==1`の場合は処理を拒否するガードを追加（unfreeze機構は設けない、恒久ピン留め）。`_build_agreements_context`に`is_frozen`優先のソートキーと🔒アイコン表示を追加。
+4. **GoalShiftEvent**: `init_db`に`goal_shift_events`テーブルを新規追加（v2設計書§4.1のDDLに`run_id`列を追加、他テーブルとの一貫性のため）。`call_resource_arbiter`のプロンプト・JSON出力スキーマに`requires_goal_constraint_change`を追加。新規`detect_goal_shift()`関数（v2設計書§4.2の擬似コード通り）と`db_append_goal_shift_event()`ヘルパーを追加し、`arbiter_node`が`call_resource_arbiter`呼び出し直後に配線。
+
+**今回のスコープ外（Plan mode相談で確定）:**
+
+- decision_extractorの役割転換（BL-050完了条件3）は含めない。
+- Detectorが既存Agreementを構造的に上書き・無効化できない問題は、BL-062として別途起票するに留めた（write_agreementの権限モデル全体の再設計が必要な、より根深い課題のため）。
+- F-5.5（思考内エージェント化ループ）は設計検証のみでR5では未実装（v2設計書の既定方針通り）。
+
+**完了条件:**
+
+- `python -m py_compile cela_main.py`合格。
+- 新規`tests/test_r5_thought_log_freeze_goalshift.py`（14件）を含め、オフラインスモークテスト計96件Pass。
+- `python scripts/check_docs_consistency.py`合格。
+- 実LLM再ドライランでの効果確認（Detectorの思考プロセス監査の実際の発火、Freeze機能の実運用、GoalShiftEventの実発火）は次回待ち。
 
 ---
 
