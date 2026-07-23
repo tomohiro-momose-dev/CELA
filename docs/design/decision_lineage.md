@@ -632,6 +632,16 @@
 
 ---
 
+## 論点55: streaming受信中のhttpx.RemoteProtocolError未捕捉クラッシュ（BL-059、BL-022の再発型）
+
+- **発端:** ユーザーがドライラン中の実際のクラッシュ（トレースバック全文）を報告。「落ちました」の一言と共に、`httpx.RemoteProtocolError: peer closed connection without sending complete message body (incomplete chunked read)`が`detector_node`の`call_detector`→`_query_and_parse_with_retry`→`query_AI`→`_query_AI_live`の`for chunk in stream:`実行中に発生し、未捕捉のままプロセス全体が終了したトレースバックを共有。
+- **AIの分析:** トレースバックを読み、BL-022（OpenRouter経由の壊れたレスポンスで`response.json()`が生の`json.JSONDecodeError`を送出し、絞り込んだ例外タプル`(APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError)`に含まれず素通りしていた事例）と全く同型の問題と特定。streaming応答の受信中にプロバイダ側が接続を切ると、httpx/httpcore層の生例外（`httpx.RemoteProtocolError`）がopenai SDKのラップより手前で発生し、同じ例外タプルに含まれていなかったことが原因。
+- **実装:** `import httpx`を追加し、`_query_AI_live`の例外タプルに`httpx.RemoteProtocolError`を追加してリトライ対象に含めた。D-009の「一時的なAPI/接続障害はリトライ、ロジックエラーは即座に伝播」という意図に照らし、これは明確に前者に該当するとBL-022と同じ判断基準で処理。
+- **決定者:** t-momose（クラッシュの発見・トレースバックの共有）、Claude Sonnet 5（BL-022との同型性の特定・修正）
+- **関連:** [BL-059](issue_backlog.md#bl-059-streaming受信中のhttpxremoteprotocolerrorが未捕捉でプロセスクラッシュする)、[BL-022](issue_backlog.md#bl-022-openrouterの壊れたレスポンスによる生jsonjsondecodeerrorがd-009の絞り込んだexceptを素通りしクラッシュ)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
