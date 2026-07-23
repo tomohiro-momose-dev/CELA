@@ -30,6 +30,7 @@ import re
 from unittest import result
 
 from langgraph.graph import StateGraph, END
+import httpx
 from openai import OpenAI
 from openai import APIError, APIConnectionError, RateLimitError, APITimeoutError
 
@@ -375,7 +376,14 @@ def _save_replay_fixtures(path: str, fixtures: dict) -> None:
 
 # 許可モジュール（ホワイトリスト）。random は除外（検算の決定性＝再現性を損なうため、D-007）。
 # decimal/fractions は浮動小数点誤差回避の目的に合致する拡張として維持（D-007、AGENTS.md§7承認済み変更）。
-_ALLOWED_IMPORTS = {"math", "statistics", "datetime", "json", "fractions", "decimal"}
+# itertools/functools/collections/operator/re はBL-058で追加（AGENTS.md§7承認済み変更）。
+# いずれもI/O・ファイルシステム・OS・ネットワークアクセスを一切持たない純粋計算・データ構造
+# ユーティリティであり、既存のサブプロセス分離＋AST危険呼び出し検査のサンドボックス境界を
+# 拡張しない（組合せ探索的な検算でitertoolsが必要になった実機ドライラン、log/2026-07-23/1256）。
+_ALLOWED_IMPORTS = {
+    "math", "statistics", "datetime", "json", "fractions", "decimal",
+    "itertools", "functools", "collections", "operator", "re",
+}
 
 # 危険な名前（import文なしで呼べるビルトイン・組み込み関数）。AST上のName/Attribute/Call参照として検査（D-006）。
 _DANGEROUS_NAMES = {
@@ -779,7 +787,18 @@ WRITE_AGREEMENT_TOOL = {
                 },
                 "phase_id": {"type": "string"},
                 "task_id": {"type": "string"},
-                "depends_on": {"type": "array", "items": {"type": "string"}},
+                "depends_on": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional. IDs of EXISTING entries in the 【決定事項DB】(agreements DB) shown in your "
+                        "system prompt that this entry builds on — use the bracketed number shown before each "
+                        "entry there, e.g. '[42] ...' -> depends_on: ['42']. Do NOT put task_id values here "
+                        "(e.g. 'task_1_1') — that is a different concept (the task plan's own depends_on) and "
+                        "will be rejected since no such agreements-DB row exists. Omit this field entirely if "
+                        "you have no specific prior agreements-DB entry to cite."
+                    ),
+                },
                 "resource_claims": {"type": "object"},
                 "target_topic": {"type": "string", "description": "For UPDATE: the topic to update"},
                 "confirmed_variables": {
@@ -1254,7 +1273,7 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                     "provider": {
                         # 推論速度が速いプロバイダーを左から順に優先して接続させる
                         #"order": ["venice/fp8", "novita/fp8", "xiaomi/fp8", "baidu/fp8", "fireworks", "streamlake/fp8", "novita/fp8" ],
-                        "order": ["venice/fp8", "novita/fp8", "xiaomi/fp8", "baidu/fp8", "fireworks", "streamlake/fp8", "novita/fp8" ],
+                        "order": ["novita/fp8", "parasail/fp8"],
                         "allow_fallbacks": False # 全滅した場合は空いている他プロバイダーへ迂回
                     }
                 }
@@ -1321,11 +1340,21 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
             repl_session = _PythonReplSession()
             try:
                 for iteration in range(1, MAX_TOOL_ITER + 1):
+                    # [CONSTRAINT] BL-060: BL-016/BL-056bの「残り回数」通知はあくまで依頼であり、
+                    # モデルが最終許容iterationでもツール呼び出し（例: write_agreement）を選んでしまうと
+                    # 次のiterationが存在せずそのまま非収束クラッシュする事例が実機ドライランで確認された
+                    # （log/2026-07-23/1453、iter=15でwrite_agreement成功直後にクラッシュ）。
+                    # 最終iterationのみ`tools`を外し、API側の構造としてツール呼び出しを不可能にすることで
+                    # 必ずテキスト最終応答が返る（クラッシュしない）ことを保証する。
+                    call_kwargs = create_kwargs
+                    if iteration == MAX_TOOL_ITER and "tools" in create_kwargs:
+                        call_kwargs = {k: v for k, v in create_kwargs.items() if k != "tools"}
+                        print(f"⚠️ [{label}] 最終iteration（{iteration}）のためツールを外し、テキスト最終応答を強制します")
                     # [UX] stream=Trueで届くchunkを、reasoning/content/tool_callsの3種に分けて
                     # リアルタイム描画しつつ蓄積する。tool_callsは複数の呼び出しがindex単位で
                     # 断片的に届く（id/function.name/function.argumentsがそれぞれ複数chunkに
                     # またがることがある）ため、indexごとに文字列連結して復元する。
-                    stream = client.chat.completions.create(**create_kwargs)
+                    stream = client.chat.completions.create(**call_kwargs)
                     content_parts: list[str] = []
                     reasoning_started = False
                     content_started = False
@@ -1407,6 +1436,13 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                             if tc.function.name == "python_repl":
                                 result = repl_session.run(args.get("code", ""))
                                 python_calls_log.append({"code": args.get("code", ""), "result": result})
+                                # [BL-045] ループが正常終了する前（例: 次iterationでのAPIエラー例外）に
+                                # 途中終了しても、実際に行われた検算の記録がBL-033のフェイルクローズ判定から
+                                # 失われないよう、実行のたびに即時反映する（正常終了時のみの更新だと、
+                                # write_agreement成功後にAPIエラーで打ち切られた場合、検算済みなのに
+                                # 「python_repl未使用」と誤判定されホワイトボードが誤ロールバックされる：
+                                # log/2026-07-22/2217で実機確認）。
+                                _LAST_PYTHON_CALLS = python_calls_log
                                 print(f"🔧 [{label}] python_repl 実行（iter={iteration}）:\n{args.get('code','')}\n→ {result}\n")
                             else:
                                 # [CONSTRAINT] R3: python_repl以外のツール（read_verified_fact,
@@ -1438,21 +1474,30 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                             "role": "system",
                             "content": f"{light_system_prompt}\n\n{_JAPANESE_OUTPUT_DIRECTIVE}",
                         }
-                    # [CONSTRAINT] BL-016: モデルは自分が残りあと何回ツールを呼べるか知らないため、
+                    # [CONSTRAINT] BL-016/BL-056b: モデルは自分が残りあと何回ツールを呼べるか知らないため、
                     # 検算を続けられる余地が残っていると誤認したままMAX_TOOL_ITERを使い切り、
                     # テキスト最終回答を一度も返せずに非収束クラッシュする事例が実機ドライランで確認された
                     # （組合せ最適化的なタスクでiter=9に妥当な結論が出ていたのにiter=10で無駄な再検算をした事例）。
                     # 残り回数が僅少になった時点で明示的に知らせ、次の応答で打ち切るよう促す。
+                    # [BL-056b] しきい値を「残り2回」から「残り3回」に前倒し。組合せ最適化的に
+                    # 長時間探索するタスク（例: 複数の代替案を数値検討する場合）では「残り2回」の
+                    # 通知では長い最終回答（成果物の書き出し含む）を書き切る前に上限を超えて
+                    # 非収束クラッシュする事例が実機ドライランで確認された（log/2026-07-23/1256）。
                     remaining_iters = MAX_TOOL_ITER - iteration
-                    if 0 < remaining_iters <= 2:
-                        loop_messages.append({
-                            "role": "user",
-                            "content": (
+                    if 0 < remaining_iters <= 3:
+                        if remaining_iters == 1:
+                            notice = (
+                                f"[SYSTEM NOTICE] ツール呼び出しの残り回数はあと{remaining_iters}回です。"
+                                f"これ以上ツールを呼ばず、次の応答で必ずテキストのみの最終回答（成果物含む）を"
+                                f"出力してください。中断すると非収束エラーになり、この応答自体が失われます。"
+                            )
+                        else:
+                            notice = (
                                 f"[SYSTEM NOTICE] ツール呼び出しの残り回数はあと{remaining_iters}回です。"
                                 f"検算がすでに完了しているなら、次の応答はツールを呼ばずテキストで最終回答を出力してください。"
                                 f"まだ検算が必要な場合も、残り{remaining_iters}回以内に収まるよう要点を絞ってください。"
-                            ),
-                        })
+                            )
+                        loop_messages.append({"role": "user", "content": notice})
                     create_kwargs["messages"] = loop_messages
                 # [CONSTRAINT] 非収束は一時的なAPI障害ではなく設計上の異常事態。下記exceptをAPIError系に
                 # 絞ることで、このRuntimeErrorは握りつぶされずログに原因が一目でわかる形で伝播する（D-009）。
@@ -1467,9 +1512,24 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
         # 含まれておらず素通りしていた（実機ドライランで確認）。tc.function.argumentsの
         # パース失敗は既にローカルなtry/exceptで個別処理済み（L711-719）のため、ここに
         # json.JSONDecodeErrorを加えても他のロジックエラーを誤って握りつぶす心配はない。
-        except (APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError) as e:
+        # [CONSTRAINT] BL-059: BL-022と同種の問題。streamingレスポンス受信中にプロバイダ側が
+        # 接続を切ると、openai SDKでラップされる前の生のhttpx.RemoteProtocolError
+        # （"peer closed connection without sending complete message body"）がそのまま
+        # 送出され、絞り込んだ例外タプルに含まれず未捕捉のままプロセス全体をクラッシュさせていた
+        # （実機ドライランで確認、log/2026-07-23）。これも一時的な接続障害でありロジックエラーでは
+        # ないため、リトライ対象に追加する。
+        except (APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError, httpx.RemoteProtocolError) as e:
 
             if attempt < len(delays):
+                # [BL-046] 中間リトライは従来何も表示せずtime.sleepするだけだったため、
+                # tools付きツールループの途中で発生した場合にloop_messages/python_calls_logが
+                # サイレントに破棄されiter=1へ巻き戻る（BL-009の既知の粗いリトライ粒度）様子が
+                # ユーザーから見て「iterが同じループに見える」謎の挙動になっていた
+                # （log/2026-07-22/2300で実機確認）。可視化のためリトライ発生自体をログ出力する。
+                print(
+                    f"\n🔄 [{label}] 一時的なAPIエラー、{delays[attempt]}秒後にツールループを"
+                    f"最初からやり直します（attempt {attempt + 1}/{len(delays) + 1}）: {e}"
+                )
                 time.sleep(delays[attempt])
             else:
                 print(f"\n[API Error] サーバーが高負荷のため応答できませんでした。: {e}")
@@ -1811,9 +1871,14 @@ def get_verified_facts_from_db(conn: sqlite3.Connection, run_id: str,
     ★R3a拡張: トピック検索機能を追加。read_verified_factツールから呼び出される。
     """
     if topic:
+        # [BL-053] variable_nameは英語スネークケース識別子（例: vehicle_count）だが、
+        # topic_keywordはAIが渡す日本語の説明的キーワード（例: 予算・オペレーター）が
+        # ほとんどのため、variable_nameだけを検索対象にすると構造的にほぼ一致しない。
+        # 日本語理由文が入るreason列も検索対象に加える。
+        like_pattern = f"%{topic}%"
         rows = conn.execute(
-            "SELECT * FROM verified_facts WHERE run_id=? AND variable_name LIKE ?",
-            (run_id, f"%{topic}%")
+            "SELECT * FROM verified_facts WHERE run_id=? AND (variable_name LIKE ? OR reason LIKE ?)",
+            (run_id, like_pattern, like_pattern)
         ).fetchall()
     elif variable_names:
         if not variable_names:
@@ -1927,6 +1992,9 @@ class LineageState(TypedDict):
     db_path: str
     chat_history: list[dict]
     turn_count: int
+    round_count: int  # [BL-005対応] turn_countはグラフ内部ループで凍結するため、
+                       # generate_user_utterance_nodeへの再入場回数を数える別カウンタ。
+                       # reflection_intervalの発火判定はこちらを使う。
     max_turns: int
     reflection_interval: int
     risk_flag: str
@@ -1943,6 +2011,10 @@ class LineageState(TypedDict):
     medium_risk_streak: int   # 追加
     constraint_issue: str              # 直近detectorの判定 (none/minor/major)
     constraint_issue_log: list[dict]   # major/minor を蓄積するログ
+    # [BL-051軽量版] Detectorがminor/major判定に至らずとも思考過程で気づいた懸念・観察を
+    # 自由記述で蓄積するログ。constraint_issue_logと異なりnoneの回でも記録し、
+    # 後続ノード（User AI/Expert）のプロンプトに毎回参考情報として提示する。
+    detector_observations_log: list[dict]
     # --- 以下を追加 ---
     global_constraints: list[GlobalConstraint]
     phases: list[Phase]
@@ -2090,6 +2162,24 @@ def _get_current_task(state: LineageState) -> dict:
         if t.get("task_id") == current_task_id:
             return t
     return tasks[0] if tasks else {}
+
+
+def _build_detector_observations_block(state: LineageState, limit: int = 3) -> str:
+    """[BL-051軽量版] Detectorがconstraint_issueの判定に至らずとも書き残した気づき・懸念
+    （detector_observations_log）を、User AI/Expertのプロンプトへ参考情報として毎ターン
+    提示するためのヘルパー。差し戻し時のみ表示されるconstraint_issue_logと異なり、
+    noneの回の気づきも失われず後続ノードに引き継がれる。
+    """
+    log = state.get("detector_observations_log", [])
+    if not log:
+        return ""
+    recent = log[-limit:]
+    entries_text = "\n".join(f"- (turn{e['turn']} / {e['target_role']}) {e['observations']}" for e in recent)
+    return (
+        f"\n【Detectorが気づいた点（参考情報、判定を左右するものではありません）】\n{entries_text}\n"
+        f"重大な指摘ではないため差し戻しにはなっていませんが、内容として無視してよいとは限りません。"
+        f"必要に応じて考慮してください。\n"
+    )
 
 
 def _build_task_scope_context(state: LineageState, conn: sqlite3.Connection) -> dict:
@@ -2342,6 +2432,16 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         安易に「制約の緩和」や「要件の放棄（一部機能の省略など）」を提案しないでください。\n
         制約が厳しい場合こそ、最新の技術動向、代替アプローチ、リソースの再配分、設計の見直しなど、\n
         抜本的でクリエイティブな「代替案」を絞り出し、絶対目標の枠内に収める努力を最後まで諦めないでください。\n
+        \n
+        【制約と条件の切り分け（重要）】\n
+        ゴール文には、動かせない「真の制約」（例：総予算の上限、法規制、安全基準）と、\n
+        議論の前提として例示的に与えられているだけの「見直し可能な条件」（例：特定の調達方法を\n
+        前提にした単価、特定の運用パターンの例示的な数値）が、区別なく並記されていることがあります。\n
+        検討の結果、与えられた条件のままでは制約を同時に満たす解が存在しないと分かった場合、\n
+        思考停止で条件を鵜呑みにせず、まず「これは動かせない真の制約か、それとも見直し可能な\n
+        前提条件か」を都度見極めてください。後者だと判断できる場合は、その前提自体を疑い、\n
+        代替の前提（例：調達方法の変更、仕様の見直し、運用方式の変更）を提案してください。\n
+        ただし、真の制約（総予算・法規制・安全基準等）そのものの緩和・放棄は認められません。\n
         目標達成に向け常に目標を意識し、目標からの論理的・倫理的・数値的(単純な計算誤りも含む）な"
         矛盾や逸脱がないかを意識して回答してください\n
         挨拶、感謝の言葉は不要です\n
@@ -2362,6 +2462,18 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "\n【F-2.6 機械的検算ゲート（必須）】\n"
         "数値的根拠を提示する際は python_repl ツールで計算を実行し、結果を明示すること。暗算での提示は禁止します。\n"
     )
+
+    system_prompt += (
+        "\n【ドメイン妥当性チェック（★検算とは別の観点、必須）】\n"
+        "検算（python_repl）はあくまで「数式が正しいか」しか保証しません。数式の辻褄を合わせるために、"
+        "元データに根拠のない内訳・仮定をその場ででっち上げていないか（例：制約を満たすよう逆算した"
+        "都合の良い数値分割）を必ず自問してください。また、数値が正しくても現実世界で本当に成立するか"
+        "（労働基準法上のシフト・休憩要件、物理的な運用可能性、予備・冗長性の欠如、安全規制等）を、"
+        "検算とは独立した観点として最後に必ず確認してください。制約が厳しく数式上は帳尻が合わせられても"
+        "現実には成立しない場合は、そのことを隠さず明示的に指摘・報告してください。\n"
+    )
+
+    system_prompt += _build_detector_observations_block(state)
 
     system_prompt += (f"""
     \n📊 [プロジェクト進行計画]
@@ -2531,6 +2643,35 @@ def call_detector(state: LineageState, target_role: str) -> dict:
             f"必ずあなた自身がpython_replで独立して検算してください。\n"
         )
 
+# [BL-049/BL-054] 検算（数値監査）とは別視点のドメイン妥当性レビュー用instruction。
+    # F-2.6検算ゲート導入以降、role_specific_instructionが「検算結果」を主なmajorトリガーに
+    # しているため、Detectorの注意力が数値の辻褄合わせに強く誘導され、法規制・物理的運用可能性
+    # 等の非数値的な論点（労基法上のシフト要件、予備車両の欠如等）が見落とされる事故が実機
+    # ドライランで確認された（log/2026-07-22/2336）。数値監査パスとは別のLLM呼び出しとして
+    # ドメイン妥当性レビューを独立実行し、両者の判定を統合する（2段構成、D-041）。
+    # [BL-054] さらに、ドメインレビューを検算より先に実行する順序へ変更した。検算を先に
+    # 済ませてしまうと「数値は合っている」という結果に引きずられ、そもそもの前提・設計
+    # （台数・人数配置等）が現実的かというドメイン評価が後手になり軽視されやすいため、
+    # 前提・設計そのものの妥当性確認を最初に行う（ユーザー指摘、2026-07-23）。
+    if target_role == "user":
+        domain_role_instruction = (
+            "評価対象：User(発注者)の発言。数値の検算は既に別プロセス（数値監査）で完了しています。"
+            "あなたはそれとは別の視点で、Userが承認・指示しようとしている計画に、"
+            "数式としては辻褄が合っていても現実世界では成立しないドメイン的な問題"
+            "（労働基準法上のシフト・休憩要件、物理的な運用可能性、予備・冗長性の欠如、"
+            "安全規制等）が残っていないかを確認してください。"
+            "Userがそれを見落として安易に承認・指示している場合はmajorとしてください。"
+        )
+    else:
+        domain_role_instruction = (
+            "評価対象：Agent(作業者)の発言。数値の検算は既に別プロセス（数値監査）で完了しています。"
+            "あなたはそれとは別の視点で、Agentの提案の前提・結論が現実世界で本当に成立するか"
+            "（物理的な実現可能性、労働基準法等の法規制、予備・冗長性の欠如、安全性の運用面）を"
+            "評価してください。数式の辻褄を合わせるためだけに、元データに根拠のない内訳・仮定を"
+            "その場ででっち上げていないか（例：制約を満たすよう逆算した都合の良い数値分割）も、"
+            "特に注意して確認してください。"
+        )
+
 # 評価する対象（UserかExpertか）によって、チェック基準の厳しさを変える
     if target_role == "user":
         role_specific_instruction = (f"""
@@ -2565,6 +2706,68 @@ def call_detector(state: LineageState, target_role: str) -> dict:
 
 
 
+    # [BL-054] 第1段: ドメイン妥当性レビューを検算より先に実行する。
+    # 検算を先に済ませると「数値は合っている」という結果に引きずられ、そもそもの前提・設計
+    # （台数・人数配置等）が現実的かというドメイン評価が後手・軽視されやすいため、まず前提・
+    # 設計そのものの妥当性を検算とは無関係に確認する（ユーザー指摘、2026-07-23）。
+    # この時点では数値監査パスはまだ実行していないため、その結果には言及しない。
+    domain_prompt = (
+        f"あなたはプロジェクトにおける議論の「ドメイン妥当性レビュー」担当監査人です。\n"
+        f"あなたの役割は数値の検算（計算が合っているか）ではありません。数値の機械的検算は"
+        f"この後、別の監査パスで独立して行われるため、ここでは検算する必要はありません"
+        f"（結果に明らかな違和感がある場合を除き、python_replでの再計算は不要です）。\n"
+        f"まず最初に、そもそもの前提・設計（台数、人数配置、シフト、速度・距離の設定など）"
+        f"自体に現実世界で無理がないかを確認してください。検算で数式のつじつまが合っていても、"
+        f"前提そのものが現実的に成立しなければ意味がありません。\n\n"
+        f"{domain_role_instruction}\n\n"
+        f"【判定基準（重要：情報不足を理由にmajorにしないこと）】\n"
+        f"- major: 与えられた情報だけから、具体的かつ明白なドメイン上の矛盾・違反が特定できる場合のみ"
+        f"（例：明記された労働時間・人数から法定休憩が物理的に取得不可能と計算できる、"
+        f"明記された速度・距離から制約が数式上どうやっても満たせないのに満たしたと偽装している、等）。\n"
+        f"- minor: 明白な矛盾とまでは言えないが、内訳・前提の説明が薄く今後の精査が望ましい場合、"
+        f"または軽微な懸念にとどまる場合。\n"
+        f"- none: 矛盾・懸念なし。\n"
+        f"シナリオに明記されていない詳細（例：具体的な人数構成、勤務シフトの詳細）が不明であること"
+        f"自体は、それだけでは矛盾ではありません。**「情報が不足していて確認できない」ことをmajorの"
+        f"根拠にしてはいけません**。majorにする場合は、与えられた情報の範囲内で矛盾を具体的に指摘できる"
+        f"ことが必須です。\n\n"
+        f"System Goal: {goal}\n"
+        f"【現在タスクのacceptance_criteria】\n{criteria_text}\n\n"
+        f"{whiteboard_block}"
+        f"【今回評価するターンのやり取り】\n{history_text}\n\n"
+        f"【BL-051軽量版: 気づき欄】constraint_issueの判定（none/minor/major）には至らないが、"
+        f"思考の過程で気になった点・将来的なリスクの芽・引っかかった前提などがあれば、"
+        f"'observations'に自由記述で書き残してください（無ければ空文字でよい）。"
+        f"これは判定を左右するものではなく、後続の議論のために参考情報として引き継がれます。\n\n"
+        f'Return ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
+    )
+    domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
+        domain_prompt, client=client_auditor, model=model_auditor, label="Detector (Domain Review)",
+        tools=None, fallback={"constraint_issue": "none", "comment": "", "observations": ""},
+    )
+    if domain_parse_failed:
+        print("🚨 [Detector] ドメイン妥当性レビューのJSON判定取得に失敗しました。フェイルクローズ(major)します。")
+        domain_constraint_issue = "major"
+        domain_comment = "(ドメイン妥当性レビューのJSON解析失敗のためフェイルクローズしました)"
+        domain_observations = ""
+    else:
+        print(f"【Detectorの判定結果(JSONパース後・ドメイン妥当性レビュー)】\n{domain_parsed}\n")
+        domain_constraint_issue = domain_parsed.get("constraint_issue", "none")
+        if domain_constraint_issue not in ("none", "minor", "major"):
+            domain_constraint_issue = "none"
+        domain_comment = domain_parsed.get("comment", "")
+        domain_observations = domain_parsed.get("observations", "") or ""
+
+    # [BL-054] 第2段: 数値監査（検算）パス。先に実施したドメイン妥当性レビューの結果を
+    # 提示し、前提そのものに既に指摘があるかを踏まえた上で検算させる。
+    domain_findings_block = (
+        f"【先行して実施したドメイン妥当性レビューの結果】constraint_issue={domain_constraint_issue}, "
+        f"comment={domain_comment}\n"
+        f"この前提・設計の妥当性レビュー結果を踏まえた上で、以下の数値の機械的検算を行ってください。"
+        f"レビューで前提自体に矛盾が指摘されている場合、その前提を鵜呑みにした検算だけで"
+        f"none/minorとせず、関連する数値評価にもその点を反映してください。\n\n"
+    )
+
     prompt = (
         f"あなたはプロジェクトにおける議論の厳格で優秀な監査人です。\n\n"
         f"以下の2軸は**完全に独立した別の評価軸**です。混同しないでください。\n\n"
@@ -2588,6 +2791,7 @@ def call_detector(state: LineageState, target_role: str) -> dict:
 
         f"{role_specific_instruction}\n\n" # ★ここで切り替える
 
+        f"{domain_findings_block}"
         f"**追加の重要指示: 上限値（例:「上限1億円」「上限3,000万円」）を超えていない場合、"
         f"あるいは上限値に近い値であっても、それは矛盾とは見なさないでください。"
         f"「上限内の数値差」や「予算の上下関係」を正確に計算し、上限を超えていない場合はnoneまたはminorと判定してください。\n\n"
@@ -2612,40 +2816,60 @@ def call_detector(state: LineageState, target_role: str) -> dict:
         f"3回分の判定が出た時点で、それ以上の再検討・迷いは禁止します。\n\n"
         f"【今回評価するターンのやり取り】\n"
         f"{history_text}\n"
-        #f"User Input: {user_input}\n"
-        #f"AI Output: {expert_output}\n\n"
-
-        #f"■ 現在のフェーズ: {state["current_phase"]['title']}\n"
-        #f"■このフェーズで扱うべき視座: {state["current_phase"].get('allowed_abstraction_levels', ['concept', 'constraint', 'design', 'impl'])}\n"
-        #f"■ 視座の逸脱チェック:\n"
-        #f"- 上記の視座を超えた詳細（例: 概念フェーズなのに実装の話）が出た場合は drift=True\n"
-        #f"- 上記の視座より抽象的な話（例: 設計フェーズなのに目的論を繰り返す）が出た場合も drift=True\n"
-        f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由", "criteria_status": [true/false, ...]}}'
+        f"【BL-051軽量版: 気づき欄】constraint_issueの判定（none/minor/major）には至らないが、"
+        f"思考の過程で気になった点・将来的なリスクの芽・引っかかった前提などがあれば、"
+        f"'observations'に自由記述で書き残してください（無ければ空文字でよい）。"
+        f"これは判定を左右するものではなく、後続の議論のために参考情報として引き継がれます。\n\n"
+        f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由", "criteria_status": [true/false, ...], "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
     )
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
     _CURRENT_CALLER_ROLE = "detector"
     _CURRENT_TASK_ID = state.get("current_task_id", "")
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_auditor, model=model_auditor, label="Detector",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": []},
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "observations": ""},
     )
     if parse_failed:
         # [SAFETY] D-005: 層2リトライを使い切った場合はフェイルオープン（none）ではなくフェイルクローズ（major）に倒す。
         # F-2.6検算ゲート導入の目的（暗算を信用しない）と、判定データ欠落時のフェイルオープンは相容れないため。
         print("🚨 [Detector] 層2リトライを使い切ってもJSON判定を取得できませんでした。フェイルクローズ(major)します。")
-        return {"risk": "low", "constraint_issue": "major", "comment": "(判定JSON解析失敗のためフェイルクローズしました)", "criteria_status": []}
-    print(f"【Detectorの判定結果(JSONパース後)】\n{parsed}\n")
+        return {"risk": "low", "constraint_issue": "major", "comment": "(判定JSON解析失敗のためフェイルクローズしました)", "criteria_status": [], "observations": domain_observations}
+    print(f"【Detectorの判定結果(JSONパース後・数値監査パス)】\n{parsed}\n")
     risk = parsed.get("risk", "low")
     if risk not in ("low", "medium", "high"):
         risk = "low"
-    constraint_issue = parsed.get("constraint_issue", "none")
-    if constraint_issue not in ("none", "minor", "major"):
-        constraint_issue = "none"
+    numeric_constraint_issue = parsed.get("constraint_issue", "none")
+    if numeric_constraint_issue not in ("none", "minor", "major"):
+        numeric_constraint_issue = "none"
+    numeric_comment = parsed.get("comment", "")
+    numeric_observations = parsed.get("observations", "") or ""
     criteria_status = parsed.get("criteria_status", [])
     if not isinstance(criteria_status, list):
         criteria_status = []
 
-    return {"risk": risk, "constraint_issue": constraint_issue, "comment": parsed.get("comment", ""), "criteria_status": criteria_status}
+    # 統合: 数値監査・ドメイン妥当性レビューのうち、より重篤な判定を採用する。
+    _severity_order = {"none": 0, "minor": 1, "major": 2}
+    constraint_issue = max(
+        (numeric_constraint_issue, domain_constraint_issue),
+        key=lambda v: _severity_order[v],
+    )
+    comment_parts = [f"【ドメイン妥当性レビュー】{domain_comment}"]
+    if numeric_comment:
+        comment_parts.append(f"【数値監査】{numeric_comment}")
+    comment = "\n".join(comment_parts)
+
+    # [BL-051軽量版] 両パスの気づき欄を統合。severityとは独立に、非空であれば毎回蓄積対象とする。
+    observations_parts = []
+    if domain_observations:
+        observations_parts.append(f"【ドメイン】{domain_observations}")
+    if numeric_observations:
+        observations_parts.append(f"【数値】{numeric_observations}")
+    observations = "\n".join(observations_parts)
+
+    return {
+        "risk": risk, "constraint_issue": constraint_issue, "comment": comment,
+        "criteria_status": criteria_status, "observations": observations,
+    }
 
 def call_decision_extractor(chat_history: list[dict], existing_topics: list[str], target_role: str,
                              owns_variables: list[str] | None = None,
@@ -2945,8 +3169,12 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
     decisions = get_decisions_from_db(_conn, state["run_id"])
     agreements = get_agreements_from_db(_conn, state["run_id"])
     chat_history = state["chat_history"]
-    turn_count = state["turn_count"]
-    max_turns = state["max_turns"]
+    # [BL-056] reflectionの発火判定自体はBL-048でround_countベースに切り替え済みだが、
+    # プロンプト内の表示が凍結したままのturn_count（BL-005）だったため、
+    # 「全30ターン中1ターン目のまま」という表示とAI自身の混乱を招いていた。
+    # 発火条件と表示の基準を一致させるため、ここもround_countに揃える。
+    round_count = state.get("round_count", 0)
+    reflection_interval = state.get("reflection_interval", 3)
     constraint_issue_log = state["constraint_issue_log"]
     risk_register = state.get("risk_register",[])
 
@@ -3010,6 +3238,19 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
     ■ これまでのシステム判断のタイムライン:\n{timeline_str}
     ■ 直近の実際の会話の流れ:\n{history_text}
 
+    【でっちあげ監査（★R5 F-2.1、cela_r5_design_v2.md §1.3）】
+    上記の直近の会話の流れとタイムラインを俯瞰し、単発のDetectorでは見逃されがちな
+    以下のパターンがないか確認してください。
+    - 制約（時間・距離・予算等）が数式的に満たせないはずなのに、根拠のない前提や内訳
+      （例: 「AkmとBkmに分割すれば辻褄が合う」のような、元データにない都合の良い数値）を
+      その場ででっち上げて帳尻を合わせている。
+    - 都合の悪い制約に触れず、結論だけ急いで確定させようとしている。
+    - Detector自身が「本当にこの前提は妥当か？」と一度疑いながらも、
+      根拠のない推測で自己納得して通してしまっている。
+    このようなパターンが見つかった場合、discussion_statusを"stagnant"とし、noteに
+    どの発言・どの数値がでっちあげと判断したか、具体的に指摘してください
+    （単に「進んでいない」という理由でのstagnant判定と区別できるようにするため）。
+
     """
     fatal_unvalidated = [r for r in risk_register if r.get("severity") == "fatal" and r.get("resolution_status") == "unvalidated"]
     if fatal_unvalidated:
@@ -3022,7 +3263,9 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
 
     prompt += f"""
         
-       ⏳ 現在は 全 {max_turns} ターン中 **{turn_count} ターン目** です。
+       ⏳ 現在は **ラウンド{round_count}**（{reflection_interval}ラウンドごとに本監査を実施）です。
+       ※「ターン」は内部のやり取り往復の途中で足踏みすることがあるため、ここでは代わりに
+       「ラウンド」（発注者Userの発言サイクルの周回数）を進行状況の目安として用いています。
 
         Return ONLY JSON in the exact format below:
         {{
@@ -3052,14 +3295,17 @@ def call_facilitator(goal: str, chat_history: list[dict], decisions: list[Decisi
     
     prompt = f"""
     あなたはAI同士の議論をサポートする優秀な「ファシリテーター」です。
-    現在、AI同士の議論が目標(Goal)から脱線しそうになっているか、同じ論点で少し停滞しているようです。
+    現在、AI同士の議論が目標(Goal)から脱線しそうになっているか、同じ論点で少し停滞しているようです。\n
     
     彼らが再び目標に向かって、自律的かつ建設的な議論を進められるように、
-    議論の焦点となるべき「未決着の論点」や「次に深掘りすべきテーマ」を優しく提示するメッセージを1つ作成してください。
-    
-    ※「〇〇について直ちに決定してください」といった強制的な表現は避け、「〇〇の点について、もう少し議論を深めてみてはいかがでしょうか？」
-      「〇〇の観点も考慮して、方針を話し合ってみてください」といった、AI同士の対話を促す自然なトーンで記述してください。
+    議論の焦点となるべき「未決着の論点」や「次に深掘りすべきテーマ」を優しく提示するメッセージを1つ作成してください。\n
+    また、議論が膠着状態である時は、視座を上げ目標と、制約、条件、AI同士の議論を見渡し、そもそも目標が達成しようとしている本質的な課題は何か
+    その課題を解決するための手段は他にないのか、AI（ユーザーとエージェント/エキスパート）は視野が狭くなっていないか、
+    また、守らなければならない制約と、見直し可能な条件は何かという視点で思考してください。    
 
+    ※以上の事から「〇〇について直ちに決定してください」といった強制的な表現は避け、AI達の視野狭窄を解き、本質的な課題解決の視座と発想、思考を与える
+    ようアドバイスしてください。
+  
     ■ プロジェクトの目標(Goal): {goal}
     ■ 直近の会話:
     {history_text}
@@ -3261,6 +3507,14 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         「要件を満たせない」と泣き言を言ってきても、絶対に【絶対目標】のハードルを下げないでください。\n
         「制約緩和の検討」や「重要要件の放棄」を提案された場合は、それを却下し、
         『プロとして制約内に収めるための別の技術的アプローチや代替案を考え直せ』と厳しく突き返してください。\n
+        \n
+        【制約と条件の切り分け（重要）】\n
+        ただし、却下する前に、相手が緩和を求めているのが「動かせない真の制約」（総予算の上限、\n
+        法規制、安全基準等）なのか、それとも「議論の前提として例示的に与えられているだけの\n
+        見直し可能な条件」（特定の調達方法を前提にした単価、特定の運用パターンの例示的な数値等）\n
+        なのかを、あなた自身も都度見極めてください。ゴール文にはこの2種類が区別なく並記されている\n
+        ことがあります。後者だと判断できる場合は、思考停止で却下するのではなく、その前提自体を\n
+        見直す代替案（調達方法の変更、仕様の見直し等）を相手に検討させる指示に切り替えてください。\n
          <あなたの発話や指示の根拠や参考にした情報、思考過程を示してください。>\n
 
         📏 【指示のスコープについて（厳守・質への非妥協性とは別軸、BL-023）】\n
@@ -3281,10 +3535,21 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     """)
 
     system_prompt += (
-        "\n【F-2.6 機械的検算ゲート（必須）】\n"
-        "Expertの数値主張を批判的に監査する際、暗算に頼らず python_repl ツールで再計算し、"
-        "矛盾（計算ミス・ごまかし）を看破してください。\n"
+        "\n【検算とドメインレビューの役割分担】\n"
+        "Expertの提案に含まれる数値の機械的な検算（合計・比率・閾値比較等）は、"
+        "既にDetector（監査システム）がpython_replで独立して実行済みです。"
+        "あなたが同じ検算をもう一度繰り返す必要はなく、その検算結果を信頼してよいものとします。\n"
+        "その代わり、あなたはプロジェクトオーナーとして、Detectorの数値監査だけでは拾えない"
+        "「ドメイン的な妥当性」に重きを置いてレビューしてください:\n"
+        "- その前提・計画は現実世界で本当に成立するか（労働基準法上の休憩・シフト要件、"
+        "物理的な運用可能性、予備・冗長性の欠如、安全規制等）。\n"
+        "- 数式としては辻褄が合っていても、現実の運用としては無理がある内訳・仮定を"
+        "その場ででっち上げていないか。\n"
+        "計算結果そのものに強い違和感がある場合に限り、あなた自身も python_repl で検算してください"
+        "（毎回のルーティンとして再検算する必要はありません）。\n"
     )
+
+    system_prompt += _build_detector_observations_block(state)
 
     previous_user_input = state.get("user_input", "(取得不可)")
 
@@ -3412,6 +3677,9 @@ def generate_user_utterance_node(state: LineageState) -> LineageState:
     Generates the user's next utterance based on system state, managing conversation history and retries following constraint violations.
     """
     print("\n[generate_user_utterance]------ ユーザーAIが思考中 ------\n")
+    # [BL-005対応] このノードへの再入場= 1ラウンドの開始（BL-044で確認済みのラウンド定義）。
+    # turn_count（グラフ内部ループで凍結し得る、BL-005）に依存せず、ここで確実に加算する。
+    state["round_count"] = state.get("round_count", 0) + 1
     # 🌟 追加: 差し戻しループの場合、前回エラーになった発言を履歴から削除（履歴汚染とAPIエラーを防止）
     if state.get("constraint_issue") in ("major"):
         if state["chat_history"] and state["chat_history"][-1]["role"] == "user":
@@ -3604,6 +3872,11 @@ Manages state updates including risk levels, constraint logging, and decision re
         )
 
     print(f"\n------ 完了 ------")
+    print(
+        f"【Detectorの判定内容】risk={result['risk']}, constraint_issue={result['constraint_issue']}\n"
+        f"comment: {result['comment']}\n"
+        f"observations（気づき・懸念、参考情報）: {result.get('observations', '') or '(なし)'}\n"
+    )
     state["risk_flag"] = result["risk"]
     state["constraint_issue"] = result["constraint_issue"]
 
@@ -3617,6 +3890,16 @@ Manages state updates including risk levels, constraint logging, and decision re
             "turn": state["turn_count"],
             "severity": result["constraint_issue"],
             "comment": result["comment"],
+        })
+
+    # [BL-051軽量版] constraint_issueの判定に関わらず、Detectorが自由記述で書き残した
+    # 気づき・懸念を蓄積する。noneの回でも記録される点がconstraint_issue_logと異なる。
+    observations = result.get("observations", "")
+    if observations:
+        state.setdefault("detector_observations_log", []).append({
+            "turn": state["turn_count"],
+            "target_role": target_role,
+            "observations": observations,
         })
 
     if result["risk"] == "high":
@@ -4257,8 +4540,12 @@ Otherwise, routing to "user_decision_extractor."
             return "halt"
         
         # リフレクションのタイミング
-        if state["turn_count"] > 0 and state["turn_count"] % state["reflection_interval"] == 0:
-            print("\n[route_after_expert_decision]------ リフレクションのタイミングになりました ------\n")
+        # [BL-005対応] turn_countはグラフ内部ループ（route_after_expert_decisionが
+        # generate_user_utteranceへ戻り続ける限り）で凍結し得るため、代わりに
+        # generate_user_utterance_nodeで加算されるround_countを使う。
+        round_count = state.get("round_count", 0)
+        if round_count > 0 and round_count % state["reflection_interval"] == 0:
+            print(f"\n[route_after_expert_decision]------ リフレクションのタイミングになりました（round={round_count}） ------\n")
             return "reflection"
         
         # ★次ターンの開始（User AIへ手番を戻す！）
@@ -4409,6 +4696,7 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
             "db_path": db_path,
             "chat_history": [],
             "turn_count": 0,
+            "round_count": 0,
             "max_turns":  config["initial_max_turnval"],
             "reflection_interval": config["reflection_interval"],
             "risk_flag": "low",
@@ -4423,6 +4711,7 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
             "ready_for_review": False,
             "constraint_issue": "none",
             "constraint_issue_log": [],
+            "detector_observations_log": [],
             "global_constraints": [],
             "phases": [],
             "current_phase": {

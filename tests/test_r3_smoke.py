@@ -97,6 +97,21 @@ def test_r3a_t3_get_verified_facts_from_db_topic_and_all(db_conn):
     assert none_found == []
 
 
+def test_bl053_get_verified_facts_topic_search_matches_japanese_reason(db_conn):
+    """BL-053: topic_keywordはAIが渡す日本語の説明的キーワード（例:「予算」）がほとんどだが、
+    variable_nameは英語スネークケース識別子のため、reason列（日本語理由文）も検索対象に
+    含めないと構造的にほぼ一致しない（実ドライランでnot_found率41%を確認）。"""
+    conn, run_id = db_conn
+    cela_main.upsert_verified_fact(
+        conn, run_id, "annual_deficit", -704, unit="万円/年",
+        source_task_id="task_1_1", source_phase_id="phase_1", confirmed_by="expert",
+        reason="年間運営費1,696万円から運賃収入2,400万円を引いた実質赤字額（予算上限3,000万円以内）",
+    )
+    by_japanese_topic = cela_main.get_verified_facts_from_db(conn, run_id, topic="予算")
+    assert len(by_japanese_topic) == 1
+    assert by_japanese_topic[0]["variable_name"] == "annual_deficit"
+
+
 def test_r3a_t3b_read_verified_fact_tool_via_dispatch(db_conn):
     """R3a-T3: read_verified_factツール（TOOL_DISPATCH経由）がフェーズ横断の確定値を返すこと。
     R3b-T11（二重JSONエンコード回帰確認）も兼ねる: 戻り値は生のdict/listであること。
