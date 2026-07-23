@@ -222,7 +222,7 @@ def detect_goal_shift(state: LineageState, arbiter_result: dict) -> dict | None:
     return None
 ```
 
-**未確定事項**: 現状の`call_resource_arbiter`のプロンプト・戻り値スキーマには`requires_goal_constraint_change`に相当するフィールドがない。本フィールドを追加するプロンプト変更が必要（4.3節参照）。
+**未確定事項**: 現状の`call_resource_arbiter`のプロンプト・戻り値スキーマには`requires_goal_constraint_change`に相当するフィールドがない。本フィールドを追加するプロンプト変更が必要（4.3節参照）。★2026-07-23追記: `arbiter_node`自体の発火（4.2節参照、BL-041 MVP実装）は解消済みのため、GoalShiftEvent実装における残る未確定事項は実質この1点（`requires_goal_constraint_change`フィールド追加）と、4.1節の`goal_shift_events`テーブル自体の新規作成・`detect_goal_shift`の配線のみになった。
 
 ### 4.3 `call_resource_arbiter`への追加指示
 
