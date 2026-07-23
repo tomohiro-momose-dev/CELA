@@ -90,6 +90,7 @@
 | BL-056 | 中 | `cela_main.py` (`call_reflection`) | ドライラン（`log/2026-07-23/1122`）でReflectionが発火した際、プロンプト内表示が「全30ターン中1ターン目」のままで、Reflection自身が実際の会話量との矛盾に気づき混乱するログ（"これはおかしい"）をユーザーが発見。BL-048で発火条件自体は`round_count`ベースに切り替え済みだったが、プロンプト内の表示は凍結したままの`turn_count`（BL-005）を使い続けていたことが原因。表示を`round_count`（`reflection_interval`との対応も明記）に置き換えて発火条件と表示の基準を一致させた | P2 |
 | BL-057 | 高 | `cela_main.py` (`_query_AI_live`のツールループ残り回数通知、BL-016) | ドライラン（`log/2026-07-23/1256`）で、複数の代替案を数値検討する組合せ最適化的なExpertターンがMAX_TOOL_ITER=15回の非収束クラッシュで打ち切られたことをユーザーが報告（成果物のホワイトボード自体はwrite_agreement実行済みのため保存されていた）。BL-016の「残り2回」通知では、長い最終回答（成果物の書き出しを含む）を書き切る前に上限を超えてしまうケースがあると判明。通知しきい値を「残り3回」に前倒しし、残り1回の通知文言もより強い断定的な指示に強化 | P1 |
 | BL-058 | 中 | `cela_main.py` (`_ALLOWED_IMPORTS`) | 同ドライラン（`log/2026-07-23/1256`）で、Expertが組合せ探索に`import itertools`を試みたがホワイトリスト（`_ALLOWED_IMPORTS`）に含まれず`[REPL Error]`で拒否されていたことをユーザーが発見。「サンドボックスから抜け出せないような標準的なツール群は許可したらどうか」と提案。I/O・ファイルシステム・OS・ネットワークアクセスを一切持たない純粋計算ユーティリティ（itertools/functools/collections/operator/re）をD-007と同じ承認プロセス（AGENTS.md§7）で追加 | P3 |
+| BL-059 | 高 | `cela_main.py` (`_query_AI_live`の例外タプル) | ドライラン中に`httpx.RemoteProtocolError`（"peer closed connection without sending complete message body"）が未捕捉のままプロセス全体をクラッシュさせたことをユーザーが報告。BL-022（`json.JSONDecodeError`が絞り込んだ例外タプルから漏れていた事例）と同種の問題で、streaming応答受信中にプロバイダ側が接続を切った際のhttpx層の生例外が`(APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError)`に含まれていなかった。`httpx.RemoteProtocolError`を追加しリトライ対象化 | P1 |
 
 ---
 
@@ -1833,6 +1834,33 @@ AGENTS.md§7（定数変更は事前承認必須）に従い、AIから追加候
 - `python -m py_compile cela_main.py`合格、既存オフラインスモークテスト計71件Pass。
 - `_check_repl_code_safety`/`_run_python_repl`で`import itertools`が実際に許可され動作することを手動確認済み。
 - 実LLM再ドライランで、組合せ探索的なタスクで`itertools`等が実際に活用されることを確認する（次回待ち）。
+
+---
+
+### BL-059: streaming受信中のhttpx.RemoteProtocolErrorが未捕捉でプロセスクラッシュする
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 依存 | なし |
+| 関連 | [BL-022](issue_backlog.md#bl-022-openrouterの壊れたレスポンスによる生jsonjsondecodeerrorがd-009の絞り込んだexceptを素通りしクラッシュ), D-019（同種修正の前例） |
+
+**内容:**
+
+ユーザーがドライラン中の実際のクラッシュ（トレースバック）を報告。`detector_node`→`call_detector`→`_query_and_parse_with_retry`→`query_AI`→`_query_AI_live`の`for chunk in stream:`（streaming応答の受信ループ）実行中に、OpenRouter経由のプロバイダ側が完全なメッセージボディを送らずに接続を切ったことで、`httpcore.RemoteProtocolError`が`httpx.RemoteProtocolError`としてopenai SDKの外側（`_query_AI_live`本体）まで生の形で伝播し、`(APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError)`という絞り込んだ例外タプルのどれにも一致せず未捕捉のままPythonプロセス全体をクラッシュさせた。
+
+BL-022（`response.json()`内部で送出される生の`json.JSONDecodeError`が同じ理由で漏れていた事例）と全く同型の問題で、いずれも「一時的なAPI/接続障害はリトライ対象、ロジックエラーは即座に伝播」というD-009の意図には前者（一時的障害）に該当するにもかかわらず、例外タプルの絞り込みが狭すぎたことが原因。
+
+**実装（`cela_main.py`）:**
+
+- `import httpx`を追加。
+- `_query_AI_live`の例外タプルに`httpx.RemoteProtocolError`を追加し、リトライ対象化。
+
+**完了条件:**
+
+- `python -m py_compile cela_main.py`合格、既存オフラインスモークテスト計71件Pass。
+- 実LLM再ドライランで、同種の接続切断が発生してもプロセスがクラッシュせずリトライされることを確認する（次回待ち）。
 
 ---
 
