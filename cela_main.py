@@ -981,7 +981,15 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
                     return f"topic '{target_topic}' はFreeze済みのため変更できません（agreement_id={a['id']}）"
                 db_supersede_agreement(a["id"], conn, run_id)
                 break
-        return None
+        # [BL-080] 以前はここで`return None`しており、旧レコードのstatus変更のみで処理が終わっていた。
+        # ExpertがDeliverableの全文置換のためSUPERSEDE+decision_what（全文）を送っても、その内容は
+        # 完全に破棄され、ホワイトボードには一切反映されないまま「成功」を返す実質何もしない
+        # ツール呼び出しになっていた（1319ドライランで発覚、Expertがこれを「システムの反映
+        # タイミング問題」と誤って自己正当化するハルシネーションループの真因だった）。
+        # BL-062のDetectorによる無効化用途（短い理由文のみ、ホワイトボードには触れない）との
+        # 後方互換は、下記のlen(raw_content) > 200の閾値（CREATE/UPDATE全文置換と同一基準）で
+        # 保つ。ここではreturnせず、CREATE/UPDATE共通のホワイトボード保存・agreements行INSERT
+        # 処理へ続ける。
 
     depends_on_val = json.dumps(args.get("depends_on", []), ensure_ascii=False) if isinstance(args.get("depends_on"), (list, dict)) else (args.get("depends_on") or "[]")
     resource_claims_val = json.dumps(args.get("resource_claims", {}), ensure_ascii=False) if isinstance(args.get("resource_claims"), (list, dict)) else (args.get("resource_claims") or "{}")
@@ -989,11 +997,15 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
     # [R4] Deliverableのホワイトボード保存
     global _LAST_WHITEBOARD_EDIT
     content = raw_content
-    if entry_type == "Deliverable" and action_type == "CREATE" and len(raw_content) > 200:
-        v = apply_whiteboard_patch(conn, run_id, phase_id, tid, raw_content, author_role=caller_role, edit_summary="初版作成")
+    if entry_type == "Deliverable" and action_type in ("CREATE", "SUPERSEDE") and len(raw_content) > 200:
+        edit_summary = "初版作成" if action_type == "CREATE" else (args.get("reason_why", "") or "SUPERSEDEによる全文置換")
+        v = apply_whiteboard_patch(conn, run_id, phase_id, tid, raw_content, author_role=caller_role, edit_summary=edit_summary)
         _LAST_WHITEBOARD_EDIT = {"phase_id": phase_id, "task_id": tid, "version": v}
         content = f"WHITEBOARD:{phase_id}:{tid}"
-        print(f"  📋 [Whiteboard] write_agreement経由の成果物 '{topic}' をwhiteboard_drafts Ver.1として保存しました（phase={phase_id}, task={tid}）。")
+        if action_type == "CREATE":
+            print(f"  📋 [Whiteboard] write_agreement経由の成果物 '{topic}' をwhiteboard_drafts Ver.1として保存しました（phase={phase_id}, task={tid}）。")
+        else:
+            print(f"  📋 [Whiteboard] write_agreement(SUPERSEDE)経由で '{topic}' の全文をwhiteboard_drafts Ver.{v}として保存しました（phase={phase_id}, task={tid}）。")
 
     if action_type == "UPDATE":
         target_topic = args.get("target_topic", topic)
