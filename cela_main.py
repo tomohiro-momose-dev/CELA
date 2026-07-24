@@ -747,6 +747,7 @@ def _read_deliverable_file_handler(args: dict) -> dict | str:
 _CURRENT_RUN_ID: str = ""
 _CURRENT_CALLER_ROLE: str = ""  # R3b: write_agreementの権限チェック用
 _CURRENT_TASK_ID: str = ""      # R3b: confirmed_variablesのsource_task_id用
+_CURRENT_GOAL_TEXT: str = ""    # [BL-086] revise_goalが編集対象とする現在のgoal本文
 
 # [F-3.1] R3b: 書き込みツール定義
 WRITE_AGREEMENT_TOOL = {
@@ -926,6 +927,227 @@ def _freeze_agreement_tool_impl(args: dict, conn: sqlite3.Connection, run_id: st
     if not agreement_id:
         return {"success": False, "error": "agreement_idは必須です"}
     return freeze_agreement(conn, run_id, agreement_id, reason)
+
+
+# ===========================================================================
+# [BL-086] 前提エスカレーション経路: Expert/User AIが「ゴールの文言上の制約が
+# 真の目的（例: 高齢者の移動手段の確保）と矛盾しているのでは」と気づいた場合に、
+# BL-025のスコープガードレール（他タスクへの越権禁止）を一切緩めずに、その懸念を
+# 構造化して提起し、User AI（発注者役）に却下/承認を判断させる。承認する場合は
+# state["goal"]自体を改定し、対応するAgreementをFreezeして、次のDetector監査で
+# 同じ論点が無限に再燃するのを防ぐ（BL-062のDetector独立判断とFreezeを両立させる）。
+# ===========================================================================
+ESCALATE_PREMISE_CONCERN_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "escalate_premise_concern",
+        "description": (
+            "[BL-086] Raise a narrow, structured concern that a goal's literal constraint/premise "
+            "conflicts with the true underlying need it was meant to serve (e.g. a budget cap forcing "
+            "a vehicle-size choice that contradicts the service model's own domain logic). This is NOT "
+            "a general 'I can't meet this constraint' complaint, and it does NOT grant permission to act "
+            "outside your current task's scope or write anything else. It only creates a record for the "
+            "User (project owner) to review and decide. You must still complete your current task's "
+            "literal acceptance_criteria this turn -- raising this concern is not license to skip them."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "concern_summary": {"type": "string", "description": "One-sentence label for this concern."},
+                "implicated_constraint": {"type": "string", "description": "The exact constraint/premise text (quote from the goal or an existing agreement's topic) whose literal framing is in question."},
+                "why_conflicts_with_true_need": {"type": "string", "description": "Concretely explain the domain contradiction: why satisfying this constraint literally works against the actual underlying need it exists to serve."},
+                "suggested_reframe": {"type": "string", "description": "A concrete alternative framing/premise or constraint value you believe would better serve the true underlying need."},
+                "phase_id": {"type": "string", "description": "Optional. Current phase_id."},
+                "task_id": {"type": "string", "description": "Optional. Current task_id."},
+            },
+            "required": ["concern_summary", "implicated_constraint", "why_conflicts_with_true_need", "suggested_reframe"],
+        },
+    },
+}
+
+RESOLVE_PREMISE_CONCERN_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "resolve_premise_concern",
+        "description": (
+            "[BL-086] Reject an open escalation (raised via escalate_premise_concern): the constraint "
+            "stands as-is. Use this when, after consideration, you judge the literal framing is correct "
+            "and should not change. Do not call this to accept a reframe -- use revise_goal for that."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "escalation_id": {"type": "string", "description": "The escalation_id shown in your system prompt's Open escalations list."},
+                "reason": {"type": "string", "description": "Why the constraint stands; this is shown back so the same concern isn't re-raised without new grounds."},
+            },
+            "required": ["escalation_id", "reason"],
+        },
+    },
+}
+
+REVISE_GOAL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "revise_goal",
+        "description": (
+            "[BL-086] Accept an open escalation: revise the project goal's text to correct the flagged "
+            "premise, and (recommended) permanently freeze the agreement that embodies the accepted "
+            "exception so Detector does not re-litigate it. If the exception is not yet recorded as an "
+            "agreement, call write_agreement first (status='Approved') in this same turn, then call "
+            "revise_goal with its id as freeze_agreement_id."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "escalation_id": {"type": "string", "description": "The escalation_id this revision resolves."},
+                "edits": {
+                    "type": "array",
+                    "description": "Targeted text replacements against the CURRENT goal text shown in your system prompt (same mechanism as write_agreement Deliverable edits). Each old_text must match exactly (or uniquely) in the current goal text.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_text": {"type": "string"},
+                            "new_text": {"type": "string"},
+                        },
+                        "required": ["old_text", "new_text"],
+                    },
+                },
+                "reason_why": {"type": "string", "description": "Why you are accepting this reframe -- must explain the true underlying need being served."},
+                "freeze_agreement_id": {"type": "string", "description": "Optional. The bracketed agreement ID for the Decision/Deliverable embodying this accepted exception. If given, it is frozen (is_frozen=1) as part of this same call."},
+            },
+            "required": ["escalation_id", "edits", "reason_why"],
+        },
+    },
+}
+
+
+def db_create_goal_escalation(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str,
+                               raised_by_role: str, concern_summary: str, implicated_constraint: str,
+                               why_conflicts: str, suggested_reframe: str) -> str:
+    """[BL-086] goal_escalationsへOpen状態で1行INSERTし、escalation_idを返す。"""
+    escalation_id = f"ESC-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
+    conn.execute(
+        "INSERT INTO goal_escalations (escalation_id, run_id, phase_id, task_id, raised_by_role, "
+        "concern_summary, implicated_constraint, why_conflicts, suggested_reframe, status, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (escalation_id, run_id, phase_id, task_id, raised_by_role, concern_summary,
+         implicated_constraint, why_conflicts, suggested_reframe, "Open", time.time())
+    )
+    return escalation_id
+
+
+def get_goal_escalation(conn: sqlite3.Connection, run_id: str, escalation_id: str) -> dict | None:
+    """[BL-086] 指定escalation_idの1行を返す（存在しなければNone）。"""
+    row = conn.execute(
+        "SELECT * FROM goal_escalations WHERE escalation_id=? AND run_id=?", (escalation_id, run_id)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_open_goal_escalations(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    """[BL-086] status='Open'の全エスカレーションを提起順に返す。"""
+    rows = conn.execute(
+        "SELECT * FROM goal_escalations WHERE run_id=? AND status='Open' ORDER BY created_at ASC", (run_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _escalate_premise_concern_tool_impl(args: dict, conn: sqlite3.Connection, run_id: str,
+                                         caller_role: str, task_id: str) -> dict:
+    """[BL-086] escalate_premise_concernの実体。expert/userロールのみ許可
+    （detectorや他の監査ロールは対象外——このチャネルは「提起」専用でExpert/Userの
+    対話に属する懸念のためのもの）。"""
+    if caller_role not in ("expert", "user"):
+        return {"success": False, "error": f"{caller_role}はescalate_premise_concernを呼び出せません"}
+    required = ["concern_summary", "implicated_constraint", "why_conflicts_with_true_need", "suggested_reframe"]
+    missing = [f for f in required if not args.get(f)]
+    if missing:
+        return {"success": False, "error": f"必須フィールドが不足: {missing}"}
+    escalation_id = db_create_goal_escalation(
+        conn, run_id, args.get("phase_id", ""), args.get("task_id") or task_id, caller_role,
+        args["concern_summary"], args["implicated_constraint"],
+        args["why_conflicts_with_true_need"], args["suggested_reframe"],
+    )
+    return {"success": True, "escalation_id": escalation_id}
+
+
+def _resolve_premise_concern_tool_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str) -> dict:
+    """[BL-086] resolve_premise_concern（却下）の実体。userロールのみ許可。"""
+    if caller_role != "user":
+        return {"success": False, "error": f"{caller_role}はresolve_premise_concernを呼び出せません（userロールのみ許可）"}
+    escalation_id = args.get("escalation_id", "")
+    reason = args.get("reason", "")
+    if not escalation_id or not reason:
+        return {"success": False, "error": "escalation_id/reasonは必須です"}
+    row = get_goal_escalation(conn, run_id, escalation_id)
+    if row is None:
+        return {"success": False, "error": f"escalation_id '{escalation_id}' が見つかりません"}
+    if row["status"] != "Open":
+        return {"success": False, "error": f"escalation_id '{escalation_id}' は既にstatus='{row['status']}'です"}
+    conn.execute(
+        "UPDATE goal_escalations SET status='Rejected', resolution_reason=?, resolved_at=? "
+        "WHERE escalation_id=? AND run_id=?",
+        (reason, time.time(), escalation_id, run_id)
+    )
+    decision = make_decision(who="user", what=f"エスカレーション{escalation_id}を却下（制約は現状維持）", why=reason)
+    db_append_decision(decision, conn, run_id)
+    return {"success": True, "escalation_id": escalation_id}
+
+
+def _revise_goal_tool_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str) -> dict:
+    """[BL-086] revise_goal（承認・ゴール改定）の実体。userロールのみ許可。
+    DB側の副作用（escalation status更新／freeze／goal_shift_events／decision）はここで完結させ、
+    LangGraph state["goal"]への反映のみを、呼び出し元ノードが戻り値経由で行う
+    （_LAST_GOAL_REVISIONブリッジ、ツールハンドラはstateへ直接触れられないため）。
+    """
+    if caller_role != "user":
+        return {"success": False, "error": f"{caller_role}はrevise_goalを呼び出せません（userロールのみ許可）"}
+    escalation_id = args.get("escalation_id", "")
+    edits = args.get("edits") or []
+    reason_why = args.get("reason_why", "")
+    freeze_agreement_id = args.get("freeze_agreement_id", "")
+    if not escalation_id or not edits or not reason_why:
+        return {"success": False, "error": "escalation_id/edits/reason_whyは必須です"}
+
+    row = get_goal_escalation(conn, run_id, escalation_id)
+    if row is None:
+        return {"success": False, "error": f"escalation_id '{escalation_id}' が見つかりません"}
+    if row["status"] != "Open":
+        return {"success": False, "error": f"escalation_id '{escalation_id}' は既にstatus='{row['status']}'として解決済みです"}
+
+    new_content, err = _apply_text_edits(_CURRENT_GOAL_TEXT, edits)
+    if err:
+        return {"success": False, "error": err}
+
+    if freeze_agreement_id:
+        freeze_result = freeze_agreement(conn, run_id, freeze_agreement_id,
+                                          reason=f"[Escalation {escalation_id} accepted] {reason_why}")
+        if not freeze_result.get("success"):
+            return {"success": False, "error": f"freeze失敗: {freeze_result.get('error')}"}
+
+    conn.execute(
+        "UPDATE goal_escalations SET status='Accepted', resolution_reason=?, resolved_agreement_id=?, resolved_at=? "
+        "WHERE escalation_id=? AND run_id=?",
+        (reason_why, freeze_agreement_id or "", time.time(), escalation_id, run_id)
+    )
+    shift = {
+        "shift_kind": "premise_revision",
+        "from_goal_state": _CURRENT_GOAL_TEXT,
+        "to_goal_state": new_content,
+        "reason_why": reason_why,
+        "evidence": f"Escalation {escalation_id}: {row['concern_summary']}",
+        "triggered_by": "Escalation_Resolution",
+        "triggering_agreement_id": freeze_agreement_id or "",
+    }
+    db_append_goal_shift_event(shift, conn, run_id)
+    decision = make_decision(who="user", what=f"ゴール制約を改定（Escalation {escalation_id} 承認）", why=reason_why)
+    db_append_decision(decision, conn, run_id)
+
+    return {
+        "success": True, "escalation_id": escalation_id,
+        "new_goal_text": new_content, "old_goal_text": _CURRENT_GOAL_TEXT,
+        "frozen_agreement_id": freeze_agreement_id or None,
+    }
 
 
 def _check_write_permission(args: dict, caller_role: str) -> str | None:
@@ -1200,6 +1422,15 @@ TOOL_DISPATCH = {
     "freeze_agreement": lambda args: _freeze_agreement_tool_impl(
         args, get_active_conn(), _CURRENT_RUN_ID, _CURRENT_CALLER_ROLE
     ),
+    "escalate_premise_concern": lambda args: _escalate_premise_concern_tool_impl(
+        args, get_active_conn(), _CURRENT_RUN_ID, _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    ),
+    "resolve_premise_concern": lambda args: _resolve_premise_concern_tool_impl(
+        args, get_active_conn(), _CURRENT_RUN_ID, _CURRENT_CALLER_ROLE
+    ),
+    "revise_goal": lambda args: _revise_goal_tool_impl(
+        args, get_active_conn(), _CURRENT_RUN_ID, _CURRENT_CALLER_ROLE
+    ),
 }
 
 # BL-033: 直前のquery_AI呼び出しでLLMが実際に実行したpython_replの(code, result)記録。
@@ -1226,6 +1457,13 @@ _LAST_WHITEBOARD_EDIT: dict | None = None
 # 呼び出し元（expert_node等）がstateへコピーする前提の一時バッファ。
 _LAST_REASONING_TEXT: str = ""
 
+# [BL-086] 直前のquery_AI呼び出しのツールループ内でrevise_goalが成功した場合、
+# その{new_goal_text, old_goal_text, escalation_id}を記録する。DB側の副作用
+# （freeze/goal_shift_events/escalation status更新）は_revise_goal_tool_impl内で
+# 完結済みであり、ここで運ぶのはLangGraph state["goal"]への反映に必要な情報のみ。
+# query_AI()呼び出しごとにリセットされる（_LAST_WRITE_AGREEMENT_SUCCEEDEDと同型）。
+_LAST_GOAL_REVISION: dict | None = None
+
 
 def get_last_python_calls() -> list[dict]:
     """【SLM要約】
@@ -1251,6 +1489,14 @@ def get_last_whiteboard_edit() -> dict | None:
     return dict(_LAST_WHITEBOARD_EDIT) if _LAST_WHITEBOARD_EDIT else None
 
 
+def get_last_goal_revision() -> dict | None:
+    """[BL-086] 直前のquery_AI呼び出しのツールループ内でrevise_goalが成功した場合、
+    その{new_goal_text, old_goal_text, escalation_id}を返す。
+    generate_user_utterance_nodeがstate["goal"]へ反映するために使う。
+    """
+    return dict(_LAST_GOAL_REVISION) if _LAST_GOAL_REVISION else None
+
+
 def get_last_reasoning_text() -> str:
     """【SLM要約】
     [R5 F-2.1] 直前のquery_AI呼び出しでモデルが出力したreasoning（思考過程）の全文を返す。
@@ -1265,11 +1511,12 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
     Orchestration of external AI API calls with Record/Replay stub support (keyed by (label, call_seq)),
     delegating the actual retry/provider-selection logic to _query_AI_live.
     """
-    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT
+    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION
     _LAST_PYTHON_CALLS = []
     _LAST_WRITE_AGREEMENT_SUCCEEDED = False
     _LAST_WHITEBOARD_EDIT = None
     _LAST_REASONING_TEXT = ""
+    _LAST_GOAL_REVISION = None
 
     call_seq = _call_seq_counter
     _call_seq_counter += 1
@@ -1624,6 +1871,18 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                                     if isinstance(result, dict) and result.get("success"):
                                         global _LAST_WRITE_AGREEMENT_SUCCEEDED
                                         _LAST_WRITE_AGREEMENT_SUCCEEDED = True
+                                elif tc.function.name == "revise_goal":
+                                    # [BL-086] revise_goalはツールハンドラ内でLangGraph stateに
+                                    # 触れられないため、成功時の新旧goalテキストをここで
+                                    # _LAST_GOAL_REVISIONへ橋渡しし、呼び出し元ノード
+                                    # （generate_user_utterance_node）がstate["goal"]へ反映する。
+                                    if isinstance(result, dict) and result.get("success"):
+                                        global _LAST_GOAL_REVISION
+                                        _LAST_GOAL_REVISION = {
+                                            "new_goal_text": result.get("new_goal_text"),
+                                            "old_goal_text": result.get("old_goal_text"),
+                                            "escalation_id": result.get("escalation_id"),
+                                        }
                                 print(f"🔧 [{label}] {tc.function.name} 実行（iter={iteration}）: {json.dumps(args, ensure_ascii=False)}\n→ {result}\n")
 
                         loop_messages.append({
@@ -1879,6 +2138,27 @@ def init_db(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_goal_shift_kind ON goal_shift_events(shift_kind);
     CREATE INDEX IF NOT EXISTS idx_goal_shift_timestamp ON goal_shift_events(timestamp);
     CREATE INDEX IF NOT EXISTS idx_goal_shift_run ON goal_shift_events(run_id);
+
+    -- [BL-086] Expert/User AIが「ゴールの文言上の制約が真の目的と矛盾しているのでは」と
+    -- 構造化した形でフラグを立てるエスカレーション記録。plan_drafts（版管理文書）とは異なり
+    -- 単発の意思決定レコードのため専用テーブルとする。
+    CREATE TABLE IF NOT EXISTS goal_escalations (
+        escalation_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        phase_id TEXT,
+        task_id TEXT,
+        raised_by_role TEXT NOT NULL,
+        concern_summary TEXT NOT NULL,
+        implicated_constraint TEXT NOT NULL,
+        why_conflicts TEXT NOT NULL,
+        suggested_reframe TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'Open',
+        resolution_reason TEXT,
+        resolved_agreement_id TEXT,
+        created_at REAL NOT NULL,
+        resolved_at REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_goal_escalations_run_status ON goal_escalations(run_id, status);
     """)
     _ensure_agreements_task_id_column(conn)
     _ensure_verified_facts_r3a_columns(conn)
@@ -2174,6 +2454,70 @@ def _get_deferred_notes_text(conn: sqlite3.Connection, run_id: str, phase_id: st
     if not section or section == _PLAN_DEFERRED_PLACEHOLDER:
         return ""
     return f"【他タスクからの申し送り事項（先送り、要確認）】\n{section}\n"
+
+
+def _get_frozen_agreements_text(conn: sqlite3.Connection, run_id: str) -> str:
+    """[BL-086] Freeze済み（is_frozen=1）項目のみを抽出した軽量テキスト。Detectorの
+    ドメイン妥当性レビューパス（従来agreements_textを一切受け取っていなかった）に、
+    トークンコストを抑えたまま「これは既に審議済みの意図的な例外」というシグナルだけを
+    渡すためのヘルパー（agreements_text全体を渡すと項目数に比例してコストが増える）。
+    """
+    rows = conn.execute(
+        "SELECT * FROM agreements WHERE run_id=? AND is_frozen=1 AND status != 'Superseded' ORDER BY id", (run_id,)
+    ).fetchall()
+    if not rows:
+        return ""
+    lines = [
+        f"🔒 [{r['id']}] {r['topic']}: {(r['decision_what'] or '')[:150]}"
+        f"（Freeze理由: {(r['reason_why'] or '')[:100]}）"
+        for r in rows
+    ]
+    return "【🔒 Freeze済み（人間の発注者が審議の上で承認した恒久的な例外）】\n" + "\n".join(lines) + "\n"
+
+
+def _get_open_escalations_text(conn: sqlite3.Connection, run_id: str) -> str:
+    """[BL-086] User AI向け: 未解決エスカレーション一覧。今回の発言で必ず
+    resolve_premise_concern（却下）かrevise_goal（承認）のどちらかを呼んで解決させる
+    （先送りループの防止、BL-082の申し送りとは異なり滞留させてはならない）。
+    """
+    open_escalations = get_open_goal_escalations(conn, run_id)
+    if not open_escalations:
+        return ""
+    lines = [
+        f"[{e['escalation_id']}] (raised by {e['raised_by_role']}) 懸念: {e['concern_summary']}\n"
+        f"  該当する制約/前提: {e['implicated_constraint']}\n"
+        f"  なぜ真の目的と矛盾するか: {e['why_conflicts']}\n"
+        f"  提案されている再定義: {e['suggested_reframe']}"
+        for e in open_escalations
+    ]
+    return (
+        "【⚠️ BL-086: 未解決のエスカレーション（今回必ず判断してください）】\n"
+        "以下は、Expert/あなた自身が「ゴールの文言上の制約が、本来満たすべき真の目的と矛盾している"
+        "のではないか」と判断し、あなた（発注者）の判断を仰ぐために構造化された形でフラグを立てた"
+        "懸念です。却下する場合はresolve_premise_concernツールを、承認しゴールを改定する場合は"
+        "revise_goalツールを呼び出してください（判断を先送りせず、今回の発言内で必ず解決してください）。\n\n"
+        + "\n\n".join(lines) + "\n"
+    )
+
+
+def _get_escalation_status_text_for_expert(conn: sqlite3.Connection, run_id: str) -> str:
+    """[BL-086] Expert向け: Open/Rejectedの状況のみ提示し、同じ懸念の重複再提起を防ぐ。
+    Acceptedは提示しない（state["goal"]自体が既に改定後の文言になっており、call_expertは
+    毎ターンstate["goal"]を再埋め込みするため二重に伝える必要がない）。
+    """
+    rows = conn.execute(
+        "SELECT * FROM goal_escalations WHERE run_id=? AND status IN ('Open','Rejected') ORDER BY created_at ASC",
+        (run_id,)
+    ).fetchall()
+    if not rows:
+        return ""
+    lines = []
+    for r in rows:
+        if r["status"] == "Open":
+            lines.append(f"[{r['escalation_id']}] (判断待ち・未解決) 懸念: {r['concern_summary']} — 同じ懸念を重複して提起しないでください。")
+        else:
+            lines.append(f"[{r['escalation_id']}] (却下済み) 懸念: {r['concern_summary']} — 却下理由: {r['resolution_reason']}")
+    return "【BL-086: これまでのエスカレーション状況】\n" + "\n".join(lines) + "\n"
 
 
 # [BL-075/D-047] rollback_whiteboard（F-7.3）は撤廃した。「1つ前のバージョンは健全」という
@@ -3098,6 +3442,13 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     if deferred_notes_text:
         system_prompt += f"\n📌 【BL-082: 他タスクからの申し送り事項（先送り）】\n{deferred_notes_text}\n"
 
+    # [BL-086] これまでに提起したエスカレーションの状況（Open/Rejectedのみ）を提示し、
+    # 同じ懸念の重複再提起を防ぐ。Acceptedはstate["goal"]自体が既に改定済みのため
+    # ここでは表示しない（毎ターン再埋め込みされるgoal本文が既に反映済み）。
+    _escalation_status_text = _get_escalation_status_text_for_expert(_conn, state["run_id"])
+    if _escalation_status_text:
+        system_prompt += f"\n{_escalation_status_text}\n"
+
     # [BL-041] 「木を見て森を見ず」対策: 狭いタスクスコープ内で導出した数値が、
     # 実は他タスクの制約と衝突する可能性を残したまま無条件に確定値として扱われ、
     # 後から発覚しても誰も再検討しない（Expertはスコープガードレールで他タスクに
@@ -3188,7 +3539,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     _CURRENT_CALLER_ROLE = "expert"
     _CURRENT_TASK_ID = state.get("current_task_id", "")
     return query_AI(messages, client=client_agent, model=model_agent, label=f"Expert:{expert_name}",
-                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL], light_system_prompt=light_system_prompt)
+                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL], light_system_prompt=light_system_prompt)
 
 
 #def call_detector(goal: str, user_input: str, expert_output: str, decisions: list[Decision], current_phase: dict) -> dict:
@@ -3354,6 +3705,10 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"自体は、それだけでは矛盾ではありません。**「情報が不足していて確認できない」ことをmajorの"
         f"根拠にしてはいけません**。majorにする場合は、与えられた情報の範囲内で矛盾を具体的に指摘できる"
         f"ことが必須です。\n\n"
+        f"{_get_frozen_agreements_text(get_active_conn(), state['run_id'])}"
+        f"【BL-086: 🔒Freeze済み項目の扱い】上記に🔒が付いている項目があれば、それは人間の発注者が"
+        f"既に審議の上で承認した意図的な例外です。同じ論点をmajor/minorの根拠にしないでください"
+        f"（ただし別の新しい問題点はこれまで通り厳格に評価してください）。\n\n"
         f"System Goal: {goal}\n"
         f"【現在タスクのacceptance_criteria】\n{criteria_text}\n\n"
         f"{whiteboard_block}"
@@ -3434,6 +3789,12 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"System Goal: {goal}\n"
         f"Recent Decisions（参考程度）: {recent_decitions}\n\n"
         f"【プロジェクトの合意・決定事項・検討状況DB】\n{agreements_text}\n\n"
+        f"【BL-086: 🔒Freeze済み項目の扱い】上記DBで🔒アイコンが付いている項目は、既に人間の発注者"
+        f"（User）が審議の上で承認した意図的な例外です。同じ論点を理由に再度major判定やSUPERSEDEの"
+        f"対象にしないでください（unfreeze機構は存在せず、Freeze済みへのSUPERSEDE/UPDATEはツール"
+        f"呼び出し自体がエラーになります）。ただし、Freezeされていない別の新しい問題点はこれまで通り"
+        f"厳格に評価してください。🔒項目について致命的ではない懸念がある場合は、constraint_issueを"
+        f"上げず'observations'欄に留めてください。\n\n"
         f"【BL-062: 既存Agreementの無効化】constraint_issue=\"major\"と判定し、その原因が上記DB内の"
         f"特定のtopic（例：既にApprovedとして記録されている数値や決定）にある場合、commentに書くだけで"
         f"終わらせず、write_agreementツールをaction_type=\"SUPERSEDE\", status=\"Rejected\", "
@@ -4222,6 +4583,12 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         {"📌 【BL-082: 他タスクからの申し送り事項（先送り）】" + chr(10) + _scope_ctx["deferred_notes_text"] if _scope_ctx["deferred_notes_text"] else ""}
     """)
 
+    # [BL-086] Expert/自分自身が提起した未解決エスカレーションがあれば、今回の発言で
+    # 必ずresolve_premise_concern（却下）かrevise_goal（承認・ゴール改定）で解決させる。
+    _open_escalations_text = _get_open_escalations_text(_conn, state["run_id"])
+    if _open_escalations_text:
+        system_prompt += f"\n{_open_escalations_text}\n"
+
     system_prompt += (
         "\n【検算とドメインレビューの役割分担】\n"
         "Expertの提案に含まれる数値の機械的な検算（合計・比率・閾値比較等）は、"
@@ -4299,10 +4666,11 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         messages.append({"role": "user", "content": "(会話を開始してください。要件を伝えて作業を指示してください)"})
         print("---NO chat_history---\n")
 
-    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID, _CURRENT_GOAL_TEXT
     _CURRENT_CALLER_ROLE = "user"
     _CURRENT_TASK_ID = state.get("current_task_id", "")
-    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL])
+    _CURRENT_GOAL_TEXT = user_goal  # [BL-086] revise_goalの編集対象
+    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL])
 
     if content is None or content.strip() == "" or content == "(APIから空の応答が返されました)":
         for retry in range(3):
@@ -4310,7 +4678,8 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             # global宣言は既に上の行で完了しているため再宣言不要
             _CURRENT_CALLER_ROLE = "user"
             _CURRENT_TASK_ID = state.get("current_task_id", "")
-            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL])
+            _CURRENT_GOAL_TEXT = user_goal
+            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL])
             if content and content.strip() and content != "(APIから空の応答が返されました)":
                 break
         else:
@@ -4393,6 +4762,14 @@ def generate_user_utterance_node(state: LineageState) -> LineageState:
     state["user_wrote_agreement"] = get_last_write_agreement_succeeded()
     # [R5 F-2.1] User AIのreasoningを、次のDetectorが思考プロセス監査に使えるようstateへ保存する。
     state["user_last_reasoning"] = get_last_reasoning_text()
+    # [BL-086] revise_goalが今ターン成功していれば、state["goal"]をここで改定する。
+    # state["goal"]は9箇所の呼び出し元が毎ターン再埋め込みするため、この1箇所の代入だけで
+    # 次ターン以降すべての消費者（call_expert/call_detector/call_resource_arbiter等）へ
+    # 自動的に伝播する（個別配線不要）。
+    _goal_revision = get_last_goal_revision()
+    if _goal_revision:
+        state["goal"] = _goal_revision["new_goal_text"]
+        print(f"🧭 [BL-086] Escalation {_goal_revision['escalation_id']} 承認によりgoalを改定しました。")
     print(f"\n>>> 👤 User AIの発言:\n{user_input}")
     state["user_input"] = user_input
     state["chat_history"].append({"role": "user", "content": state["user_input"]})

@@ -31,11 +31,14 @@ def test_bl062_call_detector_instructs_supersede_on_major():
     assert "target_topic" in src
 
 
-def test_bl062_freeze_tool_removed_from_user_ai_tools():
-    """D-045: FREEZE_AGREEMENT_TOOLはgenerate_user_utterance_nodeのtoolsリストから
-    外され、呼び出し不能になっていること（本体・is_frozenガード・表示ロジックは温存のまま）。"""
-    src = inspect.getsource(cela_main.generate_user_utterance_node)
-    assert "FREEZE_AGREEMENT_TOOL" not in src
+def test_bl086_freeze_tool_reactivated_in_user_ai_tools():
+    """BL-086でD-045を乗り越え、FREEZE_AGREEMENT_TOOLをgenerate_user_utterance
+    （実際にtools=[...]を保持する関数、generate_user_utterance_nodeはラッパーで
+    tools=[...]を持たない）へ再び追加したことの回帰確認。BL-062自身の欠落
+    （Detectorが🔒Freeze済み項目を尊重する指示を持たなかった問題）をcall_detectorの
+    プロンプトに追加した上での意図的な再有効化（D-05x参照）。"""
+    src = inspect.getsource(cela_main.generate_user_utterance)
+    assert "FREEZE_AGREEMENT_TOOL" in src
 
 
 def test_bl062_freeze_agreement_impl_still_intact():
