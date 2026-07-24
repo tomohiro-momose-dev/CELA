@@ -947,6 +947,23 @@ def _check_write_permission(args: dict, caller_role: str) -> str | None:
     return None
 
 
+def _find_active_deliverable_agreement(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str) -> dict | None:
+    """[BL-084] entry_type="Deliverable"のagreementを、topic文字列ではなく(phase_id, task_id)で
+    一意に識別する（whiteboard_draftsと同じ識別子）。BL-074で発覚した「Expertが呼び出しごとに
+    topicの言い回しを変え、target_topic省略時のフォールバック（=自分自身のtopic）が既存行と
+    一致せずold_content/supersede対象を見失う」問題は、target_excerptの緩い一致（BL-081）を
+    いくら強化しても直らない（比較対象のbase_contentがそもそも空文字になるため）。1459ドライラン
+    で同一task_2_4に対しUPDATE呼び出しごとにtopicが変化し（"...確率論的リスク反映版"→
+    "...結論部の数値整合性修正"→"...確率論的リスク反映・修正版"）、2回とも`edits`が
+    「完全一致0件・緩い一致も0件」で失敗する実害を確認した。
+    """
+    for a in reversed(get_agreements_from_db(conn, run_id)):
+        if (a.get("entry_type") == "Deliverable" and a.get("phase_id") == phase_id
+                and a.get("task_id") == task_id and a.get("status") != "Superseded"):
+            return a
+    return None
+
+
 def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str, task_id: str = "") -> str | None:
     """[F-3.1] write_agreementツールからDBへagreementをコミットする。
     action_type=SUPERSEDEの場合は既存レコードをSupersededに更新する。
@@ -972,15 +989,23 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
     tid = args.get("task_id") or task_id
 
     if action_type == "SUPERSEDE":
-        target_topic = args.get("target_topic", topic)
-        for a in reversed(get_agreements_from_db(conn, run_id)):
-            if a["topic"] == target_topic and a.get("status") != "Superseded":
-                # [R5 F-8.3/D-044] Freeze済み（is_frozen=1）のagreementは恒久ピン留めのため、
-                # SUPERSEDEを拒否する（unfreeze機構は設けない設計）。
-                if a.get("is_frozen"):
-                    return f"topic '{target_topic}' はFreeze済みのため変更できません（agreement_id={a['id']}）"
-                db_supersede_agreement(a["id"], conn, run_id)
-                break
+        # [BL-084] Deliverableはtopic文字列ドリフトの影響を受けるため(phase_id, task_id)で識別する。
+        # Decision/Directiveは従来通りtopicベース（BL-084のスコープ外、影響範囲を限定）。
+        if entry_type == "Deliverable":
+            target = _find_active_deliverable_agreement(conn, run_id, phase_id, tid)
+        else:
+            target_topic = args.get("target_topic", topic)
+            target = next(
+                (a for a in reversed(get_agreements_from_db(conn, run_id))
+                 if a["topic"] == target_topic and a.get("status") != "Superseded"),
+                None,
+            )
+        if target is not None:
+            # [R5 F-8.3/D-044] Freeze済み（is_frozen=1）のagreementは恒久ピン留めのため、
+            # SUPERSEDEを拒否する（unfreeze機構は設けない設計）。
+            if target.get("is_frozen"):
+                return f"topic '{target['topic']}' はFreeze済みのため変更できません（agreement_id={target['id']}）"
+            db_supersede_agreement(target["id"], conn, run_id)
         # [BL-080] 以前はここで`return None`しており、旧レコードのstatus変更のみで処理が終わっていた。
         # ExpertがDeliverableの全文置換のためSUPERSEDE+decision_what（全文）を送っても、その内容は
         # 完全に破棄され、ホワイトボードには一切反映されないまま「成功」を返す実質何もしない
@@ -1008,15 +1033,27 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
             print(f"  📋 [Whiteboard] write_agreement(SUPERSEDE)経由で '{topic}' の全文をwhiteboard_drafts Ver.{v}として保存しました（phase={phase_id}, task={tid}）。")
 
     if action_type == "UPDATE":
-        target_topic = args.get("target_topic", topic)
-        old_content = ""
-        for a in reversed(get_agreements_from_db(conn, run_id)):
-            if a["topic"] == target_topic and a.get("status") != "Superseded":
+        # [BL-084] SUPERSEDE分岐と同じ理由でDeliverableのみ(phase_id, task_id)で識別する。
+        if entry_type == "Deliverable":
+            target = _find_active_deliverable_agreement(conn, run_id, phase_id, tid)
+            target_topic = target["topic"] if target else topic
+            old_content = ""
+            if target is not None:
                 # [R5 F-8.3/D-044] Freeze済みのagreementはUPDATEも拒否する（SUPERSEDEと同様）。
-                if a.get("is_frozen"):
-                    return f"topic '{target_topic}' はFreeze済みのため変更できません（agreement_id={a['id']}）"
-                old_content = a["decision_what"]
-                break
+                if target.get("is_frozen"):
+                    return f"topic '{target_topic}' はFreeze済みのため変更できません（agreement_id={target['id']}）"
+                old_content = target["decision_what"]
+        else:
+            target = None
+            target_topic = args.get("target_topic", topic)
+            old_content = ""
+            for a in reversed(get_agreements_from_db(conn, run_id)):
+                if a["topic"] == target_topic and a.get("status") != "Superseded":
+                    # [R5 F-8.3/D-044] Freeze済みのagreementはUPDATEも拒否する（SUPERSEDEと同様）。
+                    if a.get("is_frozen"):
+                        return f"topic '{target_topic}' はFreeze済みのため変更できません（agreement_id={a['id']}）"
+                    old_content = a["decision_what"]
+                    break
         if entry_type == "Deliverable":
             edits = args.get("edits")
             is_whiteboard = old_content.startswith("WHITEBOARD:")
@@ -1056,10 +1093,15 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
                 content = old_content
                 print(f"  🔒 [Whiteboard Protected] '{target_topic}' への実質的な変更がなかったため、既存バージョンを維持しました。")
         # ここでようやく旧レコードをSuperseded化（上記のedits検証失敗時はここに到達せず、旧レコードは温存される）
-        for a in reversed(get_agreements_from_db(conn, run_id)):
-            if a["topic"] == target_topic and a.get("status") != "Superseded":
-                db_supersede_agreement(a["id"], conn, run_id)
-                break
+        # [BL-084] Deliverableは冒頭で解決済みのtarget（(phase_id, task_id)識別）をそのまま使う。
+        if entry_type == "Deliverable":
+            if target is not None:
+                db_supersede_agreement(target["id"], conn, run_id)
+        else:
+            for a in reversed(get_agreements_from_db(conn, run_id)):
+                if a["topic"] == target_topic and a.get("status") != "Superseded":
+                    db_supersede_agreement(a["id"], conn, run_id)
+                    break
 
     # [R5 F-3.7] トークンコスト抑制のため全件記録はせず、status='Rejected'の場合のみ
     # 直前呼び出しのreasoningをスナップショット保存する。
