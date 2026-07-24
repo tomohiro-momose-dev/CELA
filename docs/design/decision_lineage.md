@@ -858,6 +858,23 @@
 
 ---
 
+## 論点73: task_plannerの計画のホワイトボード化と、先送り事項のタスク間申し送り（BL-082・D-053）— Explore調査とPlan agentレビューによる2段階設計
+
+- **発端:** ユーザーが`log/2026-07-24/1349`のドライランで、User AIがtask_1_3完了判定の中で述べた先送り判断（「積雪・通信エリアの区間切り出しの地形照合はtask_2_1/task_2_2で具体化されるべき」）を引用し、「この先送り事項は現状消えてしまいますよね？」と質問した。
+- **AIの調査:** ログとコードを突き合わせ、二重の消失原因を発見した。(1) `call_decision_extractor`の「先送りの検出」ルール（`entry_type="Directive", status="Deferred"`）はExpert側の抽出ブランチにしか実装されておらず、User AI側のブランチには存在しなかった（今回の実例はUser AIの発言だったため抽出自体が発動しなかった）。(2) たとえ正しく抽出されても、`_build_agreements_context`（LLM向けコンテキストを組み立てる唯一の関数）は`entry_type=="Directive"`を無条件で全除外しており（BL-073時代の「完了後もProposedのまま残るDirectiveのノイズ防止」対症療法の副作用）、後続タスクには一切見えない構造だった。
+- **ユーザーの提案:** 「task_plannerが出した計画もホワイトボード化して、先送り事項を書き込めたりできるようにしたいですね」と提案。AIも「筋が良い」と回答し、既存の`whiteboard_drafts`パターンを踏襲する方向性で合意した。
+- **ユーザーの指示:** 「良さそうなので設計と実装を進めて最後にBL化。影響範囲や各ノードでの呼び出し忘れ等十分に気を付けて」と、実装まで一括で進めることと、多ノードにまたがる変更ゆえの見落とし防止を明示的に指示。
+- **設計プロセス:** この指示を受け、AIはPlan modeへ移行し、(1) Exploreエージェントで`task_planner_node`/`state["phases"]`の全消費箇所（`_build_task_scope_context`, `call_expert`, `generate_user_utterance`, `arbiter_node`, `_resolve_task_transition`, `decision_extractor_node`等）と冪等性ガードの仕組みを洗い出し、(2) その調査結果を基にPlan agentへ設計批判的レビューを依頼する2段階のプロセスを取った。
+- **レビューで発見された当初設計の見落とし:**
+  - `call_detector`が`_build_task_scope_context`を経由せず独自にタスクコンテキストを構築しており、しかも既に「先送り済みの論点はmajorにしない」という緩和ロジックを持っていた（直近2ターンの会話窓のみに依存）ため、当初想定していた`call_expert`/`generate_user_utterance`の2箇所だけでは不十分で、これが正に「呼び出し忘れ」になりうる箇所だった。
+  - 一括事前シード（task_planner実行時に全タスク分の計画文書を生成）は、チェックポイント再開時（`task_planner_node`の冪等性ガードが再実行をスキップするため）に新規デプロイ後の既存run再開でシードが行われないという互換性ギャップを生むと指摘され、遅延生成方式へ変更。
+  - 見出し文字列の検索・追記位置の判定について、タスクの`description`や申し送りテキスト自体がLLM生成の自由文であるため、単純な`str.find`や「次の見出しまで探す」ロジックでは偶然の部分一致・境界誤認のリスクがあると指摘され、行アンカー付き正規表現＋見出し直後への固定挿入方式へ変更（BL-074/076/081で対応してきた「LLMの自由文に対する脆いパターンマッチング」という同じ問題クラスを、事前に設計段階で回避した）。
+- **決定者:** t-momose（発見・提案・実装指示・実装範囲の判断）、Claude Sonnet 5（フォレンジック調査、2段階設計プロセスの実施、技術設計・実装）
+- **検証:** 新規`tests/test_bl082_plan_drafts_deferred_notes.py`（11件、ラウンドトリップ・遅延生成・複数追記の蓄積・対象未解決時のフェイルクローズ・description内の偶然一致排除・3箇所すべての配線確認をinspect.getsourceで機械的に検証）。オフラインスモークテスト計141件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。加えて、`decision_extractor_node`にDeferred抽出をモック注入し、対象タスクの`plan_drafts`へ実際に申し送りが書き込まれ`_get_deferred_notes_text`で読み戻せることをエンドツーエンドで手動確認した。実LLM再ドライランでの効果確認は次回待ち。
+- **関連:** [D-053](decision_log.md#d-053-task_plannerの計画をplan_draftsとして永続化し先送り事項をタスク間で申し送る)、[BL-082](issue_backlog.md#bl-082-task_plannerの計画をホワイトボード化し先送り事項をタスク間で永続的に申し送りできるようにする)、[BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
