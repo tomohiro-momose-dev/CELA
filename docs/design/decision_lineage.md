@@ -779,7 +779,7 @@
 - **設計方針の議論:** ユーザーが「本来は一つのトピックに対して更新してほしい。topic文字列の連続性が保証されない限りこれをシステム的に解決するにはどうすべきか」と質問。AIは、`entry_type`によって同一性の単位が異なる（`Decision`はtopicで区別すべきだが、`Deliverable`・`Directive`はこのアーキテクチャ上1タスクにつき1つであり、本来`task_id`が同一性の単位であるべき）という分析を提示し、BL-073の`_resolve_directive_for_task`（task_id基準の解決）と同じ発想を`Deliverable`側にも一貫適用する方針（`_resolve_prior_deliverable_for_task`新設案）を提案した。
 - **決定者:** t-momose（BL化の指示、`task_id`ベース識別への方針転換の承認）、Claude Sonnet 5（原因の実地調査・誤診断の自己訂正・設計方針の提案）
 - **状態:** BL-074として起票（`open`）。設計方針は決定済みだが実装は次回。
-- **関連:** [BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存する)、[BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)
+- **関連:** [BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)、[BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)
 
 ---
 

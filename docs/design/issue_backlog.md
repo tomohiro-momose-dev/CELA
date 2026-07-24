@@ -2262,13 +2262,13 @@ BL-059と同型の問題である。`_query_AI_live`の単一の`try`ブロッ�
 
 ---
 
-### BL-074: Deliverableのtopic文字列に連続性が保証されず、Supersede漏れの亡霊`Proposed`行がDBに複数残存する
+### BL-074: Deliverableのtopic文字列に連続性が保証されず、Supersede漏れの亡霊`Proposed`行がDBに複数残存する（＋BL-076のtarget_excerpt完全一致の脆さを統合）
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（設計方針は決定、実装は次回） |
+| 状態 | `open`（target_excerpt側の正規化フォールバック＋失敗理由ログは`done`。Deliverable本体のtask_id識別への切替は次回） |
 | 優先度 | P2 |
-| 関連 | [BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)（同根の問題、Directive側の解決） |
+| 関連 | [BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)（同根の問題、Directive側の解決）、[BL-076](issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)（統合元）、[BL-079](issue_backlog.md#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる設計検討未着手) |
 
 **内容:**
 
@@ -2280,12 +2280,31 @@ BL-059と同型の問題である。`_query_AI_live`の単一の`try`ブロッ�
 
 `topic`はentry_type="Decision"（1タスク内に複数の論点がありうる）には妥当な識別キーだが、entry_type="Deliverable"は本アーキテクチャ上1タスクにつき1つ（whiteboard_draftsが`task_id`単位でバージョン管理している設計と整合）であり、`topic`ではなく`task_id`を識別キーとすべきと判断した。具体的には、`entry_type=="Deliverable"`のCREATE/UPDATE/SUPERSEDEいずれの場合も、`target_topic`の文字列一致に加えて（あるいは代えて）同一`task_id`かつ`entry_type=="Deliverable"`かつ非Supersededの既存行を検索・Supersede化してから新行を追記する。CREATE時（現状は無条件追記のみで既存行の検索を一切行わない）にもこの検索・Supersede化を追加することで、ver.1→ver.2のような「新しいCREATEのつもりで実質的に前バージョンを置き換える」ケースも自動的に解決される。BL-073の`_resolve_directive_for_task`と対になる`_resolve_prior_deliverable_for_task`のような関数を新設し、`_commit_agreement_from_tool`・`decision_extractor_node`の両経路（Deliverableの書き込みが起こりうる箇所）から呼び出す方針。
 
-**完了条件:**
+**完了条件（Deliverable本体・task_id識別、未実装）:**
 
 - `_commit_agreement_from_tool`・`decision_extractor_node`の両経路で、`entry_type=="Deliverable"`のCREATE/UPDATE/SUPERSEDEいずれについても、同一`task_id`の既存非Superseded Deliverable行が自動的にSupersede化されること。
 - 回帰テスト: task_2_2型のシナリオ（同一task_idに対し複数回のCREATE/UPDATE/SUPERSEDEが異なるtopic文字列で発生）で、最終的に非Superseded Deliverable行が1件のみになること。
 - オフラインスモークテスト・`py_compile`・`check_docs_consistency.py`の非退行確認。
 - 実装は次回セッションで着手（本ターンは発見・BL起票・設計方針決定のみ）。
+
+---
+
+**2026-07-24追記: BL-076のtarget_excerpt完全一致の脆さを統合（実装済み・`done`）**
+
+1216ドライラン（`log/2026-07-24/1216/log_no_prompt.md`）のフォレンジック調査で、`constraint_issue=major`かつ`target_role=assistant`の判定が複数回発生し`target_excerpt`も正しく出力されていたにもかかわらず、成功時に出るはずの`🔴 [Whiteboard Annotated]`ログが一度も出力されていないことが判明した。原因は`_annotate_whiteboard_with_detector_comment`の完全一致依存（topic文字列ドリフトと同根の脆さ）に加え、失敗時は`return False`のみでログが一切出ないサイレント失敗だったこと。実際のケースでは、Detector自身が「AIの発言と実際のホワイトボードの内容が一致していない」という乖離を独立に発見しており（BL-062のSUPERSEDE運用に繋がった一件）、これがtarget_excerptの一致失敗の典型例だったと考えられる。
+
+**対応（実装済み）:**
+
+1. `_annotate_whiteboard_with_detector_comment`の戻り値を`bool`から`tuple[bool, str]`（成功可否, 理由）へ変更し、`detector_node`側で失敗時にも`⚠️ [Whiteboard Annotate Failed]`として理由（0件一致/複数件一致等）付きでログ出力するよう変更。
+2. 完全一致（`content.count(target_excerpt) == 1`）に失敗した場合、新設`_normalize_for_loose_match`で改行・空白・Markdown太字記法（`**`）・全角半角の差異を吸収した正規化文字列を作り（元の文字列位置へのindex_map付き）、正規化後に一意一致する場合はそちらを採用してオリジナル文字列上の正しい位置へ注釈を挿入するフォールバックを追加。
+3. リトライ（一致失敗をDetector自身のツール呼び出し結果として返し、同一ツールループ内で再試行させる構造）はスコープが大きいため、BL-079として別途起票。
+
+**完了条件（target_excerpt側・完了）:**
+
+- 新規`tests/test_bl074_annotation_loose_match_fallback.py`（5件）: 太字記法差異・改行空白差異・全角半角差異それぞれでの緩い一致成功、正規化後も曖昧な場合の失敗維持、`detector_node`の失敗理由ログ配線確認。
+- 既存`tests/test_bl076_whiteboard_detector_annotation.py`をタプル戻り値に合わせて更新。
+- オフラインスモークテスト計122件Pass、`python -m py_compile`合格。
+- 実LLM再ドライランでの効果確認（1216ドライランと同様のケースで実際に注釈が挿入される、または少なくとも失敗理由がログに残ること）は次回待ち。
 
 ---
 
@@ -2355,6 +2374,8 @@ BL-075でロールバックを撤廃し、`call_expert`のプロンプトに部�
 - オフラインスモークテスト計113件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。
 - 実LLM再ドライランでの効果確認（注釈が実際にホワイトボードへ挿入され、Expertが部分修正時に注釈ごと解消すること）は次回待ち。
 
+**2026-07-24追記:** 1216ドライランで実際に検証したところ、major/assistant判定が複数回発生したにもかかわらず注釈挿入が0回しか発火せず、しかもサイレントに失敗していたことが判明。完全一致依存の脆さという根本原因はBL-074（topic文字列ドリフト）と同根と判断し、対策（失敗理由ログ＋正規化フォールバック）はBL-074側に統合して実装した。詳細は[BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)を参照。
+
 ---
 
 ### BL-077: AGENTS.mdの「まずMemory/STATUS/backlogを確認してから動く」設計思想をCELA自身のAI群に適用する（設計検討・未着手）
@@ -2412,7 +2433,7 @@ BL-076（ホワイトボードへの指摘埋め込み）の議論の延長と�
 |------|------|
 | 状態 | `open`（設計検討のみ、実装未着手） |
 | 優先度 | P3 |
-| 関連 | [BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存する) |
+| 関連 | [BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合) |
 
 **内容:**
 
