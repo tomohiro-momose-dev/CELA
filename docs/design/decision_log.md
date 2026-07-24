@@ -815,6 +815,20 @@
 
 ---
 
+### D-054: entry_type="Deliverable"のUPDATE/SUPERSEDE対象特定を、topic文字列ではなく(phase_id, task_id)で行う
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-24 |
+| 状態 | `decided` |
+| 決定者 | t-momose（1459ログのレビュー依頼・修正着手の指示） / Claude Sonnet 5（フォレンジック調査による根本原因の特定・設計・実装） |
+| **決定理由** | ユーザー依頼で`log/2026-07-24/1459`のドライランをレビューする中で、BL-081（editsの緩い一致フォールバック）実装後にもかかわらず`edits`が2回とも「old_textが現在のホワイトボード内容に見つかりませんでした（正規化後の緩い一致も0件でした）」で失敗している事例を発見。実際に該当箇所を再現テストしたところ、old_text自体はホワイトボード内容と完全に一致しており（127文字、差分0）、BL-081の正規化ロジックには一切問題がないことを確認した。真因は`_commit_agreement_from_tool`のUPDATE/SUPERSEDE分岐が`target_topic`（省略時は自分自身の`topic`にフォールバック）の文字列完全一致で対象agreementを検索していたこと。実ログでExpertは`target_topic`を一度も送らず、しかも呼び出しごとにtopicの言い回しを変えていた（"...確率論的リスク反映版"→"...結論部の数値整合性修正"→"...確率論的リスク反映・修正版"）ため、既存行と一致せず`old_content`が空文字のまま渡され、`_apply_text_edits("", edits)`が常に0件/0件で失敗する構造だった。これはBL-074の完了条件に「Deliverable本体のtask_id識別への切替はまだ`open`」と明記されていた項目そのものであり、BL-081のフォールバック強化だけでは原理的に解決できないことが実害2件で裏付けられたため、今回着手することとした。 |
+| 決定内容 | 新設`_find_active_deliverable_agreement(conn, run_id, phase_id, task_id)`が、entry_type="Deliverable"のagreementを`(phase_id, task_id)`（whiteboard_draftsと同じ識別子）で検索し、`status != "Superseded"`の最新行を返す。`_commit_agreement_from_tool`のSUPERSEDE分岐・UPDATE分岐（対象特定・Freezeチェック・最終Superseded化の3箇所）を、entry_type=="Deliverable"の場合のみこの新関数を使うよう分岐。Decision/Directiveは影響範囲を限定するため従来通りtopic文字列ベースのまま変更していない。 |
+| 影響 | `cela_main.py`（新設`_find_active_deliverable_agreement`、`_commit_agreement_from_tool`のSUPERSEDE/UPDATE分岐の対象特定ロジック）。新規`tests/test_bl084_deliverable_task_id_identification.py`（5件、1459ログの実際のtopicドリフトパターンを再現）。 |
+| 関連 BL | [BL-084](issue_backlog.md#bl-084-entry_typedeliverableのupdatesupersedeがtopic文字列ドリフトでeditsを0件0件失敗させ続けていたbl-074の未着手項目の再発)、[BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)（今回解消した「まだopen」の完了条件）、[BL-081](issue_backlog.md#bl-081-write_agreementのeditsold_textnew_textがmarkdownテーブル行頭の全角スペースパイプ記号の有無で完全一致に失敗しやすかった)（この修正で真因ではなかったと判明した緩い一致フォールバック） |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）

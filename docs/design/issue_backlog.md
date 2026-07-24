@@ -115,6 +115,7 @@
 | BL-081 | 高 | `cela_main.py` (`_apply_text_edits`/`_normalize_for_loose_match`/新設`_find_loose_match_spans`) | ユーザーが同じ1319ドライランを指して「まだホワイトボードの差分書き換えに苦労しているようです」と再調査を依頼。調査の結果、ExpertがBL-080の誘因となった`edits`失敗（Markdownテーブル行頭の全角スペース・パイプ記号の有無だけでold_text完全一致が0件になる）の実例を特定。BL-074/D-050でDetectorのtarget_excerpt向けに確立した正規化緩い一致の仕組みを`_apply_text_edits`自身にも適用し、Expertの主たる編集手段であるeditsがその場で成功する確率を高めた（新設`_find_loose_match_spans`で正規化後の一致位置を元の文字列へ逆写像）。あわせて、`_normalize_for_loose_match`自体に「半角スペースは除去されるが全角スペース（　）はNFKC正規化後の半角スペース1文字として結果に残ってしまう」という非対称バグを発見・修正し、テーブル区切り記号（\|）も正規化対象に追加した | P1 |
 | BL-082 | 高 | `cela_main.py` (新設`plan_drafts`テーブル/`get_latest_plan_draft`/`apply_plan_patch`/`_append_deferred_note_to_plan`/`_get_deferred_notes_text`、`decision_extractor_node`/`call_decision_extractor`/`_build_task_scope_context`/`call_expert`/`generate_user_utterance`/`call_detector`) | `log/2026-07-24/1349`のドライランで、User AIが「積雪・通信エリアの区間切り出しの地形照合はtask_2_1/task_2_2で具体化されるべき」と先送り判断を発言したことをユーザーが指摘し「この先送り事項は現状消えてしまいますよね？」と質問。調査の結果、二重の理由で消失することが判明: (1) `call_decision_extractor`の「先送りの検出」ルール（`entry_type=Directive, status=Deferred`として抽出）がExpert側の抽出ブランチにしか実装されておらずUser AI側には存在しなかった（今回の実例はUser AIの発言だったため抽出自体が発動しなかった）、(2) たとえ正しく抽出されても`_build_agreements_context`がentry_type="Directive"を無条件で全除外しており後続タスクには一切見えない構造だった（BL-073時代の対症療法の副作用）。ユーザーが提案した「task_plannerの計画もホワイトボード化して先送り事項を書き込めるようにする」という方向性を採用。`whiteboard_drafts`の完全ミラーとして新規`plan_drafts`テーブルを新設（既存テーブルへの混在によるリスクを避けるため）。`decision_extractor_node`が申し送り先task_id（新設`defer_to_task_id`フィールド、両抽出ブランチに追加）を解決し対象タスクの計画文書へ追記、`call_expert`・`generate_user_utterance`・`call_detector`の3箇所（Explore調査＋Plan agentによる批判的レビューで発見した見落とし箇所）すべてに配線した | P1 |
 | BL-083 | 高 | `cela_main.py` (`_query_AI_live`の例外タプル) | BL-082コミット後の実ドライラン（`log/2026-07-24/1459`）で、Expert(iter=7)がedits編集を行おうとした直後、streaming受信中に相手ホストから強制切断（Windows `WinError 10054`）され、生の`httpx.ReadError`（`httpcore.ReadError`由来）が絞り込んだ例外タプルに含まれず未捕捉のままプロセス全体がクラッシュした。BL-059（`httpx.RemoteProtocolError`）/BL-072（`httpx.TimeoutException`）と同型の再発で、BL-081/BL-082のロジックとは無関係な純粋なネットワーク層の例外クラス漏れ。例外タプルに`httpx.ReadError`を追加して対応 | P0 |
+| BL-084 | 高 | `cela_main.py` (`_commit_agreement_from_tool`のSUPERSEDE/UPDATE分岐、新設`_find_active_deliverable_agreement`) | ユーザー依頼で`log/2026-07-24/1459`をレビューする中で発見。BL-081実装後にもかかわらず`edits`が2回とも「old_textが見つかりませんでした（正規化後の緩い一致も0件）」で失敗していたため実際に再現テストしたところ、old_text自体は完全一致（127文字差分0）しており、BL-081の正規化ロジックには問題がないことを確認。真因は`_commit_agreement_from_tool`がUPDATE/SUPERSEDE対象を`target_topic`（省略時は自分自身のtopicにフォールバック）の文字列完全一致で検索していたこと。Expertが`target_topic`を一度も送らず、呼び出しごとにtopicの言い回しを変えていた（実例あり）ため既存行と一致せず`old_content`が空文字のまま渡され、`_apply_text_edits("", edits)`が常に0件/0件で失敗していた。BL-074の完了条件「Deliverable本体のtask_id識別への切替はまだ`open`」がまさにこれで、BL-081のフォールバック強化だけでは原理的に解決できないことが実害で裏付けられた。新設`_find_active_deliverable_agreement`で(phase_id, task_id)識別に切替（Decision/Directiveはスコープ外、従来通り） | P0 |
 
 ---
 
@@ -2602,6 +2603,51 @@ BL-059/BL-072と同型の問題である。`_query_AI_live`の例外タプルは
 - 新規`tests/test_bl083_httpx_readerror_retry.py`（1件）: `_query_AI_live`のソースが`httpx.ReadError`を例外タプルに含むことを確認。
 - オフラインスモークテスト計142件Pass、`python -m py_compile`合格。
 - 実LLM再ドライランでの再発なし確認は次回待ち。
+
+---
+
+### BL-084: entry_type="Deliverable"のUPDATE/SUPERSEDEがtopic文字列ドリフトでeditsを0件/0件失敗させ続けていた（BL-074の未着手項目の再発）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P0 |
+| 関連 | [BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)（今回解消した「まだopen」の完了条件）、[BL-081](issue_backlog.md#bl-081-write_agreementのeditsold_textnew_textがmarkdownテーブル行頭の全角スペースパイプ記号の有無で完全一致に失敗しやすかった)（真因ではなかったと判明した緩い一致フォールバック）、[D-054](decision_log.md#d-054-entry_typedeliverableのupdatesupersede対象特定をtopic文字列ではなくphase_id-task_idで行う) |
+
+**内容:**
+
+ユーザー依頼で`log/2026-07-24/1459`のドライランをレビューする中で、`edits`が2回とも以下のエラーで失敗している事例を発見した。
+
+```
+{'success': False, 'error': 'edits[0]: old_textが現在のホワイトボード内容に見つかりませんでした（正規化後の緩い一致も0件でした）。一字一句正確な引用か確認してください。'}
+```
+
+BL-081実装後のはずなのに緩い一致まで0件になっている点を不審に思い、ログから該当old_textと実際のホワイトボード内容を抽出して`_apply_text_edits`に直接再投入したところ、**old_text自体は127文字・差分0で完全一致した**。つまりBL-081の正規化ロジックは無関係で、`_apply_text_edits`に渡された`content`引数そのものが空文字だったことになる。
+
+`_commit_agreement_from_tool`のコードを確認すると、UPDATE/SUPERSEDE分岐は以下のように対象agreementを`target_topic`（省略時は自分自身の`topic`）の文字列完全一致で検索していた。
+
+```python
+target_topic = args.get("target_topic", topic)
+old_content = ""
+for a in reversed(get_agreements_from_db(conn, run_id)):
+    if a["topic"] == target_topic and a.get("status") != "Superseded":
+        old_content = a["decision_what"]
+        break
+```
+
+実ログのExpertは`target_topic`を一度も送らず、しかも同一task_2_4のUPDATE呼び出しのたびにtopicの言い回しを変えていた（"task_2_4 最大待ち時間シミュレーション（確率論的リスク反映版）"→"task_2_4 結論部の数値整合性修正"→"task_2_4 最大待ち時間シミュレーション（確率論的リスク反映・修正版）"）。`target_topic`が毎回新しく発明された文字列にフォールバックするため既存行と一致せず、`old_content`が空文字のまま`base_content`に渡り、`_apply_text_edits("", edits)`は`content.count(old_text)`が常に0（緩い一致も同様に0）になる。直前の成功例はExpertが偶然topicを一字一句同じにしていただけで、少しでも言い回しを変えると即座に壊れる状態だった。
+
+これはBL-074の完了条件に明記していた「Deliverable本体のtask_id識別への切替はまだ`open`」の項目そのものであり、BL-081（editsの緩い一致フォールバック強化）だけでは原理的に解決できないことが、同一ドライラン内で2回の実害として裏付けられた。
+
+**対応:**
+
+新設`_find_active_deliverable_agreement(conn, run_id, phase_id, task_id)`が、entry_type="Deliverable"のagreementを`(phase_id, task_id)`（`whiteboard_drafts`と同じ識別子）で検索し、`status != "Superseded"`の最新行を返す。`_commit_agreement_from_tool`のSUPERSEDE分岐・UPDATE分岐（対象特定・Freezeチェック・最終Superseded化マークの3箇所）を、`entry_type=="Deliverable"`の場合のみこの新関数を使うよう分岐した。Decision/Directiveは影響範囲を限定するためスコープ外とし、従来通りtopic文字列ベースの挙動を変えていない。
+
+**完了条件:**
+
+- 新規`tests/test_bl084_deliverable_task_id_identification.py`（5件）: 1459ログの実際のtopicドリフトパターンを再現したUPDATE/SUPERSEDE成功確認、Superseded遷移確認、Decision/Directiveの従来挙動が変わっていないことの回帰確認、`_find_active_deliverable_agreement`がSuperseded行を無視することの確認。
+- オフラインスモークテスト計147件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。
+- 実LLM再ドライランでの効果確認（1459ログと同様に、Expertがtopicを変えながらUPDATE/editsを繰り返すシナリオで成功すること）は次回待ち。
 
 ---
 
