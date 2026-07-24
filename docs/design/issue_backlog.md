@@ -2214,7 +2214,7 @@ TypeError: '<' not supported between instances of 'NoneType' and 'float'
 |------|------|
 | 状態 | `done` |
 | 優先度 | P0 |
-| 関連 | [BL-059](issue_backlog.md#bl-059-streaming受信中のhttpxremoteprotocolerrorが未捕捉でプロセスクラッシュする)（同型の問題、`httpx.RemoteProtocolError`が漏れていた事例） |
+| 関連 | [BL-059](issue_backlog.md#bl-059-streaming受信中のhttpxremoteprotocolerrorが未捕捉でプロセスクラッシュする)（同型の問題、`httpx.RemoteProtocolError`が漏れていた事例）、[BL-083](issue_backlog.md#bl-083-streaming受信中のhttpxreaderror接続の強制切断が絞り込んだ例外タプルから漏れプロセスクラッシュを引き起こす)（同型の再発、`httpx.ReadError`が漏れていた事例） |
 
 **内容:**
 
