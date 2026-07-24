@@ -829,6 +829,20 @@
 
 ---
 
+### D-055: ホワイトボード保存時にDBと並行してMarkdownファイルへ書き出す
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-24 |
+| 状態 | `decided` |
+| 決定者 | t-momose（要望） / Claude Sonnet 5（設計・実装） |
+| **決定理由** | ユーザーから「ホワイトボードの中身を保存時にファイルに書き出してほしい」と要望があった。R4以降`whiteboard_drafts`はDB（sqlite）のみに保存されており、中身を確認・diffするにはsqliteクライアントでのクエリが必要で、ドライラン中の目視確認や過去ログのレビュー時に手間だった。 |
+| 決定内容 | 新設`_write_whiteboard_to_file`を`apply_whiteboard_patch`のDB INSERT直後から呼び出し、`{log_dir}/whiteboards/{phase_id}_{task_id}_V{version}.md`へバージョンごとに個別ファイルとして書き出す（DBが正、ファイルは`save_deliverable_to_file`と同様のベストエフォート補助資料）。DB側のappend-onlyバージョニング方針に合わせ旧バージョンを上書き・削除しない。BL-027（`MultiLogger`のimport時副作用防止）と同じ理由で、`MultiLogger._instance`が未初期化（テスト/import時）の場合は書き出しをスキップし、`tmp_path`上のDBを使う既存テスト群（BL-080〜BL-084）が本番`log/`配下を汚染しないようにした。 |
+| 影響 | `cela_main.py`（新設`_write_whiteboard_to_file`、`apply_whiteboard_patch`への配線）。新規`tests/test_bl085_whiteboard_file_writeback.py`（3件）。 |
+| 関連 BL | [BL-085](issue_backlog.md#bl-085-ホワイトボード保存時にmarkdownファイルへも書き出す)、[BL-027](issue_backlog.md#bl-027-cela_mainpyのロガーがimport時点で無条件起動し本番log配下にテスト実行の痕跡が混入する)（同じ理由でのガード先例） |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）

@@ -116,6 +116,7 @@
 | BL-082 | 高 | `cela_main.py` (新設`plan_drafts`テーブル/`get_latest_plan_draft`/`apply_plan_patch`/`_append_deferred_note_to_plan`/`_get_deferred_notes_text`、`decision_extractor_node`/`call_decision_extractor`/`_build_task_scope_context`/`call_expert`/`generate_user_utterance`/`call_detector`) | `log/2026-07-24/1349`のドライランで、User AIが「積雪・通信エリアの区間切り出しの地形照合はtask_2_1/task_2_2で具体化されるべき」と先送り判断を発言したことをユーザーが指摘し「この先送り事項は現状消えてしまいますよね？」と質問。調査の結果、二重の理由で消失することが判明: (1) `call_decision_extractor`の「先送りの検出」ルール（`entry_type=Directive, status=Deferred`として抽出）がExpert側の抽出ブランチにしか実装されておらずUser AI側には存在しなかった（今回の実例はUser AIの発言だったため抽出自体が発動しなかった）、(2) たとえ正しく抽出されても`_build_agreements_context`がentry_type="Directive"を無条件で全除外しており後続タスクには一切見えない構造だった（BL-073時代の対症療法の副作用）。ユーザーが提案した「task_plannerの計画もホワイトボード化して先送り事項を書き込めるようにする」という方向性を採用。`whiteboard_drafts`の完全ミラーとして新規`plan_drafts`テーブルを新設（既存テーブルへの混在によるリスクを避けるため）。`decision_extractor_node`が申し送り先task_id（新設`defer_to_task_id`フィールド、両抽出ブランチに追加）を解決し対象タスクの計画文書へ追記、`call_expert`・`generate_user_utterance`・`call_detector`の3箇所（Explore調査＋Plan agentによる批判的レビューで発見した見落とし箇所）すべてに配線した | P1 |
 | BL-083 | 高 | `cela_main.py` (`_query_AI_live`の例外タプル) | BL-082コミット後の実ドライラン（`log/2026-07-24/1459`）で、Expert(iter=7)がedits編集を行おうとした直後、streaming受信中に相手ホストから強制切断（Windows `WinError 10054`）され、生の`httpx.ReadError`（`httpcore.ReadError`由来）が絞り込んだ例外タプルに含まれず未捕捉のままプロセス全体がクラッシュした。BL-059（`httpx.RemoteProtocolError`）/BL-072（`httpx.TimeoutException`）と同型の再発で、BL-081/BL-082のロジックとは無関係な純粋なネットワーク層の例外クラス漏れ。例外タプルに`httpx.ReadError`を追加して対応 | P0 |
 | BL-084 | 高 | `cela_main.py` (`_commit_agreement_from_tool`のSUPERSEDE/UPDATE分岐、新設`_find_active_deliverable_agreement`) | ユーザー依頼で`log/2026-07-24/1459`をレビューする中で発見。BL-081実装後にもかかわらず`edits`が2回とも「old_textが見つかりませんでした（正規化後の緩い一致も0件）」で失敗していたため実際に再現テストしたところ、old_text自体は完全一致（127文字差分0）しており、BL-081の正規化ロジックには問題がないことを確認。真因は`_commit_agreement_from_tool`がUPDATE/SUPERSEDE対象を`target_topic`（省略時は自分自身のtopicにフォールバック）の文字列完全一致で検索していたこと。Expertが`target_topic`を一度も送らず、呼び出しごとにtopicの言い回しを変えていた（実例あり）ため既存行と一致せず`old_content`が空文字のまま渡され、`_apply_text_edits("", edits)`が常に0件/0件で失敗していた。BL-074の完了条件「Deliverable本体のtask_id識別への切替はまだ`open`」がまさにこれで、BL-081のフォールバック強化だけでは原理的に解決できないことが実害で裏付けられた。新設`_find_active_deliverable_agreement`で(phase_id, task_id)識別に切替（Decision/Directiveはスコープ外、従来通り） | P0 |
+| BL-085 | 低 | `cela_main.py` (新設`_write_whiteboard_to_file`、`apply_whiteboard_patch`) | ユーザーから「ホワイトボードの中身を保存時にファイルに書き出してほしい」と要望。従来`whiteboard_drafts`はDB（sqlite）のみに保存され、中身を確認するにはクエリが必要だった。`apply_whiteboard_patch`から新設`_write_whiteboard_to_file`を呼び、保存の都度`{log_dir}/whiteboards/{phase_id}_{task_id}_V{version}.md`へバージョンごとに個別ファイルとして書き出す（DBのappend-onlyバージョニングと同じく上書きしない）。BL-027と同じ理由で、`MultiLogger._instance`が未初期化（テスト/import時）の場合は書き出しをスキップし、本番log/配下のテスト汚染を防止 | P3 |
 
 ---
 
@@ -2651,6 +2652,32 @@ for a in reversed(get_agreements_from_db(conn, run_id)):
 
 ---
 
+### BL-085: ホワイトボード保存時にMarkdownファイルへも書き出す
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P3 |
+| 関連 | [D-055](decision_log.md#d-055-ホワイトボード保存時にdbと並行してmarkdownファイルへ書き出す)、[BL-027](issue_backlog.md#bl-027-cela_mainpyのロガーがimport時点で無条件起動し本番log配下にテスト実行の痕跡が混入する)（同じ理由でテスト時の書き出しをガードした先例） |
+
+**内容:**
+
+ユーザーから「ホワイトボードの中身を保存時にファイルに書き出してほしい」と要望があった。`whiteboard_drafts`はR4以降DB（sqlite）のみに保存されており、中身を確認するにはクエリが必要でsqliteクライアントを開く手間があった。
+
+**対応:**
+
+新設`_write_whiteboard_to_file(phase_id, task_id, version, content, author_role, edit_summary)`を`apply_whiteboard_patch`のDB INSERT直後から呼び出し、`{log_dir}/whiteboards/{phase_id}_{task_id}_V{version}.md`へバージョンごとに個別ファイルとして書き出す（`save_deliverable_to_file`と同様のベストエフォート補助資料という位置づけ、DBが正）。ファイル冒頭に`phase_id`/`task_id`/`version`/`author_role`/`edit_summary`をコメントヘッダーとして埋め込む。DB側のappend-onlyバージョニング方針に合わせ、旧バージョンのファイルを上書き・削除せず全バージョンを個別に保持する。
+
+BL-027（`MultiLogger`のimport時副作用防止）と同じ理由で、`getattr(MultiLogger, "_instance", None) is None`（＝実際のドライラン実行中ではない、テストやimport時）の場合は書き出しをスキップする。BL-080〜BL-084のテストは`tmp_path`上のDBに対し`apply_whiteboard_patch`を大量に呼ぶため、このガードがないと本番`log/`配下がテスト実行のたびに汚染されてしまう。
+
+**完了条件:**
+
+- 新規`tests/test_bl085_whiteboard_file_writeback.py`（3件）: `MultiLogger`初期化済み時にバージョンごとのファイルが書き出されること（内容・ヘッダー・旧版との非混在を確認）、未初期化時は`apply_whiteboard_patch`・`_write_whiteboard_to_file`のいずれもファイルを書き出さないこと。
+- オフラインスモークテスト計150件Pass（既存147件＋新規3件）、`python -m py_compile`合格。テスト実行後も実プロジェクトの`log/`配下に新規ディレクトリが生成されていないことを目視確認。
+- 実LLM再ドライランでの動作確認（実行のたびに`log/<date>/<time>/whiteboards/`へファイルが生成されること）は次回待ち。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -2733,3 +2760,4 @@ for a in reversed(get_agreements_from_db(conn, run_id)):
 | 2026-07-24 | ユーザーが`log/2026-07-24/1349`でUser AIの先送り発言（積雪・通信エリアの地形照合はtask_2_1/task_2_2で扱う）を指摘し「この先送り事項は現状消えてしまいますよね？」と質問。調査の結果、decision_extractorの先送り検出ルールがExpert側ブランチにしか実装されておらずUser側で発動しないこと、`_build_agreements_context`がentry_type=Directiveを無条件除外し後続タスクに一切見えないことの二重の欠陥を発見。ユーザーが「task_plannerの計画もホワイトボード化」を提案し「設計と実装を進めて最後にBL化」「呼び出し忘れ等に気を付けて」と指示。探索エージェント調査＋Plan agentの批判的レビューを経て、新規`plan_drafts`テーブル・遅延シード・行アンカー正規表現による堅牢な追記処理を設計し実装。レビューで`call_detector`が第3の呼び出し漏れ箇所として発見され配線に追加。D-053として記録、新規`tests/test_bl082_plan_drafts_deferred_notes.py`（11件）含めオフラインスモークテスト計141件Pass、`check_docs_consistency.py`合格、エンドツーエンドの手動統合確認も実施。BL-082として新規起票・`done`化。 |
 | 2026-07-24 | BL-082コミット後の再ドライラン（`log/2026-07-24/1459`）で、Expert(iter=7)のedits編集直後にstreaming受信中の接続が強制切断（Windows `WinError 10054`）され、生の`httpx.ReadError`が絞り込んだ例外タプルから漏れ未捕捉のままプロセスクラッシュ（BL-059/BL-072と同型の再発、BL-081/BL-082のロジックとは無関係な純粋なネットワーク層の例外クラス漏れ）。例外タプルに`httpx.ReadError`を追加して解消。新規`tests/test_bl083_httpx_readerror_retry.py`（1件）含めオフラインスモークテスト計142件Pass、`python -m py_compile`合格。BL-083として新規起票・`done`化。 |
 | 2026-07-24 | ユーザー依頼で`log/2026-07-24/1459`を精査する中で、BL-081実装後にもかかわらず`edits`が2回とも「old_textが見つかりませんでした（正規化後の緩い一致も0件）」で失敗している事例を発見。実際にold_textとホワイトボード内容を抽出し`_apply_text_edits`に再投入したところ完全一致（差分0）することを確認し、BL-081の正規化ロジックは無関係と判明。真因は`_commit_agreement_from_tool`のUPDATE/SUPERSEDE分岐が`target_topic`（省略時は自分自身のtopic）の文字列完全一致で対象を検索しており、Expertが呼び出しごとにtopicの言い回しを変えていたため既存行と一致せず`old_content`が空文字のまま渡されていたこと。BL-074の完了条件「Deliverable本体のtask_id識別への切替はまだopen」がまさにこれで、ユーザーの「修正着手してください」との指示により、新設`_find_active_deliverable_agreement`で(phase_id, task_id)識別に切替（Decision/Directiveはスコープ外、従来通り）。D-054として記録、新規`tests/test_bl084_deliverable_task_id_identification.py`（5件、1459ログの実際のtopicドリフトを再現）含めオフラインスモークテスト計147件Pass、`check_docs_consistency.py`合格。BL-084として新規起票・`done`化。 |
+| 2026-07-24 | ユーザーから「ホワイトボードの中身を保存時にファイルに書き出してほしい」と要望。新設`_write_whiteboard_to_file`を`apply_whiteboard_patch`から呼び出し、`{log_dir}/whiteboards/{phase_id}_{task_id}_V{version}.md`へバージョンごとに個別Markdownファイルとして書き出すよう実装（DBが正、ファイルはベストエフォートの補助資料）。BL-027と同じ理由で`MultiLogger`未初期化時（テスト/import時）は書き出しをスキップし、本番log/配下のテスト汚染を防止。D-055として記録、新規`tests/test_bl085_whiteboard_file_writeback.py`（3件）含めオフラインスモークテスト計150件Pass、`python -m py_compile`合格。BL-085として新規起票・`done`化。 |
