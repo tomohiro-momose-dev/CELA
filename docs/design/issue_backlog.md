@@ -106,6 +106,7 @@
 | BL-072 | 高 | `cela_main.py` (`_query_AI_live`) | BL-071修正後の再ドライランで、`expert_node`のstreaming受信中に`httpx.ReadTimeout`が発生しプロセス全体がクラッシュ。BL-059（`httpx.RemoteProtocolError`が絞り込んだ例外タプルから漏れていた事例）と同型で、`httpx.ReadTimeout`もopenai SDKの`APITimeoutError`へラップされず生のまま送出されていた。個別の派生例外を都度追加するのではなく、`ReadTimeout`/`ConnectTimeout`/`WriteTimeout`/`PoolTimeout`を包含する親クラス`httpx.TimeoutException`を例外タプルに追加して解消 | P0 |
 | BL-073 | 中 | `cela_main.py` (`decision_extractor_node`/`_commit_agreement_from_tool`) | `entry_type="Directive"`のagreementは、対応するtask_idのDeliverableが承認されても`status="Proposed"`のまま遷移させる経路が無く永久にDBへ残っていた。`reflection_node`の「未解決」抽出（`status=="Proposed"`の全件、entry_type不問）に既に履行済みの指示がノイズとして出続け、実ドライランでReflectionが毎ターン自問自答を強いられていた（実害はなかったが放置すると誤判定を誘発しうる根本課題）。Deliverableが`Approved`/`Approved_with_Conditions`/`Implicitly_Accepted`へ遷移した際、対応するtask_idのDirectiveも自動的に`Approved`へ解決する`_resolve_directive_for_task`を新設し、`decision_extractor_node`のUPDATE分岐と`_commit_agreement_from_tool`の両経路から呼び出すよう解消 | P2 |
 | BL-074 | 中 | `cela_main.py` (`_commit_agreement_from_tool`/`decision_extractor_node`のtopic文字列一致によるUPDATE/SUPERSEDE対象特定) | ユーザーとログ（`log/2026-07-24/0647`）のtask_2_2（初期導入費用内訳策定）議論の変遷をレビューする中で発見。`entry_type="Deliverable"`のUPDATE/SUPERSEDEは`target_topic`（省略時は`topic`自身）の文字列完全一致でのみ対象行を特定するが、Expert/decision_extractorはバージョンを重ねるたびに新しいtopic文字列（「task_2_2 初期導入費用の内訳策定」→「水ノ守町...ver.2修正版」→「...ver.3」→「初期導入費用の内訳策定（ver.3）承認」）を自由に発明しており、連続性が保証されない。結果としてtask_2_2単一のDeliverableに対し、Supersede漏れの`Proposed`行が複数（実測4行）DBに残存し、LLM向けコンテキスト（`_build_agreements_context`）に亡霊のように出続けた。BL-073（Directiveの永久Proposed残留）と同根だがDeliverable側での顕在化 | P2 |
+| BL-075 | 高 | `cela_main.py` (`rollback_whiteboard`/`expert_node`/`call_expert`) | 実ドライラン（`log/2026-07-24/0647`）で、task_2_3のオペレーター年間有給休暇が労基法違反（5日）としてmajor判定→Ver.2で10日に修正→**別件**の懸念（法定祝日未考慮）でmajor判定→ロールバックにより有給10日の修正が無警告で有給5日へ後退、というバージョン退行をDetector自身が発見。原因はF-7.3のロールバック（`rollback_whiteboard`）が常に「1つ前のバージョンは健全」という前提でrows[1]（2版前）へ機械的に復元する設計だったこと。この前提はmajor判定のたびに別の新しい懸念が指摘される実運用下では成り立たず、既に修正済みの問題を無警告で再導入する。ロールバック自体を撤廃し、ホワイトボードの最新内容を保持したままExpertがDetectorの指摘箇所のみを`edits`で部分修正する方針（ユーザー提案、Word/PDFコメント機能的ワークフロー）に変更 | P1 |
 
 ---
 
@@ -2284,6 +2285,42 @@ BL-059と同型の問題である。`_query_AI_live`の単一の`try`ブロッ�
 
 ---
 
+### BL-075: F-7.3ホワイトボードロールバックが「1つ前は健全」という前提に反し、修正済み問題を無警告で再導入する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | [D-047](decision_log.md#d-047-f-73ホワイトボードロールバックを撤廃し部分修正誘導プロンプトへ置き換える) |
+
+**内容:**
+
+実ドライラン（`log/2026-07-24/0647`）継続中、task_2_3（年間ランニングコストの内訳策定）でDetector自身が以下のバージョン退行を発見した。
+
+1. Ver.1（CREATE）：オペレーター年間有給休暇5日・年間稼働240日 → Detector: `major`（労働基準法第39条違反、法定最低10日）
+2. Ver.2（CREATE）：Expertが有給10日・251日に修正 → Detector: `minor`（**別件**：法定祝日が未考慮という新しい懸念。この時点でDetector自身が「有給5日→10日はVer.2で修正済み」と明記）
+3. 差し戻し発生（祝日懸念でmajor）→ `rollback_whiteboard`が発火。この時点でwhiteboard_draftsに2版（Ver.1, Ver.2）が存在するため、`rows[1]`＝Ver.1（有給5日）の内容がVer.3として復元される
+4. Ver.4（CREATE）：Expertは祝日懸念のみに対応し、現在のホワイトボード（実質Ver.1の内容）を土台に作業したため、**有給10日の修正が消えて有給5日に逆戻り**
+
+原因は`rollback_whiteboard`（F-7.3、要件定義書_v35.md該当箇所「前バージョン（Ver.3の正常な状態）へロールバックする」）が、常に「1つ前のバージョンは健全」という前提でrows[1]（2版前）を機械的に復元する設計だったこと。major判定のたびに指摘内容が変わる実運用下では、1つ前のバージョン自体が過去に別件でmajor判定された版であることがあり、この前提は成立しない。ユーザーから、F-7.3導入時の背景（差し戻し時に前のNG発言を消すのは、次のAIがそれに引っ張られて同じ誤りを繰り返すのを防ぐためだったが、F-2.6検算ゲート・BL-033監査記録・agreements DBコンテキスト注入等でシステムが大幅に強化された現在は、この設計がむしろ矛盾を生んでいる）の説明があった。
+
+**対応:** ユーザー提案（Word/PDFのコメント機能のように、Detectorの指摘箇所を示した上で差し戻し、差し戻されたAIは指摘を読みホワイトボードを確認して部分修正、影響範囲が大きければ周辺も再考する、というワークフロー）を採用。
+
+1. `rollback_whiteboard`関数を削除（`expert_node`からの呼び出しも削除）。ホワイトボードの最新内容は保持されたまま次のExpertターンに引き継がれる。
+2. `call_expert`のmajor差し戻しプロンプトを、「完全に修正した新しい提案を作成してください」（全文書き直し誘導）から、「現在のホワイトボードはロールバックされていない。Detectorの指摘箇所を特定し、`edits`（old_text/new_text）で部分修正せよ。影響が他箇所に及ぶ場合はその範囲も見直し、必要なら`decision_what`による全文更新（SUPERSEDE）を使え。既に修正済みだった箇所を無関係な理由で元に戻さないよう注意せよ」という部分修正優先の指示に置き換えた。
+3. 副次的発見: 同関数内に、`system_prompt`へ`+=`した後に一度も`messages`へ反映されない完全な**死んだコード重複ブロック**（同一の差し戻し警告メッセージが2箇所に存在し、後者は文字列変数を更新するのみでAPI呼び出しに一切影響しない）を発見し削除した。
+
+**完了条件:**
+
+- `rollback_whiteboard`関数が完全に削除され、`expert_node`から呼び出されないこと。
+- `call_expert`のプロンプトが部分修正・影響範囲確認を指示する文言に置き換わっていること。
+- 新規`tests/test_bl075_no_whiteboard_rollback.py`（4件）: 関数削除確認、`expert_node`ソースからの呼び出し削除確認、`call_expert`の新文言確認、実際にmajor判定を受けてもwhiteboard_draftsの最新内容が巻き戻らないことの機能テスト。
+- 既存`tests/test_r4_smoke.py`のF-7.3ロールバック専用テスト2件を削除（機能自体の廃止のため）。
+- オフラインスモークテスト計109件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。
+- 実LLM再ドライランでの効果確認（同種のバージョン退行が再発しないこと）は次回待ち。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -2357,3 +2394,4 @@ BL-059と同型の問題である。`_query_AI_live`の単一の`try`ブロッ�
 | 2026-07-24 | BL-071修正後の再ドライランで、`expert_node`のstreaming受信中に`httpx.ReadTimeout`が絞り込んだ例外タプルから漏れ未捕捉のままプロセスクラッシュ（BL-059と同型の問題）。個別の派生例外を都度追加するのではなく、`ReadTimeout`/`ConnectTimeout`/`WriteTimeout`/`PoolTimeout`を包含する親クラス`httpx.TimeoutException`を`_query_AI_live`の例外タプルに追加して解消。新規`tests/test_bl072_httpx_timeout_retry.py`（1件）を含めオフラインスモークテスト計103件Pass。BL-072として新規起票・`done`化。 |
 | 2026-07-24 | ユーザーと同ドライラン（`log/2026-07-24/0647`）のR4/R5機能稼働レビューを行う中で、Reflectionの内省監査ログが完了済みタスクの指示（Directive）を「未解決」として繰り返し自問自答している様子を発見。調査の結果、`entry_type="Directive"`のagreementは`decision_extractor_node`のUPDATE分岐・`_commit_agreement_from_tool`のいずれからも遷移させる経路がなく、CREATE時の`status="Proposed"`のままDBに永久残留する構造的欠陥と判明。ユーザーの指示により、対症療法（未解決抽出からDirectiveを除外）ではなく根本解決（②案）を採用し、新設`_resolve_directive_for_task`をDeliverable承認の両経路（decision_extractor/write_agreementツール）から呼び出しDirectiveを自動的に`Approved`へ遷移させる実装を行った。新規`tests/test_bl073_directive_auto_resolve.py`（4件）を含めオフラインスモークテスト計107件Pass、`check_docs_consistency.py`合格。BL-073として新規起票・`done`化。 |
 | 2026-07-24 | ユーザーの依頼でtask_2_1承認後のtask_2_2（初期導入費用内訳策定）議論の変遷とDB更新状況をログから詳細に再構成する中で、topic文字列が版を重ねるたびに変わり（「task_2_2 初期導入費用の内訳策定」→「...ver.2修正版」→「...ver.3」→「...ver.3承認」）、Supersede漏れの`Proposed`/`Approved_with_Conditions`行が実測4行DBに残存していることを発見。また前回セッションで報告した「edits失敗の原因はモデルの一字一句コピーミス」という診断が誤りで、実際は`target_topic`未指定によりDB内の対応行が見つからず`old_content=""`となったことが根本原因と判明し訂正。BL-074として新規起票（`open`、BL-073と同根）。ユーザーと相談の上、`topic`ではなく`task_id`をDeliverableの識別キーとする設計方針（`_resolve_prior_deliverable_for_task`新設案）を決定。実装は次回。 |
+| 2026-07-24 | 同ドライラン継続中、Detector自身がtask_2_3のオペレーター年間有給休暇（労基法違反で一度major判定・Ver.2で10日に修正済み）が、別件（法定祝日未考慮）でのmajor判定・ロールバックにより無警告で5日（違反状態）へ後退していることを発見。原因はF-7.3の`rollback_whiteboard`が「1つ前のバージョンは健全」という前提で機械的にrows[1]（2版前）を復元する設計だったこと。ユーザーから、この「直前のNG発言・状態を消して一から考え直させる」設計は元々「次のAIが誤った思考に引っ張られる」のを防ぐためだったが、F-2.6検算ゲート等でシステムが大幅強化された現在は逆に矛盾を生んでいるとの説明があり、Word/PDFのコメント機能のようにDetectorの指摘箇所を示して部分修正させる方式への転換を提案・採用。`rollback_whiteboard`を削除し、`call_expert`のmajor差し戻しプロンプトを全文書き直し誘導から`edits`による部分修正・影響範囲確認の指示に置き換えた。副次的に、`system_prompt`に追記されるが`messages`に反映されない死んだコード重複ブロックも発見・削除。新規`tests/test_bl075_no_whiteboard_rollback.py`（4件）追加、`test_r4_smoke.py`のF-7.3ロールバック専用テスト2件を削除。オフラインスモークテスト計109件Pass、`check_docs_consistency.py`合格。BL-075として新規起票・`done`化。D-047として記録。 |
