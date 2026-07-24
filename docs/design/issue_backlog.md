@@ -113,6 +113,7 @@
 | BL-079 | 低 | `cela_main.py` (`_annotate_whiteboard_with_detector_comment`/`call_detector`、未着手・設計検討のみ) | BL-074の正規化フォールバックを相談する中で、ユーザーがClaude Code自身の`Edit`ツールが同種の完全一致方式でも実運用できている理由を質問。調査の結果、Claude Codeは(1)LLMがその場で読んだ内容から引用する、(2)不一致時に即座にエラーがツール結果として返り同一ターン内でLLM自身がリトライできる、の2点が揃っているのに対し、CELAの`_annotate_whiteboard_with_detector_comment`は(2)を欠き、失敗してもDetector自身にフィードバックが返らないことが根本差だと判明。ユーザーが他ツール（python_repl等）ではエラーフィードバックがあるとDetectorが試行錯誤して解決を試みている思考ログを確認しており、同様に注釈挿入の一致失敗をDetector自身のツール呼び出し結果として返し、同一ツールループ内でリトライさせる構造を提案。Detectorは既にツールループ内で動作しているため設計変更の規模が大きく、BL化のみ行い実装は別途 | P3 |
 | BL-080 | 高 | `cela_main.py` (`_commit_agreement_from_tool`のSUPERSEDE分岐) | ユーザー依頼で1216ドライラン後の1319ドライランをフォレンジック調査する中で発見。`entry_type="Deliverable"`に対する`action_type="SUPERSEDE"`は、旧agreement行のstatusを`Superseded`に変更した直後に`return None`しており、Expertが渡した`decision_what`（全文）を完全に破棄し、`apply_whiteboard_patch`も一切呼ばれないまま「成功」を返す実質何もしないツール呼び出しになっていた。BL-075で追加したプロンプト（editsの完全一致に失敗した場合、decision_whatによる全文更新＝SUPERSEDEを使えという誘導）がExpertをこの壊れた経路に誘導し、Expertは`{'success': True}`を信じて「更新完了」と報告するが、直後に`read_deliverable_file`で読み戻すと旧内容のままという矛盾に直面。Expertはこれを「システムの反映タイミングの問題」と誤って自己正当化し、Detector/Userからハルシネーション（虚偽の更新完了報告）と判定され続ける無限ループに陥っていた。`entry_type=="Deliverable"`かつ`action_type in ("CREATE", "SUPERSEDE")`かつ`len(decision_what) > 200`（CREATE/UPDATE全文置換と同一閾値）の場合、CREATE同様`apply_whiteboard_patch`で新版を保存するよう修正。BL-062のDetectorによる無効化用途（短い理由文のみ、ホワイトボードには触れない）との後方互換は同じ閾値で維持 | P0 |
 | BL-081 | 高 | `cela_main.py` (`_apply_text_edits`/`_normalize_for_loose_match`/新設`_find_loose_match_spans`) | ユーザーが同じ1319ドライランを指して「まだホワイトボードの差分書き換えに苦労しているようです」と再調査を依頼。調査の結果、ExpertがBL-080の誘因となった`edits`失敗（Markdownテーブル行頭の全角スペース・パイプ記号の有無だけでold_text完全一致が0件になる）の実例を特定。BL-074/D-050でDetectorのtarget_excerpt向けに確立した正規化緩い一致の仕組みを`_apply_text_edits`自身にも適用し、Expertの主たる編集手段であるeditsがその場で成功する確率を高めた（新設`_find_loose_match_spans`で正規化後の一致位置を元の文字列へ逆写像）。あわせて、`_normalize_for_loose_match`自体に「半角スペースは除去されるが全角スペース（　）はNFKC正規化後の半角スペース1文字として結果に残ってしまう」という非対称バグを発見・修正し、テーブル区切り記号（\|）も正規化対象に追加した | P1 |
+| BL-082 | 高 | `cela_main.py` (新設`plan_drafts`テーブル/`get_latest_plan_draft`/`apply_plan_patch`/`_append_deferred_note_to_plan`/`_get_deferred_notes_text`、`decision_extractor_node`/`call_decision_extractor`/`_build_task_scope_context`/`call_expert`/`generate_user_utterance`/`call_detector`) | `log/2026-07-24/1349`のドライランで、User AIが「積雪・通信エリアの区間切り出しの地形照合はtask_2_1/task_2_2で具体化されるべき」と先送り判断を発言したことをユーザーが指摘し「この先送り事項は現状消えてしまいますよね？」と質問。調査の結果、二重の理由で消失することが判明: (1) `call_decision_extractor`の「先送りの検出」ルール（`entry_type=Directive, status=Deferred`として抽出）がExpert側の抽出ブランチにしか実装されておらずUser AI側には存在しなかった（今回の実例はUser AIの発言だったため抽出自体が発動しなかった）、(2) たとえ正しく抽出されても`_build_agreements_context`がentry_type="Directive"を無条件で全除外しており後続タスクには一切見えない構造だった（BL-073時代の対症療法の副作用）。ユーザーが提案した「task_plannerの計画もホワイトボード化して先送り事項を書き込めるようにする」という方向性を採用。`whiteboard_drafts`の完全ミラーとして新規`plan_drafts`テーブルを新設（既存テーブルへの混在によるリスクを避けるため）。`decision_extractor_node`が申し送り先task_id（新設`defer_to_task_id`フィールド、両抽出ブランチに追加）を解決し対象タスクの計画文書へ追記、`call_expert`・`generate_user_utterance`・`call_detector`の3箇所（Explore調査＋Plan agentによる批判的レビューで発見した見落とし箇所）すべてに配線した | P1 |
 
 ---
 
@@ -2523,6 +2524,56 @@ Detector・Userの判定自体は「ホワイトボードが更新されてい�
 
 ---
 
+### BL-082: task_plannerの計画をホワイトボード化し、先送り事項をタスク間で永続的に申し送りできるようにする
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | [BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)（Directive無条件除外の原因となった対症療法）、[D-053](decision_log.md#d-053-task_plannerの計画をplan_draftsとして永続化し先送り事項をタスク間で申し送る) |
+
+**内容:**
+
+`log/2026-07-24/1349`のドライランで、User AIがtask_1_3完了判定の中で「積雪・通信エリアの区間切り出しの地形照合はtask_2_1/task_2_2で具体化されるべき」という先送り判断を発言した。ユーザーが「この先送り事項は現状消えてしまいますよね？」と質問し、調査の結果、二重の理由で消失することが判明した。
+
+1. `call_decision_extractor`のプロンプトには元々「先送りの検出」ルール（`action_type: "CREATE", entry_type: "Directive", status: "Deferred"`として抽出）が存在するが、**Expert側の抽出ブランチにしか実装されておらず、User AI側の抽出ブランチには存在しなかった**。今回の実例はUser AIの発言だったため、そもそも抽出ルールが適用されずDeliverable承認の一部として埋没した。
+2. たとえ正しく`Directive`/`Deferred`として抽出されても、`_build_agreements_context`（LLM向けコンテキストを組み立てる唯一の関数）は`entry_type=="Directive"`を無条件で全除外している（BL-073時代の「完了後もProposedのまま残るDirectiveのノイズ防止」という対症療法の副作用）。つまり先送りの仕組みは設計上存在するが実質的に死んでいた。
+
+ユーザーが「task_plannerが出した計画もホワイトボード化して、先送り事項を書き込めたりできるようにしたい」と提案し、「設計と実装を進めて最後にBL化」「影響範囲や各ノードでの呼び出し忘れ等十分に気を付けて」との指示を受けた。設計は探索エージェントによる現状調査（`state["phases"]`の全消費箇所の洗い出し）と、Plan agentによる批判的レビューの2段階を経た。
+
+**レビューで発見された当初設計の見落とし（対応済み）:**
+
+- **`call_detector`が第3の呼び出し箇所として漏れていた**: `call_detector`は`_build_task_scope_context`を経由せず独自に現在タスクのコンテキストを構築しており、しかも自身のプロンプトに既に「先送り済みの論点はmajorにしない」という緩和ロジックを持っていた（直近2ターンの会話窓のみに依存し、それが窓外へ流れると同じ既知の懸念を再度major判定してしまう）。当初案は`call_expert`/`generate_user_utterance`の2箇所のみを想定していたが、レビューでこの欠落が指摘され、共有ヘルパー`_get_deferred_notes_text`を新設して3箇所すべてから呼ぶ設計に修正した。
+- **一括事前シードではなく遅延生成を採用**: task_planner実行時に全タスク分の計画文書を事前生成する案は、チェックポイント再開時（`task_planner_node`の冪等性ガードが再実行をスキップするため）に新規デプロイ後の既存run再開でシードが行われないという互換性ギャップを生むと指摘され、「先送り事項が実際に書き込まれる初回にのみ骨格文書を生成する」遅延生成方式に変更した。
+- **マーカー検索の堅牢性強化**: 見出し文字列の検索は当初単純な`str.find`を想定していたが、タスクの`description`（LLM生成の自由文）に偶然見出し文字列が部分一致で含まれるリスクを指摘され、行アンカー付き正規表現（`re.search(r'(?m)^## 先送り事項...\s*$', content)`）に変更。また「次の見出しまでを探す」という区間検出ロジックも、申し送りテキスト自体（LLM生成の自由文）が偶然`\n## `を含んだ場合の境界誤認リスクを指摘され、「見出し直後に固定で挿入する」方式に変更し、区間終端探索ロジックそのものを排除した。
+
+**対応（実装済み）:**
+
+1. `whiteboard_drafts`の完全なミラーとして新規`plan_drafts`テーブルを新設（別テーブルにしたのは、`whiteboard_drafts`が今セッションでBL-080/BL-081という2つの繊細な修正を経たばかりであり、そのキー空間に別用途を混在させるリスクを避けるため）。`get_latest_plan_draft`/`apply_plan_patch`を`get_latest_whiteboard`/`apply_whiteboard_patch`の完全なミラーとして新設。
+2. `_render_plan_skeleton(task)`（固定フォーマットの骨格文書生成）、`_append_deferred_note_to_plan`（遅延シード＋行アンカー正規表現＋見出し直後固定挿入）、`_get_deferred_notes_text`（プレースホルダのままなら空文字を返しトークン消費を避ける）を新設。
+3. `call_decision_extractor`のJSON出力スキーマに`defer_to_task_id`（`status=="Deferred"`の場合のみ意味を持つ）を追加し、「先送りの検出」指示をExpert・User双方の抽出ブランチに追加（従来の非対称性を解消）。
+4. `decision_extractor_node`に`task_id_to_phase_id`/`task_id_to_task`マップを新設（`_resolve_task_transition`の`phase_lookup`と同じ、全フェーズ一巡のパターン）し、`entry_type=="Directive" and status=="Deferred"`かつ`defer_to_task_id`が解決できる場合に`_append_deferred_note_to_plan`を呼ぶ配線を追加。解決できない場合は警告ログのみでスキップ（フェイルクローズ）。
+5. `_build_task_scope_context`の返り値に`deferred_notes_text`を追加し、`call_expert`・`generate_user_utterance`に配線。`call_detector`は独自にコンテキストを構築するため`_get_deferred_notes_text`を直接呼び、ドメイン監査・数値監査両パスのプロンプトに反映。
+
+**関連する既知の未対応事項（今回のスコープ外、参考記録）:**
+
+- `Task` TypedDictに`status: str # "pending"/"in_progress"/"completed"/"deferred"`という未使用フィールドが既に存在する（他に一切参照なし）。本機能の先行未完成の試みの痕跡と推測され、`plan_drafts`に置き換わる形のため、将来のクリーンアップ候補として記録するに留める。
+- `write_agreement`ツール（`WRITE_AGREEMENT_TOOL`のenum・`_write_agreement_impl`の`valid_statuses`）は`status="Deferred"`を受け付けない。つまりDeferredの作成経路は現状`decision_extractor_node`のみ（この事実がフック地点の選択の裏付けにもなった）。ツール側にDeferredが将来追加された場合、`decision_extractor_node`の該当分岐は`if not wrote_agreement_this_turn:`の内側にあるため実行されない可能性がある点をコードコメントで明記した。
+- タスク/フェーズ構造は計画確定後は不変という前提を維持（先送りが新規タスクを生成することはない）。
+
+**完了条件:**
+
+- `plan_drafts`テーブル・`get_latest_plan_draft`/`apply_plan_patch`が`whiteboard_drafts`系と同型で動作すること。
+- `_append_deferred_note_to_plan`が遅延シード・複数追記の蓄積・対象未解決時のフェイルクローズ・description内の偶然の部分一致排除のいずれも正しく処理すること。
+- `call_expert`・`generate_user_utterance`・`call_detector`の3箇所すべてで先送り事項が参照可能であること（`inspect.getsource`による機械的な配線確認テストで担保）。
+- `call_decision_extractor`のExpert・User双方のブランチが`defer_to_task_id`と先送り検出指示を含むこと。
+- 新規`tests/test_bl082_plan_drafts_deferred_notes.py`（11件）。
+- エンドツーエンドの手動統合確認: `decision_extractor_node`にDeferred抽出をモック注入し、対象タスクの`plan_drafts`に実際に申し送りが書き込まれ、`_get_deferred_notes_text`で正しく読み戻せることを確認済み。
+- オフラインスモークテスト計141件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。
+- 実LLM再ドライランでの効果確認（1349ドライランと同様のケースで、先送り事項がtask_2_1/task_2_2開始時にプロンプトへ実際に現れること）は次回待ち。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -2602,3 +2653,4 @@ Detector・Userの判定自体は「ホワイトボードが更新されてい�
 | 2026-07-24 | ユーザーの依頼で`log/2026-07-24/1216`のドライランログをフォレンジック調査し、BL-073〜BL-078の各修正が実際に効いているか検証。BL-073（Directive自動解決）・BL-062（SUPERSEDE配線）・BL-078（focus_guidance）・F-2.1/F-3.7（思考プロセス監査）は実際に発火・機能していることを確認したが、BL-076（ホワイトボード注釈）はmajor/assistant判定が複数回発生したにもかかわらず一度も発火しておらず、しかも失敗がサイレント（`_annotate_whiteboard_with_detector_comment`は`False`を返すのみでログなし）だったことを発見・報告。ユーザーの指示により、この完全一致依存の脆さをBL-074（topic文字列ドリフト）と同根の問題として統合し、(1)失敗理由（0件一致/複数件一致）をログへ出す、(2)改行・空白・Markdown太字記法・全角半角を正規化した緩い一致へのフォールバック、を実装（戻り値を`tuple[bool, str]`化）。さらにユーザーから「Claude Code自身のEdit（完全一致）はなぜ実運用できるのか」との質問があり、調査の結果「その場で読んだ内容から引用する」ことに加え「不一致時に即座にエラーが返り同一ターン内でリトライできる」ことが鍵と判明。CELAのDetectorには後者が欠けており、これを取り入れる「一致失敗をDetector自身にツール結果として返し同一ツールループ内でリトライさせる」構造をユーザーが承認、規模が大きいためBL-079として起票（`open`、実装は別途）。新規`tests/test_bl074_annotation_loose_match_fallback.py`（5件）、既存`tests/test_bl076_whiteboard_detector_annotation.py`をタプル戻り値に更新、オフラインスモークテスト計122件Pass、`check_docs_consistency.py`合格。 |
 | 2026-07-24 | ユーザーの依頼で`log/2026-07-24/1319`のドライランをフォレンジック調査し、「後からtask_1_1のホワイトボードを修正している様子がある」という報告の実態を特定。ExpertがBL-075のプロンプト誘導（editsの完全一致失敗時はdecision_whatによる全文更新＝SUPERSEDEを使え）に従い`action_type='SUPERSEDE'`で全文更新を試みると、ツールは`{'success': True}`を返すのに実際にはホワイトボードが一切更新されず、Expertがこれを「システムの反映タイミングの問題」と誤って自己正当化し、Detector/Userからハルシネーションと判定され差し戻され続ける無限ループを発見。根本原因は`_commit_agreement_from_tool`の`SUPERSEDE`分岐が旧agreement行のstatus変更直後に`return None`しており、`decision_what`（全文）を完全に破棄しapply_whiteboard_patchも呼ばずに「成功」を返す、実質何もしないツール呼び出しだったこと。「修正してBL起票」との指示により、`entry_type=="Deliverable"`かつ`action_type in ("CREATE", "SUPERSEDE")`かつ長文の場合はCREATE同様ホワイトボードへ保存するよう即時修正（BL-062のDetector無効化用途との後方互換は同じ200文字閾値で維持）。D-051として記録、新規`tests/test_bl080_supersede_deliverable_whiteboard_writeback.py`（3件）含めオフラインスモークテスト計125件Pass、`check_docs_consistency.py`合格。BL-080として新規起票・`done`化。 |
 | 2026-07-24 | ユーザーが同じ`log/2026-07-24/1319`を指して「やはりまだ、ホワイトボードの差分書き換えに苦労しているようです」と再調査を依頼。ExpertがBL-080の誘因となった`edits`失敗の実例を特定：old_textにMarkdownテーブル行頭の`| `＋全角スペースや行末の` |`が含まれておらず完全一致0件。BL-074/D-050でDetectorのtarget_excerpt向けに確立した正規化緩い一致を`_apply_text_edits`にも適用し、新設`_find_loose_match_spans`で位置逆写像した上でフォールバック置換するよう実装。あわせて`_normalize_for_loose_match`自体の非対称バグ（半角スペースは除去されるが全角スペースはNFKC正規化後の半角スペースとして残存）を発見・修正し、テーブル区切り記号（`\|`）も正規化対象に追加。D-052として記録、新規`tests/test_bl081_edits_loose_match_fallback.py`（5件）含めオフラインスモークテスト計130件Pass、`check_docs_consistency.py`合格。BL-081として新規起票・`done`化。 |
+| 2026-07-24 | ユーザーが`log/2026-07-24/1349`でUser AIの先送り発言（積雪・通信エリアの地形照合はtask_2_1/task_2_2で扱う）を指摘し「この先送り事項は現状消えてしまいますよね？」と質問。調査の結果、decision_extractorの先送り検出ルールがExpert側ブランチにしか実装されておらずUser側で発動しないこと、`_build_agreements_context`がentry_type=Directiveを無条件除外し後続タスクに一切見えないことの二重の欠陥を発見。ユーザーが「task_plannerの計画もホワイトボード化」を提案し「設計と実装を進めて最後にBL化」「呼び出し忘れ等に気を付けて」と指示。探索エージェント調査＋Plan agentの批判的レビューを経て、新規`plan_drafts`テーブル・遅延シード・行アンカー正規表現による堅牢な追記処理を設計し実装。レビューで`call_detector`が第3の呼び出し漏れ箇所として発見され配線に追加。D-053として記録、新規`tests/test_bl082_plan_drafts_deferred_notes.py`（11件）含めオフラインスモークテスト計141件Pass、`check_docs_consistency.py`合格、エンドツーエンドの手動統合確認も実施。BL-082として新規起票・`done`化。 |

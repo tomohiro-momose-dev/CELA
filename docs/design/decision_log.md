@@ -801,6 +801,20 @@
 
 ---
 
+### D-053: task_plannerの計画をplan_draftsとして永続化し、先送り事項をタスク間で申し送る
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-24 |
+| 状態 | `decided` |
+| 決定者 | t-momose（発見・提案・実装範囲の判断） / Claude Sonnet 5（設計・実装、Exploreエージェント調査・Plan agentレビュー） |
+| **決定理由** | `log/2026-07-24/1349`のドライランで、User AIがtask_1_3完了判定の中で「積雪・通信エリアの区間切り出しの地形照合はtask_2_1/task_2_2で具体化されるべき」という先送り判断を発言したことをユーザーが指摘し、「この先送り事項は現状消えてしまいますよね？」と質問した。調査の結果、(1) `call_decision_extractor`の「先送りの検出」ルールがExpert側の抽出ブランチにしか実装されておらずUser AI側には存在しなかった（今回の実例はUser AIの発言だったため抽出自体が発動しなかった）、(2) たとえ正しく抽出されても`_build_agreements_context`がentry_type="Directive"を無条件で全除外しており後続タスクには一切見えない（BL-073時代の対症療法の副作用）、という二重の欠陥を発見した。ユーザーが「task_plannerが出した計画もホワイトボード化して、先送り事項を書き込めたりできるようにしたい」と提案し、「設計と実装を進めて最後にBL化」「影響範囲や各ノードでの呼び出し忘れ等十分に気を付けて」と指示した。設計はExploreエージェントによる`state["phases"]`の全消費箇所調査と、Plan agentによる批判的レビューの2段階を経ており、レビューで`call_detector`（既に「先送り済みならmajorにしない」という緩和ロジックを持つが直近2ターンの会話窓のみに依存していた）が当初案から漏れていた第3の呼び出し箇所として発見された。 |
+| 決定内容 | `whiteboard_drafts`の完全なミラーとして新規`plan_drafts`テーブルを新設（既存テーブルへの混在によるリスク回避のため別テーブルを選択）。`_append_deferred_note_to_plan`は一括事前シードではなく**遅延生成**を採用（チェックポイント再開時のシード漏れ互換性ギャップを回避するため）。見出し検索は行アンカー付き正規表現＋見出し直後への固定挿入方式を採用し、「次の見出しまで探す」区間検出ロジックは使わない（タスクの`description`・申し送りテキストいずれもLLM生成の自由文であり、偶然の部分一致・境界誤認リスクを構造的に排除するため）。`decision_extractor_node`が新設`defer_to_task_id`フィールド（Expert・User双方の抽出ブランチに追加、従来の非対称性を解消）を解決し、対象タスクの計画文書へ追記する。`call_expert`・`generate_user_utterance`・`call_detector`の3箇所全てに`deferred_notes_text`/`_get_deferred_notes_text`を配線した。 |
+| 影響 | `cela_main.py`（新設`plan_drafts`テーブル・`get_latest_plan_draft`・`apply_plan_patch`・`_render_plan_skeleton`・`_append_deferred_note_to_plan`・`_get_deferred_notes_text`、`call_decision_extractor`のJSON schema・両抽出ブランチのプロンプト拡張、`decision_extractor_node`の`task_id_to_phase_id`/`task_id_to_task`マップと配線、`_build_task_scope_context`・`call_expert`・`generate_user_utterance`・`call_detector`への埋め込み）。新規`tests/test_bl082_plan_drafts_deferred_notes.py`（11件）。 |
+| 関連 BL | [BL-082](issue_backlog.md#bl-082-task_plannerの計画をホワイトボード化し先送り事項をタスク間で永続的に申し送りできるようにする)、[BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)（Directive無条件除外の原因となった対症療法） |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
