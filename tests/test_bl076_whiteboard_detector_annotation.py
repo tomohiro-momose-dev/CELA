@@ -44,13 +44,14 @@ def test_bl076_annotate_inserts_hybrid_comment_after_unique_excerpt(db_conn):
         "車両はリースと後付け改造で調達する。\n他の記述。", "expert", "初版"
     )
 
-    ok = cela_main._annotate_whiteboard_with_detector_comment(
+    ok, reason = cela_main._annotate_whiteboard_with_detector_comment(
         conn, run_id, "phase_2", "task_2_2",
         target_excerpt="車両はリースと後付け改造で調達する。",
         comment="リース会社が認証もするのは契約範囲外になる可能性がある、再考せよ",
         decision_id="D-1784850088729",
     )
     assert ok is True
+    assert "完全一致" in reason
 
     latest = cela_main.get_latest_whiteboard(conn, run_id, "phase_2", "task_2_2")
     assert latest["version"] == 2
@@ -69,11 +70,12 @@ def test_bl076_annotate_noop_when_excerpt_not_unique_or_missing(db_conn):
     cela_main.apply_whiteboard_patch(conn, run_id, "phase_2", "task_2_2", "AとBとAが並ぶ。", "expert", "初版")
 
     for bad_excerpt in ["存在しない文言", "A", ""]:
-        ok = cela_main._annotate_whiteboard_with_detector_comment(
+        ok, reason = cela_main._annotate_whiteboard_with_detector_comment(
             conn, run_id, "phase_2", "task_2_2",
             target_excerpt=bad_excerpt, comment="なにか指摘", decision_id="D-999",
         )
         assert ok is False
+        assert reason
 
     latest = cela_main.get_latest_whiteboard(conn, run_id, "phase_2", "task_2_2")
     assert latest["version"] == 1, "一致しない場合はバージョンが増えないはず"

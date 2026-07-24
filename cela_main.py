@@ -15,6 +15,7 @@ import traceback
 import sqlite3
 import uuid
 import hashlib
+import unicodedata
 import ast
 import subprocess
 import threading
@@ -1991,28 +1992,68 @@ _DETECTOR_COMMENT_TEMPLATE = (
 )
 
 
+def _normalize_for_loose_match(s: str) -> tuple[str, list[int]]:
+    """[BL-074] target_excerptの完全一致依存の脆さ（topic文字列ドリフトと同根）への対策。
+    改行・空白の揺れ、Markdown太字記法（**）、全角/半角の違いを吸収した正規化文字列を作り、
+    正規化後の各文字が元の文字列の何文字目由来かを示すindex_mapを併せて返す
+    （マッチ位置を元の文字列へ逆写像し、注釈を正しい位置へ挿入するため）。
+    """
+    norm_chars: list[str] = []
+    index_map: list[int] = []
+    for i, ch in enumerate(s):
+        if ch in " \t\n\r*":
+            continue
+        norm_ch = unicodedata.normalize("NFKC", ch)
+        if len(norm_ch) != 1:
+            norm_ch = ch
+        norm_chars.append(norm_ch)
+        index_map.append(i)
+    return "".join(norm_chars), index_map
+
+
 def _annotate_whiteboard_with_detector_comment(
     conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str,
     target_excerpt: str, comment: str, decision_id: str
-) -> bool:
-    """[BL-076] target_excerptがホワイトボード内で一意に一致すればその直後に注釈を挿入し、
-    一致しない・複数一致する・ホワイトボード自体が存在しない場合は挿入を諦める（False返却）。
-    ExpertのTOP-levelな誤解を避けるため、曖昧な位置への注釈挿入は行わない。
+) -> tuple[bool, str]:
+    """[BL-076/BL-074] target_excerptがホワイトボード内で一意に一致すればその直後に注釈を挿入する。
+    まず完全一致を試み、0件または複数件で失敗した場合は正規化（改行・空白・太字記法・全角半角）
+    した緩い一致にフォールバックする。それでも一意に特定できない場合は挿入を諦める。
+    戻り値は(成功可否, 理由文字列) — 呼び出し元が失敗理由（0件一致/複数件一致等）を
+    ログへ出せるようにし、以前はサイレントに失敗していた問題（BL-074調査で発覚）を解消する。
     """
     latest = get_latest_whiteboard(conn, run_id, phase_id, task_id)
     if not latest:
-        return False
+        return False, "ホワイトボードが存在しません"
     content = latest["content"]
     annotation = _DETECTOR_COMMENT_TEMPLATE.format(decision_id=decision_id, comment=comment)
-    if not target_excerpt or content.count(target_excerpt) != 1:
-        return False
-    new_content = content.replace(target_excerpt, target_excerpt + annotation, 1)
+    if not target_excerpt:
+        return False, "target_excerptが空文字でした"
+
+    exact_count = content.count(target_excerpt)
+    if exact_count == 1:
+        new_content = content.replace(target_excerpt, target_excerpt + annotation, 1)
+    else:
+        norm_content, index_map = _normalize_for_loose_match(content)
+        norm_excerpt, _ = _normalize_for_loose_match(target_excerpt)
+        loose_count = norm_content.count(norm_excerpt) if norm_excerpt else 0
+        if not norm_excerpt or loose_count != 1:
+            reason = (
+                f"完全一致0件・正規化後緩い一致も{loose_count}件でした"
+                if exact_count == 0 else
+                f"完全一致が{exact_count}件（一意でない）で、正規化後緩い一致も{loose_count}件でした"
+            )
+            return False, reason
+        norm_start = norm_content.find(norm_excerpt)
+        norm_end = norm_start + len(norm_excerpt) - 1
+        orig_end = index_map[norm_end]
+        new_content = content[: orig_end + 1] + annotation + content[orig_end + 1 :]
+
     apply_whiteboard_patch(
         conn, run_id, phase_id, task_id, new_content,
         author_role="system_detector_annotation",
         edit_summary=f"[Detector注釈] {comment[:80]}"
     )
-    return True
+    return True, "完全一致で挿入" if exact_count == 1 else "正規化後の緩い一致で挿入"
 
 
 def get_agreements_from_db(conn: sqlite3.Connection, run_id: str) -> list[dict]:
@@ -4290,13 +4331,15 @@ Manages state updates including risk levels, constraint logging, and decision re
     if result["constraint_issue"] == "major" and target_role == "assistant":
         _phase_id_for_annotation = state.get("current_phase", {}).get("phase_id", "")
         if current_task_id and _phase_id_for_annotation:
-            annotated = _annotate_whiteboard_with_detector_comment(
+            annotated, _annotate_reason = _annotate_whiteboard_with_detector_comment(
                 _conn, state["run_id"], _phase_id_for_annotation, current_task_id,
                 target_excerpt=result.get("target_excerpt", ""), comment=result["comment"],
                 decision_id=decision["id"],
             )
             if annotated:
-                print(f"  🔴 [Whiteboard Annotated] Detector指摘をホワイトボードに注釈として埋め込みました（decision_id={decision['id']}）。")
+                print(f"  🔴 [Whiteboard Annotated] Detector指摘をホワイトボードに注釈として埋め込みました（{_annotate_reason}、decision_id={decision['id']}）。")
+            else:
+                print(f"  ⚠️ [Whiteboard Annotate Failed] 注釈の埋め込みに失敗しました（{_annotate_reason}、decision_id={decision['id']}）。BL-074参照。")
 
     this_turn_decisions = get_decisions_from_db(_conn, state["run_id"])[1:]
 
