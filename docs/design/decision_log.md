@@ -773,6 +773,20 @@
 
 ---
 
+### D-051: `write_agreement`のSUPERSEDEがDeliverableの全文更新を破棄していた問題の修正
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-24 |
+| 状態 | `decided` |
+| 決定者 | t-momose（1319ログ調査の依頼、修正・BL起票の指示） / Claude Sonnet 5（フォレンジック調査による発見・技術設計・実装） |
+| **決定理由** | ユーザーが「1319の最新ログを見てください。後からtask_1_1のホワイトボードを修正している様子があります」と調査を依頼。調査の結果、Expertが`edits`（old_text/new_text）による部分更新に失敗した後、BL-075で追加した「完全一致が難しければ`decision_what`による全文更新＝SUPERSEDEを使え」という誘導プロンプトに従い`action_type='SUPERSEDE'`で再試行したところ、ツールは`{'success': True}`を返すのに実際にはホワイトボードが一切更新されず、Expertが「システムの反映タイミングの問題」と誤って自己正当化し、Detector/Userからハルシネーションと判定され差し戻され続ける無限ループに陥っていたことを発見した。コードを確認したところ、`_commit_agreement_from_tool`の`SUPERSEDE`分岐は旧agreement行のstatus変更直後に`return None`しており、`decision_what`（全文）を完全に破棄し`apply_whiteboard_patch`も一切呼ばないまま「成功」を返す、実質何もしないツール呼び出しだったことが根本原因と判明した。Detector・Userの「ホワイトボードが更新されていない」という観測自体は正しかったが、原因評価（Expertのハルシネーション）は不正確で、真因はツール実装側の欠陥だった。ユーザーが「修正してBL起票」と即決したため、即時修正した。 |
+| 決定内容 | `entry_type=="Deliverable"`かつ`action_type in ("CREATE", "SUPERSEDE")`かつ`len(decision_what) > 200`（CREATE/UPDATEの全文置換パスと同一閾値）の場合、CREATEと同様に`apply_whiteboard_patch`で新版を保存するよう修正。SUPERSEDE分岐からの早期`return None`を削除し、CREATE/UPDATE共通のホワイトボード保存・agreements行INSERT処理へ合流させた。BL-062のDetectorによる無効化用途（短い却下理由のみのSUPERSEDE、ホワイトボードには触れない）は、同じ200文字閾値により後方互換を維持する。 |
+| 影響 | `cela_main.py`（`_commit_agreement_from_tool`のSUPERSEDE分岐の修正）。新規`tests/test_bl080_supersede_deliverable_whiteboard_writeback.py`（3件）。 |
+| 関連 BL | [BL-080](issue_backlog.md#bl-080-write_agreementのsupersedeがdeliverableの全文更新を破棄し実質何もしないツール呼び出しになっていた)、[BL-075](issue_backlog.md#bl-075-f-73ホワイトボードロールバックが1つ前は健全という前提に反し修正済み問題を無警告で再導入する)（誘因となったプロンプト）、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（無効化用途との後方互換） |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）

@@ -111,6 +111,7 @@
 | BL-077 | 低 | `cela_main.py`（CELA自身のAI群全体、未着手・設計検討のみ） | ユーザーが、本プロジェクト自身のAGENTS.mdが定める「まずMemory/STATUS/backlogを確認してから動く」という設計思想を、CELAが動かすAI群（Expert/User AI等）自身にも適用するアイデアを提示。ホワイトボード（現状把握）と、まだ実装されていない「issue_BL」相当の仕組み（タスク内の残課題・指摘事項の永続管理）を必ず先に確認してから、User AIなら指示、Expertならタスク遂行に入るという思考ワークフロー。ユーザー自身、STATUS.md・traceability.md相当の仕組みも新たに必要になると認識しており、範囲が大きいためBL化のみ行い、設計は別途相談 | P3 |
 | BL-078 | 中 | `cela_main.py` (`call_orchestrator`/`orchestrator_node`/`call_expert`) | ユーザーが、Detectorの「監査の観点をプロンプトで変えるだけで仕事ぶりがガラッと変わる」効果に着想を得て、Orchestratorが専門家選定時に既に行っているタスク内容の考察（従来は選定理由`reason`としてログにのみ残り、Expertには一切伝わっていなかった）を、新設`focus_guidance`フィールドとして明示的に出力させ、選ばれたExpertのプロンプトに注入することでタスクごとに思考を最適化できないか提案。`call_orchestrator`のプロンプト・JSON出力に`focus_guidance`（タスク固有の着眼点・注意点、`reason`＝選定理由とは別物）を追加し、`orchestrator_node`が`state["expert_focus_guidance"]`へ保存、`call_expert`のフル版・軽量版プロンプト両方に注入 | P2 |
 | BL-079 | 低 | `cela_main.py` (`_annotate_whiteboard_with_detector_comment`/`call_detector`、未着手・設計検討のみ) | BL-074の正規化フォールバックを相談する中で、ユーザーがClaude Code自身の`Edit`ツールが同種の完全一致方式でも実運用できている理由を質問。調査の結果、Claude Codeは(1)LLMがその場で読んだ内容から引用する、(2)不一致時に即座にエラーがツール結果として返り同一ターン内でLLM自身がリトライできる、の2点が揃っているのに対し、CELAの`_annotate_whiteboard_with_detector_comment`は(2)を欠き、失敗してもDetector自身にフィードバックが返らないことが根本差だと判明。ユーザーが他ツール（python_repl等）ではエラーフィードバックがあるとDetectorが試行錯誤して解決を試みている思考ログを確認しており、同様に注釈挿入の一致失敗をDetector自身のツール呼び出し結果として返し、同一ツールループ内でリトライさせる構造を提案。Detectorは既にツールループ内で動作しているため設計変更の規模が大きく、BL化のみ行い実装は別途 | P3 |
+| BL-080 | 高 | `cela_main.py` (`_commit_agreement_from_tool`のSUPERSEDE分岐) | ユーザー依頼で1216ドライラン後の1319ドライランをフォレンジック調査する中で発見。`entry_type="Deliverable"`に対する`action_type="SUPERSEDE"`は、旧agreement行のstatusを`Superseded`に変更した直後に`return None`しており、Expertが渡した`decision_what`（全文）を完全に破棄し、`apply_whiteboard_patch`も一切呼ばれないまま「成功」を返す実質何もしないツール呼び出しになっていた。BL-075で追加したプロンプト（editsの完全一致に失敗した場合、decision_whatによる全文更新＝SUPERSEDEを使えという誘導）がExpertをこの壊れた経路に誘導し、Expertは`{'success': True}`を信じて「更新完了」と報告するが、直後に`read_deliverable_file`で読み戻すと旧内容のままという矛盾に直面。Expertはこれを「システムの反映タイミングの問題」と誤って自己正当化し、Detector/Userからハルシネーション（虚偽の更新完了報告）と判定され続ける無限ループに陥っていた。`entry_type=="Deliverable"`かつ`action_type in ("CREATE", "SUPERSEDE")`かつ`len(decision_what) > 200`（CREATE/UPDATE全文置換と同一閾値）の場合、CREATE同様`apply_whiteboard_patch`で新版を保存するよう修正。BL-062のDetectorによる無効化用途（短い理由文のみ、ホワイトボードには触れない）との後方互換は同じ閾値で維持 | P0 |
 
 ---
 
@@ -2449,6 +2450,42 @@ BL-074のtarget_excerpt正規化フォールバックを相談する中で、ユ
 
 ---
 
+### BL-080: `write_agreement`のSUPERSEDEがDeliverableの全文更新を破棄し、実質何もしないツール呼び出しになっていた
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P0 |
+| 関連 | [BL-075](issue_backlog.md#bl-075-f-73ホワイトボードロールバックが1つ前は健全という前提に反し修正済み問題を無警告で再導入する)（誘因となったプロンプト）、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（無効化用途との後方互換）、[D-051](decision_log.md#d-051-write_agreementのsupersedeがdeliverableの全文更新を破棄していた問題の修正) |
+
+**内容:**
+
+ユーザー依頼で1319ドライラン（`log/2026-07-24/1319/log_no_prompt.md`）をフォレンジック調査した結果、深刻な機能不全を発見した。`_commit_agreement_from_tool`の`action_type=="SUPERSEDE"`分岐は、対象topicの旧agreement行を`status="Superseded"`に変更した直後に`return None`しており、Expertが渡した`decision_what`（全文更新の内容）を一切使わず、`apply_whiteboard_patch`も呼ばれず、新しいagreement行のINSERTすら行わないまま、ツール呼び出し自体は`{'success': True, 'message': 'DB update successful'}`という「成功」を返していた。
+
+実ドライランでは以下の連鎖が発生していた:
+1. Expertが`edits`（old_text/new_text）でホワイトボードの部分更新を試みるが、テーブル行頭の全角スペース等の不一致で`old_textが見つかりません`エラー
+2. BL-075で追加したプロンプト誘導（「完全一致が難しければ`decision_what`による全文更新＝SUPERSEDEを使え」）に従い、Expertが`action_type='SUPERSEDE'`＋`decision_what`（全文）で再試行
+3. ツールは`{'success': True}`を返すが、実際にはホワイトボードは一切更新されていない
+4. Expertが`read_deliverable_file`で読み戻すと旧内容のままで、「システムの反映タイミングの問題」と誤って自己正当化
+5. Detector・Userはこれを（正しくは）ハルシネーション・虚偽の更新完了報告と判定し差し戻すが、Expertは同じ壊れた経路を再試行し続け、同一の失敗が繰り返される無限ループに陥っていた
+
+Detector・Userの判定自体は「ホワイトボードが更新されていない」という観測事実としては正しかったが、原因を「Expertの虚偽報告」と評価していた点は不正確で、真因はツール実装側の欠陥だった。
+
+**対応（実装済み）:**
+
+`entry_type=="Deliverable"`かつ`action_type in ("CREATE", "SUPERSEDE")`かつ`len(decision_what) > 200`（CREATE/UPDATEの全文置換パスと同一の閾値）の場合、CREATEと同様に`apply_whiteboard_patch`で新版を保存するよう修正。SUPERSEDE分岐からの早期`return None`を削除し、CREATE/UPDATE共通のホワイトボード保存・agreements行INSERT処理へ合流させた。BL-062のDetectorによる無効化用途（例: 労基法違反を理由にした短い却下理由のみのSUPERSEDE、ホワイトボードには触れない）は、同じ200文字閾値により従来通りの挙動（ホワイトボード非変更、短文をagreements行のcontentへ直接保持）を維持する。
+
+**完了条件:**
+
+- `_commit_agreement_from_tool`のSUPERSEDE分岐が早期`return None`せず、CREATE/UPDATE共通処理へ合流すること。
+- `entry_type=="Deliverable"`かつSUPERSEDE＋長文`decision_what`の場合、`get_latest_whiteboard`で新版が読めること。
+- BL-062型の短文SUPERSEDE（無効化用途）はホワイトボードのバージョンを増やさないこと（後方互換）。
+- 新規`tests/test_bl080_supersede_deliverable_whiteboard_writeback.py`（3件）: 長文SUPERSEDEのホワイトボード書き込み確認、短文SUPERSEDEの非変更確認（後方互換）、早期returnが削除されていることのソース確認。
+- オフラインスモークテスト計125件Pass、`python -m py_compile`合格。
+- 実LLM再ドライランでの効果確認（1319ドライランと同種のシナリオで、SUPERSEDE後に`read_deliverable_file`が実際に更新後の内容を返すこと）は次回待ち。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -2526,3 +2563,4 @@ BL-074のtarget_excerpt正規化フォールバックを相談する中で、ユ
 | 2026-07-24 | ユーザーから、BL-075のプロンプト誘導だけでは毎ターン再構成されて消えるプロンプト注入に留まり見落とされうるとの指摘があり、Detectorのmajor指摘をホワイトボード本文にも永続的な注釈として埋め込む機能を追加提案・実装。`call_detector`の両パスに`target_excerpt`（一字一句引用）を追加し、新設`_annotate_whiteboard_with_detector_comment`が一意一致時のみ注釈を挿入。フォーマットは案A（grep容易なタグ）と案B（Markdown引用）のハイブリッド（ユーザー承認、D-048）。新規`tests/test_bl076_whiteboard_detector_annotation.py`（4件）含めオフラインスモークテスト計113件Pass、`check_docs_consistency.py`合格。BL-076として新規起票・`done`化。あわせて、ユーザーが提示したより大きな構想（AGENTS.mdの「まずMemory/STATUS/backlogを確認」という思想をCELA自身のAI群に適用する、issue_BL・STATUS.md・traceability.md相当の仕組みが必要）をBL-077として起票（`open`、設計検討のみ、実装は別途）。 |
 | 2026-07-24 | ユーザーが、Detectorのドメイン妥当性レビューが「監査の観点をプロンプトで変えるだけで仕事ぶりがガラッと変わる」ことに着想を得て、Orchestratorが専門家選定時に既に行っているタスク考察（従来は選定理由`reason`としてログに残るのみでExpertには伝わっていなかった）を、新設`focus_guidance`として明示的に出力させ選ばれたExpertのプロンプトへ注入する提案。ユーザーの指示により、`call_orchestrator`のプロンプトにも明示（Expertの選定理由とは別に、タスク固有の着眼点・落とし穴を1〜3点求める指示を追加）した上で、`orchestrator_node`が`state["expert_focus_guidance"]`へ保存、`call_expert`のフル版・軽量版プロンプト両方に注入する実装を行った。新規`tests/test_bl078_orchestrator_focus_guidance.py`（4件）含めオフラインスモークテスト計117件Pass、`check_docs_consistency.py`合格。BL-078として新規起票・`done`化。D-049として記録。 |
 | 2026-07-24 | ユーザーの依頼で`log/2026-07-24/1216`のドライランログをフォレンジック調査し、BL-073〜BL-078の各修正が実際に効いているか検証。BL-073（Directive自動解決）・BL-062（SUPERSEDE配線）・BL-078（focus_guidance）・F-2.1/F-3.7（思考プロセス監査）は実際に発火・機能していることを確認したが、BL-076（ホワイトボード注釈）はmajor/assistant判定が複数回発生したにもかかわらず一度も発火しておらず、しかも失敗がサイレント（`_annotate_whiteboard_with_detector_comment`は`False`を返すのみでログなし）だったことを発見・報告。ユーザーの指示により、この完全一致依存の脆さをBL-074（topic文字列ドリフト）と同根の問題として統合し、(1)失敗理由（0件一致/複数件一致）をログへ出す、(2)改行・空白・Markdown太字記法・全角半角を正規化した緩い一致へのフォールバック、を実装（戻り値を`tuple[bool, str]`化）。さらにユーザーから「Claude Code自身のEdit（完全一致）はなぜ実運用できるのか」との質問があり、調査の結果「その場で読んだ内容から引用する」ことに加え「不一致時に即座にエラーが返り同一ターン内でリトライできる」ことが鍵と判明。CELAのDetectorには後者が欠けており、これを取り入れる「一致失敗をDetector自身にツール結果として返し同一ツールループ内でリトライさせる」構造をユーザーが承認、規模が大きいためBL-079として起票（`open`、実装は別途）。新規`tests/test_bl074_annotation_loose_match_fallback.py`（5件）、既存`tests/test_bl076_whiteboard_detector_annotation.py`をタプル戻り値に更新、オフラインスモークテスト計122件Pass、`check_docs_consistency.py`合格。 |
+| 2026-07-24 | ユーザーの依頼で`log/2026-07-24/1319`のドライランをフォレンジック調査し、「後からtask_1_1のホワイトボードを修正している様子がある」という報告の実態を特定。ExpertがBL-075のプロンプト誘導（editsの完全一致失敗時はdecision_whatによる全文更新＝SUPERSEDEを使え）に従い`action_type='SUPERSEDE'`で全文更新を試みると、ツールは`{'success': True}`を返すのに実際にはホワイトボードが一切更新されず、Expertがこれを「システムの反映タイミングの問題」と誤って自己正当化し、Detector/Userからハルシネーションと判定され差し戻され続ける無限ループを発見。根本原因は`_commit_agreement_from_tool`の`SUPERSEDE`分岐が旧agreement行のstatus変更直後に`return None`しており、`decision_what`（全文）を完全に破棄しapply_whiteboard_patchも呼ばずに「成功」を返す、実質何もしないツール呼び出しだったこと。「修正してBL起票」との指示により、`entry_type=="Deliverable"`かつ`action_type in ("CREATE", "SUPERSEDE")`かつ長文の場合はCREATE同様ホワイトボードへ保存するよう即時修正（BL-062のDetector無効化用途との後方互換は同じ200文字閾値で維持）。D-051として記録、新規`tests/test_bl080_supersede_deliverable_whiteboard_writeback.py`（3件）含めオフラインスモークテスト計125件Pass、`check_docs_consistency.py`合格。BL-080として新規起票・`done`化。 |
