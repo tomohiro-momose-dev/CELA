@@ -809,6 +809,18 @@
 
 ---
 
+## 論点69: Orchestratorの専門家選定時の考察をExpertへ引き継ぐ`focus_guidance`の新設（BL-078・D-049）
+
+- **発端:** ユーザーが、Detectorのドメイン妥当性レビューが「プロンプトで監査の観点を変えるだけで仕事ぶりがガラッと変わる」ことに着目し、この応用としてOrchestratorも同様の効果を持たせられないか提案した。Orchestratorは専門家名を出力する内部処理で、タスクにふさわしい専門家を選ぶためにある程度タスクの中身を見渡して思考しているが、次のExpert AIに渡るのは専門家名だけである。Orchestratorに「どういう観点・どういう事に気をつけてタスクをこなすべきか」も出力させ、次のExpert AIのプロンプトに埋め込めば、Expertの思考を個々のタスクに最適化できないかという提案だった。
+- **AIの調査と回答:** `call_orchestrator`が既に`{"expert": ..., "reason": ...}`を返しており、`reason`（選定理由）は`make_decision`のログ用にのみ使われ、`call_expert`のプロンプトには一切渡っていないことを確認。追加のLLM呼び出しなしで実現できる低コストな改善と判断し、実装を推奨。ただし、`reason`をそのまま流用すると選定理由の言い換えになりがちなため、別フィールド（`focus_guidance`）を新設すべきと提案した。
+- **実装の指示:** ユーザーが「`focus_guidance`を設けるのと同時に、オーケストレーターのプロンプトにも明示してください。expert側への注入もお忘れなく」と実装を指示。
+- **実装内容:** `call_orchestrator`のプロンプトに、選定理由とは別に「このタスクに実際に着手する専門家AIが具体的にどんな観点で検討すべきか・特に見落としやすい落とし穴は何か」を1〜3点、タスク固有の実行可能な指示として出力させる`focus_guidance`を追加。`orchestrator_node`が`state["expert_focus_guidance"]`へ保存（`LineageState`へフィールド追加）、`call_expert`のフル版system_prompt・軽量版light_system_prompt（BL-025②）の両方に注入した。
+- **決定者:** t-momose（提案・実装指示）、Claude Sonnet 5（実現可能性の調査・技術設計・実装）
+- **検証:** 新規`tests/test_bl078_orchestrator_focus_guidance.py`（4件）。オフラインスモークテスト計117件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。実LLM再ドライランでの効果確認（`focus_guidance`がタスクごとに具体的な内容で出力され、Expertの検討の質に寄与すること）は次回待ち。
+- **関連:** [D-049](decision_log.md#d-049-orchestratorの専門家選定時の考察をfocus_guidanceとしてexpertへ注入する)、[BL-078](issue_backlog.md#bl-078-orchestratorの専門家選定時の考察をfocus_guidanceとしてexpertへ注入する)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
