@@ -112,6 +112,7 @@
 | BL-078 | 中 | `cela_main.py` (`call_orchestrator`/`orchestrator_node`/`call_expert`) | ユーザーが、Detectorの「監査の観点をプロンプトで変えるだけで仕事ぶりがガラッと変わる」効果に着想を得て、Orchestratorが専門家選定時に既に行っているタスク内容の考察（従来は選定理由`reason`としてログにのみ残り、Expertには一切伝わっていなかった）を、新設`focus_guidance`フィールドとして明示的に出力させ、選ばれたExpertのプロンプトに注入することでタスクごとに思考を最適化できないか提案。`call_orchestrator`のプロンプト・JSON出力に`focus_guidance`（タスク固有の着眼点・注意点、`reason`＝選定理由とは別物）を追加し、`orchestrator_node`が`state["expert_focus_guidance"]`へ保存、`call_expert`のフル版・軽量版プロンプト両方に注入 | P2 |
 | BL-079 | 低 | `cela_main.py` (`_annotate_whiteboard_with_detector_comment`/`call_detector`、未着手・設計検討のみ) | BL-074の正規化フォールバックを相談する中で、ユーザーがClaude Code自身の`Edit`ツールが同種の完全一致方式でも実運用できている理由を質問。調査の結果、Claude Codeは(1)LLMがその場で読んだ内容から引用する、(2)不一致時に即座にエラーがツール結果として返り同一ターン内でLLM自身がリトライできる、の2点が揃っているのに対し、CELAの`_annotate_whiteboard_with_detector_comment`は(2)を欠き、失敗してもDetector自身にフィードバックが返らないことが根本差だと判明。ユーザーが他ツール（python_repl等）ではエラーフィードバックがあるとDetectorが試行錯誤して解決を試みている思考ログを確認しており、同様に注釈挿入の一致失敗をDetector自身のツール呼び出し結果として返し、同一ツールループ内でリトライさせる構造を提案。Detectorは既にツールループ内で動作しているため設計変更の規模が大きく、BL化のみ行い実装は別途 | P3 |
 | BL-080 | 高 | `cela_main.py` (`_commit_agreement_from_tool`のSUPERSEDE分岐) | ユーザー依頼で1216ドライラン後の1319ドライランをフォレンジック調査する中で発見。`entry_type="Deliverable"`に対する`action_type="SUPERSEDE"`は、旧agreement行のstatusを`Superseded`に変更した直後に`return None`しており、Expertが渡した`decision_what`（全文）を完全に破棄し、`apply_whiteboard_patch`も一切呼ばれないまま「成功」を返す実質何もしないツール呼び出しになっていた。BL-075で追加したプロンプト（editsの完全一致に失敗した場合、decision_whatによる全文更新＝SUPERSEDEを使えという誘導）がExpertをこの壊れた経路に誘導し、Expertは`{'success': True}`を信じて「更新完了」と報告するが、直後に`read_deliverable_file`で読み戻すと旧内容のままという矛盾に直面。Expertはこれを「システムの反映タイミングの問題」と誤って自己正当化し、Detector/Userからハルシネーション（虚偽の更新完了報告）と判定され続ける無限ループに陥っていた。`entry_type=="Deliverable"`かつ`action_type in ("CREATE", "SUPERSEDE")`かつ`len(decision_what) > 200`（CREATE/UPDATE全文置換と同一閾値）の場合、CREATE同様`apply_whiteboard_patch`で新版を保存するよう修正。BL-062のDetectorによる無効化用途（短い理由文のみ、ホワイトボードには触れない）との後方互換は同じ閾値で維持 | P0 |
+| BL-081 | 高 | `cela_main.py` (`_apply_text_edits`/`_normalize_for_loose_match`/新設`_find_loose_match_spans`) | ユーザーが同じ1319ドライランを指して「まだホワイトボードの差分書き換えに苦労しているようです」と再調査を依頼。調査の結果、ExpertがBL-080の誘因となった`edits`失敗（Markdownテーブル行頭の全角スペース・パイプ記号の有無だけでold_text完全一致が0件になる）の実例を特定。BL-074/D-050でDetectorのtarget_excerpt向けに確立した正規化緩い一致の仕組みを`_apply_text_edits`自身にも適用し、Expertの主たる編集手段であるeditsがその場で成功する確率を高めた（新設`_find_loose_match_spans`で正規化後の一致位置を元の文字列へ逆写像）。あわせて、`_normalize_for_loose_match`自体に「半角スペースは除去されるが全角スペース（　）はNFKC正規化後の半角スペース1文字として結果に残ってしまう」という非対称バグを発見・修正し、テーブル区切り記号（\|）も正規化対象に追加した | P1 |
 
 ---
 
@@ -2486,6 +2487,42 @@ Detector・Userの判定自体は「ホワイトボードが更新されてい�
 
 ---
 
+### BL-081: `write_agreement`の`edits`（old_text/new_text）が、Markdownテーブル行頭の全角スペース・パイプ記号の有無で完全一致に失敗しやすかった
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | [BL-080](issue_backlog.md#bl-080-write_agreementのsupersedeがdeliverableの全文更新を破棄し実質何もしないツール呼び出しになっていた)（誘因となった失敗経路）、[BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)（同根の正規化緩い一致手法）、[D-052](decision_log.md#d-052-write_agreementのeditsold_textnew_textにも正規化した緩い一致フォールバックを適用する) |
+
+**内容:**
+
+ユーザーがBL-080修正後の同じ1319ドライラン（`log/2026-07-24/1319/log_no_prompt.md`）を指して「やはりまだ、ホワイトボードの差分書き換えに苦労しているようです」と再調査を依頼。ログを確認したところ、Expertが最初に試みた`edits`（old_text/new_text）による部分更新が、以下のようなMarkdownテーブル行頭・行末の書式差だけで完全一致に失敗していたことを特定した：
+
+- old_text: `D-1. オペレーター給与（**3名**常駐） | 500×**3** | ...`
+- 実際のホワイトボード: `| 　D-1. オペレーター給与（**3名**常駐） | 500×**3** | ... |`（先頭に`| `＋全角スペース、末尾に` |`）
+
+この完全一致失敗がBL-080で発覚した壊れたSUPERSEDE全文置換経路へExpertを迂回させる直接の引き金になっていた。BL-074/D-050でDetectorの`target_excerpt`向けに確立した「改行・空白・Markdown太字記法・全角半角を正規化した緩い一致」の仕組みを、Expert自身の主たる編集手段である`_apply_text_edits`にも適用すべきと判断した。
+
+さらに調査の過程で、既存の`_normalize_for_loose_match`（BL-074で新設）自体に非対称バグを発見した。半角スペースは判定前にスキップされ結果から完全に除去される一方、全角スペース（`　`）はスキップ判定の対象外だったため、NFKC正規化を経て半角スペース1文字として結果に**残ってしまい**、「同じ意味のはずの全角/半角スペースが正規化後も食い違う」という矛盾があった。
+
+**対応（実装済み）:**
+
+1. `_normalize_for_loose_match`を「まずNFKC正規化 → 正規化後の文字が空白かどうかを判定してスキップ」という順序に変更し、全角/半角スペースを対称に扱うよう修正。あわせてテーブル区切り記号（`|`）もスキップ対象に追加。
+2. 新設`_find_loose_match_spans(content, old_text)`が、正規化後の一致箇所を元の文字列上の(開始, 終了)スパンとして返す（`_annotate_whiteboard_with_detector_comment`とは異なり、置換のため範囲全体の逆写像が必要）。
+3. `_apply_text_edits`を、完全一致（0件、または複数件でreplace_all未指定）に失敗した場合、上記の緩い一致へフォールバックするよう変更。それでも一意に定まらない場合のみ、従来通り理由付きでエラーを返す。
+
+**完了条件:**
+
+- `_apply_text_edits`が、テーブル行頭の全角スペース・パイプ記号の有無だけの差異ではエラーを返さず、正規化後の緩い一致で置換に成功すること。
+- 正規化後も一意に定まらない場合は、引き続き理由付きでエラーを返すこと（安全側の挙動を維持）。
+- `_normalize_for_loose_match`の全角/半角スペース非対称バグが解消され、両者が同じ正規化結果になること。
+- 新規`tests/test_bl081_edits_loose_match_fallback.py`（5件）: 1319ログ実例の再現確認、正規化後も曖昧な場合の失敗維持確認、完全一致優先の回帰確認、全角/半角スペース対称性の回帰確認、`_find_loose_match_spans`の位置逆写像確認。
+- オフラインスモークテスト計130件Pass、`python -m py_compile`合格。
+- 実LLM再ドライランでの効果確認（1319ドライランと同種のケースで`edits`がその場で成功し、SUPERSEDEへの迂回が発生しなくなること）は次回待ち。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -2564,3 +2601,4 @@ Detector・Userの判定自体は「ホワイトボードが更新されてい�
 | 2026-07-24 | ユーザーが、Detectorのドメイン妥当性レビューが「監査の観点をプロンプトで変えるだけで仕事ぶりがガラッと変わる」ことに着想を得て、Orchestratorが専門家選定時に既に行っているタスク考察（従来は選定理由`reason`としてログに残るのみでExpertには伝わっていなかった）を、新設`focus_guidance`として明示的に出力させ選ばれたExpertのプロンプトへ注入する提案。ユーザーの指示により、`call_orchestrator`のプロンプトにも明示（Expertの選定理由とは別に、タスク固有の着眼点・落とし穴を1〜3点求める指示を追加）した上で、`orchestrator_node`が`state["expert_focus_guidance"]`へ保存、`call_expert`のフル版・軽量版プロンプト両方に注入する実装を行った。新規`tests/test_bl078_orchestrator_focus_guidance.py`（4件）含めオフラインスモークテスト計117件Pass、`check_docs_consistency.py`合格。BL-078として新規起票・`done`化。D-049として記録。 |
 | 2026-07-24 | ユーザーの依頼で`log/2026-07-24/1216`のドライランログをフォレンジック調査し、BL-073〜BL-078の各修正が実際に効いているか検証。BL-073（Directive自動解決）・BL-062（SUPERSEDE配線）・BL-078（focus_guidance）・F-2.1/F-3.7（思考プロセス監査）は実際に発火・機能していることを確認したが、BL-076（ホワイトボード注釈）はmajor/assistant判定が複数回発生したにもかかわらず一度も発火しておらず、しかも失敗がサイレント（`_annotate_whiteboard_with_detector_comment`は`False`を返すのみでログなし）だったことを発見・報告。ユーザーの指示により、この完全一致依存の脆さをBL-074（topic文字列ドリフト）と同根の問題として統合し、(1)失敗理由（0件一致/複数件一致）をログへ出す、(2)改行・空白・Markdown太字記法・全角半角を正規化した緩い一致へのフォールバック、を実装（戻り値を`tuple[bool, str]`化）。さらにユーザーから「Claude Code自身のEdit（完全一致）はなぜ実運用できるのか」との質問があり、調査の結果「その場で読んだ内容から引用する」ことに加え「不一致時に即座にエラーが返り同一ターン内でリトライできる」ことが鍵と判明。CELAのDetectorには後者が欠けており、これを取り入れる「一致失敗をDetector自身にツール結果として返し同一ツールループ内でリトライさせる」構造をユーザーが承認、規模が大きいためBL-079として起票（`open`、実装は別途）。新規`tests/test_bl074_annotation_loose_match_fallback.py`（5件）、既存`tests/test_bl076_whiteboard_detector_annotation.py`をタプル戻り値に更新、オフラインスモークテスト計122件Pass、`check_docs_consistency.py`合格。 |
 | 2026-07-24 | ユーザーの依頼で`log/2026-07-24/1319`のドライランをフォレンジック調査し、「後からtask_1_1のホワイトボードを修正している様子がある」という報告の実態を特定。ExpertがBL-075のプロンプト誘導（editsの完全一致失敗時はdecision_whatによる全文更新＝SUPERSEDEを使え）に従い`action_type='SUPERSEDE'`で全文更新を試みると、ツールは`{'success': True}`を返すのに実際にはホワイトボードが一切更新されず、Expertがこれを「システムの反映タイミングの問題」と誤って自己正当化し、Detector/Userからハルシネーションと判定され差し戻され続ける無限ループを発見。根本原因は`_commit_agreement_from_tool`の`SUPERSEDE`分岐が旧agreement行のstatus変更直後に`return None`しており、`decision_what`（全文）を完全に破棄しapply_whiteboard_patchも呼ばずに「成功」を返す、実質何もしないツール呼び出しだったこと。「修正してBL起票」との指示により、`entry_type=="Deliverable"`かつ`action_type in ("CREATE", "SUPERSEDE")`かつ長文の場合はCREATE同様ホワイトボードへ保存するよう即時修正（BL-062のDetector無効化用途との後方互換は同じ200文字閾値で維持）。D-051として記録、新規`tests/test_bl080_supersede_deliverable_whiteboard_writeback.py`（3件）含めオフラインスモークテスト計125件Pass、`check_docs_consistency.py`合格。BL-080として新規起票・`done`化。 |
+| 2026-07-24 | ユーザーが同じ`log/2026-07-24/1319`を指して「やはりまだ、ホワイトボードの差分書き換えに苦労しているようです」と再調査を依頼。ExpertがBL-080の誘因となった`edits`失敗の実例を特定：old_textにMarkdownテーブル行頭の`| `＋全角スペースや行末の` |`が含まれておらず完全一致0件。BL-074/D-050でDetectorのtarget_excerpt向けに確立した正規化緩い一致を`_apply_text_edits`にも適用し、新設`_find_loose_match_spans`で位置逆写像した上でフォールバック置換するよう実装。あわせて`_normalize_for_loose_match`自体の非対称バグ（半角スペースは除去されるが全角スペースはNFKC正規化後の半角スペースとして残存）を発見・修正し、テーブル区切り記号（`\|`）も正規化対象に追加。D-052として記録、新規`tests/test_bl081_edits_loose_match_fallback.py`（5件）含めオフラインスモークテスト計130件Pass、`check_docs_consistency.py`合格。BL-081として新規起票・`done`化。 |

@@ -787,6 +787,20 @@
 
 ---
 
+### D-052: `write_agreement`の`edits`（old_text/new_text）にも正規化した緩い一致フォールバックを適用する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-24 |
+| 状態 | `decided` |
+| 決定者 | t-momose（再調査の依頼） / Claude Sonnet 5（フォレンジック調査による発見・技術設計・実装） |
+| **決定理由** | BL-080修正後、ユーザーが同じ`log/2026-07-24/1319`を指して「やはりまだ、ホワイトボードの差分書き換えに苦労しているようです」と再調査を依頼。ログを精査したところ、ExpertがBL-080の誘因そのものとなった`edits`の完全一致失敗の実例（old_textにMarkdownテーブル行頭の`| `＋全角スペースや行末の` |`が含まれておらず、実際のホワイトボードとの完全一致が0件になっていた）を特定した。BL-074/D-050でDetectorの`target_excerpt`向けに確立した「改行・空白・Markdown太字記法・全角半角を正規化した緩い一致」の仕組みは、Expert自身の主たる編集手段である`_apply_text_edits`には未適用だった。さらに調査の過程で、既存の`_normalize_for_loose_match`自体に「半角スペースは判定前にスキップされ除去されるが、全角スペース（　）はスキップ判定の対象外でNFKC正規化後に半角スペース1文字として結果に残ってしまう」という非対称バグを発見した。これは「同じ意味のはずの全角/半角スペースが正規化後も食い違う」という、正規化フォールバックの前提を掘り崩す欠陥だったため、あわせて修正することとした。 |
+| 決定内容 | `_normalize_for_loose_match`を「まずNFKC正規化 → 正規化後の文字が空白かどうかを判定してスキップ」という順序に変更し、全角/半角スペースを対称に扱うよう修正。テーブル区切り記号（`\|`）もスキップ対象に追加。新設`_find_loose_match_spans(content, old_text)`が正規化後の一致箇所を元の文字列上の(開始, 終了)スパンとして返す。`_apply_text_edits`は、完全一致（0件、または複数件でreplace_all未指定）に失敗した場合にこの緩い一致へフォールバックし、それでも一意に定まらない場合のみ理由付きでエラーを返すよう変更した。 |
+| 影響 | `cela_main.py`（`_normalize_for_loose_match`の判定順序修正、新設`_find_loose_match_spans`、`_apply_text_edits`のフォールバック追加）。新規`tests/test_bl081_edits_loose_match_fallback.py`（5件）。 |
+| 関連 BL | [BL-081](issue_backlog.md#bl-081-write_agreementのeditsold_textnew_textがmarkdownテーブル行頭の全角スペースパイプ記号の有無で完全一致に失敗しやすかった)、[BL-080](issue_backlog.md#bl-080-write_agreementのsupersedeがdeliverableの全文更新を破棄し実質何もしないツール呼び出しになっていた)（誘因となった失敗経路）、[BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)（同根の正規化手法） |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
