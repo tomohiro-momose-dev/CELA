@@ -759,6 +759,20 @@
 
 ---
 
+### D-050: ホワイトボード注釈のtarget_excerpt一致失敗をBL-074へ統合し、ログ出力＋正規化フォールバックで対応する（リトライ構造はBL-079へ分離）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-24 |
+| 状態 | `decided` |
+| 決定者 | t-momose（統合方針・対策範囲の判断） / Claude Sonnet 5（フォレンジック調査・技術設計・実装） |
+| **決定理由** | `log/2026-07-24/1216`のドライランをユーザー依頼でフォレンジック調査した結果、BL-076のホワイトボード注釈機能が、major/assistant判定が複数回発生し`target_excerpt`も正しく出力されていたにもかかわらず一度も発火しておらず、しかも`_annotate_whiteboard_with_detector_comment`が失敗時に`False`を返すのみでログが一切出ないサイレント失敗だったことが判明した。この完全一致依存の脆さはBL-074（Deliverableのtopic文字列ドリフト）と同根の問題であり、ユーザーの判断で別BLに分けず統合することとした。さらにユーザーから「Claude Code自身のEdit（old_text/new_text完全一致）はなぜ実運用でハードルが高くならないのか」という質問があり、調査の結果、(1)LLMがその場で読んだ内容から引用すること、(2)不一致時にツール結果として即座にエラーが返り同一ターン内でLLM自身がリトライできること、の2点が理由と判明した。CELAの現状は(2)を欠いており、ユーザーは他ツール（python_repl等）でエラーフィードバックがあるとDetectorが試行錯誤して解決を試みている思考ログを確認しており、同様の自己修正ループを注釈挿入にも適用すべきと判断した。ただし(2)の実現（Detector自身のツール呼び出しとして注釈挿入を提供し、同一ツールループ内でリトライさせる）はDetectorの既存2パスツールループの設計変更を伴い規模が大きいため、まず即応可能な(1)側の緩和策（正規化フォールバック）とサイレント失敗の解消（理由付きログ）を今回実装し、(2)は別途BL-079として起票・実装は次回とする方針に決定した。 |
+| 決定内容 | `_annotate_whiteboard_with_detector_comment`の戻り値を`bool`から`tuple[bool, str]`（成功可否, 理由）へ変更。完全一致に失敗した場合、新設`_normalize_for_loose_match`（改行・空白・Markdown太字記法・全角半角を吸収し、元の文字列位置へのindex_mapを保持）による正規化後の緩い一致へフォールバックし、それでも一意に定まらない場合のみ挿入を諦める。`detector_node`は成功時・失敗時のいずれも理由付きでログ出力する（失敗時: `⚠️ [Whiteboard Annotate Failed]`）。BL-076の「実LLM再ドライランでの効果確認は次回待ち」という完了条件はこの調査により部分的に充足され、同時に脆弱性が発覚したため対策を前倒しで実装した。Detector自身へのフィードバック＆同一ツールループ内リトライの構造化はBL-079として別途起票し、本決定のスコープ外とする。 |
+| 影響 | `cela_main.py`（`_annotate_whiteboard_with_detector_comment`の戻り値変更・`_normalize_for_loose_match`新設、`detector_node`のログ配線、`unicodedata`のimport追加）。新規`tests/test_bl074_annotation_loose_match_fallback.py`（5件）、既存`tests/test_bl076_whiteboard_detector_annotation.py`をタプル戻り値に合わせて更新。 |
+| 関連 BL | [BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)、[BL-076](issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)、[BL-079](issue_backlog.md#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる設計検討未着手) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
