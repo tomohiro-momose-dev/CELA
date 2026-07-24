@@ -114,6 +114,7 @@
 | BL-080 | 高 | `cela_main.py` (`_commit_agreement_from_tool`のSUPERSEDE分岐) | ユーザー依頼で1216ドライラン後の1319ドライランをフォレンジック調査する中で発見。`entry_type="Deliverable"`に対する`action_type="SUPERSEDE"`は、旧agreement行のstatusを`Superseded`に変更した直後に`return None`しており、Expertが渡した`decision_what`（全文）を完全に破棄し、`apply_whiteboard_patch`も一切呼ばれないまま「成功」を返す実質何もしないツール呼び出しになっていた。BL-075で追加したプロンプト（editsの完全一致に失敗した場合、decision_whatによる全文更新＝SUPERSEDEを使えという誘導）がExpertをこの壊れた経路に誘導し、Expertは`{'success': True}`を信じて「更新完了」と報告するが、直後に`read_deliverable_file`で読み戻すと旧内容のままという矛盾に直面。Expertはこれを「システムの反映タイミングの問題」と誤って自己正当化し、Detector/Userからハルシネーション（虚偽の更新完了報告）と判定され続ける無限ループに陥っていた。`entry_type=="Deliverable"`かつ`action_type in ("CREATE", "SUPERSEDE")`かつ`len(decision_what) > 200`（CREATE/UPDATE全文置換と同一閾値）の場合、CREATE同様`apply_whiteboard_patch`で新版を保存するよう修正。BL-062のDetectorによる無効化用途（短い理由文のみ、ホワイトボードには触れない）との後方互換は同じ閾値で維持 | P0 |
 | BL-081 | 高 | `cela_main.py` (`_apply_text_edits`/`_normalize_for_loose_match`/新設`_find_loose_match_spans`) | ユーザーが同じ1319ドライランを指して「まだホワイトボードの差分書き換えに苦労しているようです」と再調査を依頼。調査の結果、ExpertがBL-080の誘因となった`edits`失敗（Markdownテーブル行頭の全角スペース・パイプ記号の有無だけでold_text完全一致が0件になる）の実例を特定。BL-074/D-050でDetectorのtarget_excerpt向けに確立した正規化緩い一致の仕組みを`_apply_text_edits`自身にも適用し、Expertの主たる編集手段であるeditsがその場で成功する確率を高めた（新設`_find_loose_match_spans`で正規化後の一致位置を元の文字列へ逆写像）。あわせて、`_normalize_for_loose_match`自体に「半角スペースは除去されるが全角スペース（　）はNFKC正規化後の半角スペース1文字として結果に残ってしまう」という非対称バグを発見・修正し、テーブル区切り記号（\|）も正規化対象に追加した | P1 |
 | BL-082 | 高 | `cela_main.py` (新設`plan_drafts`テーブル/`get_latest_plan_draft`/`apply_plan_patch`/`_append_deferred_note_to_plan`/`_get_deferred_notes_text`、`decision_extractor_node`/`call_decision_extractor`/`_build_task_scope_context`/`call_expert`/`generate_user_utterance`/`call_detector`) | `log/2026-07-24/1349`のドライランで、User AIが「積雪・通信エリアの区間切り出しの地形照合はtask_2_1/task_2_2で具体化されるべき」と先送り判断を発言したことをユーザーが指摘し「この先送り事項は現状消えてしまいますよね？」と質問。調査の結果、二重の理由で消失することが判明: (1) `call_decision_extractor`の「先送りの検出」ルール（`entry_type=Directive, status=Deferred`として抽出）がExpert側の抽出ブランチにしか実装されておらずUser AI側には存在しなかった（今回の実例はUser AIの発言だったため抽出自体が発動しなかった）、(2) たとえ正しく抽出されても`_build_agreements_context`がentry_type="Directive"を無条件で全除外しており後続タスクには一切見えない構造だった（BL-073時代の対症療法の副作用）。ユーザーが提案した「task_plannerの計画もホワイトボード化して先送り事項を書き込めるようにする」という方向性を採用。`whiteboard_drafts`の完全ミラーとして新規`plan_drafts`テーブルを新設（既存テーブルへの混在によるリスクを避けるため）。`decision_extractor_node`が申し送り先task_id（新設`defer_to_task_id`フィールド、両抽出ブランチに追加）を解決し対象タスクの計画文書へ追記、`call_expert`・`generate_user_utterance`・`call_detector`の3箇所（Explore調査＋Plan agentによる批判的レビューで発見した見落とし箇所）すべてに配線した | P1 |
+| BL-083 | 高 | `cela_main.py` (`_query_AI_live`の例外タプル) | BL-082コミット後の実ドライラン（`log/2026-07-24/1459`）で、Expert(iter=7)がedits編集を行おうとした直後、streaming受信中に相手ホストから強制切断（Windows `WinError 10054`）され、生の`httpx.ReadError`（`httpcore.ReadError`由来）が絞り込んだ例外タプルに含まれず未捕捉のままプロセス全体がクラッシュした。BL-059（`httpx.RemoteProtocolError`）/BL-072（`httpx.TimeoutException`）と同型の再発で、BL-081/BL-082のロジックとは無関係な純粋なネットワーク層の例外クラス漏れ。例外タプルに`httpx.ReadError`を追加して対応 | P0 |
 
 ---
 
@@ -2571,6 +2572,36 @@ Detector・Userの判定自体は「ホワイトボードが更新されてい�
 - エンドツーエンドの手動統合確認: `decision_extractor_node`にDeferred抽出をモック注入し、対象タスクの`plan_drafts`に実際に申し送りが書き込まれ、`_get_deferred_notes_text`で正しく読み戻せることを確認済み。
 - オフラインスモークテスト計141件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。
 - 実LLM再ドライランでの効果確認（1349ドライランと同様のケースで、先送り事項がtask_2_1/task_2_2開始時にプロンプトへ実際に現れること）は次回待ち。
+
+---
+
+### BL-083: streaming受信中の`httpx.ReadError`（接続の強制切断）が絞り込んだ例外タプルから漏れ、プロセスクラッシュを引き起こす
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P0 |
+| 関連 | [BL-059](issue_backlog.md#bl-059-streaming受信中のhttpxremoteprotocolerrorが未捕捉でプロセスクラッシュする)、[BL-072](issue_backlog.md#bl-072-httpxreadtimeoutが絞り込んだ例外タプルから漏れstreaming受信中にプロセスクラッシュを引き起こす)（いずれも同型の問題、別の派生例外クラスが漏れていた事例） |
+
+**内容:**
+
+BL-082コミット後、ユーザーが新たなドライラン（`log/2026-07-24/1459`）を実行したところ、Expert(iter=7)が数値表の`edits`編集を試みようとした直後、streaming受信中に以下によりプロセス全体がクラッシュした。
+
+```
+httpcore.ReadError: [WinError 10054] 既存の接続はリモート ホストに強制的に切断されました。
+httpx.ReadError: [WinError 10054] 既存の接続はリモート ホストに強制的に切断されました。
+  at _query_AI_live: for chunk in stream:
+```
+
+BL-059/BL-072と同型の問題である。`_query_AI_live`の例外タプルは`(APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError, httpx.RemoteProtocolError, httpx.TimeoutException)`まで拡張済みだったが、プロバイダ側との接続がTCPレベルで強制切断された場合に送出される生の`httpx.ReadError`（`httpcore.ReadError`由来）は含まれておらず、素通りしていた。ログの直前の内容（BL-081修正後の通常のedits編集フロー）を確認したところ、BL-080/BL-081/BL-082のロジック変更とは無関係な、純粋なネットワーク層の例外クラス漏れであることを確認した。
+
+**対応:** 例外タプルに`httpx.ReadError`を追加した。個別の派生例外を都度追加する運用が3回目（BL-059→BL-072→BL-083）であり、根本的には「openai SDK/httpxが送出しうる全ての通信系例外を網羅する」ことは困難なため、将来また未知の派生例外が漏れる可能性は残る（BL-079のDetector自己リトライ構造とは別に、通信層のフェイルセーフとして`Exception`全体を捕捉して指数バックオフ後にプロセスを継続させる、より広い防御層の検討は別途のBLとして扱う余地がある。今回はスコープ外）。
+
+**完了条件:**
+
+- 新規`tests/test_bl083_httpx_readerror_retry.py`（1件）: `_query_AI_live`のソースが`httpx.ReadError`を例外タプルに含むことを確認。
+- オフラインスモークテスト計142件Pass、`python -m py_compile`合格。
+- 実LLM再ドライランでの再発なし確認は次回待ち。
 
 ---
 
