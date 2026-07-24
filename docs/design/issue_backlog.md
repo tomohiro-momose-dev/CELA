@@ -107,6 +107,8 @@
 | BL-073 | 中 | `cela_main.py` (`decision_extractor_node`/`_commit_agreement_from_tool`) | `entry_type="Directive"`のagreementは、対応するtask_idのDeliverableが承認されても`status="Proposed"`のまま遷移させる経路が無く永久にDBへ残っていた。`reflection_node`の「未解決」抽出（`status=="Proposed"`の全件、entry_type不問）に既に履行済みの指示がノイズとして出続け、実ドライランでReflectionが毎ターン自問自答を強いられていた（実害はなかったが放置すると誤判定を誘発しうる根本課題）。Deliverableが`Approved`/`Approved_with_Conditions`/`Implicitly_Accepted`へ遷移した際、対応するtask_idのDirectiveも自動的に`Approved`へ解決する`_resolve_directive_for_task`を新設し、`decision_extractor_node`のUPDATE分岐と`_commit_agreement_from_tool`の両経路から呼び出すよう解消 | P2 |
 | BL-074 | 中 | `cela_main.py` (`_commit_agreement_from_tool`/`decision_extractor_node`のtopic文字列一致によるUPDATE/SUPERSEDE対象特定) | ユーザーとログ（`log/2026-07-24/0647`）のtask_2_2（初期導入費用内訳策定）議論の変遷をレビューする中で発見。`entry_type="Deliverable"`のUPDATE/SUPERSEDEは`target_topic`（省略時は`topic`自身）の文字列完全一致でのみ対象行を特定するが、Expert/decision_extractorはバージョンを重ねるたびに新しいtopic文字列（「task_2_2 初期導入費用の内訳策定」→「水ノ守町...ver.2修正版」→「...ver.3」→「初期導入費用の内訳策定（ver.3）承認」）を自由に発明しており、連続性が保証されない。結果としてtask_2_2単一のDeliverableに対し、Supersede漏れの`Proposed`行が複数（実測4行）DBに残存し、LLM向けコンテキスト（`_build_agreements_context`）に亡霊のように出続けた。BL-073（Directiveの永久Proposed残留）と同根だがDeliverable側での顕在化 | P2 |
 | BL-075 | 高 | `cela_main.py` (`rollback_whiteboard`/`expert_node`/`call_expert`) | 実ドライラン（`log/2026-07-24/0647`）で、task_2_3のオペレーター年間有給休暇が労基法違反（5日）としてmajor判定→Ver.2で10日に修正→**別件**の懸念（法定祝日未考慮）でmajor判定→ロールバックにより有給10日の修正が無警告で有給5日へ後退、というバージョン退行をDetector自身が発見。原因はF-7.3のロールバック（`rollback_whiteboard`）が常に「1つ前のバージョンは健全」という前提でrows[1]（2版前）へ機械的に復元する設計だったこと。この前提はmajor判定のたびに別の新しい懸念が指摘される実運用下では成り立たず、既に修正済みの問題を無警告で再導入する。ロールバック自体を撤廃し、ホワイトボードの最新内容を保持したままExpertがDetectorの指摘箇所のみを`edits`で部分修正する方針（ユーザー提案、Word/PDFコメント機能的ワークフロー）に変更 | P1 |
+| BL-076 | 中 | `cela_main.py` (`call_detector`/`detector_node`/新設`_annotate_whiteboard_with_detector_comment`) | BL-075のプロンプト誘導だけでは「毎ターン再構成されるプロンプト注入」に留まり見落とされ得るとユーザーが指摘。Detectorのmajor指摘を、プロンプト注入と同時にホワイトボード本文そのものにWord/PDFのコメント機能のように永続的な注釈として埋め込む機能を追加。Detectorの両パス（ドメイン妥当性レビュー・数値監査）に`target_excerpt`（指摘対象の一字一句引用）を出力させ、ホワイトボード内で一意一致する場合のみ`> 🔴 **[Detector指摘 #ID]**: ...`形式（案A・タグ+案Bの引用のハイブリッド、ユーザー承認）の注釈をその直後に挿入する。Expertは修正時にeditsで注釈行ごと書き換えることで自然に注釈が消える設計 | P2 |
+| BL-077 | 低 | `cela_main.py`（CELA自身のAI群全体、未着手・設計検討のみ） | ユーザーが、本プロジェクト自身のAGENTS.mdが定める「まずMemory/STATUS/backlogを確認してから動く」という設計思想を、CELAが動かすAI群（Expert/User AI等）自身にも適用するアイデアを提示。ホワイトボード（現状把握）と、まだ実装されていない「issue_BL」相当の仕組み（タスク内の残課題・指摘事項の永続管理）を必ず先に確認してから、User AIなら指示、Expertならタスク遂行に入るという思考ワークフロー。ユーザー自身、STATUS.md・traceability.md相当の仕組みも新たに必要になると認識しており、範囲が大きいためBL化のみ行い、設計は別途相談 | P3 |
 
 ---
 
@@ -2321,6 +2323,61 @@ BL-059と同型の問題である。`_query_AI_live`の単一の`try`ブロッ�
 
 ---
 
+### BL-076: Detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込む（Word/PDFコメント方式）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| 関連 | [BL-075](issue_backlog.md#bl-075-f-73ホワイトボードロールバックが1つ前は健全という前提に反し修正済み問題を無警告で再導入する)、[D-048](decision_log.md#d-048-detectorのmajor指摘をホワイトボード本文にも永続的な注釈として埋め込む) |
+
+**内容:**
+
+BL-075でロールバックを撤廃し、`call_expert`のプロンプトに部分修正誘導文を追加したが、ユーザーから「それだけでは毎ターン再構成されて消えるプロンプト注入に留まり、AIが見落とす可能性がある。ホワイトボードに直接Detectorの指摘と理由を載せれば永続化されて気づく可能性が高いし、指摘箇所が明白になる」との指摘があった。Word/PDFのコメント機能のように、指摘対象の箇所に直接コメントを書き込み、差し戻す設計が理想として提示された。
+
+**対応:**
+
+1. `call_detector`の両パス（ドメイン妥当性レビュー・数値監査）のJSON出力スキーマに`target_excerpt`（ホワイトボード本文から指摘対象を一字一句そのまま引用したもの）を追加。両パスの結果は、実際に採用されたconstraint_issueの重篤度を出した側の`target_excerpt`を優先して統合する。
+2. 新設`_annotate_whiteboard_with_detector_comment(conn, run_id, phase_id, task_id, target_excerpt, comment, decision_id)`が、`target_excerpt`がホワイトボード内で一意一致する場合のみ、その直後に注釈を挿入した新バージョンを`apply_whiteboard_patch`で保存する。一致しない・複数一致する・空文字の場合は挿入しない（誤った位置への注釈でExpertを混乱させないため）。
+3. 注釈フォーマットは、案A（grep容易なタグ・ID付き）と案B（視認性の高いMarkdown引用）のハイブリッド（ユーザー承認、D-048）:
+   ```
+   > 🔴 **[Detector指摘 #D-xxx]**: <指摘内容>
+   > （この注釈は指摘箇所を修正すると同時に削除してください）
+   ```
+4. `detector_node`から、`constraint_issue=="major"`かつExpertの成果物を評価するターン（`target_role=="assistant"`）の場合のみ呼び出す。
+5. `call_expert`のBL-075差し戻しプロンプトに、注釈行を探して`old_text`に含めることで修正と同時に注釈も消えるという運用方法を明記。
+
+**完了条件:**
+
+- 新規`tests/test_bl076_whiteboard_detector_annotation.py`（4件）: ハイブリッド注釈の挿入確認、非一意/不一致時のno-op確認、`call_detector`両パスの`target_excerpt`要求確認、`detector_node`の配線確認。
+- オフラインスモークテスト計113件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。
+- 実LLM再ドライランでの効果確認（注釈が実際にホワイトボードへ挿入され、Expertが部分修正時に注釈ごと解消すること）は次回待ち。
+
+---
+
+### BL-077: AGENTS.mdの「まずMemory/STATUS/backlogを確認してから動く」設計思想をCELA自身のAI群に適用する（設計検討・未着手）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計検討のみ、実装未着手） |
+| 優先度 | P3 |
+| 関連 | [BL-076](issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式) |
+
+**内容:**
+
+BL-076（ホワイトボードへの指摘埋め込み）の議論の延長として、ユーザーが「この本プロジェクト自身のAGENTS.mdのように、AIは必ずまずホワイトボードと（まだ実装されていない）issue_BL相当の仕組みを確認して現状・指摘事項・タスク内の残課題を認識してから、User AIなら指示を出し、Expertはタスクをこなす、という思考ワークフローにできないか」という設計アイデアを提示した。ユーザー自身、これを実現するにはSTATUS.md・traceability.md相当の永続的な進捗管理の仕組みも新たに必要になると認識している。
+
+これはBL-075/BL-076（ホワイトボード本文への注釈埋め込み）よりも一段大きい構想で、CELAが動かすExpert/User AI自身に「作業前に必ず状況確認する」という規律を持たせるための、タスクごとの課題管理・進捗管理レイヤーの新設を意味する。範囲が大きいため、今回はBL化のみ行い、実装は別途設計相談の上で着手する。
+
+**完了条件（未定、設計時に確定）:**
+
+- ホワイトボード・issue_BL相当の仕組みをExpert/User AIの各ターン冒頭でどう確認させるか（プロンプト注入か、専用readツールか）の設計。
+- issue_BL相当の永続的な課題管理データモデル（DBスキーマ or ホワイトボードへの統合）の設計。
+- STATUS.md/traceability.md相当の進捗管理をCELA自身にどう持たせるかの設計。
+- 本項目は次回以降のセッションで別途設計相談から着手する。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -2395,3 +2452,4 @@ BL-059と同型の問題である。`_query_AI_live`の単一の`try`ブロッ�
 | 2026-07-24 | ユーザーと同ドライラン（`log/2026-07-24/0647`）のR4/R5機能稼働レビューを行う中で、Reflectionの内省監査ログが完了済みタスクの指示（Directive）を「未解決」として繰り返し自問自答している様子を発見。調査の結果、`entry_type="Directive"`のagreementは`decision_extractor_node`のUPDATE分岐・`_commit_agreement_from_tool`のいずれからも遷移させる経路がなく、CREATE時の`status="Proposed"`のままDBに永久残留する構造的欠陥と判明。ユーザーの指示により、対症療法（未解決抽出からDirectiveを除外）ではなく根本解決（②案）を採用し、新設`_resolve_directive_for_task`をDeliverable承認の両経路（decision_extractor/write_agreementツール）から呼び出しDirectiveを自動的に`Approved`へ遷移させる実装を行った。新規`tests/test_bl073_directive_auto_resolve.py`（4件）を含めオフラインスモークテスト計107件Pass、`check_docs_consistency.py`合格。BL-073として新規起票・`done`化。 |
 | 2026-07-24 | ユーザーの依頼でtask_2_1承認後のtask_2_2（初期導入費用内訳策定）議論の変遷とDB更新状況をログから詳細に再構成する中で、topic文字列が版を重ねるたびに変わり（「task_2_2 初期導入費用の内訳策定」→「...ver.2修正版」→「...ver.3」→「...ver.3承認」）、Supersede漏れの`Proposed`/`Approved_with_Conditions`行が実測4行DBに残存していることを発見。また前回セッションで報告した「edits失敗の原因はモデルの一字一句コピーミス」という診断が誤りで、実際は`target_topic`未指定によりDB内の対応行が見つからず`old_content=""`となったことが根本原因と判明し訂正。BL-074として新規起票（`open`、BL-073と同根）。ユーザーと相談の上、`topic`ではなく`task_id`をDeliverableの識別キーとする設計方針（`_resolve_prior_deliverable_for_task`新設案）を決定。実装は次回。 |
 | 2026-07-24 | 同ドライラン継続中、Detector自身がtask_2_3のオペレーター年間有給休暇（労基法違反で一度major判定・Ver.2で10日に修正済み）が、別件（法定祝日未考慮）でのmajor判定・ロールバックにより無警告で5日（違反状態）へ後退していることを発見。原因はF-7.3の`rollback_whiteboard`が「1つ前のバージョンは健全」という前提で機械的にrows[1]（2版前）を復元する設計だったこと。ユーザーから、この「直前のNG発言・状態を消して一から考え直させる」設計は元々「次のAIが誤った思考に引っ張られる」のを防ぐためだったが、F-2.6検算ゲート等でシステムが大幅強化された現在は逆に矛盾を生んでいるとの説明があり、Word/PDFのコメント機能のようにDetectorの指摘箇所を示して部分修正させる方式への転換を提案・採用。`rollback_whiteboard`を削除し、`call_expert`のmajor差し戻しプロンプトを全文書き直し誘導から`edits`による部分修正・影響範囲確認の指示に置き換えた。副次的に、`system_prompt`に追記されるが`messages`に反映されない死んだコード重複ブロックも発見・削除。新規`tests/test_bl075_no_whiteboard_rollback.py`（4件）追加、`test_r4_smoke.py`のF-7.3ロールバック専用テスト2件を削除。オフラインスモークテスト計109件Pass、`check_docs_consistency.py`合格。BL-075として新規起票・`done`化。D-047として記録。 |
+| 2026-07-24 | ユーザーから、BL-075のプロンプト誘導だけでは毎ターン再構成されて消えるプロンプト注入に留まり見落とされうるとの指摘があり、Detectorのmajor指摘をホワイトボード本文にも永続的な注釈として埋め込む機能を追加提案・実装。`call_detector`の両パスに`target_excerpt`（一字一句引用）を追加し、新設`_annotate_whiteboard_with_detector_comment`が一意一致時のみ注釈を挿入。フォーマットは案A（grep容易なタグ）と案B（Markdown引用）のハイブリッド（ユーザー承認、D-048）。新規`tests/test_bl076_whiteboard_detector_annotation.py`（4件）含めオフラインスモークテスト計113件Pass、`check_docs_consistency.py`合格。BL-076として新規起票・`done`化。あわせて、ユーザーが提示したより大きな構想（AGENTS.mdの「まずMemory/STATUS/backlogを確認」という思想をCELA自身のAI群に適用する、issue_BL・STATUS.md・traceability.md相当の仕組みが必要）をBL-077として起票（`open`、設計検討のみ、実装は別途）。 |

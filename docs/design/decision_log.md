@@ -731,6 +731,20 @@
 
 ---
 
+### D-048: Detectorのmajor指摘をホワイトボード本文にも永続的な注釈として埋め込む
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-24 |
+| 状態 | `decided` |
+| 決定者 | t-momose（注釈方式の採用・フォーマットのハイブリッド化の判断） / Claude Sonnet 5（技術設計・実装） |
+| **決定理由** | D-047でF-7.3ロールバックを撤廃しプロンプト誘導文へ置き換えたが、ユーザーから「それだけでは毎ターン再構成されて消えるプロンプト注入に留まり、AIが見落とす可能性がある。ホワイトボードに直接Detectorの指摘と理由を載せれば永続化されて気づく可能性が高く、指摘箇所も明白になる」との指摘があった。ユーザーはWord/PDFのコメント機能のように「指摘対象の箇所に直接コメントを書き込み、差し戻す」という理想像を提示。技術的には既存のR4差分編集基盤（`_apply_text_edits`と同じ完全一致検索）を転用でき、Detectorに指摘対象の一字一句引用（`target_excerpt`）を追加出力させれば実現可能と判断した。注釈フォーマットは、grep等の将来的なツール拡張への対応も考慮したいというユーザーの要望から、案A（タグ・ID付き、機械可読）と案B（Markdown引用、視認性重視）のハイブリッドを採用した。 |
+| 決定内容 | `call_detector`の両パス（ドメイン妥当性レビュー・数値監査）のJSON出力に`target_excerpt`を追加し、実際に採用されたconstraint_issueの重篤度を出した側を優先して統合する。新設`_annotate_whiteboard_with_detector_comment`が、`target_excerpt`がホワイトボード内で一意一致する場合のみ、以下のハイブリッド形式の注釈をその直後に挿入する（一致しない場合は誤った位置への注釈を避けるため挿入しない）：`> 🔴 **[Detector指摘 #D-xxx]**: <指摘内容>` ＋ `> （この注釈は指摘箇所を修正すると同時に削除してください）`。`detector_node`から、Expertの成果物に対するmajor判定時のみ呼び出す。`call_expert`の差し戻しプロンプトに、注釈行を`old_text`に含めて書き換えることで修正と同時に注釈が消えるという運用方法を明記した。 |
+| 影響 | `cela_main.py`（`call_detector`のJSON schema拡張、`_annotate_whiteboard_with_detector_comment`新設、`detector_node`・`call_expert`への配線）。新規`tests/test_bl076_whiteboard_detector_annotation.py`（4件）。 |
+| 関連 BL | [BL-076](issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
