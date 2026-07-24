@@ -59,29 +59,6 @@ def test_apply_and_get_latest_whiteboard_roundtrip(db_conn):
     assert latest2 == {"version": 2, "content": "内容V2"}
 
 
-def test_rollback_whiteboard_restores_previous_content(db_conn):
-    """F-7.3: ロールバックは直前バージョンの内容を新バージョンとして追記すること
-    （バージョン番号は巻き戻さず、履歴として残る）。"""
-    conn, run_id = db_conn
-    cela_main.apply_whiteboard_patch(conn, run_id, "phase_1", "task_1_1", "正常な内容", "expert", "初版")
-    cela_main.apply_whiteboard_patch(conn, run_id, "phase_1", "task_1_1", "誤った内容", "expert", "誤修正")
-
-    cela_main.rollback_whiteboard(conn, run_id, "phase_1", "task_1_1", reason="テストロールバック")
-
-    latest = cela_main.get_latest_whiteboard(conn, run_id, "phase_1", "task_1_1")
-    assert latest["version"] == 3, "ロールバックはバージョンを巻き戻さず新バージョンとして追記するはず"
-    assert latest["content"] == "正常な内容"
-
-
-def test_rollback_whiteboard_noop_when_no_previous_version(db_conn):
-    """初版しかない状態でのロールバックは何もしない（ロールバック先がない）こと。"""
-    conn, run_id = db_conn
-    cela_main.apply_whiteboard_patch(conn, run_id, "phase_1", "task_1_1", "初版のみ", "expert", "初版")
-    cela_main.rollback_whiteboard(conn, run_id, "phase_1", "task_1_1", reason="テスト")
-    latest = cela_main.get_latest_whiteboard(conn, run_id, "phase_1", "task_1_1")
-    assert latest["version"] == 1 and latest["content"] == "初版のみ"
-
-
 # ===========================================================================
 # _apply_text_edits（Claude Code Editツール方式の完全一致置換）
 # ===========================================================================

@@ -304,13 +304,13 @@ STRUCTURED_OUTPUT_LABEL_KEYWORDS = ("detector", "decision extractor", "reflectio
 
 
 MAX_TOKENS_BY_ROLE = {
-    "expert": 262144,
-    "user": 262144,
-    "detector": 262144,
-    "reflection": 262144,
-    "review": 262144,
-    "decision extractor": 131072,
-    "orchestrator": 65536,
+    "expert": 500000,
+    "user": 300000,
+    "detector": 300000,
+    "reflection": 300000,
+    "review": 300000,
+    "decision extractor": 300000,
+    "orchestrator": 300000,
 }
 
 def get_max_tokens(label: str) -> int:
@@ -870,6 +870,9 @@ WRITE_AGREEMENT_TOOL = {
 # [R5 F-8.3] Freeze専用ツール。WRITE_AGREEMENT_TOOL（既に14パラメータで複雑）を汚さない
 # 独立した小さなツールとして追加する。「絶対に覆してはならない決定」への恒久ピン留めであり、
 # unfreeze機構は設けない（D-044、AGENTS.md§7準拠）。
+# ★D-045で一時休止: 検証手段のないまま恒久ピン留めするFreezeより、BL-062（Detectorの誤ったmajor
+# 判定がApprovedを覆せず永続化する矛盾）の解消を優先する判断により、User AIのtoolsから外し
+# 呼び出し不能にした（本体・is_frozenガード・表示ロジックは削除せず温存、再開時はtools配線を戻すのみ）。
 FREEZE_AGREEMENT_TOOL = {
     "type": "function",
     "function": {
@@ -1049,19 +1052,21 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
     # 直前呼び出しのreasoningをスナップショット保存する。
     _agreement_thought = get_last_reasoning_text() if args.get("status") == "Rejected" else None
     conn.execute(
-        "INSERT INTO agreements (id, turn, action_type, status, topic, decision_what, reason_why, proposed_by, "
-        "entry_type, phase_id, task_id, abstraction_level, scope, time_axis, depends_on, resource_claims, timestamp, "
-        "evidence, is_frozen, internal_thought_process, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO agreements (id, action_type, status, topic, decision_what, reason_why, proposed_by, "
+        "entry_type, phase_id, task_id, depends_on, resource_claims, timestamp, "
+        "evidence, is_frozen, internal_thought_process, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            f"AG-{int(time.time() * 1000)}", 0, action_type, args.get("status", "Proposed"),
+            f"AG-{int(time.time() * 1000)}", action_type, args.get("status", "Proposed"),
             topic, content, args.get("reason_why", ""),
             caller_role, entry_type,
             phase_id, tid,
-            "design", "local", "current",
             depends_on_val, resource_claims_val, time.time(),
             args.get("evidence", ""), 0, _agreement_thought, run_id
         )
     )
+    # [BL-073] Deliverableが承認された場合、対応するtask_idのDirectiveをApprovedへ解決する。
+    if entry_type == "Deliverable" and args.get("status") in RESOLVING_DELIVERABLE_STATUSES:
+        _resolve_directive_for_task(conn, run_id, tid, phase_id, resolved_by=caller_role)
     return None
 
 
@@ -1625,7 +1630,12 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
         # 送出され、絞り込んだ例外タプルに含まれず未捕捉のままプロセス全体をクラッシュさせていた
         # （実機ドライランで確認、log/2026-07-23）。これも一時的な接続障害でありロジックエラーでは
         # ないため、リトライ対象に追加する。
-        except (APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError, httpx.RemoteProtocolError) as e:
+        # [CONSTRAINT] BL-072: BL-059と同種。streaming受信中の`httpx.ReadTimeout`も同様に
+        # openai SDKの`APITimeoutError`へラップされず生のまま送出され未捕捉クラッシュしていた
+        # （実機ドライランで確認）。個別の派生例外を都度追加するのではなく、`ReadTimeout`/
+        # `ConnectTimeout`/`WriteTimeout`/`PoolTimeout`をすべて包含する親クラス
+        # `httpx.TimeoutException`を追加し、同種の未捕捉タイムアウトの再発を防ぐ。
+        except (APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
 
             if attempt < len(delays):
                 # [BL-046] 中間リトライは従来何も表示せずtime.sleepするだけだったため、
@@ -1753,10 +1763,9 @@ def init_db(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_decisions_run ON decisions(run_id);
 
     CREATE TABLE IF NOT EXISTS agreements (
-        id TEXT, turn INTEGER, action_type TEXT, status TEXT, topic TEXT,
+        id TEXT, action_type TEXT, status TEXT, topic TEXT,
         decision_what TEXT DEFAULT '', reason_why TEXT DEFAULT '',
         proposed_by TEXT, entry_type TEXT, phase_id TEXT,
-        abstraction_level TEXT, scope TEXT, time_axis TEXT,
         depends_on TEXT, resource_claims TEXT, timestamp REAL,
         evidence TEXT, is_frozen INTEGER DEFAULT 0, internal_thought_process TEXT,
         run_id TEXT NOT NULL
@@ -1865,12 +1874,12 @@ def db_append_agreement(a: dict, conn: sqlite3.Connection, run_id: str) -> None:
     depends_on_val = json.dumps(a.get("depends_on", []), ensure_ascii=False) if isinstance(a.get("depends_on"), (list, dict)) else (a.get("depends_on") or "[]")
     resource_claims_val = json.dumps(a.get("resource_claims", {}), ensure_ascii=False) if isinstance(a.get("resource_claims"), (list, dict)) else (a.get("resource_claims") or "{}")
     conn.execute(
-        "INSERT INTO agreements (id, turn, action_type, status, topic, decision_what, reason_why, proposed_by, "
-        "entry_type, phase_id, task_id, abstraction_level, scope, time_axis, depends_on, resource_claims, timestamp, "
-        "evidence, is_frozen, internal_thought_process, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (a.get("id"), a.get("turn"), a.get("action_type"), a.get("status"), a.get("topic"),
+        "INSERT INTO agreements (id, action_type, status, topic, decision_what, reason_why, proposed_by, "
+        "entry_type, phase_id, task_id, depends_on, resource_claims, timestamp, "
+        "evidence, is_frozen, internal_thought_process, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (a.get("id"), a.get("action_type"), a.get("status"), a.get("topic"),
          a.get("decision_what", ""), a.get("reason_why", ""), a.get("proposed_by"), a.get("entry_type"),
-         a.get("phase_id"), a.get("task_id", ""), a.get("abstraction_level"), a.get("scope"), a.get("time_axis"),
+         a.get("phase_id"), a.get("task_id", ""),
          depends_on_val, resource_claims_val, a.get("timestamp"), None, 0, None, run_id)
     )
 
@@ -1883,6 +1892,36 @@ def db_supersede_agreement(agreement_id: str, conn: sqlite3.Connection, run_id: 
         "UPDATE agreements SET status='Superseded' WHERE id=? AND run_id=?",
         (agreement_id, run_id)
     )
+
+
+# [BL-073] Deliverableが承認された際、対応するtask_idのDirective（Userの指示）がstatus='Proposed'の
+# ままDBに永久固定される問題への対処。従来はDirective自体を後から遷移させる経路が一切なく、
+# reflection_nodeの「未解決」抽出（agreements.status=="Proposed"の全件、entry_type不問）に
+# 既に履行済みの指示がノイズとして出続け、実ドライランでReflectionが毎回「なぜProposedのままか」
+# の自問自答を強いられていた（根本原因未解消のため放置すると将来的に誤判定を誘発しうる）。
+RESOLVING_DELIVERABLE_STATUSES = {"Approved", "Approved_with_Conditions", "Implicitly_Accepted"}
+
+
+def _resolve_directive_for_task(conn: sqlite3.Connection, run_id: str, task_id: str, phase_id: str, resolved_by: str) -> None:
+    """[BL-073] task_idに対応するentry_type='Directive'かつstatus='Proposed'の最新agreementを
+    'Approved'へ遷移させ、指示が実際に履行されたことをDB上で表現する。該当が無ければ何もしない。
+    """
+    if not task_id:
+        return
+    for a in reversed(get_agreements_from_db(conn, run_id)):
+        if a.get("entry_type") == "Directive" and a.get("task_id") == task_id and a.get("status") == "Proposed":
+            db_supersede_agreement(a["id"], conn, run_id)
+            resolved: Agreement = {
+                "id": f"AG-{int(time.time() * 1000)}", "timestamp": time.time(),
+                "action_type": "UPDATE", "entry_type": "Directive", "status": "Approved",
+                "topic": a["topic"], "decision_what": a.get("decision_what", ""),
+                "reason_why": f"対応するタスク（{task_id}）の成果物が承認されたため、指示は履行済みとして自動解決（BL-073）。",
+                "proposed_by": a.get("proposed_by", "Unknown"), "phase_id": phase_id or a.get("phase_id", ""),
+                "task_id": task_id, "depends_on": [], "resource_claims": {},
+            }
+            db_append_agreement(resolved, conn, run_id)
+            print(f"  ✅ [Directive Resolved] '{a['topic']}' をApprovedへ遷移しました（{task_id}の成果物承認に伴う自動解決、BL-073）。")
+            break
 
 
 # ===========================================================================
@@ -1914,24 +1953,9 @@ def apply_whiteboard_patch(conn: sqlite3.Connection, run_id: str, phase_id: str,
     return new_version
 
 
-def rollback_whiteboard(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str, reason: str) -> None:
-    """[R4] F-7.3: Detectorのmajor判定を受け、直前バージョンの内容を新バージョンとして再INSERTすることで
-    ロールバックする（cela_r4_design.md §2.3）。バージョン番号は巻き戻さず、ロールバック自体も
-    監査ログとして残す（N-2のトレーサビリティ原則）。
-    """
-    rows = conn.execute(
-        "SELECT version, content FROM whiteboard_drafts "
-        "WHERE run_id=? AND phase_id=? AND task_id=? ORDER BY version DESC LIMIT 2",
-        (run_id, phase_id, task_id)
-    ).fetchall()
-    if len(rows) < 2:
-        return  # ロールバック先がない（初版でのmajor判定は別途ハンドリング）
-    prev_content = rows[1]["content"]
-    apply_whiteboard_patch(
-        conn, run_id, phase_id, task_id,
-        new_content=prev_content, author_role="system_rollback",
-        edit_summary=f"[ROLLBACK] Detector major判定により前バージョンへ復元: {reason}"
-    )
+# [BL-075/D-047] rollback_whiteboard（F-7.3）は撤廃した。「1つ前のバージョンは健全」という
+# 前提が常には成り立たず、既に修正済みの問題を無警告で再導入する実害が確認されたため。
+# 詳細は expert_node のコメント・decision_log.md D-047参照。
 
 
 def _apply_text_edits(current_content: str, edits: list[dict]) -> tuple[str | None, str | None]:
@@ -1954,6 +1978,41 @@ def _apply_text_edits(current_content: str, edits: list[dict]) -> tuple[str | No
             return None, f"edits[{i}]: old_textが{count}箇所に一致し、一意に特定できません。replace_all=trueにするか、より長い一意な文脈を含めてください。"
         content = content.replace(old_text, new_text) if replace_all else content.replace(old_text, new_text, 1)
     return content, None
+
+
+# [BL-076] Detectorのmajor指摘を、プロンプト注入（毎ターン再構成され消える一時情報）だけでなく
+# ホワイトボード本文に永続的な注釈として書き込む（Word/PDFのコメント機能に相当）。差し戻された
+# Expertは、指摘箇所が本文中に埋め込まれているため見落としようがなく、修正時にeditsで注釈ごと
+# 書き換えることで自然に「解決済みコメントの削除」が行われる。案A（grep容易なタグ）と
+# 案B（視認性の高いMarkdown引用）のハイブリッド形式を採用（ユーザー承認、D-048）。
+_DETECTOR_COMMENT_TEMPLATE = (
+    "\n> 🔴 **[Detector指摘 #{decision_id}]**: {comment}\n"
+    "> （この注釈は指摘箇所を修正すると同時に削除してください）\n"
+)
+
+
+def _annotate_whiteboard_with_detector_comment(
+    conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str,
+    target_excerpt: str, comment: str, decision_id: str
+) -> bool:
+    """[BL-076] target_excerptがホワイトボード内で一意に一致すればその直後に注釈を挿入し、
+    一致しない・複数一致する・ホワイトボード自体が存在しない場合は挿入を諦める（False返却）。
+    ExpertのTOP-levelな誤解を避けるため、曖昧な位置への注釈挿入は行わない。
+    """
+    latest = get_latest_whiteboard(conn, run_id, phase_id, task_id)
+    if not latest:
+        return False
+    content = latest["content"]
+    annotation = _DETECTOR_COMMENT_TEMPLATE.format(decision_id=decision_id, comment=comment)
+    if not target_excerpt or content.count(target_excerpt) != 1:
+        return False
+    new_content = content.replace(target_excerpt, target_excerpt + annotation, 1)
+    apply_whiteboard_patch(
+        conn, run_id, phase_id, task_id, new_content,
+        author_role="system_detector_annotation",
+        edit_summary=f"[Detector注釈] {comment[:80]}"
+    )
+    return True
 
 
 def get_agreements_from_db(conn: sqlite3.Connection, run_id: str) -> list[dict]:
@@ -2069,7 +2128,6 @@ class Phase(TypedDict):
 
 class Agreement(TypedDict):
     id: str
-    turn: int
     action_type: str
     status: str
     topic: str
@@ -2077,25 +2135,6 @@ class Agreement(TypedDict):
     reason_why: str
     proposed_by: str
     resource_claims: dict[str, float]  # 追加: {"初期導入予算": 75000000}
-    
-     # ─── 3次元の位置情報 ───────────────────────────────
-    abstraction_level: str   # 軸1：視座（抽象度）
-                             # "concept"    概念・目的・存在意義レベル
-                             # "constraint" GlobalConstraint・方針・設計原則レベル  ← ご指摘の「最初の成果物」
-                             # "design"     詳細設計・仕様レベル
-                             # "impl"       実装・実験・PoC・検証レベル
-
-    scope: str               # 軸2：スコープ（影響範囲）
-                             # "global"     全フェーズに影響
-                             # "phase"      特定フェーズ内
-                             # "local"      特定タスク・決定内のみ
-
-    time_axis: str           # 軸3：時間軸（いつの話か）
-                             # "assumption" 現時点の前提・仮定（未検証）
-                             # "current"    現在の確定事項
-                             # "risk"       将来判明しうる致命的制約の候補
-                             # "validated"  PoC・検証によって裏付けられた事実
-    # ────────────────────────────────────────────────
 
     depends_on: list[str]   #"Decision"（合意・結論） / "Directive"（指示・タスク発行） / "Deliverable"（成果物本体）
     entry_type: str
@@ -2105,7 +2144,7 @@ class Agreement(TypedDict):
     # "Deferred"の場合、topicは先送りされた論点名、reason_whyに「どのタスクで扱うか」を含める
 
 class RiskRegister(TypedDict):
-    """3次元構造とは独立した、致命的リスクの専用台帳"""
+    """致命的リスクの専用台帳"""
     risk_id: str
     description: str                    # "冬季の積雪で待ち時間が30分を超える可能性"
     related_constraint: str             # どのGlobalConstraintに影響するか
@@ -2137,7 +2176,6 @@ class LineageState(TypedDict):
                        # reflection_intervalの発火判定はこちらを使う。
     max_turns: int
     reflection_interval: int
-    risk_flag: str
     drift_flag: bool
     halt: bool
     agent_has_guardrail: bool
@@ -2171,6 +2209,9 @@ class LineageState(TypedDict):
     # [R5 F-2.1] 直前Expert/User AI呼び出しのreasoning（思考過程）全文。Detectorの思考プロセス監査に使う。
     expert_last_reasoning: str
     user_last_reasoning: str
+    # [BL-078] Orchestratorが専門家選定時に考えた「このタスクで特に注意すべき観点」。
+    # 従来は選定理由（reason）としてログにのみ残り、Expertへは伝わっていなかった。
+    expert_focus_guidance: str
     # [BL-038] LangGraphはTypedDictスキーマに宣言されていないキーをノード間で伝播しない
     # （未宣言キーへの書き込みは次ノードに渡る前に消える）。expert_wrote_agreement/
     # user_wrote_agreement/expert_last_whiteboard_editはR3b/R4で導入されて以来ここへの
@@ -2214,7 +2255,9 @@ def _build_hydrate_context(decisions: list[Decision], config: Appconfig) -> str:
     lines = []
     for d in recent:
         why_short = (d["why"][:100] + "…") if len(d["why"]) > 100 else d["why"]
-        lines.append(f"- [{d['who']}] {d['what']}（理由: {why_short}）")
+        # [BL-064] reason_missingは書き込まれるのみで表示に一切反映されていなかったため追加。
+        missing_flag = " ⚠️理由未記載" if d.get("reason_missing") else ""
+        lines.append(f"- [{d['who']}] {d['what']}（理由: {why_short}）{missing_flag}")
     return "\n".join(lines)
 
 def _build_agreements_context(agreements: list[Agreement]) -> str:
@@ -2235,7 +2278,7 @@ Filters out superseded or directive items and applies status-based formatting/la
 
     # [R5 F-8.3] Freeze済み（is_frozen=1）の項目を先頭に配置する。chat_history_window等の
     # トリミングでFrozen項目が窓の外へ押し出されないよう、常に確実にコンテキスト上位へ含める。
-    decisions_and_deliverables.sort(key=lambda a: (not a.get("is_frozen"), a.get("timestamp", 0)))
+    decisions_and_deliverables.sort(key=lambda a: (not a.get("is_frozen"), a.get("timestamp") or 0))
 
     lines = []
     for a in decisions_and_deliverables:
@@ -2288,7 +2331,10 @@ Filters out superseded or directive items and applies status-based formatting/la
         agreement_id = a.get('id', '?')
         reason_preview = (a.get('reason_why') or '')[:100]
         reason_suffix = f"（理由: {reason_preview}）" if reason_preview else ""
-        lines.append(f"[{agreement_id}] {icon}{type_label} {clean_topic}: {content_preview}{reason_suffix}")
+        # [BL-064] evidenceは書き込まれるのみで表示に一切反映されていなかったため追加。
+        evidence_preview = (a.get('evidence') or '')[:100]
+        evidence_suffix = f"（根拠: {evidence_preview}）" if evidence_preview else ""
+        lines.append(f"[{agreement_id}] {icon}{type_label} {clean_topic}: {content_preview}{reason_suffix}{evidence_suffix}")
 
         # [BL-050] 直近1件のSuperseded版（同一topic・同一entry_type）を差分として1行追記。
         # 全履歴を出すとトークンコストが膨らむため、直前版のみに絞る。
@@ -2579,11 +2625,18 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
         \n
         回答は簡潔で論理的にせよ\n
         \n
-        Return ONLY JSON: {{"expert": "（生成した専門家の肩書き）", "reason": "..."}}'
+        [BL-078] 専門家を選ぶ過程で、あなたはこのタスクの内容・過去の経緯を踏まえて既にある程度
+        考えているはずです。その考察を'focus_guidance'として明示的に出力してください。これは
+        専門家を選んだ理由（'reason'）とは別物で、選ばれた専門家AIがこのタスクに実際に着手する際に
+        「具体的にどんな観点で検討すべきか」「特に見落としやすい落とし穴は何か」を、このタスク固有の
+        内容に即して1〜3点、実行可能な指示として書いてください（一般論・当たり前の心構えは不要）。
+        該当する具体的な観点がなければ空文字でよい。\n
+        \n
+        Return ONLY JSON: {{"expert": "（生成した専門家の肩書き）", "reason": "...", "focus_guidance": "（このタスク固有の着眼点・注意点、無ければ空文字）"}}'
         """
     )
     res = query_AI([{"role": "user", "content": prompt}], client=client_agent, model=model_agent, label="Orchestrator")
-    parsed = _safe_json_parse(res, fallback={"expert": "", "reason": ""})
+    parsed = _safe_json_parse(res, fallback={"expert": "", "reason": "", "focus_guidance": ""})
 
     # [CONSTRAINT] BL-018当時、専門家名を固定16種の配列に絞っていたが、call_expert/グラフのどちらも
     # 具体的な専門家名で分岐しておらず（プロンプトへの埋め込みラベルとして使われるのみ）、
@@ -2593,7 +2646,7 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
     expert = (parsed.get("expert") or "").strip()
     if not expert:
         expert = "プロジェクト全般アドバイザー"
-    return {"expert": expert, "reason": parsed.get("reason", "")}
+    return {"expert": expert, "reason": parsed.get("reason", ""), "focus_guidance": (parsed.get("focus_guidance") or "").strip()}
 
 
 def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str:
@@ -2612,7 +2665,15 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     phases_json = json.dumps(state.get("phases", []), ensure_ascii=False, indent=2)
 
     system_prompt = f"あなたは有能な{expert_name}の分野の専門家です。\n"
-    
+
+    # [BL-078] Orchestratorが専門家選定時に考察した、このタスク固有の着眼点・注意点。
+    # Detectorの「観点を変えるだけで仕事ぶりが変わる」効果と同じ発想で、Expertの思考を
+    # 個々のタスクの実態に最適化する狙い（従来はOrchestratorの選定理由としてログに残るのみで、
+    # Expertには一切伝わっていなかった）。
+    expert_focus_guidance = state.get("expert_focus_guidance", "")
+    if expert_focus_guidance:
+        system_prompt += f"\n🎯 【このタスクで特に注意すべき観点（Orchestratorより）】\n{expert_focus_guidance}\n"
+
     if agent_has_guardrail:
         system_prompt += f"\n【あなたの絶対的な行動指針】\n👉 {state['goal']}\n"
     
@@ -2738,14 +2799,27 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     previous_output = state.get("expert_output", "(取得不可)")
 
     if state.get("drift_flag") or state.get("constraint_issue") in ["major"]:
+        # [BL-075/D-047] 以前はロールバックでホワイトボードを2版前へ戻した上で「新しい提案を
+        # 作成してください」と指示していたが、これは全文書き直しを誘発し、既に修正済みだった
+        # 問題を無警告で再導入する原因になっていた（rollback_whiteboard撤廃と対）。
+        # 現在はホワイトボードの内容をそのまま保持し（📋セクション参照）、Detectorの指摘箇所を
+        # write_agreementのedits（old_text/new_text）で部分修正することを基本方針とする。
         system_prompt += f"""
-            \n⚠️ 【重要】\n
+            \n⚠️ 【重要：Detectorからの差し戻し】\n
             あなたの前回の発言は、倫理違反、矛盾、リソース超過や制約違反などの重大な矛盾が検知されDetector（監査システム）により差し戻されました。\n
             ▼ 【却下されたあなたの前回の提案（※チャット履歴からは削除済）】\n
             {previous_output}\n\n
-            [監査システムからの指摘事項]\n
+            [Detectorからの指摘事項（要修正箇所）]\n
             {state.get('constraint_issue_log', [])[-1:]} \n\n
-            上記の「自身の過去の提案」と「指摘事項」を熟読し、論理的破綻や計算ミス、制約条件の無視を完全に修正した新しい提案を作成してください。\n
+            【対応方針（重要）】\n
+            上記📋セクションに示されている現在のホワイトボードは、あなたの前回の提案の内容のままです（ロールバックされていません）。\n
+            [BL-076] 該当箇所には「> 🔴 **[Detector指摘 #...]**: ...」という注釈が本文中に直接埋め込まれている場合があります。\n
+            まずこの注釈を探し、指摘箇所を特定してください（見つからない場合は上記の指摘事項テキストから該当箇所を判断してください）。\n
+            write_agreementのedits（old_text/new_text）で、注釈行ごと含めて該当箇所のみを部分修正してください\n
+            （old_textに注釈を含めることで、修正と同時に注釈も自然に消えます）。修正の影響が他の箇所（関連する数値・前提）にも\n
+            及ぶ場合は、その範囲も併せて見直し、必要であればdecision_whatによる全文更新（SUPERSEDE）を使ってください。\n
+            既に正しく確定していた他の記述内容（例：以前のDetector指摘で修正済みの箇所）を、今回とは無関係な\n
+            理由で元に戻さないよう特に注意してください。\n
             必ず、矛盾の内容とその理由を明示し、どのタスク・フェーズに影響があるかを具体的に指摘してください。\n
         """
 
@@ -2772,21 +2846,12 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
             messages.append(msg)
         #messages.append({"role": "user", "content": user_input})
 
-    if state.get("drift_flag") or state.get("constraint_issue") in ["major"]:
-        system_prompt += f"""
-            \n⚠️ 【重要】\n
-            あなたの前回の発言は、倫理違反、矛盾、リソース超過や制約違反などの重大な矛盾が検知されDetector（監査システム）により差し戻されました。\n"
-            以下の指摘事項を踏まえ、発言内容を修正して再出力してください：\n"
-            {state.get('constraint_issue_log', [])[-1:]} \n"
-            必ず、矛盾の内容とその理由を明示し、どのタスク・フェーズに影響があるかを具体的に指摘してください。\n
-        """
-
-
     # BL-025 ②: ツールループの自問自答フェーズ（iter=2以降）では、全フェーズ・全DB agreementsを含む
     # 巨大なsystem_promptではなく、現在タスクの情報のみに絞った軽量版に差し替える。
     light_system_prompt = (
         f"あなたは有能な{expert_name}の分野の専門家です。\n\n"
-        f"【現在のタスク】\n{current_task_json}\n\n"
+        + (f"🎯 【このタスクで特に注意すべき観点（Orchestratorより）】\n{expert_focus_guidance}\n\n" if expert_focus_guidance else "")
+        + f"【現在のタスク】\n{current_task_json}\n\n"
         f"【この値は確定済みです。再導出しないでください】\n{verified_facts_json}\n\n"
         f"【未充足の要求項目】\n{remaining_criteria_text}\n\n"
         "他タスクのowns_variablesに該当する内容は新たに算出・提案しないでください。\n"
@@ -2811,6 +2876,10 @@ def call_detector(state: LineageState, target_role: str) -> dict:
     """
  
     recent_decitions = json.dumps(get_decisions_from_db(get_active_conn(), state["run_id"])[-2:], ensure_ascii=False)
+    # [BL-062] Detectorがmajor判定を出した際、対象のtopicをtarget_topicとしてSUPERSEDEできるよう、
+    # 既存の【決定事項DB】（topic名・ID）を提示する。従来はDetectorに一切見えておらず、
+    # write_agreementの権限（status='Rejected'）はあってもtarget_topicを指定する材料がなかった。
+    agreements_text = _build_agreements_context_from_db(get_active_conn(), state["run_id"])
     recent_history = state["chat_history"][-2:]
     history_text = "\n".join([f"{'[User]' if m['role']=='user' else '[AI]'}\n {m['content']}" for m in recent_history])
     goal = state["goal"]
@@ -2966,16 +3035,21 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"思考の過程で気になった点・将来的なリスクの芽・引っかかった前提などがあれば、"
         f"'observations'に自由記述で書き残してください（無ければ空文字でよい）。"
         f"これは判定を左右するものではなく、後続の議論のために参考情報として引き継がれます。\n\n"
-        f'Return ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
+        f"【BL-076: 指摘箇所の引用】constraint_issueがminor/majorの場合、上記ホワイトボードの本文から、"
+        f"指摘対象の箇所を一字一句そのまま（改変・要約せず）1〜2文だけ引用し'target_excerpt'に"
+        f"入れてください（ホワイトボードへの注釈挿入に機械的に使うため、正確な引用が必須です）。"
+        f"noneの場合や、ホワイトボードが存在せず引用できない場合は空文字にしてください。\n\n"
+        f'Return ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用（無ければ空文字）", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
     )
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
         domain_prompt, client=client_auditor, model=model_auditor, label="Detector (Domain Review)",
-        tools=None, fallback={"constraint_issue": "none", "comment": "", "observations": ""},
+        tools=None, fallback={"constraint_issue": "none", "comment": "", "target_excerpt": "", "observations": ""},
     )
     if domain_parse_failed:
         print("🚨 [Detector] ドメイン妥当性レビューのJSON判定取得に失敗しました。フェイルクローズ(major)します。")
         domain_constraint_issue = "major"
         domain_comment = "(ドメイン妥当性レビューのJSON解析失敗のためフェイルクローズしました)"
+        domain_target_excerpt = ""
         domain_observations = ""
     else:
         print(f"【Detectorの判定結果(JSONパース後・ドメイン妥当性レビュー)】\n{domain_parsed}\n")
@@ -2983,6 +3057,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         if domain_constraint_issue not in ("none", "minor", "major"):
             domain_constraint_issue = "none"
         domain_comment = domain_parsed.get("comment", "")
+        domain_target_excerpt = domain_parsed.get("target_excerpt", "") or ""
         domain_observations = domain_parsed.get("observations", "") or ""
 
     # [BL-054] 第2段: 数値監査（検算）パス。先に実施したドメイン妥当性レビューの結果を
@@ -3030,6 +3105,13 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"{thought_process_audit}\n"
         f"System Goal: {goal}\n"
         f"Recent Decisions（参考程度）: {recent_decitions}\n\n"
+        f"【プロジェクトの合意・決定事項・検討状況DB】\n{agreements_text}\n\n"
+        f"【BL-062: 既存Agreementの無効化】constraint_issue=\"major\"と判定し、その原因が上記DB内の"
+        f"特定のtopic（例：既にApprovedとして記録されている数値や決定）にある場合、commentに書くだけで"
+        f"終わらせず、write_agreementツールをaction_type=\"SUPERSEDE\", status=\"Rejected\", "
+        f"target_topic=\"<上記DBのtopic文字列そのまま>\", reason_why=\"<何が誤りでなぜ無効化するか>\" "
+        f"として呼び出し、DB上のその記録を実際に無効化してください。そうしないと、あなたが誤りと判定した"
+        f"内容が「承認済み」としてDBに残り続け、後続タスクや最終統合が誤って参照してしまいます。\n\n"
         f"【BL-023: 現在タスクのacceptance_criteria充足チェック】\n"
         f"以下は現在のタスクで検証されるべき独立した主張の一覧です（インデックス0始まり）。\n"
         f"{criteria_text}\n"
@@ -3048,20 +3130,24 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"思考の過程で気になった点・将来的なリスクの芽・引っかかった前提などがあれば、"
         f"'observations'に自由記述で書き残してください（無ければ空文字でよい）。"
         f"これは判定を左右するものではなく、後続の議論のために参考情報として引き継がれます。\n\n"
-        f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由", "criteria_status": [true/false, ...], "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
+        f"【BL-076: 指摘箇所の引用】constraint_issueがminor/majorの場合、上記ホワイトボードの本文から、"
+        f"指摘対象の箇所を一字一句そのまま（改変・要約せず）1〜2文だけ引用し'target_excerpt'に"
+        f"入れてください（ホワイトボードへの注釈挿入に機械的に使うため、正確な引用が必須です）。"
+        f"noneの場合や、ホワイトボードが存在せず引用できない場合は空文字にしてください。\n\n"
+        f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由", "criteria_status": [true/false, ...], "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用（無ければ空文字）", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
     )
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
     _CURRENT_CALLER_ROLE = "detector"
     _CURRENT_TASK_ID = state.get("current_task_id", "")
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_auditor, model=model_auditor, label="Detector",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "observations": ""},
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
     )
     if parse_failed:
         # [SAFETY] D-005: 層2リトライを使い切った場合はフェイルオープン（none）ではなくフェイルクローズ（major）に倒す。
         # F-2.6検算ゲート導入の目的（暗算を信用しない）と、判定データ欠落時のフェイルオープンは相容れないため。
         print("🚨 [Detector] 層2リトライを使い切ってもJSON判定を取得できませんでした。フェイルクローズ(major)します。")
-        return {"risk": "low", "constraint_issue": "major", "comment": "(判定JSON解析失敗のためフェイルクローズしました)", "criteria_status": [], "observations": domain_observations}
+        return {"risk": "low", "constraint_issue": "major", "comment": "(判定JSON解析失敗のためフェイルクローズしました)", "criteria_status": [], "target_excerpt": domain_target_excerpt, "observations": domain_observations}
     print(f"【Detectorの判定結果(JSONパース後・数値監査パス)】\n{parsed}\n")
     risk = parsed.get("risk", "low")
     if risk not in ("low", "medium", "high"):
@@ -3070,6 +3156,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
     if numeric_constraint_issue not in ("none", "minor", "major"):
         numeric_constraint_issue = "none"
     numeric_comment = parsed.get("comment", "")
+    numeric_target_excerpt = parsed.get("target_excerpt", "") or ""
     numeric_observations = parsed.get("observations", "") or ""
     criteria_status = parsed.get("criteria_status", [])
     if not isinstance(criteria_status, list):
@@ -3086,6 +3173,13 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         comment_parts.append(f"【数値監査】{numeric_comment}")
     comment = "\n".join(comment_parts)
 
+    # [BL-076] ホワイトボードへの注釈挿入に使うtarget_excerptは、実際に採用された
+    # constraint_issueの重篤度を出した側のパスの引用を優先する（両方あればドメイン優先）。
+    if _severity_order[domain_constraint_issue] >= _severity_order[numeric_constraint_issue]:
+        target_excerpt = domain_target_excerpt or numeric_target_excerpt
+    else:
+        target_excerpt = numeric_target_excerpt or domain_target_excerpt
+
     # [BL-051軽量版] 両パスの気づき欄を統合。severityとは独立に、非空であれば毎回蓄積対象とする。
     observations_parts = []
     if domain_observations:
@@ -3096,7 +3190,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
 
     return {
         "risk": risk, "constraint_issue": constraint_issue, "comment": comment,
-        "criteria_status": criteria_status, "observations": observations,
+        "criteria_status": criteria_status, "target_excerpt": target_excerpt, "observations": observations,
     }
 
 def call_decision_extractor(chat_history: list[dict], existing_topics: list[str], target_role: str,
@@ -3236,19 +3330,13 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
         🚨 【成果物抽出に関する絶対ルール】 🚨
         1. CREATE(新規作成)時: AIが提示した成果物の「全文」をそのまま content に格納せよ。絶対に短く要約してはいけない。
         2. UPDATE(更新)時: Userが「承認」「条件付き承認」「却下」などの評価をしただけで、AI側から新しい成果物本文の提示がない場合、content は【必ず空文字 ""】にせよ。「承認された」などの短い説明文を絶対に入れないこと。
-    
-        【3次元情報の付与】
-        各Decision/Deliverableには以下のメタ情報を必ず付与してください。
-        - abstraction_level: "concept"(概念) / "constraint"(制約) / "design"(設計) / "impl"(実装・PoC)
-        - scope: "global"(全体) / "phase"(フェーズ内) / "local"(限定的)
-        - time_axis: "assumption"(仮定) / "current"(確定) / "risk"(未検証リスク) / "validated"(検証済)
-        
+
         ■ 既存のトピック一覧:
         {topics_list}
-        
+
         ■ 直近の会話ログ:
         {text}
-        
+
         Return ONLY JSON format like this:
         {{
         "extracted_events": [
@@ -3256,15 +3344,12 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
             "action_type": "CREATE/UPDATE",
             "entry_type": "Decision/Directive/Deliverable",
             "target_topic": "UPDATEの場合のみ必須",
-            "status": "Proposed/Approved/Approved_with_Conditions/Rejected/Implicitly_Accepted", 
+            "status": "Proposed/Approved/Approved_with_Conditions/Rejected/Implicitly_Accepted",
             "topic": "話題の簡潔なタイトル",
             "content": "提案内容(Deliverableの更新時は必ず空文字に)",
             "rationale": "抽出理由",
             "proposed_by": "Agent/User",
             "phase_id": "現在のフェーズID",
-            "abstraction_level": "concept/constraint/design/impl",
-            "scope": "global/phase/local",
-            "time_axis": "assumption/current/risk/validated",
             "depends_on": ["依存する既存topic名があれば配列で"],
             "resource_claims": {{"予算": {{"phase_id": "task_1_1", "value": 1000000, "total_cap": 100000000}}}} // 上限のある共有リソースを消費する場合のみ記述
             }}
@@ -3285,12 +3370,6 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
     🚨 【成果物抽出に関する絶対ルール】 🚨
     1. CREATE(新規作成)時: AIが提示した成果物の「全文」をそのまま content に格納せよ。絶対に短く要約してはいけない。
     2. UPDATE(更新)時: Userが「承認」「条件付き承認」「却下」などの評価をしただけで、AI側から新しい成果物本文の提示がない場合、content は【必ず空文字 ""】にせよ。「承認された」などの短い説明文を絶対に入れないこと。
-    
-    【3次元情報の付与】
-    各Decision/Deliverableには以下のメタ情報を必ず付与してください。
-    - abstraction_level: "concept"(概念) / "constraint"(制約) / "design"(設計) / "impl"(実装・PoC)
-    - scope: "global"(全体) / "phase"(フェーズ内) / "local"(限定的)
-    - time_axis: "assumption"(仮定) / "current"(確定) / "risk"(未検証リスク) / "validated"(検証済)
 
     [BL-050] action_type="UPDATE"（既存topicの値を変更する）の場合、rationale には
     「新しい値が何故妥当か」だけでなく「前の値から何故・どう変わったのか」を必ず明記してください。
@@ -3323,9 +3402,6 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
             "proposed_by": "Agent または User",
             "phase_id": "現在のフェーズID",
             "task_id": "現在のタスクID（分からなければ空文字）",
-            "abstraction_level": "concept/constraint/design/impl",
-            "scope": "global/phase/local",
-            "time_axis": "assumption/current/risk/validated",
             "owned_variable_values": {{"変数名": "値（該当なければ空オブジェクト{{}}）"}}
             }}
         ],
@@ -3885,7 +3961,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
     _CURRENT_CALLER_ROLE = "user"
     _CURRENT_TASK_ID = state.get("current_task_id", "")
-    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, FREEZE_AGREEMENT_TOOL])
+    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL])
 
     if content is None or content.strip() == "" or content == "(APIから空の応答が返されました)":
         for retry in range(3):
@@ -3893,7 +3969,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             # global宣言は既に上の行で完了しているため再宣言不要
             _CURRENT_CALLER_ROLE = "user"
             _CURRENT_TASK_ID = state.get("current_task_id", "")
-            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, FREEZE_AGREEMENT_TOOL])
+            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL])
             if content and content.strip() and content != "(APIから空の応答が返されました)":
                 break
         else:
@@ -4053,6 +4129,10 @@ def orchestrator_node(state: LineageState) -> LineageState:
           {decision}\n\n
           """)
     state["selected_expert"] = result["expert"]
+    # [BL-078] Orchestratorが専門家選定時に考えたタスク固有の着眼点・注意点をExpertへ引き継ぐ。
+    state["expert_focus_guidance"] = result.get("focus_guidance", "")
+    if state["expert_focus_guidance"]:
+        print(f"  🎯 [Focus Guidance] {state['expert_focus_guidance']}")
     db_append_decision(decision, get_active_conn(), state["run_id"])
     return state
 
@@ -4069,19 +4149,13 @@ Updates system state with the expert's output, decisions, and conversational his
             state["chat_history"].pop()
             state["expert_retry_count"] += 1
             print(f"♻️ [Expert AI] 差し戻しのため、直前のNG発言を履歴から取り消しました。")
-        # [R4/F-7.3] 直前ターンでExpertがwhiteboard_draftsに新バージョンを書き込んでいた場合、
-        # Detectorのmajor判定を受けてロールバックする（バージョンは巻き戻さず、ロールバック自体を
-        # 新バージョンとして追記する方式。cela_r4_design.md §2.3）。
-        last_edit = state.get("expert_last_whiteboard_edit")
-        if last_edit:
-            issue_log = state.get("constraint_issue_log") or []
-            rollback_reason = issue_log[-1].get("comment", "Detector major判定") if issue_log else "Detector major判定"
-            rollback_whiteboard(
-                get_active_conn(), state["run_id"], last_edit["phase_id"], last_edit["task_id"],
-                reason=rollback_reason
-            )
-            print(f"♻️ [Whiteboard] Detector major判定を受け、phase={last_edit['phase_id']} task={last_edit['task_id']} のホワイトボードをロールバックしました。")
-            state["expert_last_whiteboard_edit"] = None
+        # [BL-075/D-047] F-7.3のwhiteboardロールバックは撤廃した。ロールバックは常に「1つ前の
+        # バージョンが健全」という前提だったが、major判定が毎回別の新しい懸念を指摘するケースでは
+        # rows[1]が過去に別件でmajor判定された版であることがあり、機械的に2版前へ戻すことで
+        # 既に修正済みだった問題（例: 有給休暇日数の労基法違反修正）を無警告で再導入していた
+        # （実ドライランで確認）。現在はホワイトボードの最新内容をそのまま保持し、Expertが
+        # Detectorの指摘箇所のみを差分編集（部分修正）で直す方針とする（call_expertのプロンプト参照）。
+        state["expert_last_whiteboard_edit"] = None
     else:
         state["expert_retry_count"] = 0
 
@@ -4166,7 +4240,6 @@ Manages state updates including risk levels, constraint logging, and decision re
         f"comment: {result['comment']}\n"
         f"observations（気づき・懸念、参考情報）: {result.get('observations', '') or '(なし)'}\n"
     )
-    state["risk_flag"] = result["risk"]
     state["constraint_issue"] = result["constraint_issue"]
 
     criteria_status = result.get("criteria_status", [])
@@ -4210,6 +4283,20 @@ Manages state updates including risk levels, constraint logging, and decision re
     )
     _conn = get_active_conn()
     db_append_decision(decision, _conn, state["run_id"])
+
+    # [BL-076] Expertの成果物（ホワイトボード）に対するmajor判定の場合、指摘をプロンプト注入
+    # だけでなくホワイトボード本文にも永続的な注釈として埋め込む。target_excerptがホワイトボード内で
+    # 一意に特定できない場合は挿入しない（誤った位置への注釈でExpertを混乱させないため）。
+    if result["constraint_issue"] == "major" and target_role == "assistant":
+        _phase_id_for_annotation = state.get("current_phase", {}).get("phase_id", "")
+        if current_task_id and _phase_id_for_annotation:
+            annotated = _annotate_whiteboard_with_detector_comment(
+                _conn, state["run_id"], _phase_id_for_annotation, current_task_id,
+                target_excerpt=result.get("target_excerpt", ""), comment=result["comment"],
+                decision_id=decision["id"],
+            )
+            if annotated:
+                print(f"  🔴 [Whiteboard Annotated] Detector指摘をホワイトボードに注釈として埋め込みました（decision_id={decision['id']}）。")
 
     this_turn_decisions = get_decisions_from_db(_conn, state["run_id"])[1:]
 
@@ -4307,9 +4394,6 @@ def decision_extractor_node(state: LineageState) -> LineageState:
         current_phase = state.get("current_phase", {})
         phase_id = item.get("phase_id", current_phase.get("phase_id", "unknown"))
         task_id = item.get("task_id") or state.get("current_task_id", "")
-        abstraction_level = item.get("abstraction_level", "design")
-        scope = item.get("scope", "local")
-        time_axis = item.get("time_axis", "assumption")
         depends_on = item.get("depends_on", [])
         resource_claims = item.get("resource_claims", {})
 
@@ -4388,11 +4472,10 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                     new_content = "(状態のみ更新)"
                 
                 agreement: Agreement = {
-                    "id": f"AG-{int(time.time() * 1000)}", "turn": state["turn_count"],
+                    "id": f"AG-{int(time.time() * 1000)}", "timestamp": time.time(),
                     "action_type": "UPDATE", "entry_type": entry_type, "status": status,
                     "topic": target_topic, "decision_what": new_content, "reason_why": rationale,
                     "proposed_by": proposed_by, "phase_id": phase_id, "task_id": task_id,
-                    "abstraction_level": abstraction_level, "scope": scope, "time_axis": time_axis,
                     "depends_on": depends_on, "resource_claims": resource_claims
                 }
                 db_append_agreement(agreement, _conn, _run_id)
@@ -4402,13 +4485,15 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                     why=f"[{proposed_by}] {rationale}"
                 )
                 db_append_decision(decision_log, _conn, _run_id)
+                # [BL-073] Deliverableが承認された場合、対応するtask_idのDirectiveをApprovedへ解決する。
+                if entry_type == "Deliverable" and status in RESOLVING_DELIVERABLE_STATUSES:
+                    _resolve_directive_for_task(_conn, _run_id, task_id, phase_id, resolved_by=proposed_by)
             else:
                 agreement: Agreement = {
-                    "id": f"AG-{int(time.time() * 1000)}", "turn": state["turn_count"],
+                    "id": f"AG-{int(time.time() * 1000)}", "timestamp": time.time(),
                     "action_type": action_type, "entry_type": entry_type, "status": status,
                     "topic": topic, "decision_what": content, "reason_why": rationale,
                     "proposed_by": proposed_by, "phase_id": phase_id, "task_id": task_id,
-                    "abstraction_level": abstraction_level, "scope": scope, "time_axis": time_axis,
                     "depends_on": depends_on, "resource_claims": resource_claims
                 }
                 db_append_agreement(agreement, _conn, _run_id)
@@ -4421,7 +4506,7 @@ def decision_extractor_node(state: LineageState) -> LineageState:
             
             print(f"\n  📝 [Extract] {agreement['action_type']} - {agreement['entry_type']}: {agreement['topic']}")
             print(f"     ├ Status: {agreement['status']} | By: {agreement['proposed_by']}")
-            print(f"     ├ Meta  : Phase={agreement['phase_id']} | Level={agreement['abstraction_level']} | Scope={agreement['scope']} | Time={agreement['time_axis']}")
+            print(f"     ├ Meta  : Phase={agreement['phase_id']}")
             print(f"     ├ Reason: {agreement['reason_why']}")
         else:
             print(f"  ⏭️ [decision_extractor] write_agreementが呼ばれたため、ExtractからAgreement書き込みをスキップしました（topic: {topic}）")
@@ -4583,7 +4668,7 @@ def integrator_node(state: LineageState) -> LineageState:
         
         # Lineage (意思決定の由来) データの挿入
         master_document.append("\n### 💡 意思決定の由来 (Decision Lineage)\n")
-        master_document.append(f"- **合意ID**: `{d['id']}` (Turn {d['turn']} に確定)")
+        master_document.append(f"- **合意ID**: `{d['id']}`")
         master_document.append(f"- **検討の背景と根拠**: {d.get('reason_why', '記載なし')}")
         if d.get("resource_claims"):
             master_document.append(f"- **関連リソース・制約**: {json.dumps(d['resource_claims'], ensure_ascii=False)}")
@@ -4607,8 +4692,7 @@ def integrator_node(state: LineageState) -> LineageState:
 
         # 矛盾がなければ、完成した統合ドキュメントをDBに登録
         db_append_agreement({
-            "id": f"AG-MASTER-{int(time.time() * 1000)}",
-            "turn": state["turn_count"],
+            "id": f"AG-MASTER-{int(time.time() * 1000)}", "timestamp": time.time(),
             "action_type": "CREATE",
             "entry_type": "Deliverable",
             "status": "Proposed", # Reviewerの審査待ち
@@ -4617,9 +4701,6 @@ def integrator_node(state: LineageState) -> LineageState:
             "reason_why": "全タスクの承認済み成果物を自動結合",
             "proposed_by": "System Integrator",
             "phase_id": "All",
-            "abstraction_level": "constraint",
-            "scope": "global",
-            "time_axis": "current",
             "depends_on": [d["id"] for d in deliverables],
             "resource_claims": {}
         }, _conn, _run_id)
@@ -4997,7 +5078,6 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
             "round_count": 0,
             "max_turns":  config["initial_max_turnval"],
             "reflection_interval": config["reflection_interval"],
-            "risk_flag": "low",
             "drift_flag": False,
             "halt": False,
             "agent_has_guardrail": config["agent_has_guardrail"],
