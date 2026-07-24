@@ -821,6 +821,20 @@
 
 ---
 
+## 論点70: 1216ドライランのフォレンジック調査で判明したBL-076の実発火0件、target_excerpt完全一致の脆さのBL-074への統合、Claude Code方式との比較からのBL-079分離（BL-074・D-050、BL-079）
+
+- **発端:** ユーザーが「1216のログを読み、BLの修正や追加が効いているか調査して」と依頼。`log/2026-07-24/1216/log_no_prompt.md`をAIがフォレンジック調査。
+- **AIの調査:** BL-073（Directive自動解決）・BL-062（SUPERSEDE配線）・BL-078（focus_guidance）・F-2.1/F-3.7（思考プロセス監査）は実際に発火・機能していることを確認できた。一方BL-076（ホワイトボード注釈）は、`constraint_issue=major`かつ`target_role=assistant`の判定が複数回発生し`target_excerpt`も正しく出力されていたにもかかわらず、成功時に出るはずの`🔴 [Whiteboard Annotated]`ログが一度も出現しないことを発見。`_annotate_whiteboard_with_detector_comment`のソースを確認したところ、完全一致依存に加え、失敗時は`return False`のみでログが一切出ないサイレント失敗であることが原因と特定した。実際のケースでは、Detector自身が「AIの発言と実際のホワイトボードの内容が一致していない」という乖離を独立に発見しており（BL-062のSUPERSEDE運用に繋がった一件）、これが一致失敗の典型パターンだったと推測される。
+- **ユーザーの判断:** 「BL-076の文字列完全一致のもろさ問題は074に統合」と指示。対策として「失敗時にも理由付きログを出す（0件一致/複数件一致を区別）」「一致失敗時のフォールバックとして正規化（改行・全角半角・太字記法除去等）した緩い一致を試す」の2点を提示した上で、「そもそもClaude Codeと同じやり方がハードルが高かった？」と、なぜCELAのtarget_excerpt完全一致は実運用で頻発に失敗するのに、Claude Code自身のEditツール（同じく完全一致方式）は実運用で機能しているのか、根本的な問いを投げかけた。
+- **AIの分析:** Claude CodeのEditツールが機能するのは、(1) LLMがその場で読んだばかりのファイル内容から引用する、(2) 不一致時にツール結果として即座にエラーが返り、同一ターン内でLLM自身がリトライできる、の2点が揃っているためと分析。CELAの`_annotate_whiteboard_with_detector_comment`はDetectorのツールループ完了後の後処理として呼ばれるため、(2)を構造的に欠いており、Detector自身は自分の引用が的を外したことを知る術がない。ハードルが高いのはexact-match方式そのものではなく、Claude Codeが持つ「即時失敗フィードバック→同一ターンでの自己修正」という構造をCELAが移植していなかった点だと回答した。
+- **ユーザーの追加判断:** 「一致失敗をDetector自身に返して同一呼び出し内でリトライさせる構造 これは取り入れましょう。AIの思考ログを見ている限りでは、他のツールではフィードバックがあれば、あの手この手を試して何とかツールをしようと思考錯誤している様子がみてとれます」と、リトライ構造の採用自体は承認。ただし「とりあえずログ＋正規化フォールバックとして、リトライはBL化」と、実装範囲を今回は即応可能な2点（理由ログ・正規化フォールバック）に絞り、Detector自身へのフィードバック＆同一ツールループ内リトライという構造変更はBL-079として別途起票するに留める判断をした。
+- **実装内容:** `_annotate_whiteboard_with_detector_comment`の戻り値を`bool`から`tuple[bool, str]`へ変更し、`detector_node`が失敗時にも理由付きでログ出力するよう変更。新設`_normalize_for_loose_match`（改行・空白・Markdown太字記法・全角半角を吸収し、元の文字列位置へのindex_mapを保持）で正規化後の緩い一致にフォールバックする処理を追加。
+- **決定者:** t-momose（1216ログ調査の依頼、BL-074への統合判断、対策範囲の絞り込み、BL-079分離の承認）、Claude Sonnet 5（フォレンジック調査による発見、Claude Code方式との比較分析、技術設計・実装）
+- **検証:** 新規`tests/test_bl074_annotation_loose_match_fallback.py`（5件）、既存`tests/test_bl076_whiteboard_detector_annotation.py`をタプル戻り値に合わせて更新。オフラインスモークテスト計122件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。実LLM再ドライランでの効果確認は次回待ち。
+- **関連:** [D-050](decision_log.md#d-050-ホワイトボード注釈のtarget_excerpt一致失敗をbl-074へ統合しログ出力正規化フォールバックで対応するリトライ構造はbl-079へ分離)、[BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)、[BL-076](issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)、[BL-079](issue_backlog.md#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる設計検討未着手)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
