@@ -117,6 +117,7 @@
 | BL-083 | 高 | `cela_main.py` (`_query_AI_live`の例外タプル) | BL-082コミット後の実ドライラン（`log/2026-07-24/1459`）で、Expert(iter=7)がedits編集を行おうとした直後、streaming受信中に相手ホストから強制切断（Windows `WinError 10054`）され、生の`httpx.ReadError`（`httpcore.ReadError`由来）が絞り込んだ例外タプルに含まれず未捕捉のままプロセス全体がクラッシュした。BL-059（`httpx.RemoteProtocolError`）/BL-072（`httpx.TimeoutException`）と同型の再発で、BL-081/BL-082のロジックとは無関係な純粋なネットワーク層の例外クラス漏れ。例外タプルに`httpx.ReadError`を追加して対応 | P0 |
 | BL-084 | 高 | `cela_main.py` (`_commit_agreement_from_tool`のSUPERSEDE/UPDATE分岐、新設`_find_active_deliverable_agreement`) | ユーザー依頼で`log/2026-07-24/1459`をレビューする中で発見。BL-081実装後にもかかわらず`edits`が2回とも「old_textが見つかりませんでした（正規化後の緩い一致も0件）」で失敗していたため実際に再現テストしたところ、old_text自体は完全一致（127文字差分0）しており、BL-081の正規化ロジックには問題がないことを確認。真因は`_commit_agreement_from_tool`がUPDATE/SUPERSEDE対象を`target_topic`（省略時は自分自身のtopicにフォールバック）の文字列完全一致で検索していたこと。Expertが`target_topic`を一度も送らず、呼び出しごとにtopicの言い回しを変えていた（実例あり）ため既存行と一致せず`old_content`が空文字のまま渡され、`_apply_text_edits("", edits)`が常に0件/0件で失敗していた。BL-074の完了条件「Deliverable本体のtask_id識別への切替はまだ`open`」がまさにこれで、BL-081のフォールバック強化だけでは原理的に解決できないことが実害で裏付けられた。新設`_find_active_deliverable_agreement`で(phase_id, task_id)識別に切替（Decision/Directiveはスコープ外、従来通り） | P0 |
 | BL-085 | 低 | `cela_main.py` (新設`_write_whiteboard_to_file`、`apply_whiteboard_patch`) | ユーザーから「ホワイトボードの中身を保存時にファイルに書き出してほしい」と要望。従来`whiteboard_drafts`はDB（sqlite）のみに保存され、中身を確認するにはクエリが必要だった。`apply_whiteboard_patch`から新設`_write_whiteboard_to_file`を呼び、保存の都度`{log_dir}/whiteboards/{phase_id}_{task_id}_V{version}.md`へバージョンごとに個別ファイルとして書き出す（DBのappend-onlyバージョニングと同じく上書きしない）。BL-027と同じ理由で、`MultiLogger._instance`が未初期化（テスト/import時）の場合は書き出しをスキップし、本番log/配下のテスト汚染を防止 | P3 |
+| BL-086 | 高 | `cela_main.py`（新設`goal_escalations`テーブル、`escalate_premise_concern`/`resolve_premise_concern`/`revise_goal`ツール、`FREEZE_AGREEMENT_TOOL`の再配線、`call_expert`/`generate_user_utterance`/`generate_user_utterance_node`/`call_detector`） | ユーザーが1459ログ由来の「オンデマンド交通なのに予算制約から逆算して35人乗りバスを導入する」矛盾を指摘し、そもそも論の視座（高齢者の移動手段確保という本質的課題）に立ち返って前提自体を見直せる経路が無いことを議論。Expertは`absolute_constraints`の文言を厳守することしかできず前提の矛盾を表明する手段が無いこと、User AIが例外を承認してもFreeze機構（D-045で無効化中）が無いためDetectorの独立監査で無限に再燃しうること、`state["goal"]`を改定する手段が無くGoalShiftEventが書きっぱなしで何も消費されないこと（BL-065）の三重の構造的欠陥を特定。ユーザー指示「エスカレーション経路を作り込み、freezeを復活させ、本質的課題の解決という視点に登り当初目標を越境しても最適な着地点に到達できるように」に基づき、Plan mode（Exploreエージェント3件＋Planエージェント1件、全行番号を直接検証済み）で設計し実装。Expert/User AIが構造化してエスカレーションを提起する`escalate_premise_concern`（narrow channel、BL-025のスコープガードレールは変更せず）、User AI専用の却下`resolve_premise_concern`・承認＋ゴール改定`revise_goal`（`_apply_text_edits`を`state["goal"]`にも再利用、承認時にFreezeも同時実行可能）を新設。`state["goal"]`は9箇所の消費者が毎ターン再埋め込みするため、`generate_user_utterance_node`の1箇所で書き換えるだけで全消費者に自動伝播。Freezeを`generate_user_utterance`のtoolsへ再配線し、`call_detector`の両監査パスに🔒Freeze済み項目を尊重する指示を追加（BL-062自身の欠落を解消） | P1 |
 
 ---
 
@@ -2675,6 +2676,46 @@ BL-027（`MultiLogger`のimport時副作用防止）と同じ理由で、`getatt
 - 新規`tests/test_bl085_whiteboard_file_writeback.py`（3件）: `MultiLogger`初期化済み時にバージョンごとのファイルが書き出されること（内容・ヘッダー・旧版との非混在を確認）、未初期化時は`apply_whiteboard_patch`・`_write_whiteboard_to_file`のいずれもファイルを書き出さないこと。
 - オフラインスモークテスト計150件Pass（既存147件＋新規3件）、`python -m py_compile`合格。テスト実行後も実プロジェクトの`log/`配下に新規ディレクトリが生成されていないことを目視確認。
 - 実LLM再ドライランでの動作確認（実行のたびに`log/<date>/<time>/whiteboards/`へファイルが生成されること）は次回待ち。
+
+---
+
+### BL-086: 前提エスカレーション経路 + Freeze復活 + ゴール改定（GoalShiftEventの実消費化）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | [D-056](decision_log.md#d-056-前提エスカレーションをツール呼び出し型で実装する)、[D-057](decision_log.md#d-057-freeze機構を再有効化しdetectorのプロンプトに尊重指示を追加する)、[D-058](decision_log.md#d-058-stategoalへの部分パッチとgoalshifteventの新規shift_kindpremise_revisionでゴール改定を実消費化する)、[BL-025](issue_backlog.md#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする)（スコープガードレールは変更せず維持）、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（Freeze一時休止の原因、今回両立させた）、[BL-065](issue_backlog.md#bl-065-r5で新設したdb永続化情報internal_thought_processgoal_shift_eventsの消費表示経路が未設計)（GoalShiftEventの書きっぱなし問題、今回初めて消費経路ができた） |
+
+**内容:**
+
+ユーザーが`log/2026-07-24/2054`の抽出済みホワイトボードをレビューする中で、「必要車両台数を2台、35人定員としているが、オンデマンドバスで35人乗りは変では」と指摘。調査の結果、この矛盾は`task_2_1`（[phase_2_task_2_1_V1.md](../../log/2026-07-24/2054/whiteboards/phase_2_task_2_1_V1.md)）で予算制約（導入台数上限2台）を先に固定し、そこから「ピーク需要をρ<1で捌くには定員をいくつまで上げればよいか」を逆算した結果であり、オンデマンド輸送は本来分散した需要に小型車両で即応するのが定石であるという前提とは根本的に矛盾していることが判明した。
+
+ユーザーがさらに「そもそも論というか、視座の設計が大事」「今の状態ではコンサルが数字をこねくり回して実際のPOCで即死するのが見える」と、より一般的な構造上の問題を指摘。調査の結果、以下の三重の構造的欠陥を特定した。
+
+1. Expertは`absolute_constraints`の文言を厳守することしかできず、「この制約の立て方自体が本来解決すべき課題（高齢者の移動手段確保）に対して逆効果かもしれない」と気づいても表明する手段が無い（BL-025のスコープガードレールは他タスクへの越権防止が目的で、そもそも論を封じる意図ではないが、結果的に同じ「厳しく限定された思考空間」を作っている）。
+2. たとえUser AIが例外を承認しても、それを恒久的にピン留めする`Freeze`機構はD-045で意図的に無効化されたままであり、次のDetector監査で同じ論点が独立に`major`判定→SUPERSEDEされ承認が無限に覆される（BL-062はDetectorの独立した正しさを守るために作られたが、その代償として「人間が既に審議した例外」を区別する手段が失われた）。
+3. ゴール自体（`state["goal"]`という単一文字列）を書き換える手段が無く、`GoalShiftEvent`（`detect_goal_shift`/`goal_shift_events`）は`arbiter_node`の資源再配分判定からしか発火せず、発火してもDB書き込みのみで何も消費しない「書きっぱなし」（BL-065）。
+
+ユーザーの指示「エスカレーション経路を作り込み、freezeを復活させ、高齢者の移動手段の確保という本質的課題の解決という視点に登り、当初目標を越境しても最適な着地点に到達できるようにしたい」を受け、Plan mode（Exploreエージェント3件による現状調査＋Planエージェント1件による設計、全ての重要な行番号・関数シグネチャを直接読み込みで裏取り済み）で設計・実装した。
+
+**対応（実装済み）:**
+
+1. 新設`goal_escalations`テーブル（単発の意思決定レコード、版管理文書の`plan_drafts`とは性質が異なるため独立テーブルとした）。
+2. 新設ツール3種: `escalate_premise_concern`（Expert・User AI双方が呼べる、BL-025のスコープガードレールは一切変更せず「提起のみ・スコープ外行動の許可ではない」旨をツール説明文自体に明記）、`resolve_premise_concern`（User AI専用、却下）、`revise_goal`（User AI専用、承認・ゴール改定。`state["goal"]`という長大プローズ文への部分パッチに、Deliverable編集で実績のある`_apply_text_edits`をそのまま再利用し全文置換による想定外欠落を回避。任意で`freeze_agreement_id`を指定すればその場でFreezeも実行）。
+3. ツールハンドラはLangGraph stateに直接触れられないため、`_LAST_WRITE_AGREEMENT_SUCCEEDED`等と同型の「直前アクション」モジュールグローバル`_LAST_GOAL_REVISION`＋getterを新設し、`generate_user_utterance_node`が`state["user_wrote_agreement"] = ...`と同じ並びで`state["goal"]`へ反映する。`state["goal"]`は9箇所の消費者（call_expert/call_detector/call_resource_arbiter等）が毎ターン新鮮に再埋め込むため、この1箇所の代入だけで全消費者に自動伝播する（個別配線不要）。
+4. `revise_goal`は`db_append_goal_shift_event`（既存の書き込み関数）を使い新規`shift_kind="premise_revision"`、`triggered_by="Escalation_Resolution"`、`from_goal_state`/`to_goal_state`に実際の改定前後テキストを記録する。GoalShiftEventにとって、arbiter経由の`constraint_hit`に次ぐ初の実効的な発火・消費経路となる。
+5. Freeze（`FREEZE_AGREEMENT_TOOL`/`freeze_agreement`/`is_frozen`ガード）をD-045以来初めて`generate_user_utterance`のtools（User AI）へ再配線。あわせて、Freeze復活の前提となる欠落——`call_detector`が🔒Freeze済み項目の意味を一切知らなかった問題——を解消するため、ドメイン妥当性パス（新設`_get_frozen_agreements_text`で軽量に埋め込み）・数値監査メインパスの両方に「🔒項目は人間が既に審議し承認した意図的な例外であり、同じ論点をmajor/minorの根拠にしない（ただし新規の別問題は従来通り厳格に評価）」という指示を追加した。
+6. Expert向け`_get_escalation_status_text_for_expert`（Open/Rejectedのみ表示、Acceptedは`state["goal"]`自体が既に改定済みのため二重通知しない）、User AI向け`_get_open_escalations_text`（未解決分を毎ターン提示し「今回必ず解決する」よう指示、先送りループを防止）を新設し配線。
+
+**完了条件:**
+
+- 新規`tests/test_bl086_escalation_freeze_goal_revision.py`（18件）: エスカレーション提起（役割ゲート・必須項目）、却下パス（役割ゲート・二重解決防止・Decision記録）、承認パス（役割ゲート・未知ID・edits不一致時のOpen維持・goal_escalations/goal_shift_events反映・Freeze同時実行とその後のSUPERSEDE拒否）、`generate_user_utterance_node`の`state["goal"]`反映、3箇所（call_expert/generate_user_utterance/call_detector）の`inspect.getsource`配線確認（ExpertのソースにResolve/Reviseツールが含まれないことでナローチャネルを機械的に保証、DetectorのソースにEscalation系ツールが一切含まれないことも確認）。
+- 既存`tests/test_r5_thought_log_freeze_goalshift.py`（14件）は無変更で全件Pass。
+- `tests/test_bl062_detector_supersede.py`の`test_bl062_freeze_tool_removed_from_user_ai_tools`を`test_bl086_freeze_tool_reactivated_in_user_ai_tools`に更新（対象を`generate_user_utterance_node`から実際にtools=[...]を持つ`generate_user_utterance`へ修正しつつアサーションを反転、D-045からの意図的な転換を明記）。
+- オフラインスモークテスト計168件Pass（既存150件＋新規18件）、`python -m py_compile`合格、`check_docs_consistency.py`合格。
+- 実装計画は`docs/design/r5/cela_r5_escalation_freeze_goalrevision_impl_Plan.md`に保存済み。
+- 実LLM再ドライランでの効果確認（Expertが今回のような前提矛盾に気づいた際に実際に`escalate_premise_concern`を呼び、User AIが`revise_goal`で応答し、次のDetector監査が同じ論点を再度major判定しないこと）は次回待ち。
 
 ---
 

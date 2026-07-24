@@ -843,6 +843,48 @@
 
 ---
 
+### D-056: 前提エスカレーションをツール呼び出し型で実装する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-24 |
+| 状態 | `decided` |
+| 決定者 | t-momose（課題の指摘・エスカレーション経路構築の指示） / Claude Sonnet 5（設計・実装、Explore/Planエージェントによる調査・批判的検証） |
+| **決定理由** | ユーザーが1459ログの「オンデマンド交通なのに35人乗りバス」矛盾を指摘した後、「そもそも論というか、視座の設計が大事」と、より一般的にExpertが制約自体の妥当性を疑い表明する手段が無い構造上の問題を提起。調査の結果、BL-025のスコープガードレールは他タスクへの越権防止が目的であり「そもそも論」を封じる意図ではないが、結果的に同じ限定された思考空間を作っていることが判明した。表明手段の実装方式として、(a) BL-082の`defer_to_task_id`のようにdecision_extractorの事後推論で検出する方式と、(b) `FREEZE_AGREEMENT_TOOL`のような専用ツール呼び出し方式を比較検討した。後者を採用した理由は、前者が「4つの構造化フィールドを自由対話から事後的に正しく分類できるか」という不確実性と追加LLM呼び出しコストを伴うのに対し、後者は同一ターン内で必須フィールドをその場で確実に取得でき、既存の`FREEZE_AGREEMENT_TOOL`という「小さな専用ツールをTOOL_DISPATCHに追加する」パターンがそのまま再利用できるため。 |
+| 決定内容 | 新設ツール`escalate_premise_concern`（Expert・User AI双方が呼べる、narrow channel。ツール説明文自体に「一般的な制約緩和の泣き言ではなく、スコープ外行動の許可でもない」旨を明記しBL-025との非衝突を担保）、`resolve_premise_concern`（User AI専用、却下）、`revise_goal`（User AI専用、承認・ゴール改定）を追加。BL-025のプロンプト文言・ガードレール自体は一切変更していない。新設`goal_escalations`テーブル（単発の意思決定レコード、版管理文書の`plan_drafts`とは性質が異なるため独立テーブル）に永続化し、Expert向け`_get_escalation_status_text_for_expert`（Open/Rejectedのみ）・User AI向け`_get_open_escalations_text`（Open分を提示し今回中の解決を必須化）で各プロンプトへ配線。 |
+| 影響 | `cela_main.py`（新設`goal_escalations`テーブル、3ツール定義・実体関数・`TOOL_DISPATCH`登録、`call_expert`/`generate_user_utterance`の配線）。新規`tests/test_bl086_escalation_freeze_goal_revision.py`。 |
+| 関連 BL | [BL-086](issue_backlog.md#bl-086-前提エスカレーション経路-freeze復活-ゴール改定goalshifteventの実消費化)、[BL-025](issue_backlog.md#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする)（変更せず維持したスコープガードレール）、[BL-082](issue_backlog.md#bl-082-task_plannerの計画をホワイトボード化し先送り事項をタスク間で永続的に申し送りできるようにする)（比較検討した事後推論方式の先例） |
+
+---
+
+### D-057: Freeze機構を再有効化し、Detectorのプロンプトに🔒尊重指示を追加する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-24 |
+| 状態 | `decided` |
+| 決定者 | t-momose（Freeze復活の明示的指示） / Claude Sonnet 5（設計・実装） |
+| **決定理由** | D-045でFreeze機構（`FREEZE_AGREEMENT_TOOL`/`freeze_agreement`/`is_frozen`ガード）は「検証手段のないまま恒久ピン留めするFreezeより、Detectorの正しいmajor判定がApprovedを覆せない矛盾（BL-062）の解消を優先する」判断により、User AIのtoolsから意図的に外され休止していた。しかし今回、User AIが例外を承認しても次のDetector監査で同じ論点が独立に`major`判定→SUPERSEDEされ承認が無限に覆される問題が、エスカレーション解決の実効性を損なうことが判明。調査の結果、Freeze自体（`is_frozen`ガード）はSUPERSEDE/UPDATEをcaller_role非依存でブロックする実装になっており、D-045当時の「Detectorの正しい判断を止めてしまう」という懸念の実体は、`call_detector`のプロンプトが🔒アイコンの意味を一切説明していない（`_build_agreements_context`が視覚的にソート・アイコン付けするだけで、対応する指示文が無い）という別の欠落だったと特定した。これはFreeze自体の設計ミスではなく、Detectorへの伝達漏れであり、両方を直せば両立可能と判断した。 |
+| 決定内容 | `FREEZE_AGREEMENT_TOOL`を`generate_user_utterance`のtools（User AI）へ再配線（`revise_goal`の`freeze_agreement_id`引数経由の内蔵Freezeとは別に、User AIが任意のタイミングで単独Freezeも可能にする——D-044のuser限定ゲートが既に安全弁として機能するため）。あわせて`call_detector`の両監査パス（ドメイン妥当性・数値監査）に「🔒Freeze済み項目は人間が既に審議し承認した意図的な例外であり、同じ論点をmajor/minorの根拠にしない（ただし新規の別問題は従来通り厳格に評価し、Freeze項目への軽微な懸念はobservations欄に留める）」という指示を追加。ドメイン妥当性パスは従来agreements_textを一切受け取っていなかったため、新設`_get_frozen_agreements_text`（🔒項目のみの軽量抽出、トークンコスト抑制）で最小限のコンテキストを追加した。 |
+| 影響 | `cela_main.py`（新設`_get_frozen_agreements_text`、`generate_user_utterance`のtools追加、`call_detector`両パスへの指示追加）。既存`tests/test_r5_thought_log_freeze_goalshift.py`（14件）は無変更で全件Pass。`tests/test_bl062_detector_supersede.py`の`test_bl062_freeze_tool_removed_from_user_ai_tools`を`test_bl086_freeze_tool_reactivated_in_user_ai_tools`に更新（D-045からの意図的な転換）。 |
+| 関連 BL | [BL-086](issue_backlog.md#bl-086-前提エスカレーション経路-freeze復活-ゴール改定goalshifteventの実消費化)、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（D-045でFreezeを休止させた原因、今回両立） |
+
+---
+
+### D-058: state["goal"]への部分パッチとGoalShiftEventの新規shift_kind="premise_revision"でゴール改定を実消費化する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-24 |
+| 状態 | `decided` |
+| 決定者 | t-momose（「当初目標を越境しても最適な着地点に到達できるように」との指示） / Claude Sonnet 5（設計・実装） |
+| **決定理由** | R5で作った`GoalShiftEvent`（`detect_goal_shift`/`goal_shift_events`）は`arbiter_node`の資源再配分判定からしか発火せず、発火してもDB書き込みのみで何も消費しない「書きっぱなし」（BL-065）だった。調査の結果、`state["goal"]`（`LineageState.goal`）は`Annotated[str, _take_latest]`の単一プローズ文字列で、グラフ起動時に一度セットされたきり一度も再代入されておらず、9箇所の消費者（call_expert/call_detector/call_resource_arbiter等）が毎ターン新鮮に再埋め込んでいることを確認した。これはLangGraphの`_take_latest`リデューサーが既にミュータブル対応済みであることを意味し、たった1箇所（User AIの改定処理ノード）で`state["goal"]`を書き換えるだけで残り8箇所が自動的に次ターンから改定後の内容を見るため、個別配線が不要と判断した。`state["goal"]`への改定方式は、全文置換（LLMに長大なゴール文全体を再生成させる）ではなく、Deliverable編集で実績のある`_apply_text_edits`（old_text/new_text方式）の部分パッチを採用した——全文置換はゴール文全体の想定外の欠落リスクを伴うため。 |
+| 決定内容 | `revise_goal`ツールが、既存`db_append_goal_shift_event`を使い新規`shift_kind="premise_revision"`（既存の`"constraint_hit"`とは異なる種別として新設、arbiterの資源超過トリガーとエスカレーション解決トリガーを混同しないため）、`triggered_by="Escalation_Resolution"`、`from_goal_state`/`to_goal_state`に実際の改定前後テキスト（arbiterフローのJSON blobとは異なり、生のプローズ文字列）を記録する。ツールハンドラはLangGraph stateに直接触れられないため、`_LAST_WRITE_AGREEMENT_SUCCEEDED`等と同型の「直前アクション」グローバル`_LAST_GOAL_REVISION`＋getterを新設し、`generate_user_utterance_node`が`state["user_wrote_agreement"] = ...`と同じ並びで`state["goal"]`へ反映する。 |
+| 影響 | `cela_main.py`（新設`_LAST_GOAL_REVISION`グローバル・`get_last_goal_revision`、`revise_goal`ツールの実体関数、`generate_user_utterance_node`への配線）。GoalShiftEventがBL-063実装以来初めて実効的な発火・消費経路を持つ。 |
+| 関連 BL | [BL-086](issue_backlog.md#bl-086-前提エスカレーション経路-freeze復活-ゴール改定goalshifteventの実消費化)、[BL-065](issue_backlog.md#bl-065-r5で新設したdb永続化情報internal_thought_processgoal_shift_eventsの消費表示経路が未設計)（今回初めて解消した書きっぱなし問題） |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
