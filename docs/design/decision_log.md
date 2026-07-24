@@ -745,6 +745,20 @@
 
 ---
 
+### D-049: Orchestratorの専門家選定時の考察を`focus_guidance`としてExpertへ注入する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-24 |
+| 状態 | `decided` |
+| 決定者 | t-momose（提案・実装指示） / Claude Sonnet 5（技術設計・実装） |
+| **決定理由** | ユーザーが、Detectorのドメイン妥当性レビューが「プロンプトで監査の観点を変えるだけで仕事ぶりがガラッと変わる」ことに着目し、同じ発想をOrchestrator→Expertの選定フローに応用できないか提案した。`call_orchestrator`は専門家の肩書きを選ぶ過程で既にタスクの中身をある程度見渡して考察しているが、その結果は`reason`（選定理由）としてログに残るのみで、選ばれたExpert自身には一切伝わっていなかった。既存の`reason`フィールドを流用すると「経験豊富だから選んだ」的な選定理由の言い換えになりがちで実行時の注意点にはなりにくいため、`reason`とは別の新フィールドを設けてタスク固有の着眼点・落とし穴を明示的に出力させる方針とした。 |
+| 決定内容 | `call_orchestrator`のプロンプトに、専門家選定理由（`reason`）とは別に、「選ばれた専門家AIがこのタスクに実際に着手する際、具体的にどんな観点で検討すべきか・特に見落としやすい落とし穴は何か」を1〜3点、タスク固有の実行可能な指示として出力させる`focus_guidance`フィールドを追加（該当なければ空文字）。`orchestrator_node`が`state["expert_focus_guidance"]`へ保存し（`LineageState`へフィールド追加）、`call_expert`のフル版system_prompt・軽量版light_system_prompt（BL-025②のツールループ自問自答フェーズ用）の両方に`🎯 【このタスクで特に注意すべき観点（Orchestratorより）】`として注入する。 |
+| 影響 | `cela_main.py`（`call_orchestrator`のプロンプト・JSON schema拡張、`orchestrator_node`・`call_expert`への配線、`LineageState`フィールド追加）。新規`tests/test_bl078_orchestrator_focus_guidance.py`（4件）。 |
+| 関連 BL | [BL-078](issue_backlog.md#bl-078-orchestratorの専門家選定時の考察をfocus_guidanceとしてexpertへ注入する) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
