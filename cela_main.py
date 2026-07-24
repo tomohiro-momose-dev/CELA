@@ -2008,10 +2008,45 @@ def get_latest_whiteboard(conn: sqlite3.Connection, run_id: str, phase_id: str, 
     return {"version": row["version"], "content": row["content"]} if row else None
 
 
+def _write_whiteboard_to_file(phase_id: str, task_id: str, version: int, content: str,
+                               author_role: str, edit_summary: str) -> str | None:
+    """[BL-085] apply_whiteboard_patchでDBへ新バージョンを保存するたびに、sqliteクエリなしで
+    中身を確認・diffできるようMarkdownファイルへも書き出す（ユーザー要望）。DBが正であり、
+    ここでの失敗は握りつぶして継続する（save_deliverable_to_fileと同じくベストエフォートの
+    補助資料という位置づけ）。バージョンごとに個別ファイルとして残す（DB側のappend-only
+    バージョニングと同じ扱い、上書きしない）。
+
+    [CONSTRAINT] BL-027と同じ理由で、MultiLoggerが実際に初期化されている（＝実行時の
+    ドライラン中である）場合のみ書き出す。BL-080〜BL-084のテストはtmp_path上のDBに対し
+    apply_whiteboard_patchを大量に呼ぶため、無条件で書き出すと本番log/配下を
+    テスト実行のたびに汚染してしまう。
+    """
+    if getattr(MultiLogger, "_instance", None) is None:
+        return None
+    safe_phase = re.sub(r'[\\/*?:"<>|]', "_", phase_id).strip() or "phase"
+    safe_task = re.sub(r'[\\/*?:"<>|]', "_", task_id).strip() or "task"
+    log_dir = getattr(MultiLogger, "log_dir", "log")
+    wb_dir = os.path.join(log_dir, "whiteboards")
+    try:
+        os.makedirs(wb_dir, exist_ok=True)
+        filepath = os.path.join(wb_dir, f"{safe_phase}_{safe_task}_V{version}.md")
+        header = (
+            f"<!-- phase_id={phase_id} task_id={task_id} version={version} "
+            f"author_role={author_role} edit_summary={edit_summary} -->\n\n"
+        )
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(header + content)
+        return filepath
+    except OSError as e:
+        print(f"  ⚠️ [Whiteboard File Write Failed] ファイル書き出しに失敗しました（無視して続行）: {e}")
+        return None
+
+
 def apply_whiteboard_patch(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str,
                             new_content: str, author_role: str, edit_summary: str) -> int:
     """[R4] 現在の最新バージョンを取得し、new_contentを新バージョンとしてINSERTする。
     削除は行わずバージョンを積み増す方式（cela_r4_design.md §2.2、N-2のトレーサビリティ原則に従う）。
+    ★修正（BL-085）: DB保存に加え、_write_whiteboard_to_fileでMarkdownファイルへも書き出す。
     """
     latest = get_latest_whiteboard(conn, run_id, phase_id, task_id)
     new_version = (latest["version"] + 1) if latest else 1
@@ -2020,6 +2055,7 @@ def apply_whiteboard_patch(conn: sqlite3.Connection, run_id: str, phase_id: str,
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (f"DF-{int(time.time()*1000)}", phase_id, task_id, new_version, new_content, author_role, edit_summary, time.time(), run_id)
     )
+    _write_whiteboard_to_file(phase_id, task_id, new_version, new_content, author_role, edit_summary)
     return new_version
 
 
