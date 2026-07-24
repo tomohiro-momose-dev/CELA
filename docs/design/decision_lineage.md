@@ -835,6 +835,18 @@
 
 ---
 
+## 論点71: SUPERSEDEがDeliverableの全文更新を破棄していた実質何もしないツール呼び出しの発見と即時修正（BL-080・D-051）
+
+- **発端:** ユーザーが「1319の最新ログを見てください。後からtask_1_1のホワイトボードを修正している様子があります」と調査を依頼。`log/2026-07-24/1319/log_no_prompt.md`をAIがフォレンジック調査。
+- **AIの調査:** Expertが`edits`（old_text/new_text）による部分更新をテーブル行頭の全角スペース等の不一致で失敗した後、BL-075で追加した「完全一致が難しければ`decision_what`による全文更新＝SUPERSEDEを使え」という誘導プロンプトに従い`action_type='SUPERSEDE'`＋全文の`decision_what`で再試行し、ツールから`{'success': True, 'message': 'DB update successful'}`が返ってきたことを確認。しかし直後に`read_deliverable_file`で読み戻すと旧内容（3名体制）のままで、Expertは「システムの反映タイミングの問題」と誤って自己正当化し、Detector・Userからハルシネーション（虚偽の更新完了報告）と判定され差し戻されるが、同じ壊れた経路で同じ失敗を繰り返す無限ループに陥っていた。`_commit_agreement_from_tool`のソースを確認したところ、`action_type=="SUPERSEDE"`分岐は対象topicの旧agreement行を`status="Superseded"`に変更した直後に`return None`しており、Expertが渡した`decision_what`（全文）を完全に無視し、`apply_whiteboard_patch`も呼ばれず、新規agreement行のINSERTすら行われないことが判明した。Detector・Userの「ホワイトボードが更新されていない」という観測は正しかったが、原因評価（Expertの虚偽報告）は不正確で、真因はツール実装側の欠陥だった。BL-075で自ら追加したプロンプトが、この壊れた経路へExpertを誘導する形になっていたことも合わせて報告した。
+- **ユーザーの判断:** 「修正してBL起票」と即決。
+- **実装内容:** `entry_type=="Deliverable"`かつ`action_type in ("CREATE", "SUPERSEDE")`かつ`len(decision_what) > 200`（CREATE/UPDATE全文置換パスと同一閾値）の場合、CREATEと同様に`apply_whiteboard_patch`で新版を保存するよう修正。SUPERSEDE分岐からの早期`return None`を削除し、CREATE/UPDATE共通のホワイトボード保存・agreements行INSERT処理へ合流させた。BL-062のDetectorによる無効化用途（短い却下理由のみのSUPERSEDE）は同じ200文字閾値により後方互換を維持することを確認した。
+- **決定者:** t-momose（1319ログ調査の依頼、修正・BL起票の即決）、Claude Sonnet 5（フォレンジック調査による発見、技術設計・実装）
+- **検証:** 新規`tests/test_bl080_supersede_deliverable_whiteboard_writeback.py`（3件、長文SUPERSEDEのホワイトボード書き込み確認・短文SUPERSEDEの後方互換確認・早期return削除のソース確認）。オフラインスモークテスト計125件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。実LLM再ドライランでの効果確認は次回待ち。
+- **関連:** [D-051](decision_log.md#d-051-write_agreementのsupersedeがdeliverableの全文更新を破棄していた問題の修正)、[BL-080](issue_backlog.md#bl-080-write_agreementのsupersedeがdeliverableの全文更新を破棄し実質何もしないツール呼び出しになっていた)、[BL-075](issue_backlog.md#bl-075-f-73ホワイトボードロールバックが1つ前は健全という前提に反し修正済み問題を無警告で再導入する)、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)
+
+---
+
 ## 更新履歴
 
 | 日付 | 内容 |
