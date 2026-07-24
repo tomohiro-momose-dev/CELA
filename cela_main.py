@@ -1792,6 +1792,15 @@ def init_db(conn: sqlite3.Connection) -> None:
     );
     CREATE INDEX IF NOT EXISTS idx_wb_run ON whiteboard_drafts(run_id, phase_id, task_id);
 
+    -- [BL-082] task_plannerの計画をwhiteboard_draftsと同型の版管理文書として永続化する。
+    -- 別テーブルにするのは、whiteboard_drafts（Deliverable用、BL-080/081で修正したばかり）の
+    -- キー空間に別用途を混在させるリスクを避けるため。
+    CREATE TABLE IF NOT EXISTS plan_drafts (
+        draft_id TEXT, phase_id TEXT NOT NULL, task_id TEXT NOT NULL, version INTEGER,
+        content TEXT, author_role TEXT, edit_summary TEXT, timestamp REAL, run_id TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_plan_run ON plan_drafts(run_id, phase_id, task_id);
+
     CREATE TABLE IF NOT EXISTS chat_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT, turn INTEGER, role TEXT, content TEXT, timestamp REAL, run_id TEXT NOT NULL
     );
@@ -1964,6 +1973,123 @@ def apply_whiteboard_patch(conn: sqlite3.Connection, run_id: str, phase_id: str,
         (f"DF-{int(time.time()*1000)}", phase_id, task_id, new_version, new_content, author_role, edit_summary, time.time(), run_id)
     )
     return new_version
+
+
+# ===========================================================================
+# [BL-082] plan_drafts: task_plannerの計画のホワイトボード化（先送り事項の申し送り）
+# ===========================================================================
+
+_PLAN_DEFERRED_HEADING = "## 先送り事項（他タスクからの申し送り）"
+_PLAN_DEFERRED_PLACEHOLDER = "(まだありません)"
+_PLAN_DEFERRED_HEADING_RE = re.compile(r"(?m)^## 先送り事項（他タスクからの申し送り）\s*$")
+
+
+def get_latest_plan_draft(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str) -> dict | None:
+    """[BL-082] get_latest_whiteboardの完全なミラー。指定task_idの最新バージョンの
+    {version, content}を返す。存在しなければNone。"""
+    row = conn.execute(
+        "SELECT version, content FROM plan_drafts "
+        "WHERE run_id=? AND phase_id=? AND task_id=? ORDER BY version DESC LIMIT 1",
+        (run_id, phase_id, task_id)
+    ).fetchone()
+    return {"version": row["version"], "content": row["content"]} if row else None
+
+
+def apply_plan_patch(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str,
+                      new_content: str, author_role: str, edit_summary: str) -> int:
+    """[BL-082] apply_whiteboard_patchの完全なミラー。現在の最新バージョンを取得し、
+    new_contentを新バージョンとしてINSERTする（削除は行わずバージョンを積み増す）。"""
+    latest = get_latest_plan_draft(conn, run_id, phase_id, task_id)
+    new_version = (latest["version"] + 1) if latest else 1
+    conn.execute(
+        "INSERT INTO plan_drafts (draft_id, phase_id, task_id, version, content, author_role, edit_summary, timestamp, run_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (f"PL-{int(time.time()*1000)}", phase_id, task_id, new_version, new_content, author_role, edit_summary, time.time(), run_id)
+    )
+    return new_version
+
+
+def _render_plan_skeleton(task: dict) -> str:
+    """[BL-082] タスク計画のプレースホルダ骨格文書を生成する。見出し文字列は固定・既知のため、
+    後続の追記・抽出処理は正規表現によるヒューリスティックなクォート照合（BL-074/076/081で
+    対応が必要だった脆さ）を一切必要としない。"""
+    acceptance_criteria = task.get("acceptance_criteria", [])
+    depends_on = task.get("depends_on", [])
+    owns_variables = task.get("owns_variables", [])
+    criteria_text = "\n".join(f"- {c}" for c in acceptance_criteria) or "- (なし)"
+    depends_text = "\n".join(f"- {d}" for d in depends_on) or "- (なし)"
+    owns_text = "\n".join(f"- {v}" for v in owns_variables) or "- (なし)"
+    return (
+        f"# {task.get('task_id', '')}: {task.get('title', '')}\n\n"
+        f"## 概要\n{task.get('description', '')}\n\n"
+        f"## 受入基準 (acceptance_criteria)\n{criteria_text}\n\n"
+        f"## 依存タスク (depends_on)\n{depends_text}\n\n"
+        f"## 確定すべき変数 (owns_variables)\n{owns_text}\n\n"
+        f"{_PLAN_DEFERRED_HEADING}\n{_PLAN_DEFERRED_PLACEHOLDER}\n"
+    )
+
+
+def _append_deferred_note_to_plan(
+    conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str,
+    note_text: str, source_task_id: str, task_for_skeleton: dict | None
+) -> bool:
+    """[BL-082] 対象task_idの計画文書（plan_drafts）の「先送り事項」セクションへ、
+    他タスクからの申し送りを追記する。文書が未生成（遅延シード）の場合は
+    task_for_skeletonから骨格文書を生成した上で追記する。
+
+    見出しの検索は行アンカー付き正規表現を使う（タスクのtitle/descriptionはLLM生成の
+    自由文であり、偶然`## 先送り事項...`という部分文字列を含む可能性を排除するため）。
+    追記位置は見出し直後に固定し、「次の見出しまでを探す」ロジックは使わない
+    （note_text自体がLLM生成の自由文であり、偶然`\\n## `を含んだ場合に境界判定を
+    誤るリスクを構造的に排除するため）。
+    """
+    latest = get_latest_plan_draft(conn, run_id, phase_id, task_id)
+    if latest:
+        content = latest["content"]
+    elif task_for_skeleton:
+        content = _render_plan_skeleton(task_for_skeleton)
+    else:
+        return False
+
+    match = _PLAN_DEFERRED_HEADING_RE.search(content)
+    if not match:
+        return False
+
+    insert_at = match.end() + 1  # 見出し行の改行の直後
+    remainder = content[insert_at:]
+    bullet = f"- 【{source_task_id}より】{note_text}"
+    if remainder.startswith(_PLAN_DEFERRED_PLACEHOLDER):
+        new_remainder = bullet + remainder[len(_PLAN_DEFERRED_PLACEHOLDER):]
+    else:
+        new_remainder = bullet + "\n" + remainder
+    new_content = content[:insert_at] + new_remainder
+
+    apply_plan_patch(
+        conn, run_id, phase_id, task_id, new_content,
+        author_role="decision_extractor", edit_summary=f"[先送り事項] {note_text[:60]}"
+    )
+    return True
+
+
+def _get_deferred_notes_text(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str) -> str:
+    """[BL-082] 指定task_idの計画文書から「先送り事項」セクションの内容を抽出し、
+    プロンプト埋め込み用のテキストを返す。文書が存在しない・プレースホルダのままの
+    場合は空文字を返す（トークン消費を避けるため、「先送り事項はありません」という
+    定型文は毎ターン出力しない）。
+    """
+    if not task_id:
+        return ""
+    latest = get_latest_plan_draft(conn, run_id, phase_id, task_id)
+    if not latest:
+        return ""
+    content = latest["content"]
+    match = _PLAN_DEFERRED_HEADING_RE.search(content)
+    if not match:
+        return ""
+    section = content[match.end():].strip()
+    if not section or section == _PLAN_DEFERRED_PLACEHOLDER:
+        return ""
+    return f"【他タスクからの申し送り事項（先送り、要確認）】\n{section}\n"
 
 
 # [BL-075/D-047] rollback_whiteboard（F-7.3）は撤廃した。「1つ前のバージョンは健全」という
@@ -2584,12 +2710,16 @@ def _build_task_scope_context(state: LineageState, conn: sqlite3.Connection) -> 
     else:
         whiteboard_text = "(このタスクの成果物はまだホワイトボードに存在しません。初版はwrite_agreementのdecision_whatに全文を渡してください)"
 
+    # [BL-082] 他タスクから本タスクへ申し送られた先送り事項（plan_drafts）。無ければ空文字。
+    deferred_notes_text = _get_deferred_notes_text(conn, state["run_id"], current_phase_id, current_task_id)
+
     return {
         "current_task": current_task,
         "current_task_json": current_task_json,
         "verified_facts_json": verified_facts_json,
         "remaining_criteria_text": remaining_criteria_text,
         "whiteboard_text": whiteboard_text,
+        "deferred_notes_text": deferred_notes_text,
     }
 
 
@@ -2862,6 +2992,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     verified_facts_json = _scope_ctx["verified_facts_json"]
     remaining_criteria_text = _scope_ctx["remaining_criteria_text"]
     whiteboard_text = _scope_ctx["whiteboard_text"]
+    deferred_notes_text = _scope_ctx["deferred_notes_text"]
 
     system_prompt += (f"""
     \n📏 【回答のスコープについて（厳守）】\n
@@ -2880,6 +3011,8 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     """)
 
     system_prompt += f"\n📋 【R4: 成果物の差分編集】\n{whiteboard_text}\n"
+    if deferred_notes_text:
+        system_prompt += f"\n📌 【BL-082: 他タスクからの申し送り事項（先送り）】\n{deferred_notes_text}\n"
 
     # [BL-041] 「木を見て森を見ず」対策: 狭いタスクスコープ内で導出した数値が、
     # 実は他タスクの制約と衝突する可能性を残したまま無条件に確定値として扱われ、
@@ -3001,6 +3134,11 @@ def call_detector(state: LineageState, target_role: str) -> dict:
         f"【R4: 現在タスクの成果物・最新ホワイトボード Ver.{_whiteboard['version']}（編集後の完全版）】\n{_whiteboard['content']}\n\n"
         if _whiteboard else ""
     )
+
+    # [BL-082] 他タスクから本タスクへの申し送り事項。「既に先送り済みの論点はmajorにしない」
+    # という以下の緩和ロジックが、直近2ターンの会話窓だけに依存せず判断できるようにする。
+    _deferred_notes = _get_deferred_notes_text(get_active_conn(), state["run_id"], _current_phase_id, _current_task_id)
+    deferred_notes_block = f"{_deferred_notes}\n" if _deferred_notes else ""
 
     # BL-033: Expertが実際に実行したpython_replの記録をDetectorに提示する。
     # Expertの「検算完了」という自己申告（tool_calls=0でも書けてしまう）を鵜呑みにせず、
@@ -3135,6 +3273,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"System Goal: {goal}\n"
         f"【現在タスクのacceptance_criteria】\n{criteria_text}\n\n"
         f"{whiteboard_block}"
+        f"{deferred_notes_block}"
         f"【今回評価するターンのやり取り】\n{history_text}\n\n"
         f"【BL-051軽量版: 気づき欄】constraint_issueの判定（none/minor/major）には至らないが、"
         f"思考の過程で気になった点・将来的なリスクの芽・引っかかった前提などがあれば、"
@@ -3223,6 +3362,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"今回のAgentの発言が、それぞれの項目に応えている（充足している）かをbool配列で判定してください。\n"
         f"配列の長さ・順序は上記の一覧と対応させてください。\n\n"
         f"{whiteboard_block}"
+        f"{deferred_notes_block}"
         f"【判定のブレ防止（3回多数決方式）】constraint_issueの判定（特にminorとmajorの境界）で"
         f"結論が変わったり迷ったりする場合、同じ論点を無限に再検討し続けないでください。"
         f"その論点について、独立した判定を意識的に3回だけ行い（1回目・2回目・3回目、それぞれ短く"
@@ -3343,10 +3483,12 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
         【重要】既存トピック一覧にある話題をAgentが「修正・更新」して再提示してきた場合でも、\n
         システム上は新しい成果物として上書きするため `action_type: "UPDATE"`, `status: "Proposed"` としてください。
 
-        【BL-023: 先送りの検出】Agentが「〇〇は次タスク（task_id）で扱う」「〇〇は別途詳細化する」のように
+        【BL-023/BL-082: 先送りの検出】Agentが「〇〇は次タスク（task_id）で扱う」「〇〇は別途詳細化する」のように
         既存トピックとは別の新しい論点を明示的に先送りした場合、`action_type: "CREATE"`, `entry_type: "Directive"`,
         `status: "Deferred"` として抽出してください。`content` には先送りされた論点、`rationale` にはどのタスクで
-        扱うかを記載してください。
+        扱うかを記載し、加えて`defer_to_task_id`にその**申し送り先のtask_id**を必ず設定してください（下記の
+        task_id一覧から一字一句そのままコピー）。申し送り先が特定できない場合は空文字にしてください。
+        {valid_task_ids_text}
 
         【BL-023: 共有変数の確定値検出】現在のタスクが確定させるべき共有変数（owns_variables）は以下の通りです:
         {owns_variables_text}
@@ -3377,7 +3519,14 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
             
             【重要】このフェーズでは「Userの評価（ステータス変更）」だけを抽出します。新しい成果物本文は抽出しないため、`content` は必ず空文字 `""` にしてください。
             また、User自身が全く新しい制約や指示を出した場合は、例外として `action_type: "CREATE"`, `entry_type: "Directive"`, `status: "Proposed"` で抽出してください。
-            
+
+            【BL-023/BL-082: 先送りの検出】Userが「〇〇は次タスク（task_id）で扱う」「〇〇は別途詳細化する」
+            「本タスクの範囲を超える」のように、既存トピックとは別の新しい論点を明示的に先送りした場合、
+            `action_type: "CREATE"`, `entry_type: "Directive"`, `status: "Deferred"` として抽出してください。
+            `content` には先送りされた論点、`rationale` にはどのタスクで扱うかを記載し、加えて
+            `defer_to_task_id`にその**申し送り先のtask_id**を必ず設定してください（下記のtask_id一覧から
+            一字一句そのままコピー）。申し送り先が特定できない場合は空文字にしてください。
+
             過去のAIの提案に対するUserの評価（状態の更新）:
             ログにある「過去のAIの提案」に対し、「今回のUserの発言」がどう反応したか【意味論的】に分析してください。
             - 肯定・受容（例：「評価する」「妥当と判断する」「現実的である」「その方向で進める」） 
@@ -3507,7 +3656,8 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
             "proposed_by": "Agent または User",
             "phase_id": "現在のフェーズID",
             "task_id": "現在のタスクID（分からなければ空文字）",
-            "owned_variable_values": {{"変数名": "値（該当なければ空オブジェクト{{}}）"}}
+            "owned_variable_values": {{"変数名": "値（該当なければ空オブジェクト{{}}）"}},
+            "defer_to_task_id": "status=Deferredの場合のみ、申し送り先のtask_id（それ以外は空文字）"
             }}
         ],
         "advances_to_phase_id": "Userが明示的に次のフェーズへの移行を指示した場合のみそのphase_id。なければnull",
@@ -3984,6 +4134,8 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         {remaining_criteria_text}\n
 
         [R4] {_scope_ctx["whiteboard_text"]}\n
+
+        {"📌 【BL-082: 他タスクからの申し送り事項（先送り）】" + chr(10) + _scope_ctx["deferred_notes_text"] if _scope_ctx["deferred_notes_text"] else ""}
     """)
 
     system_prompt += (
@@ -4473,6 +4625,14 @@ def decision_extractor_node(state: LineageState) -> LineageState:
     owns_variables = current_task_for_extraction.get("owns_variables", [])
     # [BL-039] 全フェーズのtask_idをLLMに提示し、正しい表記でのコピーを促す。
     valid_task_ids = [t["task_id"] for phase in state.get("phases", []) for t in phase.get("tasks", [])]
+    # [BL-082] 先送り事項の申し送り先task_idからphase_id・Taskディクショナリを逆引きするための
+    # マップ（_resolve_task_transitionのphase_lookupと同じ、全フェーズ一巡のパターン）。
+    task_id_to_phase_id: dict[str, str] = {}
+    task_id_to_task: dict[str, dict] = {}
+    for _phase in state.get("phases", []):
+        for _t in _phase.get("tasks", []):
+            task_id_to_phase_id[_t["task_id"]] = _phase["phase_id"]
+            task_id_to_task[_t["task_id"]] = _t
     extracted_items, transition = call_decision_extractor(state["chat_history"], existing_topics, target_role, owns_variables, valid_task_ids)
     print(f"\n------ 完了 ------")
 
@@ -4491,12 +4651,13 @@ def decision_extractor_node(state: LineageState) -> LineageState:
 
     for item in extracted_items:
         action_type = item.get("action_type", "CREATE")
-        entry_type = item.get("entry_type", "Decision") 
+        entry_type = item.get("entry_type", "Decision")
         status = item.get("status", "Proposed")
         topic = item.get("topic", "Unknown Topic")
         raw_content = item.get("content", "")
         rationale = item.get("rationale", "No reason provided")
         proposed_by = item.get("proposed_by", "Unknown")
+        defer_to_task_id = item.get("defer_to_task_id", "")
         
         current_phase = state.get("current_phase", {})
         phase_id = item.get("phase_id", current_phase.get("phase_id", "unknown"))
@@ -4610,7 +4771,26 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                     why=f"[{proposed_by}] {rationale}"
                 )
                 db_append_decision(decision_log, _conn, _run_id)
-            
+                # [BL-082] 先送り（entry_type=Directive, status=Deferred）の場合、agreements DBへの
+                # 記録（監査履歴として温存）に加えて、申し送り先task_idの計画文書（plan_drafts）へも
+                # 追記する。_build_agreements_contextはDirectiveを無条件除外するため、この文書経由の
+                # 申し送りが後続タスクに実際に届く唯一の経路。target_task_idが解決できない場合は
+                # 警告ログのみでスキップ（フェイルクローズ）。
+                # ★依存関係の注意: この分岐は`if not wrote_agreement_this_turn:`（上記）の内側にある。
+                # write_agreementツールは現状status="Deferred"を受け付けないため実害はないが、将来
+                # ツール側にDeferredが追加された場合、この分岐がスキップされうる点に留意すること。
+                if entry_type == "Directive" and status == "Deferred" and defer_to_task_id:
+                    target_phase_id = task_id_to_phase_id.get(defer_to_task_id)
+                    if target_phase_id:
+                        _append_deferred_note_to_plan(
+                            _conn, _run_id, target_phase_id, defer_to_task_id,
+                            note_text=raw_content or rationale, source_task_id=task_id,
+                            task_for_skeleton=task_id_to_task.get(defer_to_task_id),
+                        )
+                        print(f"  📌 [Deferred] '{topic}' を{defer_to_task_id}の計画文書へ申し送りました。")
+                    else:
+                        print(f"  ⚠️ [Deferred] 申し送り先task_id '{defer_to_task_id}' が解決できず、計画文書への追記をスキップしました。")
+
             print(f"\n  📝 [Extract] {agreement['action_type']} - {agreement['entry_type']}: {agreement['topic']}")
             print(f"     ├ Status: {agreement['status']} | By: {agreement['proposed_by']}")
             print(f"     ├ Meta  : Phase={agreement['phase_id']}")
