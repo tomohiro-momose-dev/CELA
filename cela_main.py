@@ -1648,7 +1648,13 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
         # （実機ドライランで確認）。個別の派生例外を都度追加するのではなく、`ReadTimeout`/
         # `ConnectTimeout`/`WriteTimeout`/`PoolTimeout`をすべて包含する親クラス
         # `httpx.TimeoutException`を追加し、同種の未捕捉タイムアウトの再発を防ぐ。
-        except (APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
+        # [CONSTRAINT] BL-083: BL-059/BL-072と同型の再発。streaming受信中に相手ホストから
+        # 強制切断される（Windows WinError 10054）と、生の`httpx.ReadError`
+        # （`httpcore.ReadError`由来）が送出され、絞り込んだexceptタプルに含まれず
+        # 未捕捉クラッシュしていた（実機ドライラン`log/2026-07-24/1459`、BL-081修正後の
+        # 通常運転中に発生。BL-082以降のロジックとは無関係な純粋なネットワーク層の欠落）。
+        # 一時的な接続断でありロジックエラーではないため、リトライ対象に追加する。
+        except (APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError, httpx.RemoteProtocolError, httpx.TimeoutException, httpx.ReadError) as e:
 
             if attempt < len(delays):
                 # [BL-046] 中間リトライは従来何も表示せずtime.sleepするだけだったため、
