@@ -1972,10 +1972,18 @@ def apply_whiteboard_patch(conn: sqlite3.Connection, run_id: str, phase_id: str,
 
 
 def _apply_text_edits(current_content: str, edits: list[dict]) -> tuple[str | None, str | None]:
-    """[R4] Claude Code Editツールと同じ方式のテキスト置換。各editの{old_text, new_text, replace_all}を
-    current_contentに対し完全一致検索→置換する。old_textが本文中に0件、または複数件かつ
-    replace_all=Falseの場合は失敗としてエラーメッセージを返す（Expertが同ターン内のツールループで
-    修正・再試行できるよう、原因を具体的に伝える）。全edit成功時のみ(新content, None)を返す。
+    """[R4/BL-081] Claude Code Editツールと同じ方式のテキスト置換。各editの
+    {old_text, new_text, replace_all}をcurrent_contentに対しまず完全一致検索→置換する。
+
+    ★修正（BL-081）: 完全一致が0件、または複数件でreplace_all未指定の場合、以前は即座に
+    エラーを返していた。1319ドライラン（log/2026-07-24/1319）で、Markdownテーブル行頭の
+    全角スペース・パイプ記号の有無だけでold_textが一致せず、ExpertがSUPERSEDEによる全文
+    置換（BL-080で判明した別の欠陥）へ迂回する原因になっていたことが判明。BL-074/D-050で
+    確立した正規化（改行・空白・太字記法・全角半角、加えて本修正でテーブル区切り|も対象に
+    追加）による緩い一致（`_find_loose_match_spans`）へのフォールバックを追加し、Expert自身の
+    主たる編集手段であるeditsがその場で成功する確率を高める。それでも一意に定まらない場合の
+    みエラーを返す（Expertが同ターン内のツールループで修正・再試行できるよう、原因を具体的に
+    伝える）。全edit成功時のみ(新content, None)を返す。
     """
     content = current_content
     for i, e in enumerate(edits):
@@ -1984,12 +1992,31 @@ def _apply_text_edits(current_content: str, edits: list[dict]) -> tuple[str | No
         replace_all = bool(e.get("replace_all", False))
         if not old_text:
             return None, f"edits[{i}]: old_textが空です。"
-        count = content.count(old_text)
-        if count == 0:
-            return None, f"edits[{i}]: old_textが現在のホワイトボード内容に見つかりませんでした。一字一句正確な引用か確認してください。"
-        if count > 1 and not replace_all:
-            return None, f"edits[{i}]: old_textが{count}箇所に一致し、一意に特定できません。replace_all=trueにするか、より長い一意な文脈を含めてください。"
-        content = content.replace(old_text, new_text) if replace_all else content.replace(old_text, new_text, 1)
+
+        exact_count = content.count(old_text)
+        if exact_count == 1 or (exact_count > 1 and replace_all):
+            content = content.replace(old_text, new_text) if replace_all else content.replace(old_text, new_text, 1)
+            continue
+
+        loose_spans = _find_loose_match_spans(content, old_text)
+        if len(loose_spans) == 1 or (len(loose_spans) > 1 and replace_all):
+            if replace_all:
+                for start, end in sorted(loose_spans, reverse=True):
+                    content = content[:start] + new_text + content[end + 1:]
+            else:
+                start, end = loose_spans[0]
+                content = content[:start] + new_text + content[end + 1:]
+            continue
+
+        if exact_count == 0:
+            return None, (
+                f"edits[{i}]: old_textが現在のホワイトボード内容に見つかりませんでした"
+                f"（正規化後の緩い一致も{len(loose_spans)}件でした）。一字一句正確な引用か確認してください。"
+            )
+        return None, (
+            f"edits[{i}]: old_textが{exact_count}箇所に一致し、一意に特定できません"
+            f"（正規化後の緩い一致も{len(loose_spans)}件）。replace_all=trueにするか、より長い一意な文脈を含めてください。"
+        )
     return content, None
 
 
@@ -2005,22 +2032,47 @@ _DETECTOR_COMMENT_TEMPLATE = (
 
 
 def _normalize_for_loose_match(s: str) -> tuple[str, list[int]]:
-    """[BL-074] target_excerptの完全一致依存の脆さ（topic文字列ドリフトと同根）への対策。
-    改行・空白の揺れ、Markdown太字記法（**）、全角/半角の違いを吸収した正規化文字列を作り、
-    正規化後の各文字が元の文字列の何文字目由来かを示すindex_mapを併せて返す
-    （マッチ位置を元の文字列へ逆写像し、注釈を正しい位置へ挿入するため）。
+    """[BL-074/BL-081] 完全一致依存の脆さ（topic文字列ドリフト・target_excerpt・edits old_text
+    に共通する根本課題）への対策。改行・空白の揺れ、Markdown太字記法（**）・テーブル区切り（|）、
+    全角/半角の違いを吸収した正規化文字列を作り、正規化後の各文字が元の文字列の何文字目由来かを
+    示すindex_mapを併せて返す（マッチ位置を元の文字列へ逆写像するため）。
+
+    ★修正（BL-081）: 全角スペース（\\u3000）等の空白類似文字は、まずNFKC正規化してから
+    空白判定する（判定前に正規化しないと、全角スペースが半角スペース1文字として結果に残り、
+    「半角スペースは除去・全角スペースは残る」という非対称な不一致が生じるバグがあった）。
     """
     norm_chars: list[str] = []
     index_map: list[int] = []
     for i, ch in enumerate(s):
-        if ch in " \t\n\r*":
-            continue
         norm_ch = unicodedata.normalize("NFKC", ch)
         if len(norm_ch) != 1:
             norm_ch = ch
+        if norm_ch.isspace() or norm_ch in "*|":
+            continue
         norm_chars.append(norm_ch)
         index_map.append(i)
     return "".join(norm_chars), index_map
+
+
+def _find_loose_match_spans(content: str, old_text: str) -> list[tuple[int, int]]:
+    """[BL-081] old_textを`_normalize_for_loose_match`で正規化した緩い一致で検索し、
+    content上の元の文字位置における(開始, 終了・両端含む)のスパンを出現順・非重複で返す。
+    old_textが空、または正規化後に空になる場合は空リストを返す。
+    """
+    norm_content, index_map = _normalize_for_loose_match(content)
+    norm_old_text, _ = _normalize_for_loose_match(old_text)
+    if not norm_old_text:
+        return []
+    spans: list[tuple[int, int]] = []
+    search_start = 0
+    while True:
+        pos = norm_content.find(norm_old_text, search_start)
+        if pos == -1:
+            break
+        end = pos + len(norm_old_text) - 1
+        spans.append((index_map[pos], index_map[end]))
+        search_start = end + 1
+    return spans
 
 
 def _annotate_whiteboard_with_detector_comment(
