@@ -110,6 +110,7 @@
 | BL-076 | 中 | `cela_main.py` (`call_detector`/`detector_node`/新設`_annotate_whiteboard_with_detector_comment`) | BL-075のプロンプト誘導だけでは「毎ターン再構成されるプロンプト注入」に留まり見落とされ得るとユーザーが指摘。Detectorのmajor指摘を、プロンプト注入と同時にホワイトボード本文そのものにWord/PDFのコメント機能のように永続的な注釈として埋め込む機能を追加。Detectorの両パス（ドメイン妥当性レビュー・数値監査）に`target_excerpt`（指摘対象の一字一句引用）を出力させ、ホワイトボード内で一意一致する場合のみ`> 🔴 **[Detector指摘 #ID]**: ...`形式（案A・タグ+案Bの引用のハイブリッド、ユーザー承認）の注釈をその直後に挿入する。Expertは修正時にeditsで注釈行ごと書き換えることで自然に注釈が消える設計 | P2 |
 | BL-077 | 低 | `cela_main.py`（CELA自身のAI群全体、未着手・設計検討のみ） | ユーザーが、本プロジェクト自身のAGENTS.mdが定める「まずMemory/STATUS/backlogを確認してから動く」という設計思想を、CELAが動かすAI群（Expert/User AI等）自身にも適用するアイデアを提示。ホワイトボード（現状把握）と、まだ実装されていない「issue_BL」相当の仕組み（タスク内の残課題・指摘事項の永続管理）を必ず先に確認してから、User AIなら指示、Expertならタスク遂行に入るという思考ワークフロー。ユーザー自身、STATUS.md・traceability.md相当の仕組みも新たに必要になると認識しており、範囲が大きいためBL化のみ行い、設計は別途相談 | P3 |
 | BL-078 | 中 | `cela_main.py` (`call_orchestrator`/`orchestrator_node`/`call_expert`) | ユーザーが、Detectorの「監査の観点をプロンプトで変えるだけで仕事ぶりがガラッと変わる」効果に着想を得て、Orchestratorが専門家選定時に既に行っているタスク内容の考察（従来は選定理由`reason`としてログにのみ残り、Expertには一切伝わっていなかった）を、新設`focus_guidance`フィールドとして明示的に出力させ、選ばれたExpertのプロンプトに注入することでタスクごとに思考を最適化できないか提案。`call_orchestrator`のプロンプト・JSON出力に`focus_guidance`（タスク固有の着眼点・注意点、`reason`＝選定理由とは別物）を追加し、`orchestrator_node`が`state["expert_focus_guidance"]`へ保存、`call_expert`のフル版・軽量版プロンプト両方に注入 | P2 |
+| BL-079 | 低 | `cela_main.py` (`_annotate_whiteboard_with_detector_comment`/`call_detector`、未着手・設計検討のみ) | BL-074の正規化フォールバックを相談する中で、ユーザーがClaude Code自身の`Edit`ツールが同種の完全一致方式でも実運用できている理由を質問。調査の結果、Claude Codeは(1)LLMがその場で読んだ内容から引用する、(2)不一致時に即座にエラーがツール結果として返り同一ターン内でLLM自身がリトライできる、の2点が揃っているのに対し、CELAの`_annotate_whiteboard_with_detector_comment`は(2)を欠き、失敗してもDetector自身にフィードバックが返らないことが根本差だと判明。ユーザーが他ツール（python_repl等）ではエラーフィードバックがあるとDetectorが試行錯誤して解決を試みている思考ログを確認しており、同様に注釈挿入の一致失敗をDetector自身のツール呼び出し結果として返し、同一ツールループ内でリトライさせる構造を提案。Detectorは既にツールループ内で動作しているため設計変更の規模が大きく、BL化のみ行い実装は別途 | P3 |
 
 ---
 
@@ -2402,6 +2403,28 @@ BL-076（ホワイトボードへの指摘埋め込み）の議論の延長と�
 - 新規`tests/test_bl078_orchestrator_focus_guidance.py`（4件）: `call_orchestrator`のプロンプト・フォールバック確認、`orchestrator_node`の配線確認、`call_expert`のフル版・軽量版両方への注入確認、`LineageState`へのフィールド宣言確認。
 - オフラインスモークテスト計117件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。
 - 実LLM再ドライランでの効果確認（`focus_guidance`が実際にタスクごとに具体的な内容で出力され、Expertの検討の質に寄与すること）は次回待ち。
+
+---
+
+### BL-079: ホワイトボード注釈の一致失敗をDetector自身にフィードバックし、同一ツールループ内でリトライさせる（設計検討・未着手）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計検討のみ、実装未着手） |
+| 優先度 | P3 |
+| 関連 | [BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存する) |
+
+**内容:**
+
+BL-074のtarget_excerpt正規化フォールバックを相談する中で、ユーザーから「そもそもClaude Code自身のEdit（old_text/new_text完全一致）方式は、なぜ実運用でハードルが高くならないのか」という質問があった。調査の結果、Claude CodeのEditツールが機能する理由は2点あり、(1) LLMがその場で読んだばかりの内容から引用する、(2) 不一致時にツール結果として即座にエラーが返り、同一ターン内でLLM自身がリトライできる、である。CELAの`_annotate_whiteboard_with_detector_comment`はBL-074の対応後も(2)を欠いており、一致失敗はDetectorのツールループの外側（`detector_node`側の後処理）で静かに起こるため、Detector自身は自分の引用が的を外したことを知る術がない。
+
+ユーザーは、python_replなど他のツールでエラーフィードバックが返ってきた場合、Detectorの思考ログ上で「あの手この手を試して何とかしようとする」試行錯誤が実際に見られることを確認しており、同様の自己修正ループをホワイトボード注釈にも適用できないか提案した。
+
+**設計方針（未確定、次回設計相談で着手）:**
+
+現状の`_annotate_whiteboard_with_detector_comment`は`call_detector`のツールループ完了後、`detector_node`側で一度だけ呼ばれる後処理であり、Detector自身のツール呼び出しではない。これをDetector自身が呼び出せる新規ツール（例: `annotate_whiteboard_tool`）として`call_detector`のツールリストに追加し、一致失敗時は「0件一致でした、別の引用を試してください」等のエラーをツール結果として返し、Detectorが同一ツールループ内で`target_excerpt`を調整して再試行できるようにする方向性が有力。ただしDetectorは既にドメイン妥当性レビュー・数値監査の2パス構成でツールループを回しており、責務・呼び出しタイミング（どちらのパスから呼ぶか、JSON出力との整合）の設計変更規模が大きいため、実装は別途設計相談の上で着手する。
+
+**完了条件（未定、設計時に確定）:**
 
 ---
 
