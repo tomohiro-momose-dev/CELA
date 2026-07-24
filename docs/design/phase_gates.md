@@ -94,9 +94,9 @@
 
 | # | Exit 条件 | 検証方法 | 状態 |
 |---|-----------|----------|------|
-| P4-1 | `whiteboard_drafts`のCRUD（`get_latest_whiteboard`/`apply_whiteboard_patch`/`rollback_whiteboard`）・`_apply_text_edits`実装 | `cela_r4_design.md`、`tests/test_r4_smoke.py` | ☑ |
+| P4-1 | `whiteboard_drafts`のCRUD（`get_latest_whiteboard`/`apply_whiteboard_patch`）・`_apply_text_edits`実装 | `cela_r4_design.md`、`tests/test_r4_smoke.py` | ☑ |
 | P4-2 | `WRITE_AGREEMENT_TOOL`への`edits`パラメータ追加、Deliverable主経路のwhiteboard方式への全面移行 | 同上 | ☑ |
-| P4-3 | ロールバック機構（F-7.3、Detectorのmajor判定と連携） | 同上 | ☑ |
+| P4-3 | ~~ロールバック機構（F-7.3、Detectorのmajor判定と連携）~~ → **BL-075/D-047（2026-07-24）で撤廃**。「1つ前のバージョンは健全」という前提が実運用で成立せず、修正済み問題を無警告で再導入するバグが実ドライランで確認されたため、部分修正誘導プロンプトへ置き換え | `tests/test_bl075_no_whiteboard_rollback.py` | ☑（撤廃により対応不要） |
 | P4-4 | オフラインスモークテスト合格 | `tests/test_r4_smoke.py`（14件）＋`test_r3_smoke.py`更新分、計64件Pass | ☑ |
 | P4-5 | 実LLM再ドライランでのA/Bテスト（トークン消費・矛盾の早期発見率・ロールバック正確性） | `traceability.md` T-*（未記入） | ☐（未実施） |
 
