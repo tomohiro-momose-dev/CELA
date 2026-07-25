@@ -955,6 +955,34 @@
 
 ---
 
+### D-064: `_safe_json_parse`は複数フェンスブロックのうち最後を採用し、計画系3関数を層2リトライで包み、レビューはフェイルクローズする
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-25 |
+| 状態 | `decided`（実装済み） |
+| 決定者 | Claude Sonnet 5（`log/2026-07-25/1814`レビュー中に発見・原因特定・修正案を提示） / t-momose（「OK 修正してください」と修正を指示） |
+| **決定理由** | BL-088修正後の再ドライラン（`log/2026-07-25/1814`）で、task_plan_reviewerが縮退計画を正しく"major"と判定していたにもかかわらず、その応答が「プレビュー用の配列ブロック」と「最終JSON出力の完全なオブジェクトブロック」という2つの```json```ブロックで構成されていたため、`_safe_json_parse`が両者を混線させ構文エラーとなり、fallback（"none"）に化けて縮退計画がそのまま承認・実行される事故を発見した。BL-088は「フェンスが1つだけ、その前に説明文がある」ケースへの対処だったが、今回は「フェンスが複数ある」という別のケースであり、根本原因は同じ（`_safe_json_parse`が「JSONブロックは応答中にちょうど1つ」という前提でしか設計されていなかったこと）と判断した。修正方針は、個別のケースにパッチを重ねるのではなく、正規表現で応答中の全フェンスブロックを検出し「最後のブロックを採用する」という一般則に統一することとした（モデルは下書き・プレビューを先に書き、最終的な答えを最後に書く傾向があるため）。あわせて、`call_task_plan_reviewer`が単発のパース失敗で即座にfallbackへ落ちていたこと自体も問題と判断し、`call_reviewer`が既に採用していた層2リトライ（`_query_and_parse_with_retry`、D-005）を`call_task_planner`・`call_goal_essence_analyst`にも展開した。特に`call_task_plan_reviewer`は実行前の安全ゲートであるため、リトライを使い切った場合のfallbackを`"none"`（フェイルオープン）のままにしておくのは危険と判断し、`call_reviewer`の既存のフェイルクローズパターン（`passed=False`）を踏襲して`"major"`（フェイルクローズ）に変更した。`call_task_planner`自体は、後段の`task_plan_reviewer_node`が縮退計画を検知してmajor判定する前提が既にあるため、fail-closed化は不要と判断し従来のfallback_phaseのままとした。 |
+| 決定内容 | (1) `_safe_json_parse`の段階1を、`re.finditer`で全```(?:json)?...```ブロックを検出し`fence_matches[-1]`（最後のブロック）を採用する方式に変更（フェンスが無ければ従来のbrace/bracket探索へフォールバック）。(2) `call_task_plan_reviewer`・`call_task_planner`・`call_goal_essence_analyst`を`_query_and_parse_with_retry`でラップ（`max_retries`はデフォルトの2のまま）。(3) `call_task_plan_reviewer`はリトライ失敗後に`{"risk": "high", "constraint_issue": "major", ...}`を返すフェイルクローズ処理を追加。新規`tests/test_bl089_json_fence_and_failclosed_review.py`（8件）。 |
+| 影響 | `cela_main.py`（`_safe_json_parse`、`call_task_plan_reviewer`、`call_task_planner`、`call_goal_essence_analyst`）。`call_task_planner`は既存の`tools=[PYTHON_REPL_TOOL]`付きツールループのため、リトライ発生時は最大3回分（1回目＋リトライ2回）のツールループを再実行しうる（コスト増だが、パース失敗自体が稀になる前提のBL-088/089修正後は発生頻度が下がる想定）。 |
+| 関連 BL | [BL-089](issue_backlog.md#bl-089-複数jsonフェンスブロックの混線によるレビュー安全ゲートの無効化および全ノード共通の重複再検証の抑制)、[BL-088](issue_backlog.md#bl-088-_safe_json_parseがコードフェンス前に説明文が付いたjson配列をfallbackへ握りつぶすバグ)（同根の`_safe_json_parse`脆弱性、今回一般化して解消） |
+
+---
+
+### D-065: 重複再検証の抑制指示は、tools付きの全ノードへ横展開する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-25 |
+| 状態 | `decided`（実装済み） |
+| 決定者 | t-momose（「他のノードも何回も何回も同じ思考を繰り返しすぎることが多々ありました」と指摘・横展開を指示） / Claude Sonnet 5（対象関数の洗い出し・実装） |
+| **決定理由** | D-063でtask_plannerにのみ追加した「同じ検証・計算を繰り返さない」指示について、ユーザーから他のノードでも同様の重複再検証が繰り返し観測されていたとの指摘があった。対象範囲を検討した結果、この問題（同一内容をpython_replで何度も再確認し、ツールループの残り予算を浪費する）は、そもそも`tools=[...]`でツールループ自体を持つ関数にしか起こりえない（`tools=None`の関数は`query_AI`の単発ストリーミング経路を通り、MAX_TOOL_ITERの概念自体が存在しないため）と判断し、`query_AI`呼び出し箇所を全数調査した。該当したのは`call_expert`・`call_detector`（主検算パスのみ、ドメイン妥当性パスは`tools=None`）・`call_resource_arbiter`・`call_integrator`・`call_reviewer`・`generate_user_utterance`・`call_goal_essence_analyst`・`call_task_plan_reviewer`の8関数（`call_task_planner`は対応済み）。`call_orchestrator`・`call_decision_extractor`・`call_reflection`・`call_facilitator`は`tools=None`のため対象外とした。`call_detector`には既に「判定のブレ防止（3回多数決方式）」という類似目的の指示があったが、これは"constraint_issueの判定"という結論の揺れを防ぐものであり、"同一の数値検算をpython_replで何度も繰り返す"こと自体への対策ではないため、重複させず補完する形で別途追加した。 |
+| 決定内容 | 上記8関数のプロンプトに、「同じ検証・計算を繰り返さない（重要）」という共通の指示文（ツール呼び出しの回数に上限があること、各検証項目は2回程度で十分なこと、新しい論点が無い「念のため最終確認」を重ねると出力が途中で切れるリスクがあること、検証完了後は直ちに最終出力に移ること）を追加した。文言は関数ごとの出力形式（JSON配列/JSONオブジェクト/自然文+ツール呼び出し）に合わせて微調整した。`call_task_plan_reviewer`には、`1814`で発見した複数JSONブロック混線（D-064）の再発防止として、「最終回答のJSONブロックは1つだけ」という指示も追加した。新規`tests/test_bl089_anti_repetition_instructions.py`（9件、対象8関数＋task_plannerの回帰確認）。 |
+| 影響 | `cela_main.py`（8関数のプロンプト文字列のみ、ロジック変更なし）。実LLMドライランでの効果測定（各ノードの平均ツール呼び出し回数が減るか）は次回ドライラン待ち。 |
+| 関連 BL | [BL-089](issue_backlog.md#bl-089-複数jsonフェンスブロックの混線によるレビュー安全ゲートの無効化および全ノード共通の重複再検証の抑制)、[BL-087](issue_backlog.md#bl-087-前提の質を上げる一連の改善task_plannerの曖昧表記禁止二重指示バグ修正task_plan_reviewer_node等)（項目22、D-063が横展開の出発点） |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
