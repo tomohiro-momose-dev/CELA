@@ -2401,7 +2401,7 @@ BL-075でロールバックを撤廃し、`call_expert`のプロンプトに部�
 |------|------|
 | 状態 | `open`（設計検討のみ、実装未着手） |
 | 優先度 | P3 |
-| 関連 | [BL-076](issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式) |
+| 関連 | [BL-076](issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)、[BL-051](issue_backlog.md#bl-051-detectorの気づきをissue_blリストとして蓄積しフェーズ終了条件とする)（本項目より先に起票済みの、同一構想のDetector限定・具体版。本項目はそれをExpert/User AI全体のワークフローへ一般化したもの） |
 
 **内容:**
 
