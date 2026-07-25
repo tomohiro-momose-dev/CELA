@@ -913,6 +913,20 @@
 
 ---
 
+### D-061: task_plan_reviewerの過剰な精度要求を較正し、plan_draftsへのタスク単位注釈はexcerpt一致ではなくtask_idキーで実装する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-25 |
+| 状態 | `decided`（実装済み） |
+| 決定者 | t-momose（実ドライラン`log/2026-07-25/1549`のレビューから3点の改善を指示） / Claude Sonnet 5（設計・実装） |
+| **決定理由** | Stage2完了後の実ドライランで、`task_plan_reviewer_node`が`task_1_3`の推定値（「山間部2km≒ルート全体13.33km」、原文12kmとの端数差はごくわずか）を「矛盾」としてmajor判定し差し戻した結果、再生成されたtask_plannerが「山間部12km＝ルート全体の15%」という原文からは読み取れない解釈で「総ルート長80km」というゴール文に存在しない数値をでっち上げる実例が観測された。ユーザーはこれを「Reviewerが過敏すぎる」「数字だけでなくタスクの漏れや順序の不備も同等に大事」と評し、較正（プロンプトの重み付け見直し）で対応する方針を示した。plan_draftsへの注釈方式については、Detectorの`_annotate_whiteboard_with_detector_comment`（文中excerpt一致、正規化フォールバック付き）を素朴に踏襲する案も検討したが、(a) plan_draftsの読み手は基本的に次のtask_planner呼び出し（LLM）であり、機械的な文字列一致より「どのtask_idの話か」というID照合の方が構造的に頑健である、(b) BL-074/076で「LLM生成の自由文に対する引用文字列マッチング」の脆さが繰り返し問題化した経緯があり、task_idという既存の確実なキーが使える場面でわざわざ同じ脆さを持ち込む理由がないと判断し、task_id単位のセクション追記方式（`_append_deferred_note_to_plan`の完全なミラー）を採用した。 |
+| 決定内容 | (1) `call_task_plan_reviewer`のプロンプトに、4評価観点（曖昧表記/タスク過不足/順序妥当性/条件の明示〈新設〉）を同等以上に重視する指示と、「ゴール文が与えていない絶対値を無理に確定させる差し戻しをしない」というアンチパターンを80km捏造の実例付きで追記。(2) `call_task_planner`に「派生値には根拠条件を併記」する項目6を新設し、`call_task_plan_reviewer`にも対応する評価観点を追加。(3) `_render_plan_skeleton`に「レビュワーからの指摘（要修正）」セクションを追加し、新関数`_append_reviewer_comment_to_plan`でtask_id単位の注釈を書き込む。`task_planner_node`は計画生成直後に全タスク分のスケルトンを事前生成し（従来の遅延生成のみでは、Reviewerが動く時点で書き込み先が存在しなかった）、`call_task_plan_reviewer`の出力に`per_task_comments`を追加、`task_plan_reviewer_node`がタスク別指摘を`plan_drafts`へ書き込みつつ`plan_reviewer_feedback`にも整形結合する。副次的に、セクション追加により`_get_deferred_notes_text`の抽出範囲（従来は文書末尾まで）が新セクションの内容を巻き込むバグが発生したため、次見出しの直前までに限定する修正も行った。 |
+| 影響 | `cela_main.py`（`call_task_plan_reviewer`・`call_task_planner`のプロンプト、`_render_plan_skeleton`・`_append_reviewer_comment_to_plan`・`_find_phase_id_for_task`・`_find_task_by_id`の新設、`_get_deferred_notes_text`の範囲限定修正、`task_planner_node`・`task_plan_reviewer_node`の配線）。`tests/test_bl087_stage2_task_plan_reviewer_node.py`に11件追加（計21件）、`tests/test_bl082_plan_drafts_deferred_notes.py`の1件を新セクション追加に合わせて修正。 |
+| 関連 BL | [BL-087](issue_backlog.md#bl-087-前提の質を上げる一連の改善task_plannerの曖昧表記禁止二重指示バグ修正task_plan_reviewer_node等)（Stage2改善、項目17〜21）、[BL-082](issue_backlog.md#bl-082-task_plannerの計画をホワイトボード化し先送り事項をタスク間で永続的に申し送りできるようにする)（`plan_drafts`拡張元） |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
