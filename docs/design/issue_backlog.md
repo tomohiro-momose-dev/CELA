@@ -2739,11 +2739,17 @@ BL-086実装後の実LLMドライラン（`log/2026-07-24/2358`）レビュー�
 3. 効果確認として翌ドライラン（`log/2026-07-25/0935`）をレビューしたところ、User AIの思考文に初めて`escalate_premise_concern`という単語が名指しで登場（「Let me also think about whether I should use escalate_premise_concern or just directly reject.」）。今回は「ゴール自体の前提矛盾ではなく`task_1_3`の`acceptance_criteria`表記の曖昧さによるExpertの誤読」と判断し不使用を選択したが、この切り分け自体は妥当であり、少なくとも検討の俎上に載るようになったことを確認。
 4. 同じ`log/2026-07-25/0935`のレビュー中に、`task_1_3`で`acceptance_criteria`の"(12km区間)"という表記が「位置」か「長さ」かを一意に確定できず、Expertが同一の誤読（15%=2.175kmを12km全区間=82.8%と誤定義）を4回連続で繰り返しV1→V9（9版）の無駄な往復が発生している事例を発見。`call_task_planner`のプロンプトに、比率/絶対値等の指標の取り違えを防ぐ曖昧表記禁止指示と、今回の失敗例をNG例として追加（項目4として新設）。
 5. さらに、User AIの標準指示（`user_always_remembers or turn_count==1`ブロック）が無条件に「合意に達したら相手のAIに成果物の出力を指示せよ」と指示しており、R4のホワイトボード方式で既にApproved済みの成果物に対しても再提出を要求し、Expertが「既に提出済みなのに再度出力を求められている」と混乱する余地があったバグを修正。「未充足の要求項目が無く、かつホワイトボードに成果物が既に存在する場合は、再提出を求めず次のタスクへ進行する」という条件分岐を追記。
-6. ユーザーからの追加要望「監査・検算ループ自体は機能するが、その前提となる計画・目標理解が歪んでいると徒労に終わる」「バス3台で無理と分かった時点で"バスである必要は？タクシー補助では？"という一段上の思考をAIにさせたい」を受け、Plan modeで段階的な改善計画に合意（`docs/design/`外、Claude Codeのplanファイル`task-plan-reviewer-node-task-planner-glistening-coral.md`として保存）。Stage 2〜5（後述）は本BLでは未着手。
+6. ユーザーからの追加要望「監査・検算ループ自体は機能するが、その前提となる計画・目標理解が歪んでいると徒労に終わる」「バス3台で無理と分かった時点で"バスである必要は？タクシー補助では？"という一段上の思考をAIにさせたい」を受け、Plan modeで段階的な改善計画に合意（`docs/design/`外、Claude Codeのplanファイル`task-plan-reviewer-node-task-planner-glistening-coral.md`として保存）。
 
-**Stage 2〜5（`open`、設計のみ・実装は別途）:**
+**対応（Stage 2、実装済み）:**
 
-- **Stage 2**: `task_planner_node`直後に1回だけ発火し、フェーズ・タスク計画全体（曖昧表現・タスク過不足・順序妥当性）をレビューする`task_plan_reviewer_node`を新設。NGなら`call_task_planner`を再実行させる、実行開始前のゲート。
+7. 新設`call_task_plan_reviewer(phases, goal)`: Detector同等のJSON（`risk`/`constraint_issue`/`comment`/`observations`）で、生成された`phases`全体を「曖昧な表記」「タスクの過不足」「depends_onの順序妥当性」の3観点からレビューする。個々のタスクの中身の是非ではなく計画の構造自体を見る、実行前1回きりのゲート。
+8. 新設`task_plan_reviewer_node`をグラフに追加（`graph.add_node("task_plan_reviewer", ...)`、`graph.add_edge("task_planner", "task_plan_reviewer")`、`route_after_task_plan_reviewer`による条件分岐で`phases`が空なら`task_planner`へ、そうでなければ`generate_user_utterance`へ）。`constraint_issue="major"`かつ`state["plan_reviewer_retry_count"] < 2`なら`state["phases"]`をクリアして差し戻し（`task_planner_node`の既存ガード`not state.get("phases")`により自然に再生成される）、指摘事項は新設`state["plan_reviewer_feedback"]`に保存。上限（2回）到達後はmajorが残っていても`plan_review_done=True`として強制承認し、無限ループを防止する。
+9. `call_task_planner`に`reviewer_feedback: str = ""`引数を追加し、差し戻し時は再生成プロンプトの先頭に「前回の計画案への差し戻し」ブロックとして指摘事項を注入。`task_planner_node`が`state["plan_reviewer_feedback"]`を読み取って渡し、消費後にクリアする。
+10. 新設`state["plan_review_done"]`は、`task_planner_node`の`turn_count==1`ガードと同型の冪等性ガード。このグラフは「entry_pointが常にtask_planner固定」で毎ターンtask_planner_node/task_plan_reviewer_nodeを通過する構造（チェックポイント再開コメント参照）のため、このガードが無いと2ターン目以降も毎回レビューLLMが再発火しトークンを浪費する。
+
+**Stage 2'・3〜5（`open`、設計のみ・実装は別途）:**
+
 - **Stage 2'**: 各フェーズ完了時に、完了フェーズで判明した事実・矛盾・確定値を踏まえてtask_plannerが未着手の残りフェーズ・タスクのみを再分解する機構。
 - **Stage 5**: 「一段上の思考」をプロンプトでの自発性に頼らず機械的トリガーで強制発火させる。トリガーはOR条件（1）`global_constraints`の`claimed/total_cap`比が閾値（初期値0.9）以上（既存`check_global_constraint_overrun`は完全超過のみ検知するため姉妹関数が必要）、（2）`expert_retry_count>=3`（既存、`route_after_expert_detector`が既に"reflection"分岐に使用）。新規ノードは作らず既存`reflection_node`/`call_reflection`に3つ目の監査観点として追加し、懸念があれば次のExpert/User AIターンへ申し送り、Expert/User AI自身に`escalate_premise_concern`を呼ばせる動線とする。
 - **Stage 3**: task_planner分解前に挿入する新設「本質フェーズ」（実現可能性の壁打ち＋目標の本質の言語化、新規`goal_essence`テーブルに保存し全ノードへ常時注入）。BL-086のエスカレーション経路とは独立・併存させる。
