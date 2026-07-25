@@ -2724,7 +2724,7 @@ BL-027（`MultiLogger`のimport時副作用防止）と同じ理由で、`getatt
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `partial`（Stage 1のみ`done`、Stage 2〜5は`open`） |
+| 状態 | `partial`（Stage 1・2は`done`、Stage 2'・3〜5は`open`） |
 | 優先度 | P1 |
 | 関連 | [BL-069](issue_backlog.md#bl-069-expertが決定前にフェーズタスク表全体を見渡して他フェーズとの資源競合に気づけるよう軽量な指示を追加する)（Stage 4で合流予定）、[BL-086](issue_backlog.md#bl-086-前提エスカレーション経路-freeze復活-ゴール改定goalshifteventの実消費化)（`escalate_premise_concern`等4ツール、本BLはその実効性検証から派生） |
 
