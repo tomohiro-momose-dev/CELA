@@ -118,6 +118,7 @@
 | BL-084 | 高 | `cela_main.py` (`_commit_agreement_from_tool`のSUPERSEDE/UPDATE分岐、新設`_find_active_deliverable_agreement`) | ユーザー依頼で`log/2026-07-24/1459`をレビューする中で発見。BL-081実装後にもかかわらず`edits`が2回とも「old_textが見つかりませんでした（正規化後の緩い一致も0件）」で失敗していたため実際に再現テストしたところ、old_text自体は完全一致（127文字差分0）しており、BL-081の正規化ロジックには問題がないことを確認。真因は`_commit_agreement_from_tool`がUPDATE/SUPERSEDE対象を`target_topic`（省略時は自分自身のtopicにフォールバック）の文字列完全一致で検索していたこと。Expertが`target_topic`を一度も送らず、呼び出しごとにtopicの言い回しを変えていた（実例あり）ため既存行と一致せず`old_content`が空文字のまま渡され、`_apply_text_edits("", edits)`が常に0件/0件で失敗していた。BL-074の完了条件「Deliverable本体のtask_id識別への切替はまだ`open`」がまさにこれで、BL-081のフォールバック強化だけでは原理的に解決できないことが実害で裏付けられた。新設`_find_active_deliverable_agreement`で(phase_id, task_id)識別に切替（Decision/Directiveはスコープ外、従来通り） | P0 |
 | BL-085 | 低 | `cela_main.py` (新設`_write_whiteboard_to_file`、`apply_whiteboard_patch`) | ユーザーから「ホワイトボードの中身を保存時にファイルに書き出してほしい」と要望。従来`whiteboard_drafts`はDB（sqlite）のみに保存され、中身を確認するにはクエリが必要だった。`apply_whiteboard_patch`から新設`_write_whiteboard_to_file`を呼び、保存の都度`{log_dir}/whiteboards/{phase_id}_{task_id}_V{version}.md`へバージョンごとに個別ファイルとして書き出す（DBのappend-onlyバージョニングと同じく上書きしない）。BL-027と同じ理由で、`MultiLogger._instance`が未初期化（テスト/import時）の場合は書き出しをスキップし、本番log/配下のテスト汚染を防止 | P3 |
 | BL-086 | 高 | `cela_main.py`（新設`goal_escalations`テーブル、`escalate_premise_concern`/`resolve_premise_concern`/`revise_goal`ツール、`FREEZE_AGREEMENT_TOOL`の再配線、`call_expert`/`generate_user_utterance`/`generate_user_utterance_node`/`call_detector`） | ユーザーが1459ログ由来の「オンデマンド交通なのに予算制約から逆算して35人乗りバスを導入する」矛盾を指摘し、そもそも論の視座（高齢者の移動手段確保という本質的課題）に立ち返って前提自体を見直せる経路が無いことを議論。Expertは`absolute_constraints`の文言を厳守することしかできず前提の矛盾を表明する手段が無いこと、User AIが例外を承認してもFreeze機構（D-045で無効化中）が無いためDetectorの独立監査で無限に再燃しうること、`state["goal"]`を改定する手段が無くGoalShiftEventが書きっぱなしで何も消費されないこと（BL-065）の三重の構造的欠陥を特定。ユーザー指示「エスカレーション経路を作り込み、freezeを復活させ、本質的課題の解決という視点に登り当初目標を越境しても最適な着地点に到達できるように」に基づき、Plan mode（Exploreエージェント3件＋Planエージェント1件、全行番号を直接検証済み）で設計し実装。Expert/User AIが構造化してエスカレーションを提起する`escalate_premise_concern`（narrow channel、BL-025のスコープガードレールは変更せず）、User AI専用の却下`resolve_premise_concern`・承認＋ゴール改定`revise_goal`（`_apply_text_edits`を`state["goal"]`にも再利用、承認時にFreezeも同時実行可能）を新設。`state["goal"]`は9箇所の消費者が毎ターン再埋め込みするため、`generate_user_utterance_node`の1箇所で書き換えるだけで全消費者に自動伝播。Freezeを`generate_user_utterance`のtoolsへ再配線し、`call_detector`の両監査パスに🔒Freeze済み項目を尊重する指示を追加（BL-062自身の欠落を解消） | P1 |
+| BL-087 | 高 | `cela_main.py` (`call_task_planner`、`generate_user_utterance`、Stage 1のみ実装済み。Stage 2〜5は`open`) | BL-086実装後の実LLMドライラン（`log/2026-07-24/2358`）レビューで、`escalate_premise_concern`等BL-086の4ツールがプロンプトで説明されているにもかかわらず一度も自発的に呼ばれないことを発見（`tools attached`表示以外での言及ゼロ）。原因は`call_expert`/`generate_user_utterance`のシステムプロンプトがツールの存在・使いどころを、既存エスカレーションがある場合にのみ条件付きで説明しており、初回は何も教えていなかったこと。恒久的な説明ブロックを両プロンプトに追加したところ、翌ドライラン（`log/2026-07-25/0935`）でUser AIの思考文に初めて`escalate_premise_concern`という単語自体が登場し（結果的に不使用と判断したが、検討はした）、指示追加の効果を確認。同ログのレビュー中に別途2件のバグ・改善余地を発見: (1) `task_1_3`の`acceptance_criteria`の"(12km区間)"という表記が比率(15%)か絶対距離かを一意に確定できず、Expertが同一の誤読を4回連続（V1→V9、9版）で繰り返した、(2) User AIの標準指示が無条件に「合意に達したら成果物の出力を指示せよ」と言うため、R4のホワイトボード方式で既にApproved済みの成果物にも再提出を要求しExpertを混乱させていた。さらにユーザーから「監査・検算の前提となる計画自体が歪んでいると徒労に終わる」「バス3台で無理と分かった時点で"バスである必要は？タクシー補助では？"という一段上の思考をAIにさせたい」という要望を受け、段階的な改善計画（`docs/design/`配下の実装計画に相当する内容はPlan modeで`task-plan-reviewer-node-task-planner-glistening-coral.md`として作成）に合意。**Stage 1（本BLの実装範囲）**: ①`call_task_planner`のプロンプトに、比率/絶対値の取り違えを防ぐ曖昧表記禁止指示と、今回のtask_1_3失敗例をNG例として追加。②`generate_user_utterance`の標準指示に、未充足の`acceptance_criteria`が無くホワイトボードに成果物が既に存在する場合は再提出を求めず次のタスクへ進行するよう条件分岐を追加。**Stage 2〜5（`open`、別BLで後日着手）**: task_planner_node直後に1回だけ発火し計画全体をレビューする`task_plan_reviewer_node`新設、フェーズ完了時にtask_plannerが残りフェーズを再計画する機構、「一段上の思考」を`reflection_node`拡張＋機械的トリガー（`global_constraints`の逼迫比率・`expert_retry_count>=3`のOR）で強制発火させる仕組み、task_planner分解前に目標の本質を言語化する新設フェーズ、Detector/User AIのレビュー観点への本質整合性チェック追加（BL-069関連） | P1 |
 
 ---
 
@@ -2716,6 +2717,43 @@ BL-027（`MultiLogger`のimport時副作用防止）と同じ理由で、`getatt
 - オフラインスモークテスト計168件Pass（既存150件＋新規18件）、`python -m py_compile`合格、`check_docs_consistency.py`合格。
 - 実装計画は`docs/design/r5/cela_r5_escalation_freeze_goalrevision_impl_Plan.md`に保存済み。
 - 実LLM再ドライランでの効果確認（Expertが今回のような前提矛盾に気づいた際に実際に`escalate_premise_concern`を呼び、User AIが`revise_goal`で応答し、次のDetector監査が同じ論点を再度major判定しないこと）は次回待ち。
+
+---
+
+### BL-087: 前提の質を上げる一連の改善（task_plannerの曖昧表記禁止・二重指示バグ修正・task_plan_reviewer_node等）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `partial`（Stage 1のみ`done`、Stage 2〜5は`open`） |
+| 優先度 | P1 |
+| 関連 | [BL-069](issue_backlog.md#bl-069-expertが決定前にフェーズタスク表全体を見渡して他フェーズとの資源競合に気づけるよう軽量な指示を追加する)（Stage 4で合流予定）、[BL-086](issue_backlog.md#bl-086-前提エスカレーション経路-freeze復活-ゴール改定goalshifteventの実消費化)（`escalate_premise_concern`等4ツール、本BLはその実効性検証から派生） |
+
+**内容:**
+
+BL-086実装後の実LLMドライラン（`log/2026-07-24/2358`）レビューで、`escalate_premise_concern`/`resolve_premise_concern`/`revise_goal`/`freeze_agreement`の4ツールが全ターンで`tools attached`として付与されているにもかかわらず、実行呼び出しが一件もゼロであることを発見。ログを精査した結果、思考文（💭）中にもツール名自体への言及が一切無く、ツールの存在を能動的に想起した形跡すら無かった。原因調査の結果、`call_expert`（`_get_escalation_status_text_for_expert`）・`generate_user_utterance`（`_get_open_escalations_text`）のいずれも、既存のエスカレーションが存在する場合にのみツールの使い方を説明する条件付き文言であり、エスカレーションがまだ1件も無い（＝初回で最も必要な）状況では、ツールの存在自体が一切説明されていなかったことが判明。
+
+**対応（Stage 1、実装済み）:**
+
+1. `call_expert`のフル`system_prompt`（【制約と条件の切り分け】セクション直後）に、`escalate_premise_concern`の使用条件（狭く構造化された懸念限定、スコープ免除にはならない、当該ターンのacceptance_criteriaは通常通り満たす、重複提起禁止）を恒久的に明記。あわせて`light_system_prompt`（ツールループiter≥2以降、従来4ツールへの言及が皆無だった箇所）にも1行のリマインダーを追加。
+2. `generate_user_utterance`の標準指示（同種のセクション直後）に、`escalate_premise_concern`（自ら起点になれる）・`resolve_premise_concern`・`revise_goal`・`freeze_agreement`の4ツールすべての使いどころを恒久的に明記（`freeze_agreement`は従来`revise_goal`経由の言及しかなく単独使用の説明が皆無だった）。
+3. 効果確認として翌ドライラン（`log/2026-07-25/0935`）をレビューしたところ、User AIの思考文に初めて`escalate_premise_concern`という単語が名指しで登場（「Let me also think about whether I should use escalate_premise_concern or just directly reject.」）。今回は「ゴール自体の前提矛盾ではなく`task_1_3`の`acceptance_criteria`表記の曖昧さによるExpertの誤読」と判断し不使用を選択したが、この切り分け自体は妥当であり、少なくとも検討の俎上に載るようになったことを確認。
+4. 同じ`log/2026-07-25/0935`のレビュー中に、`task_1_3`で`acceptance_criteria`の"(12km区間)"という表記が「位置」か「長さ」かを一意に確定できず、Expertが同一の誤読（15%=2.175kmを12km全区間=82.8%と誤定義）を4回連続で繰り返しV1→V9（9版）の無駄な往復が発生している事例を発見。`call_task_planner`のプロンプトに、比率/絶対値等の指標の取り違えを防ぐ曖昧表記禁止指示と、今回の失敗例をNG例として追加（項目4として新設）。
+5. さらに、User AIの標準指示（`user_always_remembers or turn_count==1`ブロック）が無条件に「合意に達したら相手のAIに成果物の出力を指示せよ」と指示しており、R4のホワイトボード方式で既にApproved済みの成果物に対しても再提出を要求し、Expertが「既に提出済みなのに再度出力を求められている」と混乱する余地があったバグを修正。「未充足の要求項目が無く、かつホワイトボードに成果物が既に存在する場合は、再提出を求めず次のタスクへ進行する」という条件分岐を追記。
+6. ユーザーからの追加要望「監査・検算ループ自体は機能するが、その前提となる計画・目標理解が歪んでいると徒労に終わる」「バス3台で無理と分かった時点で"バスである必要は？タクシー補助では？"という一段上の思考をAIにさせたい」を受け、Plan modeで段階的な改善計画に合意（`docs/design/`外、Claude Codeのplanファイル`task-plan-reviewer-node-task-planner-glistening-coral.md`として保存）。Stage 2〜5（後述）は本BLでは未着手。
+
+**Stage 2〜5（`open`、設計のみ・実装は別途）:**
+
+- **Stage 2**: `task_planner_node`直後に1回だけ発火し、フェーズ・タスク計画全体（曖昧表現・タスク過不足・順序妥当性）をレビューする`task_plan_reviewer_node`を新設。NGなら`call_task_planner`を再実行させる、実行開始前のゲート。
+- **Stage 2'**: 各フェーズ完了時に、完了フェーズで判明した事実・矛盾・確定値を踏まえてtask_plannerが未着手の残りフェーズ・タスクのみを再分解する機構。
+- **Stage 5**: 「一段上の思考」をプロンプトでの自発性に頼らず機械的トリガーで強制発火させる。トリガーはOR条件（1）`global_constraints`の`claimed/total_cap`比が閾値（初期値0.9）以上（既存`check_global_constraint_overrun`は完全超過のみ検知するため姉妹関数が必要）、（2）`expert_retry_count>=3`（既存、`route_after_expert_detector`が既に"reflection"分岐に使用）。新規ノードは作らず既存`reflection_node`/`call_reflection`に3つ目の監査観点として追加し、懸念があれば次のExpert/User AIターンへ申し送り、Expert/User AI自身に`escalate_premise_concern`を呼ばせる動線とする。
+- **Stage 3**: task_planner分解前に挿入する新設「本質フェーズ」（実現可能性の壁打ち＋目標の本質の言語化、新規`goal_essence`テーブルに保存し全ノードへ常時注入）。BL-086のエスカレーション経路とは独立・併存させる。
+- **Stage 4**: Detectorのドメイン妥当性監査パス・User AIのレビュー視点の両方に「本質と数値・条件設定が整合しているか」という観点を追加（BL-069と合流）。
+
+**完了条件（Stage 1）:**
+
+- 新規`tests/test_bl087_task_planner_prompt_and_resubmission_fix.py`（3件）: `call_task_planner`プロンプトへの曖昧表記禁止指示・失敗事例の埋め込み確認、`generate_user_utterance`への再提出抑制条件分岐確認（いずれも`inspect.getsource`による静的確認）。
+- `python -m py_compile cela_main.py`合格。
+- Stage 2〜5は本BLの完了条件に含めず、着手時に新規BLを起票する。
 
 ---
 

@@ -885,6 +885,20 @@
 
 ---
 
+### D-059: 「一段上の思考」はプロンプトのモード切替ではなく既存stateの機械的シグナルで強制トリガーし、新規ノードではなくreflection_nodeを拡張する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-25 |
+| 状態 | `decided`（Stage 1のみ実装済み、本決定が対象とするStage 5自体は`open`・設計のみ） |
+| 決定者 | t-momose（「タスク猛進モードと抽象化モードの動的切替」案を提示） / Claude Sonnet 5（機械的トリガー方式を提案・ユーザー了承） |
+| **決定理由** | ユーザーは当初、「今はタスク猛進モード、今は一段上の思考をする抽象化モード」とプロンプトを動的に切り替える案を提示した。しかしBL-086の`escalate_premise_concern`が「ツールを渡し使い方も説明したのに実LLMドライランで一度も自発的に呼ばれなかった」（BL-087で発見）という実例が既にあり、これは「LLMに対して指示文だけでモード切替や自発的なツール想起を期待する」設計が実証済みで弱いことを示している。同じ弱点を「モード」という形で再導入するのは筋が悪いと判断し、指示文への依存ではなく、`state`に既に存在する機械的シグナル（LLMの自己申告に頼らない客観的な閾値判定）でチェックの発火自体を強制する方式を提案し、ユーザーが了承した。ノード新設か既存`reflection_node`拡張かの選択では、このプロジェクトが繰り返し学習してきた「ノード追加のたびにトークン消費・ドライラン時間が増える」というROI上の制約（R4をBL-041より優先した判断等と同根）を踏まえ、`reflection_node`が既に`expert_retry_count>=3`到達時に呼ばれる合流点であることを理由に新規ノードを避けた。 |
+| 決定内容 | トリガー条件はOR: (1) 新設`check_global_constraint_near_limit`（既存`check_global_constraint_overrun`は`total_claimed > total_cap`の完全超過のみ検知するため、その手前の「まだ超えていないが実質詰んでいる」状態、`claimed/total_cap`比が閾値（初期値0.9）以上を検知する姉妹関数として追加）、(2) 既存`state["expert_retry_count"] >= 3`（`route_after_expert_detector`が既に"reflection"分岐に使用している値をそのまま流用）。いずれかを満たした場合、`reflection_node`/`call_reflection`（completed/stagnant/continuing判定＋でっちあげ監査を行う既存ノード）に3つ目の監査観点として「現在のアプローチ（手段）そのものが真の目的に対して無理筋になっていないか、代替手段を検討する余地はないか」を追加する。`call_reflection`自体は監査人視点でexpert/userロールを持たないため`escalate_premise_concern`を直接呼べず、懸念が出た場合は次のExpert/User AIターンのシステムプロンプトへ申し送り、Expert/User AI自身に`escalate_premise_concern`を呼ばせる動線とする（BL-082の申し送り機構と同型のパターン）。 |
+| 影響 | `cela_main.py`（Stage 5実装時に`check_global_constraint_near_limit`新設、`call_reflection`のプロンプト拡張、申し送り機構の新設が必要。本決定時点では未実装）。 |
+| 関連 BL | [BL-087](issue_backlog.md#bl-087-前提の質を上げる一連の改善task_plannerの曖昧表記禁止二重指示バグ修正task_plan_reviewer_node等)（Stage 5として記録、実装は`open`）、[BL-086](issue_backlog.md#bl-086-前提エスカレーション経路-freeze復活-ゴール改定goalshifteventの実消費化)（`escalate_premise_concern`が自発的に呼ばれなかった実例、本決定の出発点） |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
