@@ -899,6 +899,20 @@
 
 ---
 
+### D-060: 「本質フェーズ」（Stage3）はBL-086のエスカレーション経路と統合せず独立させ、9消費者すべてへ機械的に注入する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-25 |
+| 状態 | `decided`（実装済み） |
+| 決定者 | t-momose（Stage3/4の実行を指示） / Claude Sonnet 5（設計・実装） |
+| **決定理由** | Stage2完了後、ユーザーからStage3（本質フェーズ）・Stage4（Detector/User AI拡張）の実行指示を受けた。事前に提示していた設計案通り、「本質フェーズ」（事前予防、計画開始前に1回だけ目標の本質を言語化）と、BL-086の`escalate_premise_concern`/`revise_goal`（事後保険、走行中に前提矛盾に気づいた際のエスカレーション）は統合せず独立・併存させる方針をそのまま踏襲した。統合しなかった理由は、両者が防ぐ失敗モードの時間軸が異なるため（本質フェーズは計画そのものが本質から外れて生成されることを防ぐ「事前」対策、BL-086は計画は妥当でも実行中に矛盾が判明した場合の「事後」対策）、無理に1つの機構にまとめると却って「いつどちらが発火すべきか」の判定ロジックが複雑化すると判断した。注入範囲については、BL-086のD-058で既に「`state["goal"]`は9箇所の消費者が毎ターン再埋め込みする」という事実が特定されていたため、同じ9箇所（`call_orchestrator`/`call_expert`/`call_detector`〈2パス〉/`call_reflection`/`generate_user_utterance`/`call_resource_arbiter`/`call_facilitator`/`call_integrator`/`call_reviewer`）へ本質テキストも機械的に注入することで、D-058が既に確立した「ゴール文の消費経路」という設計上の合意点をそのまま再利用し、独自の一部箇所だけへの注入という中途半端な対応を避けた。 |
+| 決定内容 | 新設`goal_essence`テーブル（`run_id`単位1行）・`call_goal_essence_analyst`・`goal_essence_node`をグラフの新しい`entry_point`とし、`state["goal_essence_done"]`で冪等ガード（`task_plan_reviewer_node`の`plan_review_done`と同型）。新設`_get_goal_essence_text(conn, run_id)`を、`state`を直接持つ5関数は自分で呼び出し、`goal`のみを引数に取る4つの「純粋関数」（`call_resource_arbiter`/`call_facilitator`/`call_integrator`/`call_reviewer`）は新設`goal_essence_text: str = ""`引数を追加し、呼び出し元ノードから渡す形にした（これらの関数にDBアクセスを持ち込まず、既存のシグネチャの素性を保つため）。Stage4は、Detectorのドメイン妥当性パスと`generate_user_utterance`の両方に、本質と数値・条件設定の整合性チェック観点を追加するに留め、BL-069本体（Expertのフェーズ・タスク表活用）への統合は行わなかった（BL-069は別途、Expert側のスコープガードレールとの緊張関係の検討が必要なため）。 |
+| 影響 | `cela_main.py`（新設`goal_essence`テーブル・`db_save_goal_essence`/`get_goal_essence`/`_get_goal_essence_text`・`call_goal_essence_analyst`・`goal_essence_node`、9箇所の注入配線、Detector/User AIへの本質整合性チェック指示追加）。新規`tests/test_bl087_stage3_4_goal_essence.py`（21件）。 |
+| 関連 BL | [BL-087](issue_backlog.md#bl-087-前提の質を上げる一連の改善task_plannerの曖昧表記禁止二重指示バグ修正task_plan_reviewer_node等)（Stage3・4として実装）、[BL-086](issue_backlog.md#bl-086-前提エスカレーション経路-freeze復活-ゴール改定goalshifteventの実消費化)（D-058の9消費者を再利用、独立併存の対象）、[BL-069](issue_backlog.md#bl-069-expertが決定前にフェーズタスク表全体を見渡して他フェーズとの資源競合に気づけるよう軽量な指示を追加する)（Stage4の一部が合流、本体は別途） |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
