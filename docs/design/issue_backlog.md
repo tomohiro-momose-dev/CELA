@@ -2751,7 +2751,7 @@ BL-086実装後の実LLMドライラン（`log/2026-07-24/2358`）レビュー�
 **対応（Stage 3、実装済み）:**
 
 11. 新設`goal_essence`テーブル（`run_id`単位で1行、`true_essence`/`feasibility_notes`/`created_at`）。BL-086の`goal_escalations`（走行中に前提矛盾に気づいた際の事後エスカレーション）とは独立・併存する事前予防機構と位置づけ。
-12. 新設`call_goal_essence_analyst(goal)`: task_planner分解より前に1回だけ呼ばれ、(1)ゴール文に明示された数値制約からの大まかな実現可能性の壁打ち（詳細検算はF-2.6の役目であり、ここではオーダー感の確認に留める）、(2)個々の制約はあくまで「本来解決すべき本質的な課題」の手段・例示に過ぎない可能性を踏まえた本質の言語化、の2点をJSON（`true_essence`/`feasibility_notes`）で返す。
+12. 新設`call_goal_essence_analyst(goal)`: task_planner分解より前に1回だけ呼ばれ、(1)ゴール文に明示された数値制約からの大まかな実現可能性の壁打ち（詳細検算はF-2.6の役目であり、ここではオーダー感の確認に留めるが、暗算は禁止し`tools=[PYTHON_REPL_TOOL]`で機械計算させる——プロジェクト全体で最も上流の判断であるため暗算によるハルシネーションが後続の全タスクに伝播するリスクを重視、ユーザー指摘）、(2)個々の制約はあくまで「本来解決すべき本質的な課題」の手段・例示に過ぎない可能性を踏まえた本質の言語化、の2点をJSON（`true_essence`/`feasibility_notes`）で返す。
 13. 新設`goal_essence_node`をグラフの新しい`entry_point`として追加（旧`task_planner`から変更、`graph.add_edge("goal_essence", "task_planner")`）。新設`state["goal_essence_done"]`により、`task_plan_reviewer_node`の`plan_review_done`と同型の冪等ガード（チェックポイント再開・毎ターン再入場のたびにレビューLLMが再発火しないため）を持つ。
 14. 新設`_get_goal_essence_text(conn, run_id)`（未生成時は空文字）を、BL-086 D-058で確認された`state["goal"]`の9消費者すべて（`call_orchestrator`/`call_expert`/`call_detector`〈数値監査・ドメイン妥当性の両パス〉/`call_reflection`/`generate_user_utterance`は`state`から直接、`call_resource_arbiter`/`call_facilitator`/`call_integrator`/`call_reviewer`は新設`goal_essence_text: str = ""`引数経由で呼び出し元ノードから）へ、ゴール本文と並べて常時注入。
 
