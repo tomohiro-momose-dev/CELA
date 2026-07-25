@@ -831,7 +831,7 @@
 - **実装内容:** `_annotate_whiteboard_with_detector_comment`の戻り値を`bool`から`tuple[bool, str]`へ変更し、`detector_node`が失敗時にも理由付きでログ出力するよう変更。新設`_normalize_for_loose_match`（改行・空白・Markdown太字記法・全角半角を吸収し、元の文字列位置へのindex_mapを保持）で正規化後の緩い一致にフォールバックする処理を追加。
 - **決定者:** t-momose（1216ログ調査の依頼、BL-074への統合判断、対策範囲の絞り込み、BL-079分離の承認）、Claude Sonnet 5（フォレンジック調査による発見、Claude Code方式との比較分析、技術設計・実装）
 - **検証:** 新規`tests/test_bl074_annotation_loose_match_fallback.py`（5件）、既存`tests/test_bl076_whiteboard_detector_annotation.py`をタプル戻り値に合わせて更新。オフラインスモークテスト計122件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。実LLM再ドライランでの効果確認は次回待ち。
-- **関連:** [D-050](decision_log.md#d-050-ホワイトボード注釈のtarget_excerpt一致失敗をbl-074へ統合しログ出力正規化フォールバックで対応するリトライ構造はbl-079へ分離)、[BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)、[BL-076](issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)、[BL-079](issue_backlog.md#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる設計検討未着手)
+- **関連:** [D-050](decision_log.md#d-050-ホワイトボード注釈のtarget_excerpt一致失敗をbl-074へ統合しログ出力正規化フォールバックで対応するリトライ構造はbl-079へ分離)、[BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)、[BL-076](issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)、[BL-079](issue_backlog.md#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる)
 
 ---
 

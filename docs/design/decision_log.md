@@ -769,7 +769,7 @@
 | **決定理由** | `log/2026-07-24/1216`のドライランをユーザー依頼でフォレンジック調査した結果、BL-076のホワイトボード注釈機能が、major/assistant判定が複数回発生し`target_excerpt`も正しく出力されていたにもかかわらず一度も発火しておらず、しかも`_annotate_whiteboard_with_detector_comment`が失敗時に`False`を返すのみでログが一切出ないサイレント失敗だったことが判明した。この完全一致依存の脆さはBL-074（Deliverableのtopic文字列ドリフト）と同根の問題であり、ユーザーの判断で別BLに分けず統合することとした。さらにユーザーから「Claude Code自身のEdit（old_text/new_text完全一致）はなぜ実運用でハードルが高くならないのか」という質問があり、調査の結果、(1)LLMがその場で読んだ内容から引用すること、(2)不一致時にツール結果として即座にエラーが返り同一ターン内でLLM自身がリトライできること、の2点が理由と判明した。CELAの現状は(2)を欠いており、ユーザーは他ツール（python_repl等）でエラーフィードバックがあるとDetectorが試行錯誤して解決を試みている思考ログを確認しており、同様の自己修正ループを注釈挿入にも適用すべきと判断した。ただし(2)の実現（Detector自身のツール呼び出しとして注釈挿入を提供し、同一ツールループ内でリトライさせる）はDetectorの既存2パスツールループの設計変更を伴い規模が大きいため、まず即応可能な(1)側の緩和策（正規化フォールバック）とサイレント失敗の解消（理由付きログ）を今回実装し、(2)は別途BL-079として起票・実装は次回とする方針に決定した。 |
 | 決定内容 | `_annotate_whiteboard_with_detector_comment`の戻り値を`bool`から`tuple[bool, str]`（成功可否, 理由）へ変更。完全一致に失敗した場合、新設`_normalize_for_loose_match`（改行・空白・Markdown太字記法・全角半角を吸収し、元の文字列位置へのindex_mapを保持）による正規化後の緩い一致へフォールバックし、それでも一意に定まらない場合のみ挿入を諦める。`detector_node`は成功時・失敗時のいずれも理由付きでログ出力する（失敗時: `⚠️ [Whiteboard Annotate Failed]`）。BL-076の「実LLM再ドライランでの効果確認は次回待ち」という完了条件はこの調査により部分的に充足され、同時に脆弱性が発覚したため対策を前倒しで実装した。Detector自身へのフィードバック＆同一ツールループ内リトライの構造化はBL-079として別途起票し、本決定のスコープ外とする。 |
 | 影響 | `cela_main.py`（`_annotate_whiteboard_with_detector_comment`の戻り値変更・`_normalize_for_loose_match`新設、`detector_node`のログ配線、`unicodedata`のimport追加）。新規`tests/test_bl074_annotation_loose_match_fallback.py`（5件）、既存`tests/test_bl076_whiteboard_detector_annotation.py`をタプル戻り値に合わせて更新。 |
-| 関連 BL | [BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)、[BL-076](issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)、[BL-079](issue_backlog.md#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる設計検討未着手) |
+| 関連 BL | [BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)、[BL-076](issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)、[BL-079](issue_backlog.md#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる) |
 
 ---
 
@@ -994,6 +994,34 @@
 | 決定内容 | `call_goal_essence_analyst`のプロンプトに、JSON文字列値の**末尾**を全角鉤括弧「」『』で終えないよう明記する指示を追加（強調は文中に置くか、末尾は句点等の通常の文字にするよう指示）。他の7関数（同種のJSON出力を行う`call_expert`等）への横展開は、本件が`1913`ログで1回のみの観測であり、D-064の層2リトライで実害なく吸収されている以上、緊急性は無いと判断し見送った。同種の事象が別関数で再発した場合に改めて横展開を検討する。 |
 | 影響 | `cela_main.py`（`call_goal_essence_analyst`のプロンプト文字列のみ、ロジック変更なし）。新規`tests/test_bl090_json_string_fullwidth_quote_guard.py`（1件）。 |
 | 関連 BL | [BL-090](issue_backlog.md#bl-090-goal_essence_analystがjson文字列値の末尾を全角鉤括弧で終え閉じ引用符を書き忘れる)、[BL-089](issue_backlog.md#bl-089-複数jsonフェンスブロックの混線によるレビュー安全ゲートの無効化および全ノード共通の重複再検証の抑制)（D-064の層2リトライが実害を吸収した安全網） |
+
+---
+
+### D-067: write_agreementの成否をDetectorへ明示し、モデルの偽ツール呼び出し風テキストを鵜呑みにさせない
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-25 |
+| 状態 | `decided`（実装済み） |
+| 決定者 | t-momose（`log/2026-07-25/1913`の続きをレビューし「detectorがホワイトボードを更新できないまま、事故が起きました」と報告、「BL起票と...修正して」と指示） / Claude Sonnet 5（原因特定・修正） |
+| **決定理由** | task_2_1の3回目修正で、Expertのwrite_agreement(edits)が失敗→最終iterationでツール強制排除→モデル（DeepSeek系）が独自のツール呼び出し風疑似XML（`<｜DSML｜tool_calls>...`）を平文出力、という経路で、実際には一切実行されていない（システム自身が`get_last_write_agreement_succeeded()=False`と正しく記録）更新をDetectorが鵜呑みにして誤って承認し、Decision Extractorも虚偽のUPDATEをDBに記録する事故を発見した。`call_detector`は既に現在の最新ホワイトボード内容（`whiteboard_block`、唯一の真実）を提示していたが、それと会話ターンの「主張」を突き合わせて食い違いに気づくことをモデルの注意力だけに委ねており、構造的な保証が無かった。BL-033で確立した「Expertの自己申告（python_repl未使用でも書けてしまう）を鵜呑みにせず実行記録と突き合わせる」という設計思想の、write_agreement版の欠落と判断した。既存の`state["expert_wrote_agreement"]`/`state["user_wrote_agreement"]`フラグ（R3b §3.5.1で既に実装済み、decision_extractor_nodeの一部でのみ消費されていた）をそのままDetectorへ渡せば実装できるため、新規のDB永続化や状態追加は不要と判断した。 |
+| 決定内容 | `call_detector`のドメイン妥当性レビュー・数値監査の両プロンプトに、今回のターンでwrite_agreementが実際に成功したか（target_roleに応じて`expert_wrote_agreement`/`user_wrote_agreement`を選択）を明示する`write_agreement_status_block`を追加。失敗している場合は「相手の発言内容がどれだけ説得力があっても実際には反映されていない。上記の最新ホワイトボードのみが唯一の真実であり、食い違う場合はconstraint_issue="major"とすること」と明記した。ドメイン妥当性レビュー（今回、物理的整合性の誤判定を実際に行った当事者）にも同じブロックを配線した。新規`tests/test_bl091_write_agreement_status_and_bl079_excerpt_verify.py`。 |
+| 影響 | `cela_main.py`（`call_detector`のプロンプト文字列のみ、ロジック変更なし）。実LLM再ドライランでの効果確認（同種の偽ツール呼び出しテキストが再発した場合の検出）は次回待ち。 |
+| 関連 BL | [BL-091](issue_backlog.md#bl-091-write_agreementの成否をdetectorへ明示せずモデルの偽ツール呼び出し風テキストを鵜呑みにして誤って承認していた)、[BL-033](issue_backlog.md#bl-033-expertがpython_repl未使用のまま検算完了と虚偽申告できるf-26監査フラグに強制力がない)（同型の先行対策） |
+
+---
+
+### D-068: ホワイトボード注釈のtarget_excerpt一致は、挿入自体のツール化ではなく事前検証ツール＋プログラム側フォールバックで担保する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-25 |
+| 状態 | `decided`（実装済み） |
+| 決定者 | t-momose（BL-079も含めて修正するよう指示） / Claude Sonnet 5（設計・実装） |
+| **決定理由** | BL-079の当初構想（注釈挿入`_annotate_whiteboard_with_detector_comment`自体をDetector自身が呼べる新規ツール化する）を実装検討したところ、実際の挿入処理が`decision_id`（`detector_node`側で両パス完了後に発行）を必要とし、Detectorのツールループ実行中にはまだ存在しないという設計上の制約に直面した。これを解決するには`decision_id`発行タイミングの前倒しという大きめの変更が必要になり、BL-079が当初から懸念していた「規模が大きい」問題が実際に顕在化した。全面的な再設計を避け、実利的に「一致失敗をDetector自身にフィードバックし、同一ツールループ内で調整・再試行させる」というユーザーの核心的な要望を満たすため、挿入とは切り離した「検証専用」の軽量ツールに設計を縮小した。 |
+| 決定内容 | 新規ツール`verify_whiteboard_excerpt`（書き込みは行わず、完全一致→正規化緩い一致の2段判定でok/ngのみ返す）をDetectorの数値監査パス（tools付き）に追加。ドメイン妥当性レビュー（tools=None、BL-054で意図的に検算から切り離された軽量パス）はこのツールを呼べないため、target_excerpt統合ロジック（`call_detector`）に、severityで優先された側の引用が実際には一致しない場合、もう一方の（一致する可能性が高い）引用へプログラム的に差し替えるフォールバック（`_excerpt_matches_uniquely`）を追加し、ドメイン側単独の弱点を補った。ドメイン妥当性レビュー自体にtoolsを持たせる（BL-054の設計を変更する）ことはスコープ外とした。 |
+| 影響 | `cela_main.py`（新規`VERIFY_WHITEBOARD_EXCERPT_TOOL`/`_verify_whiteboard_excerpt_handler`/`TOOL_DISPATCH`登録、`call_detector`のtools・プロンプト・target_excerpt統合ロジック）。実LLM再ドライランでの効果確認（`Whiteboard Annotate Failed`の発生頻度低下）は次回待ち。 |
+| 関連 BL | [BL-079](issue_backlog.md#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる)、[BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合) |
 
 ---
 

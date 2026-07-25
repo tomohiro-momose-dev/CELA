@@ -110,7 +110,7 @@
 | BL-076 | 中 | `cela_main.py` (`call_detector`/`detector_node`/新設`_annotate_whiteboard_with_detector_comment`) | BL-075のプロンプト誘導だけでは「毎ターン再構成されるプロンプト注入」に留まり見落とされ得るとユーザーが指摘。Detectorのmajor指摘を、プロンプト注入と同時にホワイトボード本文そのものにWord/PDFのコメント機能のように永続的な注釈として埋め込む機能を追加。Detectorの両パス（ドメイン妥当性レビュー・数値監査）に`target_excerpt`（指摘対象の一字一句引用）を出力させ、ホワイトボード内で一意一致する場合のみ`> 🔴 **[Detector指摘 #ID]**: ...`形式（案A・タグ+案Bの引用のハイブリッド、ユーザー承認）の注釈をその直後に挿入する。Expertは修正時にeditsで注釈行ごと書き換えることで自然に注釈が消える設計 | P2 |
 | BL-077 | 低 | `cela_main.py`（CELA自身のAI群全体、未着手・設計検討のみ） | ユーザーが、本プロジェクト自身のAGENTS.mdが定める「まずMemory/STATUS/backlogを確認してから動く」という設計思想を、CELAが動かすAI群（Expert/User AI等）自身にも適用するアイデアを提示。ホワイトボード（現状把握）と、まだ実装されていない「issue_BL」相当の仕組み（タスク内の残課題・指摘事項の永続管理）を必ず先に確認してから、User AIなら指示、Expertならタスク遂行に入るという思考ワークフロー。ユーザー自身、STATUS.md・traceability.md相当の仕組みも新たに必要になると認識しており、範囲が大きいためBL化のみ行い、設計は別途相談 | P3 |
 | BL-078 | 中 | `cela_main.py` (`call_orchestrator`/`orchestrator_node`/`call_expert`) | ユーザーが、Detectorの「監査の観点をプロンプトで変えるだけで仕事ぶりがガラッと変わる」効果に着想を得て、Orchestratorが専門家選定時に既に行っているタスク内容の考察（従来は選定理由`reason`としてログにのみ残り、Expertには一切伝わっていなかった）を、新設`focus_guidance`フィールドとして明示的に出力させ、選ばれたExpertのプロンプトに注入することでタスクごとに思考を最適化できないか提案。`call_orchestrator`のプロンプト・JSON出力に`focus_guidance`（タスク固有の着眼点・注意点、`reason`＝選定理由とは別物）を追加し、`orchestrator_node`が`state["expert_focus_guidance"]`へ保存、`call_expert`のフル版・軽量版プロンプト両方に注入 | P2 |
-| BL-079 | 中 | `cela_main.py` (`_annotate_whiteboard_with_detector_comment`/`call_detector`、未着手・設計検討のみ) | BL-074の正規化フォールバックを相談する中で、ユーザーがClaude Code自身の`Edit`ツールが同種の完全一致方式でも実運用できている理由を質問。調査の結果、Claude Codeは(1)LLMがその場で読んだ内容から引用する、(2)不一致時に即座にエラーがツール結果として返り同一ターン内でLLM自身がリトライできる、の2点が揃っているのに対し、CELAの`_annotate_whiteboard_with_detector_comment`は(2)を欠き、失敗してもDetector自身にフィードバックが返らないことが根本差だと判明。ユーザーが他ツール（python_repl等）ではエラーフィードバックがあるとDetectorが試行錯誤して解決を試みている思考ログを確認しており、同様に注釈挿入の一致失敗をDetector自身のツール呼び出し結果として返し、同一ツールループ内でリトライさせる構造を提案。Detectorは既にツールループ内で動作しているため設計変更の規模が大きく、BL化のみ行い実装は別途。**2026-07-25追記:** `1913`ドライラン（L16700）でBL-074の正規化フォールバックも救えない0/0一致失敗が再現し、実効性のある解決にはやはり本BLの対応が必要と判断したため優先度をP3→P2へ引き上げ | P2 |
+| BL-079 | 中 | `cela_main.py` (新設`VERIFY_WHITEBOARD_EXCERPT_TOOL`/`_verify_whiteboard_excerpt_handler`、`call_detector`) | BL-074の正規化フォールバックを相談する中で、ユーザーがClaude Code自身の`Edit`ツールが同種の完全一致方式でも実運用できている理由を質問。調査の結果、Claude Codeは(1)LLMがその場で読んだ内容から引用する、(2)不一致時に即座にエラーがツール結果として返り同一ターン内でLLM自身がリトライできる、の2点が揃っているのに対し、CELAの`_annotate_whiteboard_with_detector_comment`は(2)を欠き、失敗してもDetector自身にフィードバックが返らないことが根本差だと判明。**2026-07-25追記:** `1913`ドライラン（L16700）でBL-074の正規化フォールバックも救えない0/0一致失敗が再現し、優先度をP3→P2へ引き上げ。**2026-07-25実装:** 当初案（注釈挿入自体をDetector自身が呼べるツール化）は、実際の注釈挿入がdecision_id確定後のdetector_node側後処理で行われるため、ツール呼び出し時点ではdecision_idが未確定という設計上の制約があり、規模が大きくなると判断。代わりに、挿入は事後処理のまま維持しつつ、事前に「この引用は一意に一致するか」だけを検証できる新規ツール`verify_whiteboard_excerpt`をDetectorの数値監査パス（tools付き）に追加し、一致失敗時はDetector自身が同一ツールループ内でexcerptを調整・再試行できるようにした。ドメイン妥当性レビュー（tools=None）は依然としてこのツールを呼べないため、`call_detector`のtarget_excerpt統合ロジックに、選ばれた側の引用が実際には一致しない場合もう一方の（一致する可能性が高い）引用へ差し替えるプログラム側フォールバックも追加した | P2 |
 | BL-080 | 高 | `cela_main.py` (`_commit_agreement_from_tool`のSUPERSEDE分岐) | ユーザー依頼で1216ドライラン後の1319ドライランをフォレンジック調査する中で発見。`entry_type="Deliverable"`に対する`action_type="SUPERSEDE"`は、旧agreement行のstatusを`Superseded`に変更した直後に`return None`しており、Expertが渡した`decision_what`（全文）を完全に破棄し、`apply_whiteboard_patch`も一切呼ばれないまま「成功」を返す実質何もしないツール呼び出しになっていた。BL-075で追加したプロンプト（editsの完全一致に失敗した場合、decision_whatによる全文更新＝SUPERSEDEを使えという誘導）がExpertをこの壊れた経路に誘導し、Expertは`{'success': True}`を信じて「更新完了」と報告するが、直後に`read_deliverable_file`で読み戻すと旧内容のままという矛盾に直面。Expertはこれを「システムの反映タイミングの問題」と誤って自己正当化し、Detector/Userからハルシネーション（虚偽の更新完了報告）と判定され続ける無限ループに陥っていた。`entry_type=="Deliverable"`かつ`action_type in ("CREATE", "SUPERSEDE")`かつ`len(decision_what) > 200`（CREATE/UPDATE全文置換と同一閾値）の場合、CREATE同様`apply_whiteboard_patch`で新版を保存するよう修正。BL-062のDetectorによる無効化用途（短い理由文のみ、ホワイトボードには触れない）との後方互換は同じ閾値で維持 | P0 |
 | BL-081 | 高 | `cela_main.py` (`_apply_text_edits`/`_normalize_for_loose_match`/新設`_find_loose_match_spans`) | ユーザーが同じ1319ドライランを指して「まだホワイトボードの差分書き換えに苦労しているようです」と再調査を依頼。調査の結果、ExpertがBL-080の誘因となった`edits`失敗（Markdownテーブル行頭の全角スペース・パイプ記号の有無だけでold_text完全一致が0件になる）の実例を特定。BL-074/D-050でDetectorのtarget_excerpt向けに確立した正規化緩い一致の仕組みを`_apply_text_edits`自身にも適用し、Expertの主たる編集手段であるeditsがその場で成功する確率を高めた（新設`_find_loose_match_spans`で正規化後の一致位置を元の文字列へ逆写像）。あわせて、`_normalize_for_loose_match`自体に「半角スペースは除去されるが全角スペース（　）はNFKC正規化後の半角スペース1文字として結果に残ってしまう」という非対称バグを発見・修正し、テーブル区切り記号（\|）も正規化対象に追加した | P1 |
 | BL-082 | 高 | `cela_main.py` (新設`plan_drafts`テーブル/`get_latest_plan_draft`/`apply_plan_patch`/`_append_deferred_note_to_plan`/`_get_deferred_notes_text`、`decision_extractor_node`/`call_decision_extractor`/`_build_task_scope_context`/`call_expert`/`generate_user_utterance`/`call_detector`) | `log/2026-07-24/1349`のドライランで、User AIが「積雪・通信エリアの区間切り出しの地形照合はtask_2_1/task_2_2で具体化されるべき」と先送り判断を発言したことをユーザーが指摘し「この先送り事項は現状消えてしまいますよね？」と質問。調査の結果、二重の理由で消失することが判明: (1) `call_decision_extractor`の「先送りの検出」ルール（`entry_type=Directive, status=Deferred`として抽出）がExpert側の抽出ブランチにしか実装されておらずUser AI側には存在しなかった（今回の実例はUser AIの発言だったため抽出自体が発動しなかった）、(2) たとえ正しく抽出されても`_build_agreements_context`がentry_type="Directive"を無条件で全除外しており後続タスクには一切見えない構造だった（BL-073時代の対症療法の副作用）。ユーザーが提案した「task_plannerの計画もホワイトボード化して先送り事項を書き込めるようにする」という方向性を採用。`whiteboard_drafts`の完全ミラーとして新規`plan_drafts`テーブルを新設（既存テーブルへの混在によるリスクを避けるため）。`decision_extractor_node`が申し送り先task_id（新設`defer_to_task_id`フィールド、両抽出ブランチに追加）を解決し対象タスクの計画文書へ追記、`call_expert`・`generate_user_utterance`・`call_detector`の3箇所（Explore調査＋Plan agentによる批判的レビューで発見した見落とし箇所）すべてに配線した | P1 |
@@ -122,6 +122,8 @@
 | BL-088 | 高 | `cela_main.py` (`_safe_json_parse`) | BL-087 Stage2改善後の実ドライラン（`log/2026-07-25/1642`）レビューで、task_plannerの1〜2回目の出力が実際には正しい5〜6フェーズの計画だったにもかかわらず、`task_plan_reviewer_node`に渡った内容は縮退した1タスクのみの`fallback_phase`になっていた事象を発見。原因は`_safe_json_parse`の「先頭が`{`/`[`でない場合に開始位置を探す」ロジックが、`brace_idx`（最初の`{`の位置）が見つかりさえすれば`bracket_idx`（最初の`[`の位置）より後にあっても常に`brace_idx`を優先していたこと。トップレベルが配列（`call_task_planner`のfallbackはlist）で、かつコードフェンス前に説明文が付く応答（例:「それでは、フェーズ分解を提示します。\n\n\`\`\`json\n[{...}]」、LLMの一般的な癖）の場合、配列を開く`[`より後にある最初のオブジェクトの`{`から開始してしまい、構文的に不正なJSON（先頭の`[`を欠いた状態）になりパース失敗、fallbackへ握りつぶされていた。このバグにより、`task_plan_reviewer_node`の差し戻しリトライ予算（上限2回）が2回とも本バグによる縮退計画の却下で無駄撃ちされ、3回目（最終・強制承認）でも再現していれば縮退計画がそのまま最終計画として承認されるところだった。`{`/`[`のどちらが先に現れるかで開始位置を決めるよう修正（`min()`判定）。新規`tests/test_bl088_safe_json_parse_bracket_precedence.py`（3件、`1642`ログの実際の失敗パターンを再現）、`python -m py_compile`合格。D-062として記録 | P1 |
 | BL-089 | 高 | `cela_main.py`（`_safe_json_parse`、`call_task_plan_reviewer`/`call_task_planner`/`call_goal_essence_analyst`を`_query_and_parse_with_retry`でラップ、`call_expert`/`call_detector`/`call_resource_arbiter`/`call_integrator`/`call_reviewer`/`generate_user_utterance`/`call_goal_essence_analyst`/`call_task_plan_reviewer`のプロンプトに重複検証抑制指示） | ユーザー依頼でドライラン再実行（`log/2026-07-25/1814`）をレビューし、BL-088修正後もなお、task_plannerの出力がmax_tokens相当の理由で途中で切れ縮退計画にフォールバックした上、task_plan_reviewerはこの縮退計画を正しく"major"と判定していたにもかかわらず、応答が「プレビュー用の配列ブロック」と「### 最終JSON出力の完全なオブジェクトブロック」という2つの```json```ブロックで構成されていたため`_safe_json_parse`が混線し構文エラー、fallback（`constraint_issue="none"`）に化けて縮退計画がそのまま承認・実行されてしまう事象（`log/2026-07-25/1814/whiteboards/`にphase_1_task_1_1のみ存在）を発見。(1) `_safe_json_parse`を、複数の```json```フェンスブロックがあれば最後のブロックを採用するよう修正（BL-088の単一フェンス+先頭プローズのケースも包含）。(2) `call_task_plan_reviewer`/`call_task_planner`/`call_goal_essence_analyst`を既存の層2リトライ`_query_and_parse_with_retry`（D-005、`call_reviewer`/`call_detector`で既に採用済みの安全網）でラップし、単発のパース失敗で即fallbackへ落ちないようにした。(3) `call_task_plan_reviewer`は安全ゲートという性質上、リトライを使い切ってもパース失敗した場合は"none"（フェイルオープン=承認）ではなく"major"（フェイルクローズ=差し戻し）を返すよう変更。続けて、ユーザーが同じ`1705`/`1814`ログから「他のノードも何回も何回も同じ思考を繰り返しすぎることが多々あった」と指摘し、`tools=[...]`でpython_repl等のツールアクセスを持つ全8関数（tools=Noneの`call_orchestrator`/`call_decision_extractor`/`call_reflection`/`call_facilitator`は対象外）のプロンプトに、既存のtask_planner項目7と同種の「同じ検証・計算を繰り返さない」指示を追加。`call_task_plan_reviewer`には追加で「最終回答のJSONブロックは1つだけ」という指示も加えた。新規`tests/test_bl089_json_fence_and_failclosed_review.py`（8件）・`tests/test_bl089_anti_repetition_instructions.py`（9件）、`python -m py_compile`合格。D-064・D-065として記録 | P1 |
 | BL-090 | 中 | `cela_main.py` (`call_goal_essence_analyst`) | BL-089修正後のドライラン（`log/2026-07-25/1913`）をユーザーがレビューし発見。L424でgoal_essence_analystの応答が、`feasibility_notes`文字列値の末尾を全角鉤括弧「」で終えたため、JSON構文上の閉じ引用符(")を書き忘れた形になりパース失敗（`⚠️ JSON判定パース失敗を検知。層2リトライ 1/2...`でBL-089の層2リトライにより自己修復済み、実害なし）。プロンプトに「JSON文字列値の末尾を全角鉤括弧「」『』で終えない」旨の注意を追加し、そもそもこの種のパース失敗自体を減らす予防策とした。新規`tests/test_bl090_json_string_fullwidth_quote_guard.py`（1件）、`python -m py_compile`合格。D-066として記録 | P3 |
+| BL-091 | 高 | `cela_main.py` (`call_detector`) | `log/2026-07-25/1913`のtask_2_1修正で、Expertのwrite_agreement(edits)が「old_text不一致」で失敗し最終iterationでツールが強制的に外された後、モデル（DeepSeek系）が独自のツール呼び出し風疑似XML（`<｜DSML｜tool_calls>...`）を平文でそのまま出力。`get_last_write_agreement_succeeded()=False`とシステム自身は正しく記録していたが、この成否フラグが`call_detector`のプロンプトに一切渡っておらず、Detectorはこの平文の「主張」を鵜呑みにして誤って承認（物理的矛盾が解消された、acceptance_criteria充足）、Decision Extractorも虚偽のUPDATEをDBに記録した。実際のホワイトボードはV2のまま（V3は存在せず）、誤った記述・数値が残存。BL-033（Expertのpython_repl自己申告を鵜呑みにしない）と同根・同型の欠落。`call_detector`のドメイン妥当性レビュー・数値監査の両プロンプトに、今回のターンでwrite_agreementが実際に成功したか（`state["expert_wrote_agreement"]`/`state["user_wrote_agreement"]`）を明示するブロックを追加し、失敗時は「相手の発言内容にかかわらず現在の最新ホワイトボードのみが真実」「食い違えばmajor」と指示。新規`tests/test_bl091_write_agreement_status_and_bl079_excerpt_verify.py`、`python -m py_compile`合格。D-067として記録 | P0 |
+| BL-092 | 中 | `cela_main.py` (`call_task_planner`/`task_plan_reviewer_node`、対応方針は未確定・記録のみ) | 別AIによる`1913`ログの独立レビュー（12項目指摘）を、さらに別チャットで各項目を実際のログ行まで追跡させた結果、数値矛盾の指摘（#1 task_2_2の往復24km/48km混在、#3 task_3_4の「約1,200万円」、#4 task_3_3の赤字誤差、#7 「10人乗り」の根拠）が、task_plan_reviewerの差し戻しを経て「解消」した実態は、数値を検算・訂正したのではなく**該当する記述・タスク内容ごと削除するか抽象的な表現に差し替える**ことで、矛盾そのものを見えなくする形だったと判明。BL-087 Fix A（reviewerの過剰な精度要求がtask_plannerに存在しない数値の捏造＝過剰な精度の追加を誘発する問題）とは逆方向の、reviewerの差し戻し圧力がtask_plannerに検証困難な具体性の削除・抽象化を選ばせてしまう構造的パターンと考えられる。一方、#2（task_5_2の「2.1分」根拠不明）は解消されず、後続のtask_2_1実行時に同種の単位混同（「停車後40.5秒で通過」という物理的に不可能な記述）として再燃しており、これはBL-091で発見・修正済みの事故（Expertのwrite_agreement失敗→偽ツール呼び出しテキスト→Detectorが鵜呑みにして誤承認）と同一のドライラン内での再確認。#12（重複再計算）はdraft1で49回→draft2で24回→draft3で8回とラウンドを追うごとに減少しており、D-065（重複検証抑制指示の全ノード展開）の効果が実データで裏付けられた。また、このドライランはtask_2_1/2_2の実行で止まっており、Phase 3以降（収支・保険料・オペレーター試算）は未実行のため、#3/#4/#7/#10/#11の一部はそもそも実行時の再検証機会自体が無かった点に留意。対応方針（「解消」の質を検算による訂正に限定させる指示追加等）は未確定のため、記録のみに留める | P2 |
 
 ---
 
@@ -2279,7 +2281,7 @@ BL-059と同型の問題である。`_query_AI_live`の単一の`try`ブロッ�
 |------|------|
 | 状態 | `open`（target_excerpt側の正規化フォールバック＋失敗理由ログは`done`。Deliverable本体のtask_id識別への切替は次回） |
 | 優先度 | P2 |
-| 関連 | [BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)（同根の問題、Directive側の解決）、[BL-076](issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)（統合元）、[BL-079](issue_backlog.md#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる設計検討未着手) |
+| 関連 | [BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)（同根の問題、Directive側の解決）、[BL-076](issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)（統合元）、[BL-079](issue_backlog.md#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる) |
 
 **内容:**
 
@@ -2456,13 +2458,13 @@ BL-089レビューの延長で、ユーザーとtask_2_1（安全基準・運休
 
 ---
 
-### BL-079: ホワイトボード注釈の一致失敗をDetector自身にフィードバックし、同一ツールループ内でリトライさせる（設計検討・未着手）
+### BL-079: ホワイトボード注釈の一致失敗をDetector自身にフィードバックし、同一ツールループ内でリトライさせる
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（設計検討のみ、実装未着手） |
+| 状態 | `done`（当初構想の縮小版として実装。完全な「注釈挿入自体のツール化」は見送り、下記参照） |
 | 優先度 | P2（`2026-07-25`: `1913`ドライランでの再発を受けP3から引き上げ） |
-| 関連 | [BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合) |
+| 関連 | [BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)、[BL-091](issue_backlog.md#bl-091-write_agreementの成否をdetectorへ明示せずモデルの偽ツール呼び出し風テキストを鵜呑みにして誤って承認していた)（同じ`1913`レビューで同時対応） |
 
 **内容:**
 
@@ -2470,11 +2472,25 @@ BL-074のtarget_excerpt正規化フォールバックを相談する中で、ユ
 
 ユーザーは、python_replなど他のツールでエラーフィードバックが返ってきた場合、Detectorの思考ログ上で「あの手この手を試して何とかしようとする」試行錯誤が実際に見られることを確認しており、同様の自己修正ループをホワイトボード注釈にも適用できないか提案した。
 
-**設計方針（未確定、次回設計相談で着手）:**
+**設計方針の見直し（当初案 → 実装した縮小版）:**
 
-現状の`_annotate_whiteboard_with_detector_comment`は`call_detector`のツールループ完了後、`detector_node`側で一度だけ呼ばれる後処理であり、Detector自身のツール呼び出しではない。これをDetector自身が呼び出せる新規ツール（例: `annotate_whiteboard_tool`）として`call_detector`のツールリストに追加し、一致失敗時は「0件一致でした、別の引用を試してください」等のエラーをツール結果として返し、Detectorが同一ツールループ内で`target_excerpt`を調整して再試行できるようにする方向性が有力。ただしDetectorは既にドメイン妥当性レビュー・数値監査の2パス構成でツールループを回しており、責務・呼び出しタイミング（どちらのパスから呼ぶか、JSON出力との整合）の設計変更規模が大きいため、実装は別途設計相談の上で着手する。
+当初は「注釈挿入自体（`_annotate_whiteboard_with_detector_comment`相当）をDetector自身が呼べる新規ツールにする」構想だったが、実装検討の結果、実際の注釈挿入は`decision_id`（`make_decision`/`db_append_decision`がdetector_node側で両パス完了後に発行するID）を必要とし、Detectorのツールループ実行中（まだJSON出力すら確定していない段階）にはこのIDが存在しないという設計上の制約が判明した。これを解決するには`decision_id`の発行タイミング自体を前倒しする大きめの変更が必要になり、当初懸念していた「責務・呼び出しタイミングの設計変更規模が大きい」問題が実際に顕在化する形になった。
 
-**完了条件（未定、設計時に確定）:**
+代わりに、挿入処理自体は従来通り`detector_node`側の事後処理のまま維持しつつ、**「この引用がホワイトボード内で一意に一致するか」だけを事前検証できる新規ツール`verify_whiteboard_excerpt`**をDetectorの数値監査パス（tools付き）に追加した。これにより、ツールループ内でtarget_excerpt候補を検証→不一致なら調整して再試行、という当初ユーザーが望んだ自己修正サイクルは実現しつつ、decision_id未確定問題を回避できる。
+
+ただしドメイン妥当性レビュー（tools=None、BL-054で意図的に検算から切り離された軽量パス）はこのツールを呼べない。ドメイン側の引用が優先採用されるケース（severityが同点以上の場合）でその引用が実際には一致しない可能性が残るため、`call_detector`のtarget_excerpt統合ロジックに、選ばれた側の引用が一致しない場合はもう一方の（検証済みの可能性が高い数値監査パス側の）引用へプログラム的に差し替えるフォールバック（`_excerpt_matches_uniquely`）も追加し、ドメイン側単独の弱点を補った。
+
+**対応（実装済み）:**
+
+1. 新規ツール`VERIFY_WHITEBOARD_EXCERPT_TOOL`/ハンドラ`_verify_whiteboard_excerpt_handler`を追加し、`TOOL_DISPATCH`に登録。既存の完全一致→正規化緩い一致という2段判定ロジック（BL-074/076と同型）を流用し、書き込みは行わずvalidateのみ行う。
+2. Detectorの数値監査パスの`tools=[...]`にこのツールを追加し、プロンプトに「target_excerptを確定する前に必ず呼び出し、ok=falseなら調整して再試行する」旨を明記。
+3. `call_detector`のtarget_excerpt統合ロジックに、選ばれた側の引用が実際にはホワイトボードと一致しない場合、もう一方の引用が一致すればそちらへ差し替えるプログラム側フォールバックを追加。
+
+**完了条件:**
+
+- 新規`tests/test_bl091_write_agreement_status_and_bl079_excerpt_verify.py`にBL-079分のテストを含める（`_verify_whiteboard_excerpt_handler`の完全一致/緩い一致/空文字ケース、TOOL_DISPATCH登録確認、プロンプト文言確認、フォールバックロジックの存在確認）。
+- `python -m py_compile cela_main.py`合格、オフラインスモークテスト全件Pass。
+- 実LLM再ドライランでの効果確認（`Whiteboard Annotate Failed`の発生頻度が下がるか）は次回待ち。
 
 ---
 
@@ -2894,6 +2910,69 @@ BL-089修正後のドライラン（`log/2026-07-25/1913`）をユーザーが�
 
 ---
 
+### BL-091: write_agreementの成否をDetectorへ明示せず、モデルの偽ツール呼び出し風テキストを鵜呑みにして誤って承認していた
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P0 |
+| 関連 | [BL-033](issue_backlog.md#bl-033-expertがpython_repl未使用のまま検算完了と虚偽申告できるf-26監査フラグに強制力がない)（Expertの自己申告を鵜呑みにしない、という同型の先行対策）、[BL-079](issue_backlog.md#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる)（同じ`1913`レビューで同時対応） |
+
+**内容:**
+
+ユーザーが`log/2026-07-25/1913`の続きをレビューし「detectorがホワイトボードを更新できないまま、事故が起きました」と報告。フォレンジック調査の結果、以下の事故を確認した:
+
+1. task_2_1（安全基準・運休判断基準）の修正で、Expertがwrite_agreementの`edits`（正規のツール呼び出し）を試みるが「old_textが現在のホワイトボード内容に見つかりませんでした」で失敗（[L44719](../../log/2026-07-25/1913/log_no_prompt.md)）。
+2. これが最終iteration（15）だったため、ツールが強制的に外され「テキスト最終応答を強制」された。
+3. ツールを持たないはずのこの最終応答で、モデル（DeepSeek系）が独自のツール呼び出し風の疑似XML構文（`<｜DSML｜tool_calls>...<｜DSML｜invoke name="write_agreement">...`）をそのまま平文として出力した（[L44744](../../log/2026-07-25/1913/log_no_prompt.md)）。これは実際には一切実行されていない（システム自身が`[DEBUG] expert_node: get_last_write_agreement_succeeded()=False`と正しく記録している）。
+4. しかし`call_detector`のプロンプトにはこの成否フラグ（`state["expert_wrote_agreement"]`/`state["user_wrote_agreement"]`）が一切渡っておらず（`expert_last_python_calls`(BL-033)や`expert_last_reasoning`(F-2.1)は渡っているのに、このフラグだけが欠落していた）、Detectorはこの偽のツール呼び出しテキストの「主張内容」を鵜呑みにし、「物理的矛盾は解消される」「acceptance_criteriaを充足している」としてrisk=low, constraint_issue=noneで承認してしまった。Decision Extractorも「UPDATE - Proposed」としてDBに記録した。
+5. 実害の確認: 実際のホワイトボードファイルは`phase_2_task_2_1_V2.md`のまま（V3は存在しない）。物理的に不可能な記述（「停車後約40.5秒で通信障害エリアを通過するため通信が自然復旧する」）と誤った数値（600秒）が今も残存しているにもかかわらず、DB上は「修正済みで承認」という偽の記録が残っていた。
+
+BL-033で確立した「Expertの自己申告（python_repl未使用でも書けてしまう）を鵜呑みにせず、実行記録と突き合わせる」という設計思想と全く同じ穴が、write_agreementの成否についても存在していたことになる。`call_detector`は既に`get_latest_whiteboard`で現在タスクの最新ホワイトボード内容（＝唯一の真実の状態）を`whiteboard_block`として提示していたが、Detector自身がこの内容と会話ターンの「主張」を突き合わせて食い違いに気づくことを、プロンプトの明示的な指示なしにモデルの注意力だけに委ねていた。
+
+**対応（実装済み）:**
+
+1. `call_detector`に、今回評価対象のターンでwrite_agreementが実際に成功したか（`state["expert_wrote_agreement"]`/`state["user_wrote_agreement"]`、target_roleに応じて選択）を明示する`write_agreement_status_block`を追加。失敗している場合は「相手の発言内容がどれだけ説得力があっても実際には一切反映されていない。上記の最新ホワイトボードのみが唯一の真実であり、食い違う場合はconstraint_issue="major"とすること」と明記。
+2. このブロックをドメイン妥当性レビュー・数値監査の両プロンプトに配線（ドメイン妥当性レビューが今回のような物理的整合性判断を誤った当事者だったため、両方に必須）。
+
+**完了条件:**
+
+- 新規`tests/test_bl091_write_agreement_status_and_bl079_excerpt_verify.py`: `call_detector`のソースに当該ブロックが両プロンプトに埋め込まれていることの確認（`inspect.getsource`による静的確認）。
+- `python -m py_compile cela_main.py`合格、オフラインスモークテスト全件Pass。
+- 実LLM再ドライランでの効果確認（同種の偽ツール呼び出しテキストが再発した場合にDetectorが正しく食い違いを検出できるか）は次回待ち。
+
+---
+
+### BL-092: reviewerの差し戻し圧力に対し、task_plannerが数値の検算・訂正ではなく該当箇所の削除・抽象化で「解消」してしまう（記録のみ・対応未確定）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（記録のみ、対応方針は未確定） |
+| 優先度 | P2 |
+| 関連 | [BL-087](issue_backlog.md#bl-087-前提の質を上げる一連の改善task_plannerの曖昧表記禁止二重指示バグ修正task_plan_reviewer_node等)（Fix A: reviewerの過剰な精度要求が逆に数値の"捏造"を誘発する問題、本BLはその逆方向）、[BL-091](issue_backlog.md#bl-091-write_agreementの成否をdetectorへ明示せずモデルの偽ツール呼び出し風テキストを鵜呑みにして誤って承認していた)（#2の再燃が同一の事故だったことを確認） |
+
+**内容:**
+
+別AIによる`log/2026-07-25/1913`の独立レビュー（12項目の指摘、ユーザー共有）を、さらに別チャットで各項目を実際のログ行まで追跡させた結果、以下が判明した。
+
+- task_planner⇔task_plan_reviewerのループは3往復（major判定: L6336, L11739 → 承認: L14213）。
+- レビュアーが指摘した数値矛盾（#1 task_2_2の「往復24km」と「片道約24km前提の計算」の混在、#3 task_3_4の「約1,200万円」根拠不明、#4 task_3_3の赤字誤差、#7「10人乗り」の根拠不明）は、いずれも**数値を検算して訂正した結果ではなく、該当するタスクの記述内容ごと削除するか、より抽象的な表現に差し替えることで矛盾自体が計画から消滅**していた（例: task_2_2は「往復24km」問題ごと「エッジケースのフェールセーフ概念設計」という別内容に差し替わった）。
+- 一方で#8（ルート全長Lの「不明」vs「確定」の矛盾）は、Lを一般式・感度分析のパラメータとして一貫して扱う方向で**適切に解消**されており、全ての「差し替え」が問題というわけではない。#1/#6/#8は構造的な矛盾が根本から作り直された「良い意味での解消」である一方、#3/#4/#7/#10は「数値の誤りを検証せず、該当箇所を消して見えなくしただけ」という質的に異なる「解消」だったと考えられる。
+- #2（task_5_2の「約2.1分」根拠不明、通信障害エリア通過時間の単位混同）は解消されず、後続のtask_2_1実行時に同種の単位混同が「停車後40.5秒で通過」という物理的に不可能な記述として再燃していた。これはBL-091で発見・修正済みの事故（Expertのwrite_agreement失敗→最終iterationで偽ツール呼び出し風テキストを出力→Detectorが鵜呑みにして誤承認）の一部として既に対応している。
+- #12（重複再計算）はdraft1で49回→draft2で24回→draft3で8回とラウンドを追うごとに明確に減少しており、D-065（重複検証抑制指示の全ノードへの展開）の実効性が実データで裏付けられた。
+- このドライランはtask_2_1/2_2の実行で停止しており、Phase 3以降（収支・保険料・オペレーター試算）は一度も実行されていない。したがって#3/#4/#7/#10、および#11（保険料タスクは追加されたが、法規制・住民説明タスクは「他タスクに暗黙的に含まれる」と判断され追加されず、代替交通手段タスクも独立化されなかった）は、実行段階での再検証機会自体が無かった。
+
+BL-087 Fix Aは「reviewerが絶対値の確定を無理強いすると、task_plannerが存在しない数値を捏造する」という過剰な精度要求のリスクに対応したものだったが、本件はその逆方向：reviewerが数値の不整合を的確に指摘しても、task_plannerが数値を実際に検算・訂正する代わりに該当箇所自体を消してしまえば、表面上はレビューを通過できてしまうという構造的な抜け道である。少なくとも今回のケースでは実害が顕在化した数値は最終計画に残っておらず（Phase 3未実行のため実行時の検証機会も無かった）、"隠れた誤り"として実行フェーズへ混入したわけではないが、これは偶然（該当タスクが差し替えで丸ごと消えたため）であり、構造的な保証ではない。
+
+**設計上の論点（未確定）:**
+
+- reviewerの差し戻し指摘に対し、task_plannerが「指摘された数値を検算・訂正する」のではなく「指摘箇所を削除・抽象化する」ことで対応した場合を検出・抑制する必要があるか。あるとすればどう検出するか（例: 差し戻し前後のタスクdiffで、指摘対象の具体的な数値・記述が丸ごと消えていないかをreviewer自身に確認させる指示を追加する等）。
+- あるいは、BL-051/BL-077で構想されている「issue_bl相当のリスト＋フェーズ完了ゲート」が実装されれば、"数値を検証せず削除して逃げる"ことができなくなる（該当issueがcloseされない限りフェーズが完了しない）ため、本問題は個別に対応するのではなくBL-051/BL-077の実装を優先する形で解消される可能性がある。
+
+**次のステップ:** 対応方針が未確定のため、記録のみに留める。次回のドライラン（特にPhase 3以降が実行されるケース）で同種のパターンが再発するか観察する。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -2983,3 +3062,4 @@ BL-089修正後のドライラン（`log/2026-07-25/1913`）をユーザーが�
 | 2026-07-25 | ユーザーの依頼で`log/2026-07-25/1705`をレビューし、task_plannerが`MAX_TOOL_ITER`（15、既存のグローバル定数、変更せず）を使い切り最終iterationで26タスク分のJSON全体を強制的な一括テキスト応答として出力させられていた事象を発見。`python_repl`呼び出し内容を精査したところ、終盤5回が「acceptance_criteriaが3個以内か」等、新しい情報を生まない同一内容の「念のため最終確認」の繰り返しだったと判明（今回は出力自体は間に合ったが、より大きな計画やStage2の再生成時に同じ現象が起きれば、最終出力が途中で切れてBL-088と同じ被害形態＝fallback化に陥るリスクがある）。ユーザーの「お願いします」との指示により、BL-087項目22として`call_task_planner`のプロンプトに項目7「計算・検証は各回1回まで、繰り返し確認しない」を追加。新規テスト1件を`tests/test_bl087_task_planner_prompt_and_resubmission_fix.py`へ追加（計4件）、オフラインスモークテスト（BL-087/088関連54件）Pass、`python -m py_compile`合格。 |
 | 2026-07-25 | ユーザーが「ドライランをやり直しました」と`log/2026-07-25/1814`のレビューを依頼。BL-088修正後もなお、task_planner出力のmax_tokens相当の途中切れで縮退計画にフォールバックした上、task_plan_reviewerがこの縮退計画を正しく"major"と判定していたにもかかわらず、応答が「プレビュー用配列ブロック」＋「### 最終JSON出力の完全なオブジェクトブロック」という2つの```json```ブロックで構成されていたため`_safe_json_parse`が混線し構文エラー、fallback（"none"）に化けて縮退計画がそのまま承認・実行されてしまう事象を発見（`log/2026-07-25/1814/whiteboards/`にphase_1_task_1_1のみ存在することで確認）。ユーザーの「修正してください」との指示により、BL-089として起票・対応: (1) `_safe_json_parse`を複数フェンスブロックのうち最後を採用する方式に変更、(2) `call_task_plan_reviewer`/`call_task_planner`/`call_goal_essence_analyst`を既存の層2リトライ`_query_and_parse_with_retry`でラップ、(3) `call_task_plan_reviewer`はリトライ失敗時に"major"へフェイルクローズ。続けてユーザーが「他のノードも何回も何回も同じ思考を繰り返しすぎることが多々ありました」と指摘し、taskプランナー項目7と同種の重複検証抑制指示を、tools=[...]を持つ他8関数（call_expert/call_detector/call_resource_arbiter/call_integrator/call_reviewer/generate_user_utterance/call_goal_essence_analyst/call_task_plan_reviewer）のプロンプトに展開。新規`tests/test_bl089_json_fence_and_failclosed_review.py`（8件）・`tests/test_bl089_anti_repetition_instructions.py`（9件）、`python -m py_compile`合格。D-064・D-065として記録。BL-089として新規起票・`done`化。 |
 | 2026-07-25 | BL-089修正後のドライラン（`log/2026-07-25/1913`）を、別チャットでのレビュー結果としてユーザーが共有。良好点（`task_plan_reviewer`の的確な差し戻し・BL-062のSUPERSEDE運用実働・サンドボックス制限からの手計算復旧・reflectionの安易でない継続判定・User AI自身の検算バグ発見）に加え4点の気づき（L424のJSON破損、L16700のWhiteboard Annotate失敗、L26206のUser AI引用転記ミス、`task_plan_reviewer`のiter=15到達）を報告。あわせてBL-089修正の実効性検証を依頼されたため、該当行を実際に読み確認: (1) L428でgoal_essence_analystのJSON判定パース失敗が層2リトライで正しく自己修復、(2) `task_plan_reviewer`がL6281・L11674の2回iter=15の強制終了に達したが、いずれも単一の完結したJSONブロックで`constraint_issue="major"`が正しく出力され、1814のような複数ブロック混線・フェイルオープンへの取り違えは再発せず。BL-089のフェイルセーフが実際に機能したことを確認。ユーザー指示により以下を追加対応: (1) L424のJSON破損（`feasibility_notes`文字列値の末尾を全角鉤括弧「」で終え閉じ引用符を書き忘れ）を`call_goal_essence_analyst`のプロンプト修正で解消（BL-090として新規起票・`done`化、D-066）。(2) L16700のWhiteboard Annotate失敗（BL-074の正規化フォールバックも救えない0/0一致）をBL-074に追記し、根本解決に必要なBL-079の優先度をP3→P2へ引き上げ。(3) L27529のログ途切れはドライラン実行中のためBLとしては起票せず。新規`tests/test_bl090_json_string_fullwidth_quote_guard.py`（1件）、`python -m py_compile`合格、`check_docs_consistency.py`合格。 |
+| 2026-07-25 | ドライランがさらに進行し、ユーザーが`log/2026-07-25/1913`の続き（L26827〜L45646）をレビュー依頼。まずtask_1_3のL定義修正（Ver.2、案A=片道採用、数式変形による等価性検証済み）を確認。次にtask_2_1（安全基準策定）で、Detectorが単位混同の計算誤り（`0.15×L<30→L<200km`、正しくは`L<3.33km`という60倍の桁違い）を発見したが3回多数決2:1でminor判定となり、`route_after_expert_detector`の差し戻しをトリガーせず誤りが放置された事象を確認（後続のUser AIが独立に同じ誤りを発見し条件付き承認で事なきを得たが偶然の救済）。この「minorは強制修正されない」問題について、ユーザーから「issue_BLリストに放り込み全closeまでフェーズ完了と見なさない」という具体的な設計材料の提示があり、既存のBL-051（Detector限定の同一構想）・BL-077（一般化版）に追記・相互リンク。さらにDetectorの「3回多数決」の実装を検証したところ、単一の`query_AI`呼び出し内でモデル自身がtrial1/2/3を自己申告するだけで、独立サンプリングではないことを確認（ユーザーの疑念が的中）。続けて`1913`ログの最新部分をレビューし、task_2_1の3回目修正でExpertのwrite_agreement(edits)が失敗→最終iterationでツール強制排除→モデルが独自のツール呼び出し風疑似XML（`<｜DSML｜tool_calls>...`）を平文出力→実際には未実行（`get_last_write_agreement_succeeded()=False`）にもかかわらずDetector・Decision Extractorがこれを鵜呑みにして誤って承認・DB記録するという重大な事故を発見（実際のホワイトボードはV2のまま、物理的矛盾・誤数値が現存）。ユーザーの「BL起票と、BL79も含めて修正して」との指示により、BL-091として新規起票・対応（`call_detector`の両プロンプトにwrite_agreement成否を明示するブロックを追加）、BL-079も実装（当初の「注釈挿入自体のツール化」はdecision_id未確定問題のため見送り、代わりに`verify_whiteboard_excerpt`ツールで事前検証させ、ドメイン妥当性レビュー側の取りこぼしにはプログラム側フォールバックで対応）。新規`tests/test_bl091_write_agreement_status_and_bl079_excerpt_verify.py`（7件）、`python -m py_compile`合格、既存BL-062/074/076/079/087/088/089/090/091関連92件Pass。D-067・D-068として記録。 |
