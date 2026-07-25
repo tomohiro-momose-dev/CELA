@@ -2743,7 +2743,7 @@ BL-086実装後の実LLMドライラン（`log/2026-07-24/2358`）レビュー�
 
 **対応（Stage 2、実装済み）:**
 
-7. 新設`call_task_plan_reviewer(phases, goal)`: Detector同等のJSON（`risk`/`constraint_issue`/`comment`/`observations`）で、生成された`phases`全体を「曖昧な表記」「タスクの過不足」「depends_onの順序妥当性」の3観点からレビューする。個々のタスクの中身の是非ではなく計画の構造自体を見る、実行前1回きりのゲート。
+7. 新設`call_task_plan_reviewer(phases, goal)`: Detector同等のJSON（`risk`/`constraint_issue`/`comment`/`observations`）で、生成された`phases`全体を「曖昧な表記」「タスクの過不足」「depends_onの順序妥当性」の3観点からレビューする。個々のタスクの中身の是非ではなく計画の構造自体を見る、実行前1回きりのゲート。**追記（ユーザー指摘）**: 新規追加ノードが暗算に頼るとプロジェクト最上流でのハルシネーションリスクが後続全タスクに伝播するため、`tools=[PYTHON_REPL_TOOL]`を付与し、曖昧表記の実際の矛盾有無（例：比率と絶対値の整合性）を暗算でなく機械計算で確認するよう指示。
 8. 新設`task_plan_reviewer_node`をグラフに追加（`graph.add_node("task_plan_reviewer", ...)`、`graph.add_edge("task_planner", "task_plan_reviewer")`、`route_after_task_plan_reviewer`による条件分岐で`phases`が空なら`task_planner`へ、そうでなければ`generate_user_utterance`へ）。`constraint_issue="major"`かつ`state["plan_reviewer_retry_count"] < 2`なら`state["phases"]`をクリアして差し戻し（`task_planner_node`の既存ガード`not state.get("phases")`により自然に再生成される）、指摘事項は新設`state["plan_reviewer_feedback"]`に保存。上限（2回）到達後はmajorが残っていても`plan_review_done=True`として強制承認し、無限ループを防止する。
 9. `call_task_planner`に`reviewer_feedback: str = ""`引数を追加し、差し戻し時は再生成プロンプトの先頭に「前回の計画案への差し戻し」ブロックとして指摘事項を注入。`task_planner_node`が`state["plan_reviewer_feedback"]`を読み取って渡し、消費後にクリアする。
 10. 新設`state["plan_review_done"]`は、`task_planner_node`の`turn_count==1`ガードと同型の冪等性ガード。このグラフは「entry_pointが常にtask_planner固定」で毎ターンtask_planner_node/task_plan_reviewer_nodeを通過する構造（チェックポイント再開コメント参照）のため、このガードが無いと2ターン目以降も毎回レビューLLMが再発火しトークンを浪費する。
