@@ -2748,19 +2748,30 @@ BL-086実装後の実LLMドライラン（`log/2026-07-24/2358`）レビュー�
 9. `call_task_planner`に`reviewer_feedback: str = ""`引数を追加し、差し戻し時は再生成プロンプトの先頭に「前回の計画案への差し戻し」ブロックとして指摘事項を注入。`task_planner_node`が`state["plan_reviewer_feedback"]`を読み取って渡し、消費後にクリアする。
 10. 新設`state["plan_review_done"]`は、`task_planner_node`の`turn_count==1`ガードと同型の冪等性ガード。このグラフは「entry_pointが常にtask_planner固定」で毎ターンtask_planner_node/task_plan_reviewer_nodeを通過する構造（チェックポイント再開コメント参照）のため、このガードが無いと2ターン目以降も毎回レビューLLMが再発火しトークンを浪費する。
 
-**Stage 2'・3〜5（`open`、設計のみ・実装は別途）:**
+**対応（Stage 3、実装済み）:**
+
+11. 新設`goal_essence`テーブル（`run_id`単位で1行、`true_essence`/`feasibility_notes`/`created_at`）。BL-086の`goal_escalations`（走行中に前提矛盾に気づいた際の事後エスカレーション）とは独立・併存する事前予防機構と位置づけ。
+12. 新設`call_goal_essence_analyst(goal)`: task_planner分解より前に1回だけ呼ばれ、(1)ゴール文に明示された数値制約からの大まかな実現可能性の壁打ち（詳細検算はF-2.6の役目であり、ここではオーダー感の確認に留める）、(2)個々の制約はあくまで「本来解決すべき本質的な課題」の手段・例示に過ぎない可能性を踏まえた本質の言語化、の2点をJSON（`true_essence`/`feasibility_notes`）で返す。
+13. 新設`goal_essence_node`をグラフの新しい`entry_point`として追加（旧`task_planner`から変更、`graph.add_edge("goal_essence", "task_planner")`）。新設`state["goal_essence_done"]`により、`task_plan_reviewer_node`の`plan_review_done`と同型の冪等ガード（チェックポイント再開・毎ターン再入場のたびにレビューLLMが再発火しないため）を持つ。
+14. 新設`_get_goal_essence_text(conn, run_id)`（未生成時は空文字）を、BL-086 D-058で確認された`state["goal"]`の9消費者すべて（`call_orchestrator`/`call_expert`/`call_detector`〈数値監査・ドメイン妥当性の両パス〉/`call_reflection`/`generate_user_utterance`は`state`から直接、`call_resource_arbiter`/`call_facilitator`/`call_integrator`/`call_reviewer`は新設`goal_essence_text: str = ""`引数経由で呼び出し元ノードから）へ、ゴール本文と並べて常時注入。
+
+**対応（Stage 4、実装済み）:**
+
+15. `call_detector`のドメイン妥当性レビューパスに「上記【🎯 本質】に照らして、数値・条件設定自体は妥当でも本質から乖離していないか」を確認する指示を追加し、乖離があればconstraint_issueをminor以上に引き上げる根拠にできるとした（BL-069の「木を見て森を見ず」対策と合流）。
+16. `generate_user_utterance`の標準指示（検算とドメインレビューの役割分担セクション直後）に、同様の本質整合性チェックと、疑義がある数値は自身の判断でも根拠を問い直す指示を追加。
+
+**Stage 2'・5（`open`、設計のみ・実装は別途）:**
 
 - **Stage 2'**: 各フェーズ完了時に、完了フェーズで判明した事実・矛盾・確定値を踏まえてtask_plannerが未着手の残りフェーズ・タスクのみを再分解する機構。
 - **Stage 5**: 「一段上の思考」をプロンプトでの自発性に頼らず機械的トリガーで強制発火させる。トリガーはOR条件（1）`global_constraints`の`claimed/total_cap`比が閾値（初期値0.9）以上（既存`check_global_constraint_overrun`は完全超過のみ検知するため姉妹関数が必要）、（2）`expert_retry_count>=3`（既存、`route_after_expert_detector`が既に"reflection"分岐に使用）。新規ノードは作らず既存`reflection_node`/`call_reflection`に3つ目の監査観点として追加し、懸念があれば次のExpert/User AIターンへ申し送り、Expert/User AI自身に`escalate_premise_concern`を呼ばせる動線とする。
-- **Stage 3**: task_planner分解前に挿入する新設「本質フェーズ」（実現可能性の壁打ち＋目標の本質の言語化、新規`goal_essence`テーブルに保存し全ノードへ常時注入）。BL-086のエスカレーション経路とは独立・併存させる。
-- **Stage 4**: Detectorのドメイン妥当性監査パス・User AIのレビュー視点の両方に「本質と数値・条件設定が整合しているか」という観点を追加（BL-069と合流）。
 
-**完了条件（Stage 1・2）:**
+**完了条件（Stage 1〜4）:**
 
 - 新規`tests/test_bl087_task_planner_prompt_and_resubmission_fix.py`（3件）: `call_task_planner`プロンプトへの曖昧表記禁止指示・失敗事例の埋め込み確認、`generate_user_utterance`への再提出抑制条件分岐確認（いずれも`inspect.getsource`による静的確認）。
 - 新規`tests/test_bl087_stage2_task_plan_reviewer_node.py`（8件）: `plan_review_done`済み・`phases`未確定時のスキップ、`constraint_issue=none`時の承認、`major`時の差し戻し（`phases`クリア・`retry_count`加算・`feedback`保存）、差し戻し上限到達後の強制承認、`call_task_planner`への`reviewer_feedback`注入・非注入時の確認、`build_graph`が`task_plan_reviewer`ノードを実際に配線していることの確認。
+- 新規`tests/test_bl087_stage3_4_goal_essence.py`（21件）: `goal_essence`テーブルのDB層roundtrip・冪等性、`goal_essence_node`のスキップ/保存、`build_graph`の`entry_point`が`goal_essence`であることの確認、9消費者すべてへの注入配線確認（`inspect.getsource`/`inspect.signature`による静的確認）、Stage4のDetector/User AI本質整合性チェック追加の確認。
 - `python -m py_compile cela_main.py`合格、オフラインスモークテスト全件Pass。
-- Stage 2'・3〜5は本BLの完了条件に含めず、着手時に新規BLを起票する。
+- Stage 2'・5は本BLの完了条件に含めず、着手時に新規BLを起票する。
 
 ---
 
