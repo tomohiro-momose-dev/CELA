@@ -927,6 +927,20 @@
 
 ---
 
+### D-062: `_safe_json_parse`の開始位置探索は`{`優先ではなく、先に現れる方（`min()`）を採用する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-25 |
+| 状態 | `decided`（実装済み） |
+| 決定者 | Claude Sonnet 5（`log/2026-07-25/1642`レビュー中に発見・原因特定・修正案を提示） / t-momose（「直して」と修正を指示） |
+| **決定理由** | D-061で較正した`task_plan_reviewer_node`の効果を確認するため`log/2026-07-25/1642`をレビューしたところ、1〜2回目のtask_planner出力が実際には5〜6フェーズの正しい計画だったにもかかわらず、レビューに渡っていたのは`call_task_planner`の`fallback_phase`（縮退した1タスク計画）だったことが判明した。原因は`_safe_json_parse`の開始位置探索が`brace_idx != -1`を`bracket_idx`より無条件に優先しており、トップレベルが配列（`call_task_planner`のfallbackはlist）かつコードフェンス直前に説明文が付く応答（LLMの一般的な癖）の場合、配列を開く`[`より後にある最初のオブジェクトの`{`から誤って開始し、構文的に不正なJSONとなってフォールバックに握りつぶされていたことだった。`call_task_planner`は`_query_and_parse_with_retry`（層2リトライ、パース失敗時に同一呼び出しを再試行する既存の防御機構）を経由しない実装だったため、パース失敗が即座にfallback確定となり、さらにBL-087 Stage2の差し戻し上限（2回）と組み合わさって、内容面の問題が皆無なまま2回の差し戻し予算を本バグだけで使い切っていた。修正方針は「`{`/`[`のうち`-1`でない方の最小値を採用する」という最小限の変更とし、既存の他の呼び出し（dict fallbackのDetector系等）の挙動に影響しないことを回帰テストで確認した上で採用した。 |
+| 決定内容 | `_safe_json_parse`（`cela_main.py`）の該当箇所を`start = brace_idx if brace_idx != -1 else bracket_idx`から、`{`/`[`のうち`-1`でない値の`min()`を取る形に変更。新規`tests/test_bl088_safe_json_parse_bracket_precedence.py`（3件）で、(1)`1642`ログの実際の失敗パターンの再現確認、(2)トップレベルがオブジェクトの通常ケースが従来通り動作することの回帰確認、(3)`{`も`[`も含まれない完全な非JSON応答でfallbackを返すことの確認、を行った。 |
+| 影響 | `cela_main.py`（`_safe_json_parse`のみ、他の呼び出し箇所への配線変更は無し）。現時点でこのバグの影響を受けるのはトップレベルが配列の`call_task_planner`のみだが、`_safe_json_parse`は汎用ユーティリティであり将来list-fallbackの呼び出しが増えた場合の予防にもなる。 |
+| 関連 BL | [BL-088](issue_backlog.md#bl-088-_safe_json_parseがコードフェンス前に説明文が付いたjson配列をfallbackへ握りつぶすバグ)、[BL-087](issue_backlog.md#bl-087-前提の質を上げる一連の改善task_plannerの曖昧表記禁止二重指示バグ修正task_plan_reviewer_node等)（本バグにより差し戻しリトライ予算が無駄撃ちされていたのを発見した経緯） |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
