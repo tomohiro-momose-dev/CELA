@@ -2769,7 +2769,7 @@ BL-086実装後の実LLMドライラン（`log/2026-07-24/2358`）レビュー�
 
 - 新規`tests/test_bl087_task_planner_prompt_and_resubmission_fix.py`（3件）: `call_task_planner`プロンプトへの曖昧表記禁止指示・失敗事例の埋め込み確認、`generate_user_utterance`への再提出抑制条件分岐確認（いずれも`inspect.getsource`による静的確認）。
 - 新規`tests/test_bl087_stage2_task_plan_reviewer_node.py`（9件）: `plan_review_done`済み・`phases`未確定時のスキップ、`constraint_issue=none`時の承認、`major`時の差し戻し（`phases`クリア・`retry_count`加算・`feedback`保存）、差し戻し上限到達後の強制承認、`call_task_planner`への`reviewer_feedback`注入・非注入時の確認、`build_graph`が`task_plan_reviewer`ノードを実際に配線していることの確認、`call_task_plan_reviewer`が`PYTHON_REPL_TOOL`を付与されていることの確認。
-- 新規`tests/test_bl087_stage3_4_goal_essence.py`（23件）: `goal_essence`テーブルのDB層roundtrip・冪等性、`goal_essence_node`のスキップ/保存、`build_graph`の`entry_point`が`goal_essence`であることの確認、9消費者すべてへの注入配線確認（`inspect.getsource`/`inspect.signature`による静的確認）、Stage4のDetector/User AI本質整合性チェック追加の確認、`call_goal_essence_analyst`が`PYTHON_REPL_TOOL`を付与されていることの確認。
+- 新規`tests/test_bl087_stage3_4_goal_essence.py`（26件）: `goal_essence`テーブルのDB層roundtrip・冪等性、`goal_essence_node`のスキップ/保存、`build_graph`の`entry_point`が`goal_essence`であることの確認、11消費者すべてへの注入配線確認（`call_task_planner`/`call_task_plan_reviewer`を含む、`inspect.getsource`/`inspect.signature`による静的確認）、Stage4のDetector/User AI本質整合性チェック追加の確認、`call_goal_essence_analyst`が`PYTHON_REPL_TOOL`を付与されていることの確認。
 - `python -m py_compile cela_main.py`合格、オフラインスモークテスト全件Pass。
 - Stage 2'・5は本BLの完了条件に含めず、着手時に新規BLを起票する。
 
