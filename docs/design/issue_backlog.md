@@ -119,6 +119,7 @@
 | BL-085 | 低 | `cela_main.py` (新設`_write_whiteboard_to_file`、`apply_whiteboard_patch`) | ユーザーから「ホワイトボードの中身を保存時にファイルに書き出してほしい」と要望。従来`whiteboard_drafts`はDB（sqlite）のみに保存され、中身を確認するにはクエリが必要だった。`apply_whiteboard_patch`から新設`_write_whiteboard_to_file`を呼び、保存の都度`{log_dir}/whiteboards/{phase_id}_{task_id}_V{version}.md`へバージョンごとに個別ファイルとして書き出す（DBのappend-onlyバージョニングと同じく上書きしない）。BL-027と同じ理由で、`MultiLogger._instance`が未初期化（テスト/import時）の場合は書き出しをスキップし、本番log/配下のテスト汚染を防止 | P3 |
 | BL-086 | 高 | `cela_main.py`（新設`goal_escalations`テーブル、`escalate_premise_concern`/`resolve_premise_concern`/`revise_goal`ツール、`FREEZE_AGREEMENT_TOOL`の再配線、`call_expert`/`generate_user_utterance`/`generate_user_utterance_node`/`call_detector`） | ユーザーが1459ログ由来の「オンデマンド交通なのに予算制約から逆算して35人乗りバスを導入する」矛盾を指摘し、そもそも論の視座（高齢者の移動手段確保という本質的課題）に立ち返って前提自体を見直せる経路が無いことを議論。Expertは`absolute_constraints`の文言を厳守することしかできず前提の矛盾を表明する手段が無いこと、User AIが例外を承認してもFreeze機構（D-045で無効化中）が無いためDetectorの独立監査で無限に再燃しうること、`state["goal"]`を改定する手段が無くGoalShiftEventが書きっぱなしで何も消費されないこと（BL-065）の三重の構造的欠陥を特定。ユーザー指示「エスカレーション経路を作り込み、freezeを復活させ、本質的課題の解決という視点に登り当初目標を越境しても最適な着地点に到達できるように」に基づき、Plan mode（Exploreエージェント3件＋Planエージェント1件、全行番号を直接検証済み）で設計し実装。Expert/User AIが構造化してエスカレーションを提起する`escalate_premise_concern`（narrow channel、BL-025のスコープガードレールは変更せず）、User AI専用の却下`resolve_premise_concern`・承認＋ゴール改定`revise_goal`（`_apply_text_edits`を`state["goal"]`にも再利用、承認時にFreezeも同時実行可能）を新設。`state["goal"]`は9箇所の消費者が毎ターン再埋め込みするため、`generate_user_utterance_node`の1箇所で書き換えるだけで全消費者に自動伝播。Freezeを`generate_user_utterance`のtoolsへ再配線し、`call_detector`の両監査パスに🔒Freeze済み項目を尊重する指示を追加（BL-062自身の欠落を解消） | P1 |
 | BL-087 | 高 | `cela_main.py` (`call_task_planner`、`generate_user_utterance`、新設`call_task_plan_reviewer`/`task_plan_reviewer_node`/`call_goal_essence_analyst`/`goal_essence_node`/`goal_essence`テーブル。Stage 1・2・3・4実装済み。Stage 2'・5は`open`) | BL-086実装後の実LLMドライラン（`log/2026-07-24/2358`）レビューで、`escalate_premise_concern`等BL-086の4ツールがプロンプトで説明されているにもかかわらず一度も自発的に呼ばれないことを発見（`tools attached`表示以外での言及ゼロ）。原因は`call_expert`/`generate_user_utterance`のシステムプロンプトがツールの存在・使いどころを、既存エスカレーションがある場合にのみ条件付きで説明しており、初回は何も教えていなかったこと。恒久的な説明ブロックを両プロンプトに追加したところ、翌ドライラン（`log/2026-07-25/0935`）でUser AIの思考文に初めて`escalate_premise_concern`という単語自体が登場し（結果的に不使用と判断したが、検討はした）、指示追加の効果を確認。同ログのレビュー中に別途2件のバグ・改善余地を発見: (1) `task_1_3`の`acceptance_criteria`の"(12km区間)"という表記が比率(15%)か絶対距離かを一意に確定できず、Expertが同一の誤読を4回連続（V1→V9、9版）で繰り返した、(2) User AIの標準指示が無条件に「合意に達したら成果物の出力を指示せよ」と言うため、R4のホワイトボード方式で既にApproved済みの成果物にも再提出を要求しExpertを混乱させていた。さらにユーザーから「監査・検算の前提となる計画自体が歪んでいると徒労に終わる」「バス3台で無理と分かった時点で"バスである必要は？タクシー補助では？"という一段上の思考をAIにさせたい」という要望を受け、段階的な改善計画（`docs/design/`配下の実装計画に相当する内容はPlan modeで`task-plan-reviewer-node-task-planner-glistening-coral.md`として作成）に合意。**Stage 1（実装済み）**: ①`call_task_planner`のプロンプトに、比率/絶対値の取り違えを防ぐ曖昧表記禁止指示と、今回のtask_1_3失敗例をNG例として追加。さらに暗算によるハルシネーションを避けるため`tools=[PYTHON_REPL_TOOL]`を付与（ユーザー指摘、`call_goal_essence_analyst`/`call_task_plan_reviewer`にも同様に付与）。②`generate_user_utterance`の標準指示に、未充足の`acceptance_criteria`が無くホワイトボードに成果物が既に存在する場合は再提出を求めず次のタスクへ進行するよう条件分岐を追加。**Stage 2（実装済み）**: `task_planner_node`直後（`graph.add_edge("task_planner", "task_plan_reviewer")`）に1回だけ発火する`task_plan_reviewer_node`を新設。生成された`phases`全体（曖昧表現・タスク過不足・依存順序）をDetector同等のJSON（`risk`/`constraint_issue`/`comment`）でレビューし、`constraint_issue="major"`かつ差し戻し回数が2回未満なら`state["phases"]`をクリアして`task_planner`へ差し戻す（既存の`task_planner_node`の`not state.get("phases")`ガードにより自然に再生成される、無限ループ防止のため上限到達後は指摘が残っていても承認）。差し戻し理由は新設`state["plan_reviewer_feedback"]`へ保存し、`call_task_planner`に追加した`reviewer_feedback`引数経由で再生成プロンプトに注入。再レビューがチェックポイント再開のたびに再発火しないよう、新設`state["plan_review_done"]`で`task_planner_node`と同型のturn_count==1ガードを踏襲。**Stage 3（実装済み）**: task_planner分解より前に1回だけ発火する`goal_essence_node`を新しい`entry_point`として追加（新設`goal_essence`テーブル・`call_goal_essence_analyst`）。ゴール文の大まかな実現可能性の壁打ちと目標の本質の言語化を行い、新設`_get_goal_essence_text`でBL-086 D-058の9消費者すべて（`state`経由5箇所＋`goal_essence_text`引数経由4箇所）へ常時注入。**Stage 4（実装済み）**: `call_detector`のドメイン妥当性パス・`generate_user_utterance`の両方に、本質と数値・条件設定の整合性チェック観点を追加（BL-069関連）。**Stage 2'・5（`open`、別途着手）**: フェーズ完了時にtask_plannerが残りフェーズを再計画する機構、「一段上の思考」を`reflection_node`拡張＋機械的トリガー（`global_constraints`の逼迫比率・`expert_retry_count>=3`のOR）で強制発火させる仕組み（D-059参照） | P1 |
+| BL-088 | 高 | `cela_main.py` (`_safe_json_parse`) | BL-087 Stage2改善後の実ドライラン（`log/2026-07-25/1642`）レビューで、task_plannerの1〜2回目の出力が実際には正しい5〜6フェーズの計画だったにもかかわらず、`task_plan_reviewer_node`に渡った内容は縮退した1タスクのみの`fallback_phase`になっていた事象を発見。原因は`_safe_json_parse`の「先頭が`{`/`[`でない場合に開始位置を探す」ロジックが、`brace_idx`（最初の`{`の位置）が見つかりさえすれば`bracket_idx`（最初の`[`の位置）より後にあっても常に`brace_idx`を優先していたこと。トップレベルが配列（`call_task_planner`のfallbackはlist）で、かつコードフェンス前に説明文が付く応答（例:「それでは、フェーズ分解を提示します。\n\n\`\`\`json\n[{...}]」、LLMの一般的な癖）の場合、配列を開く`[`より後にある最初のオブジェクトの`{`から開始してしまい、構文的に不正なJSON（先頭の`[`を欠いた状態）になりパース失敗、fallbackへ握りつぶされていた。このバグにより、`task_plan_reviewer_node`の差し戻しリトライ予算（上限2回）が2回とも本バグによる縮退計画の却下で無駄撃ちされ、3回目（最終・強制承認）でも再現していれば縮退計画がそのまま最終計画として承認されるところだった。`{`/`[`のどちらが先に現れるかで開始位置を決めるよう修正（`min()`判定）。新規`tests/test_bl088_safe_json_parse_bracket_precedence.py`（3件、`1642`ログの実際の失敗パターンを再現）、`python -m py_compile`合格。D-062として記録 | P1 |
 
 ---
 
@@ -2737,7 +2738,7 @@ BL-086実装後の実LLMドライラン（`log/2026-07-24/2358`）レビュー�
 1. `call_expert`のフル`system_prompt`（【制約と条件の切り分け】セクション直後）に、`escalate_premise_concern`の使用条件（狭く構造化された懸念限定、スコープ免除にはならない、当該ターンのacceptance_criteriaは通常通り満たす、重複提起禁止）を恒久的に明記。あわせて`light_system_prompt`（ツールループiter≥2以降、従来4ツールへの言及が皆無だった箇所）にも1行のリマインダーを追加。
 2. `generate_user_utterance`の標準指示（同種のセクション直後）に、`escalate_premise_concern`（自ら起点になれる）・`resolve_premise_concern`・`revise_goal`・`freeze_agreement`の4ツールすべての使いどころを恒久的に明記（`freeze_agreement`は従来`revise_goal`経由の言及しかなく単独使用の説明が皆無だった）。
 3. 効果確認として翌ドライラン（`log/2026-07-25/0935`）をレビューしたところ、User AIの思考文に初めて`escalate_premise_concern`という単語が名指しで登場（「Let me also think about whether I should use escalate_premise_concern or just directly reject.」）。今回は「ゴール自体の前提矛盾ではなく`task_1_3`の`acceptance_criteria`表記の曖昧さによるExpertの誤読」と判断し不使用を選択したが、この切り分け自体は妥当であり、少なくとも検討の俎上に載るようになったことを確認。
-4. 同じ`log/2026-07-25/0935`のレビュー中に、`task_1_3`で`acceptance_criteria`の"(12km区間)"という表記が「位置」か「長さ」かを一意に確定できず、Expertが同一の誤読（15%=2.175kmを12km全区間=82.8%と誤定義）を4回連続で繰り返しV1→V9（9版）の無駄な往復が発生している事例を発見。`call_task_planner`のプロンプトに、比率/絶対値等の指標の取り違えを防ぐ曖昧表記禁止指示と、今回の失敗例をNG例として追加（項目4として新設）。**追記（ユーザー指摘）**: `call_task_planner`は比率・分割・単位換算等の計算（例：面積比から距離を求める、予算から購入可能台数を見積もる）を暗算に頼っていたため、`tools=[PYTHON_REPL_TOOL]`を付与し、計画分解時点から機械計算を使わせる（項目5として新設。プロジェクト最上流のハルシネーションリスクという同じ理由で`call_goal_essence_analyst`・`call_task_plan_reviewer`にも同様に付与済み、下記12参照）。
+4. 同じ`log/2026-07-25/0935`のレビュー中に、`task_1_3`で`acceptance_criteria`の"(12km区間)"という表記が「位置」か「長さ」かを一意に確定できず、Expertが同一の誤読（15%=2.175kmを12km全区間=82.8%と誤定義）を4回連続で繰り返しV1→V9（9版）の無駄な往復が発生している事例を発見。`call_task_planner`のプロンプトに、比率/絶対値等の指標の取り違えを防ぐ曖昧表記禁止指示と、今回の失敗例をNG例として追加（項目4として新設）。**追記（ユーザー指摘）**: `call_task_planner`は比率・分割・単位換算等の計算（例：面積比から距離を求める、予算から購入可能台数を見積もる）を暗算に頼っていたため、`tools=[PYTHON_REPL_TOOL]`を付与し、計画分解時点から機械計算を使わせる（項目5として新設。プロジェクト最上流のハルシネーションリスクという同じ理由で`call_goal_essence_analyst`・`call_task_plan_reviewer`にも同様に付与済み、下記12参照）。**関連バグ（[BL-088](issue_backlog.md#bl-088-_safe_json_parseがコードフェンス前に説明文が付いたjson配列をfallbackへ握りつぶすバグ)として別途起票**: Stage2改善実装後の実ドライラン（`log/2026-07-25/1642`）で、task_plannerがコードフェンス前に一言添える応答パターンにより、この`_safe_json_parse`のバグでtask_plan_reviewer_nodeの差し戻しリトライ予算が2回とも無駄撃ちされる事象を発見・修正。
 5. さらに、User AIの標準指示（`user_always_remembers or turn_count==1`ブロック）が無条件に「合意に達したら相手のAIに成果物の出力を指示せよ」と指示しており、R4のホワイトボード方式で既にApproved済みの成果物に対しても再提出を要求し、Expertが「既に提出済みなのに再度出力を求められている」と混乱する余地があったバグを修正。「未充足の要求項目が無く、かつホワイトボードに成果物が既に存在する場合は、再提出を求めず次のタスクへ進行する」という条件分岐を追記。
 6. ユーザーからの追加要望「監査・検算ループ自体は機能するが、その前提となる計画・目標理解が歪んでいると徒労に終わる」「バス3台で無理と分かった時点で"バスである必要は？タクシー補助では？"という一段上の思考をAIにさせたい」を受け、Plan modeで段階的な改善計画に合意（`docs/design/`外、Claude Codeのplanファイル`task-plan-reviewer-node-task-planner-glistening-coral.md`として保存）。
 
@@ -2782,6 +2783,39 @@ BL-086実装後の実LLMドライラン（`log/2026-07-24/2358`）レビュー�
 - 新規`tests/test_bl087_stage3_4_goal_essence.py`（26件）: `goal_essence`テーブルのDB層roundtrip・冪等性、`goal_essence_node`のスキップ/保存、`build_graph`の`entry_point`が`goal_essence`であることの確認、11消費者すべてへの注入配線確認（`call_task_planner`/`call_task_plan_reviewer`を含む、`inspect.getsource`/`inspect.signature`による静的確認）、Stage4のDetector/User AI本質整合性チェック追加の確認、`call_goal_essence_analyst`が`PYTHON_REPL_TOOL`を付与されていることの確認。
 - `python -m py_compile cela_main.py`合格、オフラインスモークテスト全件Pass。
 - Stage 2'・5は本BLの完了条件に含めず、着手時に新規BLを起票する。
+
+---
+
+### BL-088: `_safe_json_parse`がコードフェンス前に説明文が付いたJSON配列をfallbackへ握りつぶすバグ
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | [BL-087](issue_backlog.md#bl-087-前提の質を上げる一連の改善task_plannerの曖昧表記禁止二重指示バグ修正task_plan_reviewer_node等)（このバグにより差し戻しリトライ予算が無駄撃ちされる事象から発見） |
+
+**内容:**
+
+BL-087 Stage2改善実装後の実ドライラン（`log/2026-07-25/1642`）をユーザーの依頼でレビューする中で、`task_plan_reviewer_node`が1〜2回目の`task_planner`出力を「acceptance_criteriaが極めて曖昧」「タスクが単一で全く分解されていない」としてmajor判定・差し戻していたが、ログを遡ると実際のLLM応答（💬発言）は5〜6フェーズに正しく分解された詳細な計画であったことが判明。`[task_planner] フェーズとタスクの分解結果`として実際に記録・レビューへ渡っていたのは、`call_task_planner`の`fallback_phase`（`phase_1`/`task_1_1`のみの縮退計画）だった。
+
+原因を`_safe_json_parse`（`cela_main.py`）で特定: 「段階2」の開始位置探索ロジックが、
+```python
+brace_idx = cleaned.find("{")
+bracket_idx = cleaned.find("[")
+start = brace_idx if brace_idx != -1 else bracket_idx  # brace_idxが見つかれば常に優先
+```
+という実装で、`brace_idx`が見つかりさえすれば、それが`bracket_idx`より後の位置にあっても常に`brace_idx`を採用していた。`call_task_planner`のトップレベルは配列（`[{...}, {...}]`）であり、かつ今回のLLM応答はコードフェンス直前に「それでは、フェーズ分解を提示します。」のような一文を添えるパターン（LLMの一般的な癖）だったため、「段階1」（`cleaned.startswith("```")`によるフェンス除去）が発火せず、「段階2」で本来の開始位置である`[`より後にある最初のオブジェクトの`{`から`cleaned`を切り出してしまい、`[`を欠いた構文的に不正なJSON（`{...}, {...}]`）になっていた。これが`json.loads`失敗→fallbackという経路をたどり、縮退計画に化けていた。
+
+このバグは`_query_and_parse_with_retry`（層2リトライ、パース失敗を検知して同一呼び出しをリトライする既存の防御機構）を経由しない`call_task_planner`で発生しており、パース失敗が直接fallbackとして確定してしまう。さらに、BL-087 Stage2の`task_plan_reviewer_node`は差し戻し上限を2回に制限しているため、`1642`のドライランでは1・2回目とも本バグによる縮退計画の却下で予算を使い切っており（内容面での差し戻しは実質ゼロ）、もし3回目（最終・強制承認）でも再現していれば、縮退計画がそのまま最終計画として承認され走行が続くところだった。
+
+**対応（実装済み）:**
+
+`_safe_json_parse`の該当ロジックを、`brace_idx`/`bracket_idx`のうち`-1`でないものの中で最小値（＝より先に現れる方）を採用するよう修正した。
+
+**完了条件:**
+
+- 新規`tests/test_bl088_safe_json_parse_bracket_precedence.py`（3件）: `1642`ログの実際の失敗パターン（コードフェンス前に説明文＋トップレベル配列）の再現確認、トップレベルがオブジェクトの通常ケースが従来通り動作することの回帰確認、`{`も`[`も含まれない完全な非JSON応答でfallbackを返すことの確認。
+- `python -m py_compile cela_main.py`合格、オフラインスモークテスト全件Pass。
 
 ---
 
