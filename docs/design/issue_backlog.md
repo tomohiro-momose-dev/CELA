@@ -125,6 +125,7 @@
 | BL-091 | 高 | `cela_main.py` (`call_detector`) | `log/2026-07-25/1913`のtask_2_1修正で、Expertのwrite_agreement(edits)が「old_text不一致」で失敗し最終iterationでツールが強制的に外された後、モデル（DeepSeek系）が独自のツール呼び出し風疑似XML（`<｜DSML｜tool_calls>...`）を平文でそのまま出力。`get_last_write_agreement_succeeded()=False`とシステム自身は正しく記録していたが、この成否フラグが`call_detector`のプロンプトに一切渡っておらず、Detectorはこの平文の「主張」を鵜呑みにして誤って承認（物理的矛盾が解消された、acceptance_criteria充足）、Decision Extractorも虚偽のUPDATEをDBに記録した。実際のホワイトボードはV2のまま（V3は存在せず）、誤った記述・数値が残存。BL-033（Expertのpython_repl自己申告を鵜呑みにしない）と同根・同型の欠落。`call_detector`のドメイン妥当性レビュー・数値監査の両プロンプトに、今回のターンでwrite_agreementが実際に成功したか（`state["expert_wrote_agreement"]`/`state["user_wrote_agreement"]`）を明示するブロックを追加し、失敗時は「相手の発言内容にかかわらず現在の最新ホワイトボードのみが真実」「食い違えばmajor」と指示。新規`tests/test_bl091_write_agreement_status_and_bl079_excerpt_verify.py`、`python -m py_compile`合格。D-067として記録 | P0 |
 | BL-092 | 中 | `cela_main.py` (新設`DIFF_PLAN_DRAFT_VERSIONS_TOOL`/`_diff_plan_draft_versions_handler`、`call_task_plan_reviewer`) | 別AIによる`1913`ログの独立レビュー（12項目指摘）を、さらに別チャットで各項目を実際のログ行まで追跡させた結果、数値矛盾の指摘（#1 task_2_2の往復24km/48km混在、#3 task_3_4の「約1,200万円」、#4 task_3_3の赤字誤差、#7 「10人乗り」の根拠）が、task_plan_reviewerの差し戻しを経て「解消」した実態は、数値を検算・訂正したのではなく**該当する記述・タスク内容ごと削除するか抽象的な表現に差し替える**ことで、矛盾そのものを見えなくする形だったと判明。BL-087 Fix A（reviewerの過剰な精度要求がtask_plannerに存在しない数値の捏造を誘発する問題）とは逆方向の構造的パターン。ユーザー提案（ファイル化してdiffツールを使う）を受け、ファイル中心の編集への回帰（BL-074/034/040が既に解決した脆さの再導入）は避けつつ、既にDBでバージョン管理されている`plan_drafts`（BL-082、task_planner再生成のたびにauthor_role="task_planner"で版が積み増される）に対し`difflib`で機械的diffを取る方式を採用。task_plan_reviewerが以前指摘したtask_idについて記憶・印象ではなく実際の差分（数値が訂正されたか、記述ごと消えたか）で判断できるようにした。新規`tests/test_bl092_plan_draft_diff_verification.py`（8件）、`python -m py_compile`合格。D-069として記録 | P2 |
 | BL-093 | 中 | `cela_main.py`（新設`THINK_TOOL`/`_think_handler`/`_reset_think_scratchpad`、`_query_AI_live`の`_CURRENT_TOOL_LOOP_ITERATION`＋think+summary機械的強制＋自動reasoningダイジェスト、tools付与済み全13関数呼び出し箇所への配線） | スクラッチパッド議論（別チャット共有）の結論。ツールループの`_StreamMessage`がモデルのreasoningを`None`固定で捨てており、次iterでモデルは前回のtool_calls/tool結果という記録だけから理由を再構築している問題を確認。当初は「reasoning消失は実害なし」と誤って結論しかけたが（`loop_messages`が全履歴を再送する事実と、reasoning自体が再送されない事実を混同）、ユーザー指摘で訂正。理由づけ（action/decided/why/rejected/rejected_why）を書かせ、tool結果として即座に全履歴を返す`think`ツールを新設し、消えるreasoningチャネルから残るtool_callsチャネルへ理由づけを退避させた。todo/issuesはopen/close必須のリスト、notesは上書きされない追記専用リストとして分離。iter番号はモデルの自己申告に頼らず`_CURRENT_TOOL_LOOP_ITERATION`から機械的に付与。MAX_TOOL_ITERを15→20へ引き上げ（D-071）。当初はDetector数値監査パス/task_planner/task_plan_reviewerの3ノード限定だったが、ユーザー指示「対象ノードは全ノードへ」を受け、tools付与済みの全ノード＋従来tools=None（単一応答パス）だった4関数＋Detectorドメイン妥当性パスをtools=[THINK_TOOL]へ変更し拡張（D-072）。さらにユーザーから「thinkを呼ぶかはモデル任せでは意味がない、reasoning引き継ぎは自動でなければならない」との指摘を受け、`think`に`summary`フィールドを追加しrequired化、「ツール呼び出しを含む全iterationはthink+非空summaryを併用すること」を`_query_AI_live`側で機械的に強制（違反時は一切実行せず差し戻し）。直近2iter分は生reasoningそのまま・それより古い分はthinkのsummaryを使う自動ダイジェストメッセージをloop_messagesへ都度差し替える設計に確定（D-074、機械的な文字数切り詰め案は「意味を成さない」と却下）。さらに、ツールスキーマの説明文修正だけでは同種の差し戻しが再発したため、各ノードのプロンプト本文にも利用可能ツール名を名指しした指示を追記（追記修正3）。新規`tests/test_bl093_think_tool_scratchpad.py`（42件、他ツール全10種のリマインダー確認・各ノードのプロンプト本文でのツール名指しを含む）・`tests/test_bl093_d074_auto_reasoning_enforcement.py`（6件、フェイクstreamingクライアントで`_query_AI_live`を直接検証）、既存テスト2件の妥当な緩和（完全一致→含有確認）、`python -m py_compile`合格。D-070（誤りを訂正・superseded）/D-071/D-072/D-074として記録 | P2 |
+| BL-094 | 中 | `cela_main.py`（`call_expert`/`call_detector`数値監査パス/`call_resource_arbiter`/`call_integrator`/`call_reviewer`/`generate_user_utterance`のプロンプト本文） | 実ドライラン`log/2026-07-26/1749`のハルシネーション監査（別セッションのAgentによる全文精査＋本セッションでの主要箇所の裏取り）で、`read_verified_fact`/`read_deliverable_file`が`tools=[...]`に配線されツールスキーマの`description`も存在するにもかかわらず、実際にはどのノードもこれらを能動的に呼んでおらず、他タスクで既に確定した数値と矛盾する値を独自に仮定してしまう事故が繰り返し観測された（山間部片道時間が24分/36分で食い違ったまま放置、Goal Essence Analyst自身の推測が「実現可能性メモ」という架空の一次資料であるかのように後工程で「出典」扱いされる、等）。BL-093の「ツール説明文だけでは不十分で、各ノードのプロンプト本文に名指しした指示が要る」という教訓（追記修正3）と同型の問題と判断し、read_verified_fact/read_deliverable_fileを持つ全6関数のプロンプト本文に、(1)両ツールの目的（全フェーズ横断の確定値検索／過去タスク成果物の前提込み全文参照）の説明、(2)「最低限iter=1で一度は関連キーワードでread_verified_factを呼び、他タスクの確定値・前提と文脈を同期してから作業を始めること」という思考フレームワーク上の指示、(3)思考中に「これは他タスクで既に扱われていたかもしれない」という気づきがあれば都度参照せよという指示、を追記した。Detectorには特に「数値の出所（ゴール文由来かAI自身の孫引きか）を追跡する」観点を明記。新規`tests/test_bl094_read_tool_orientation.py`（17件）、`python -m py_compile`合格、関連クラスタ213件Pass。D-075として記録 | P2 |
 
 ---
 
@@ -3042,6 +3043,32 @@ BL-087 Fix Aは「reviewerが絶対値の確定を無理強いすると、task_p
 - 既存`tests/test_bl087_stage2_task_plan_reviewer_node.py`（`call_task_planner`）・`tests/test_bl087_stage3_4_goal_essence.py`（`call_goal_essence_analyst`）のツール一覧完全一致アサーションを、ツールが増えても壊れないよう部分一致（`in`）に更新（BL-092で`call_task_plan_reviewer`側に行った修正と同型）。
 - `python -m py_compile cela_main.py`合格、関連クラスタ91件Pass、`check_docs_consistency.py`合格。
 - 実LLM再ドライランでの効果確認（機械的強制が実際に自己修復ループとして機能するか、要約の質、MAX_TOOL_ITER=20が実際に十分か）は次回待ち。
+
+---
+
+### BL-094: `read_verified_fact`/`read_deliverable_file`等「参照系」ツールのノードプロンプトへのオリエンテーション追記
+
+**経緯:** BL-093実装後の実ドライラン`log/2026-07-26/1749`について、ユーザーから「同じことの無駄な再確認や、理由や数字の出所などがわからず数値の捏造やハルシネーションなどはあるか」というレビュー依頼を受け、別セッションのgeneral-purpose Agentに全文（当時19,195行）の精査を委託。本セッション側でも主要な指摘を実ログ・`cela_main.py`と突き合わせて裏取りした結果、以下が事実として確認された。
+
+1. **無駄な再確認**: Task Planner再計画ターンが1ターン内で山間部片道時間を3通り計算し（36分→20.7分→矛盾に気づくが「ここは深入りせず」と放棄→結局36分採用）、末尾のExpertが3台の輸送能力を9通り以上再計算し続け、Detectorが独立検算で既に確定させた「150人/3h」を一度も参照しないまま新しい前提を作り直していた。
+2. **出所不明・矛盾する数値**: Goal Essence Analyst自身が「12kmを総ルート長」と仮定して逆算した600m/1.8kmという数値が、後続のExpertのDeliverableで「出典: 実現可能性メモ」という**架空の一次資料**であるかのように扱われていた（`cela_main.py:2694`で確認した通り、「実現可能性メモ」は単に`essence['feasibility_notes']`＝Goal Essence Analyst自身の推測文をラベル付けしているだけで、独立した資料ではない）。また山間部片道時間がGoal Essence Analyst側で24分、Task Planner側で36分と食い違ったまま、どちらのノードもこの矛盾に気づかず、両方が別々の文脈で「確定値」として使われ続けていた。冬季速度70%低下（14km/h）や車両定員20人も、コード内コメントでは「仮定」と明記されているのに、Detectorが`minor`指摘した後もDeliverable自体は訂正されずに承認・伝播していた。
+
+**根本原因（ユーザー診断）:** `read_verified_fact`/`read_deliverable_file`は`tools=[...]`に配線され、ツールスキーマの`description`も存在するが、**どのノードのプロンプト本文にも「これらのツールで過去の決定・確定値・理由を参照できる」という説明も、「いつ使うべきか」という指示も書かれていなかった**。BL-093で判明した「ツール説明文だけでは不十分で、各ノードのプロンプト本文に名指しした指示が要る」（追記修正3）という教訓と同型の問題であり、ツールを`tools=[...]`に追加するだけでは、モデルはそれを実際には使わない。
+
+**対応内容:** `read_verified_fact`/`read_deliverable_file`を持つ全6関数（`call_expert`/`call_detector`数値監査パス/`call_resource_arbiter`/`call_integrator`/`call_reviewer`/`generate_user_utterance`）のプロンプト本文に、`[BL-094: ...]`ブロックとして以下を追記した：
+1. 両ツールの目的説明（`read_verified_fact`＝全フェーズ・全タスク横断で変数名/キーワードから確定値・理由・引用元・confidenceを検索、`read_deliverable_file`＝過去タスクの成果物全文を前提込みで参照）。
+2. 「最低限、iter=1で一度は、関連しそうな変数名・キーワードでread_verified_factを呼び、他タスクで既に確定・仮定された値が無いか確認してから作業を始めること」という思考フレームワーク上の指示。
+3. 「思考の途中で『これは他タスクで既に扱われていたかもしれない』という気づきがあれば、その都度参照し、独自の仮定で上書きしないこと」という積極的参照の指示。
+
+Detectorには特に「Agentの数値がゴール文の直接記載か、AI自身の推測の孫引きかを見分けるために使う」という、監査役固有の観点を明記した（`出所`という語で規定テスト化）。他の「参照系」ツール（`verify_whiteboard_excerpt`＝BL-079で既に「確定前に必ず検証」という同種の指示が存在、`diff_plan_draft_versions`＝BL-092で既に「以前指摘したtask_idについて確認」という同種の指示が存在）は、既存のプロンプト内オリエンテーションで十分と判断し、今回の追記対象外とした。`python_repl`/`write_agreement`/`escalate_premise_concern`/`resolve_premise_concern`/`revise_goal`/`freeze_agreement`も同様に既存の指示で足りると判断した。
+
+`call_task_planner`/`call_goal_essence_analyst`/`call_task_plan_reviewer`（`read_verified_fact`/`read_deliverable_file`を持たない）は対象外。これらのノードにも同種のツールを新規配線するかは、ツール自体の追加であり本BLのスコープ（既存ツールへのオリエンテーション追記）を超えるため、別途の判断（新規BL化）を要する未決事項として残す。
+
+**完了条件:**
+
+- 新規`tests/test_bl094_read_tool_orientation.py`（17件）: 6関数それぞれが`BL-094`・`read_verified_fact`・`read_deliverable_file`を含むこと、`iter=1で`という同期指示を含むこと（パラメータ化テスト）、Detectorが「出所」という観点を明記していること、各関数固有の見出し文言が存在すること。
+- `python -m py_compile cela_main.py`合格、関連クラスタ213件Pass、`check_docs_consistency.py`合格。
+- 実LLM再ドライランでの効果確認（iter=1でのread_verified_fact呼び出しが実際に増えるか、数値の出所追跡が実際に機能するか）は次回待ち。
 
 ---
 
