@@ -3763,10 +3763,19 @@ It serves as the initial planning layer for breaking down complex objectives acr
        タスク分解で確認すべき論点をリストアップしてから、各論点の検討時にaction/decided/why
        （却下案があればrejected/rejected_why）を書いてください。他のツール呼び出しと同一の
        応答内でまとめて呼んでも、単独で呼んでも構いません。
-       【重要】あなたが使えるツールはpython_replとthinkの2つです。python_replを呼ぶときは、
-       必ずその同じ応答の中にthink（summary必須）も一緒に含めてください。think無しで
-       python_replだけを呼ぶと、その応答のツール呼び出しは（python_replも含めて）一切
-       実行されず差し戻されます。
+    9. [BL-094: read_verified_fact/read_deliverable_fileで既存の確定値と同期する]
+       read_verified_factは全フェーズ・全タスク横断で、変数名やキーワードから既に確定した
+       値（値・理由・引用元・confidence）を検索できます。read_deliverable_fileは過去タスクの
+       成果物全文（前提込み）を読めます。特に差し戻し（reviewer_feedback）を受けての再分解
+       時は、Goal Essence Analystや前回のタスク実行が既に何らかの値（総ルート長の仮定等）を
+       確定・仮定していないかread_verified_factで確認してから再分解してください。ゴール文に
+       ない数値を自分で仮定する前に必ずこの確認を行い、既存の確定値と矛盾する新しい仮定を
+       勝手に作らないこと。【最低限、iter=1で一度は、関連しそうなキーワードでread_verified_fact
+       を呼び、他ノードが既に確定・仮定した値と同期してから分解を始めてください】。
+       【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
+       thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の中にthink（summary必須）
+       も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、その応答のツール呼び出し
+       は一切実行されず差し戻されます。
 
     ■ 目標: {goal}
     {goal_essence_text}
@@ -3838,7 +3847,7 @@ It serves as the initial planning layer for breaking down complex objectives acr
     _reset_think_scratchpad()  # [BL-093]
     phases, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_auditor, model=model_auditor, label="Task Planner",
-        tools=[PYTHON_REPL_TOOL, THINK_TOOL], fallback=fallback_phase,
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, THINK_TOOL], fallback=fallback_phase,
     )
     if parse_failed:
         print("🚨 [Task Planner] JSON分解結果の取得に失敗しました。縮退計画にフォールバックします。")
@@ -4163,6 +4172,16 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "[BL-086] ゴール文の制約そのものが真の目的と矛盾していると具体的根拠を持って判断した場合のみ、"
         "escalate_premise_concernツールで懸念を提起できます（一般的な泣き言としては使用不可、"
         "今回のacceptance_criteriaは提起後も通常通り満たすこと）。\n"
+        "[BL-094: read_verified_fact/read_deliverable_fileで過去の決定と同期する] 上記【この値は"
+        "確定済みです】は現在タスクに関連する確定値の一部にすぎません。read_verified_factは全"
+        "フェーズ・全タスクを横断して、変数名やキーワード（例:「車両台数」「山間部」「通信不安定」）"
+        "から確定値（値・理由・引用元・confidence）を検索できます。read_deliverable_fileは過去タスク"
+        "の成果物全文（数値だけでなく、それがどんな前提・議論を経て確定したかという文脈）をtask_idや"
+        "キーワードで読めます。【最低限、iter=1で一度は、このタスクに関連しそうなキーワードで"
+        "read_verified_factを呼び、他タスクで既に確定・仮定された値が無いか確認してから作業を"
+        "始めてください】。確認せずに自分で新しい数値を仮定すると、他タスクの確定値と矛盾する"
+        "リスクがあります。思考の途中で「これは他タスクで既に扱われていたかもしれない」という"
+        "気づきがあれば、その都度これらのツールで確認し、独自の仮定で上書きしないでください。\n"
         "[BL-093] thinkツールで検討過程を残せます。自然に考えた理由づけの生文章は、thinkを使わ"
         "なければ次のiterationには引き継がれません（tool_callsの記録だけが残ります）。thinkを"
         "呼ぶと、その理由づけは次回以降のtool結果として全履歴ごと返され、雪だるま式に引き継がれ"
@@ -4506,6 +4525,16 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"引用を長く・具体的にする等調整して再度呼び出し、一意に一致することを確認してから"
         f"JSONに書いてください（一致しないtarget_excerptは、ホワイトボードへの注釈挿入が"
         f"サイレントに失敗する原因になります）。\n\n"
+        f"[BL-094: read_verified_fact/read_deliverable_fileで数値の出所を追跡する] Agentが提示した"
+        f"数値が、ゴール文に直接書かれた値なのか、Agent自身がどこかで仮定した派生値なのかを"
+        f"見分けるには、read_verified_factで当該変数名・キーワードを検索し、他タスクで既に"
+        f"確定した値・その理由・引用元と実際に一致しているか確認してください。一致しない、"
+        f"または確定値が存在しないのにAgentが「確定済み」であるかのように断定している場合は、"
+        f"それ自体が要指摘です。read_deliverable_fileでは、その確定値がどんな前提・議論を経て"
+        f"導出されたか（他ノード自身の仮定を「出典」として自己引用していないか等）まで遡って"
+        f"確認できます。【最低限、iter=1で一度は、今回の発言に含まれる主要な数値についてread_"
+        f"verified_factで確認し、ゴール文にない数値が無根拠に確定値として扱われていないかを"
+        f"チェックしてから判定を進めてください】。\n\n"
         f"【BL-093: thinkツールで検討過程を残す】この数値監査は複数回のpython_repl呼び出しを"
         f"跨ぐことが多く、自然に考えた理由づけの生文章は、thinkを使わなければ次のiterationには"
         f"引き継がれません（tool_callsの記録だけが残ります）。thinkを呼ぶと、その理由づけは次回"
@@ -4883,6 +4912,13 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goa
     理由づけ（action/decided/why、却下案があればrejected/rejected_why）は次回以降のtool結果として
     全履歴ごと返され、雪だるま式に引き継がれます。まずtodoに確認すべき論点をリストアップして
     ください。他のツール呼び出しと同一の応答内でまとめて呼んでも、単独で呼んでも構いません。
+    [BL-094: read_verified_fact/read_deliverable_fileで既存の配分・決定と同期する]
+    read_verified_factは全フェーズ・全タスク横断で、変数名やキーワードから確定値（値・理由・
+    引用元・confidence）を検索できます。read_deliverable_fileは過去タスクの成果物全文（その値が
+    どんな前提で確定したか）を読めます。【最低限、iter=1で一度は、このリソース（{overrun['constraint']}）
+    や関係するフェーズについてread_verified_factで確認し、既に確定している配分・前提が無いか
+    同期してから再配分案を検討してください】。確認せずに独自の前提で再配分すると、既存の
+    確定事項と矛盾するリスクがあります。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
     write_agreement・thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の中にthink
     （summary必須）も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、その応答の
@@ -5132,6 +5168,15 @@ def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "") ->
     理由づけ（action/decided/why、却下案があればrejected/rejected_why）は次回以降のtool結果として
     全履歴ごと返され、雪だるま式に引き継がれます。まずtodoに確認すべき論点をリストアップして
     ください。他のツール呼び出しと同一の応答内でまとめて呼んでも、単独で呼んでも構いません。
+    [BL-094: read_verified_fact/read_deliverable_fileで数値の出所を横断確認する]
+    統合文書内の各数値が、複数タスクで整合しているように見えても、実際には別々の前提から
+    独立に導出された「たまたま似た数値」である場合があります（例: 同じ量を指すはずの数値が
+    タスクごとに違う仮定で計算されていた等）。read_verified_factで主要な変数を検索し、"confirmed_"
+    variables"の理由・引用元を突き合わせることで、見かけ上一致していても前提が食い違っている
+    ケースを検出できます。read_deliverable_fileでは、その数値がどのタスクでどんな前提のもと
+    確定したかを遡って確認できます。【最低限、iter=1で一度は、統合文書中の主要な数値について
+    read_verified_factで確認し、複数タスクにまたがる数値の前提が実際に一致しているかを
+    チェックしてから矛盾判定を行ってください】。\n
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
     write_agreement・thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の中にthink
     （summary必須）も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、その応答の
@@ -5226,6 +5271,14 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "")
     理由づけ（action/decided/why、却下案があればrejected/rejected_why）は次回以降のtool結果として
     全履歴ごと返され、雪だるま式に引き継がれます。まずtodoに確認すべき論点をリストアップして
     ください。他のツール呼び出しと同一の応答内でまとめて呼んでも、単独で呼んでも構いません。
+    [BL-094: read_verified_fact/read_deliverable_fileで最終成果物の数値根拠を追跡する]
+    最終成果物中の数値がゴール文の直接記載か、それとも途中のどこかのタスクで仮定された派生値かを
+    read_verified_factで検索し確認してください。確定値の理由・引用元が「他ノード自身の推測」を
+    自己引用しているだけで、実質的な根拠がゴール文にまで遡れない場合は、それ自体を要指摘として
+    扱ってください。read_deliverable_fileで元タスクの成果物本文まで遡れば、その前提が明示されて
+    いたか（仮定として書かれていたか、無条件の確定事項として書かれていたか）を確認できます。
+    【最低限、iter=1で一度は、成果物中の主要な数値についてread_verified_factで確認してから
+    判定を進めてください】。\n
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
     write_agreement・thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の中にthink
     （summary必須）も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、その応答の
@@ -5426,6 +5479,15 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     system_prompt += _build_detector_observations_block(state)
 
     system_prompt += (
+        "\n[BL-094: read_verified_fact/read_deliverable_fileで既存の決定と同期する]\n"
+        "上記の【この値は確定済みです】は現在タスクに関連する確定値の一部にすぎません。"
+        "read_verified_factは全フェーズ・全タスクを横断して、変数名やキーワードから確定値"
+        "（値・理由・引用元・confidence）を検索できます。read_deliverable_fileは過去タスクの"
+        "成果物全文（その値がどんな前提・議論を経て確定したか）を読めます。【最低限、iter=1で"
+        "一度は、現在のタスクや直近のAgentの発言に関連しそうなキーワードでread_verified_fact"
+        "を呼び、他タスクで既に確定・仮定された値と食い違う指示を出そうとしていないか確認して"
+        "ください】。思考中に「これは前のタスクで既に決まっていたはずでは」という疑問が浮かんだ"
+        "場合も、その都度これらのツールで確認してください。\n"
         "\n【BL-093: thinkツールで検討過程を残す】自然に考えた理由づけの生文章は、thinkを使わ"
         "なければ次のiterationには引き継がれません（tool_callsの記録だけが残ります）。thinkを"
         "呼ぶと、その理由づけは次回以降のtool結果として全履歴ごと返され、雪だるま式に引き継がれ"
@@ -5683,10 +5745,17 @@ def call_goal_essence_analyst(goal: str) -> dict:
     理由づけ（action/decided/why、却下案があればrejected/rejected_why）は次回以降のtool結果として
     全履歴ごと返され、雪だるま式に引き継がれます。まずtodoに確認すべき論点をリストアップして
     ください。他のツール呼び出しと同一の応答内でまとめて呼んでも、単独で呼んでも構いません。
-    【重要】あなたが使えるツールはpython_replとthinkの2つです。python_replを呼ぶときは、
-    必ずその同じ応答の中にthink（summary必須）も一緒に含めてください。think無しで
-    python_replだけを呼ぶと、その応答のツール呼び出しは（python_replも含めて）一切
-    実行されず差し戻されます。
+    [BL-094: read_verified_fact/read_deliverable_fileで既存の確定値の有無を確認する]
+    read_verified_factは全フェーズ・全タスク横断で既に確定した値を、read_deliverable_file
+    は過去タスクの成果物全文を検索できます。あなたは通常このプロジェクトの最初期に1回だけ
+    呼ばれるため、多くの場合まだ何も確定していません（該当なしという結果もそれ自体が
+    正しい確認結果です）。もし何らかの理由で既に確定値・過去の成果物が存在する場合は、
+    それを無視して独自に矛盾する仮定を置かないよう、iter=1で一度read_verified_factを
+    呼んで確認してください。
+    【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
+    thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の中にthink（summary必須）
+    も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、その応答のツール呼び出し
+    は一切実行されず差し戻されます。
 
     Return ONLY JSON: {{"true_essence": "（本質の言語化、2〜4文程度）",
     "feasibility_notes": "（大まかな実現可能性の見立て、無理筋に見える組み合わせがあれば
@@ -5698,7 +5767,7 @@ def call_goal_essence_analyst(goal: str) -> dict:
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_auditor, model=model_auditor, label="Goal Essence Analyst",
-        tools=[PYTHON_REPL_TOOL, THINK_TOOL],
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, THINK_TOOL],
         fallback={"true_essence": goal, "feasibility_notes": "(JSONパース失敗のため見立てなし)"},
     )
     if parse_failed:
@@ -5856,10 +5925,18 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     ます。まずtodoに確認すべきtask_idや論点をリストアップしてから、各論点の検討時にaction/
     decided/why（却下案があればrejected/rejected_why）を書いてください。他のツール呼び出しと
     同一の応答内でまとめて呼んでも、単独で呼んでも構いません。
-    【重要】あなたが使えるツールはpython_repl・diff_plan_draft_versions・thinkです。think以外の
-    いずれかを呼ぶときは、必ずその同じ応答の中にthink（summary必須）も一緒に含めてください。
-    think無しでこれらのツールだけを呼ぶと、その応答のツール呼び出しは一切実行されず差し戻され
-    ます。
+    [BL-094: read_verified_fact/read_deliverable_fileで数値の出所を確認する]
+    計画中の各タスクが前提とする数値（比率から逆算した絶対値等）が、ゴール文の直接記載か、
+    それとも他ノード（Goal Essence Analyst等）が既にどこかで仮定・確定した値かを見分けるには、
+    read_verified_factで該当する変数名・キーワードを検索し、その理由・引用元を確認してください。
+    「出典」として引用されている値が、実は他ノード自身の推測にすぎない場合（真にゴール文まで
+    遡れない場合）は、それ自体を要指摘としてください。read_deliverable_fileでは、その値が
+    どのタスクでどんな前提のもと確定したかを遡って確認できます。【最低限、iter=1で一度は、
+    計画中の主要な派生値についてread_verified_factで確認してから判定を進めてください】。
+    【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
+    diff_plan_draft_versions・thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の
+    中にthink（summary必須）も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、
+    その応答のツール呼び出しは一切実行されず差し戻されます。
 
     Return ONLY JSON: {{"risk": "low"/"medium"/"high", "constraint_issue": "none"/"major",
     "comment": "（majorの場合、task_plannerへの差し戻し指摘。具体的な修正指示にすること）",
@@ -5875,7 +5952,7 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_auditor, model=model_auditor, label="Task Plan Reviewer",
-        tools=[PYTHON_REPL_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, THINK_TOOL],
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, THINK_TOOL],
         fallback={"risk": "low", "constraint_issue": "none", "comment": "(JSONパース失敗のためnone扱い)",
                   "observations": "", "per_task_comments": []},
     )
