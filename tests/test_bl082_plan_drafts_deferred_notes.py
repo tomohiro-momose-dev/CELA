@@ -85,7 +85,11 @@ def test_bl082_append_deferred_note_lazily_seeds_skeleton(db_conn):
     assert latest is not None
     assert "必要車両台数の算出" in latest["content"]
     assert "【task_1_3より】積雪・通信エリアの地形照合を要検証" in latest["content"]
-    assert cela_main._PLAN_DEFERRED_PLACEHOLDER not in latest["content"]
+    # [BL-087 Stage2改善] プレースホルダ文字列自体は後続の「レビュワーからの指摘」セクションに
+    # 未使用のまま残るため（別セクションの空欄）、先送り事項セクション直後がプレースホルダで
+    # ないことをピンポイントで確認する（グローバルなnot in判定は使えなくなった）。
+    after_heading = latest["content"].split(cela_main._PLAN_DEFERRED_HEADING + "\n", 1)[1]
+    assert not after_heading.startswith(cela_main._PLAN_DEFERRED_PLACEHOLDER)
 
 
 def test_bl082_append_deferred_note_accumulates_multiple_appends(db_conn):

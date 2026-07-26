@@ -339,7 +339,7 @@ def test_integrator_node_reads_whiteboard_pointer(db_conn, monkeypatch):
 
     captured = {}
 
-    def fake_call_integrator(goal, merged_text):
+    def fake_call_integrator(goal, merged_text, **kwargs):
         captured["merged_text"] = merged_text
         return {"contradictions": False}
 

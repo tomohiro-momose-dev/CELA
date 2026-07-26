@@ -16,6 +16,7 @@ import sqlite3
 import uuid
 import hashlib
 import unicodedata
+import difflib
 import ast
 import subprocess
 import threading
@@ -574,7 +575,10 @@ PYTHON_REPL_TOOL = {
             "IMPORTANT: each call still only shows output you explicitly print — a bare expression like "
             "'2500 + 300 + 800' alone produces NO output. You MUST wrap it in print(...), e.g. "
             "'print(2500 + 300 + 800)'. If a previous call returned '[REPL] (no output)', you forgot "
-            "print() — retry with print() instead of repeating the same bare expression."
+            "print() — retry with print() instead of repeating the same bare expression. "
+            "[BL-093] You must also call `think` with a non-empty `summary` in this SAME response "
+            "(not a separate later response), or none of this response's tool calls -- including "
+            "this one -- will be executed."
         ),
         "parameters": {
             "type": "object",
@@ -601,7 +605,10 @@ READ_VERIFIED_FACT_TOOL = {
             "Search verified facts (confirmed values) across ALL phases. "
             "You can search by variable name (e.g. 'vehicle_count') or by topic keyword. "
             "Returns the value, reason, citations, and confidence level. "
-            "Use this to access cross-phase dependencies that are not in your current phase's scope."
+            "Use this to access cross-phase dependencies that are not in your current phase's scope. "
+            "[BL-093] You must also call `think` with a non-empty `summary` in this SAME response "
+            "(not a separate later response), or none of this response's tool calls -- including "
+            "this one -- will be executed."
         ),
         "parameters": {
             "type": "object",
@@ -630,7 +637,10 @@ READ_DELIVERABLE_FILE_TOOL = {
             "Prefer task_id or topic_keyword: the tool will look up the actual saved file path "
             "from the agreements database for you. Only pass file_path if you already have the "
             "exact path (e.g. copied verbatim from a 'FILE_PATH:...' value shown elsewhere). "
-            "Returns the file content as text."
+            "Returns the file content as text. "
+            "[BL-093] You must also call `think` with a non-empty `summary` in this SAME response "
+            "(not a separate later response), or none of this response's tool calls -- including "
+            "this one -- will be executed."
         ),
         "parameters": {
             "type": "object",
@@ -651,6 +661,278 @@ READ_DELIVERABLE_FILE_TOOL = {
         }
     }
 }
+
+
+# [BL-079] Detector専用。target_excerpt（ホワイトボードへの注釈挿入に使う一字一句引用）が
+# 実際に一意一致するかを、JSON最終出力を書く前にツールループ内で確認できるようにする。
+# 従来はdetector_nodeの事後処理でのみ判明し、一致失敗はサイレントに（Detector自身に一切
+# フィードバックされないまま）握りつぶされていた（BL-074）。このツールで事前検証させることで、
+# 同一ツールループ内でexcerptを調整・再試行できる。
+VERIFY_WHITEBOARD_EXCERPT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "verify_whiteboard_excerpt",
+        "description": (
+            "Check whether a candidate quote (for the JSON output's target_excerpt field) matches "
+            "EXACTLY ONCE in the current task's latest whiteboard content, before you finalize your "
+            "JSON. If it returns ok=false, adjust the excerpt (e.g. make it longer/more specific to "
+            "become unique, or fix a mismatched character) and call this again -- do not just give up "
+            "and leave target_excerpt as a guess. Call this once for your final candidate excerpt "
+            "before writing the JSON output. "
+            "[BL-093] You must also call `think` with a non-empty `summary` in this SAME response "
+            "(not a separate later response), or none of this response's tool calls -- including "
+            "this one -- will be executed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "excerpt": {
+                    "type": "string",
+                    "description": "Exact verbatim quote (1-2 sentences) from the whiteboard content you intend to use as target_excerpt."
+                }
+            },
+            "required": ["excerpt"],
+        },
+    },
+}
+
+
+# [BL-092] task_plan_reviewer専用。前ラウンドでmajor/minor判定した特定task_idの内容が、
+# 次のラウンドで実際に検算・訂正されたのか、単に記述ごと削除・抽象化されて見えなくなった
+# だけなのかを、LLMの主観的な印象ではなく機械的なdiffで確認できるようにする。task_planner_node
+# は再生成のたびに全タスクのplan_draftsスケルトンをauthor_role="task_planner"で再投入するため
+# （タスク自身の再生成品質確認とは無関係だが、副次的に版管理の役割も果たす）、直近2回分の
+# task_planner版を単純比較すれば「前回指摘した具体的な数値・記述が今回どう変わったか」が分かる。
+DIFF_PLAN_DRAFT_VERSIONS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "diff_plan_draft_versions",
+        "description": (
+            "Get a mechanical line-by-line diff between the two most recent task_planner-authored "
+            "versions of a given task_id's plan text. Use this BEFORE judging whether a previously "
+            "flagged issue (major/minor from an earlier round) was actually fixed with a corrected "
+            "value, versus merely deleted or reworded away with no equivalent replacement -- do not "
+            "rely on your own memory/impression of what changed. Requires at least 2 task_planner "
+            "rounds to exist for this task_id (fails gracefully with a reason if not). "
+            "[BL-093] You must also call `think` with a non-empty `summary` in this SAME response "
+            "(not a separate later response), or none of this response's tool calls -- including "
+            "this one -- will be executed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "task_id to diff across the two most recent task_planner rounds, e.g. 'task_2_2'."
+                }
+            },
+            "required": ["task_id"],
+        },
+    },
+}
+
+
+def _diff_plan_draft_versions_handler(args: dict) -> dict:
+    """[BL-092] diff_plan_draft_versionsツールの実体。同一task_idについて
+    author_role='task_planner'の版を版番号順に取得し、直近2件の間の統一diff（difflib）を返す。
+    書き込みは行わない読み取り専用ツール。
+    """
+    task_id = args.get("task_id", "")
+    if not task_id:
+        return {"ok": False, "reason": "task_idが空文字です"}
+    if not _CURRENT_RUN_ID:
+        return {"ok": False, "reason": "現在のrunが特定できませんでした"}
+    conn = get_active_conn()
+    rows = conn.execute(
+        "SELECT version, content FROM plan_drafts "
+        "WHERE run_id=? AND task_id=? AND author_role='task_planner' ORDER BY version ASC",
+        (_CURRENT_RUN_ID, task_id)
+    ).fetchall()
+    if len(rows) < 2:
+        return {
+            "ok": False,
+            "reason": (
+                f"task_id='{task_id}'にtask_planner由来の版が{len(rows)}件しかありません"
+                "（差分を出すには2件以上必要です。まだ1回しか計画生成されていないか、task_idが誤りです）"
+            ),
+        }
+    prev, latest = rows[-2], rows[-1]
+    diff_lines = list(difflib.unified_diff(
+        prev["content"].splitlines(), latest["content"].splitlines(),
+        fromfile=f"round(version={prev['version']})", tofile=f"round(version={latest['version']})",
+        lineterm="",
+    ))
+    diff_text = "\n".join(diff_lines)
+    return {
+        "ok": True,
+        "prev_version": prev["version"],
+        "latest_version": latest["version"],
+        "diff": diff_text[:8000] if diff_text else "(前回と完全に同一内容で、差分はありません)",
+    }
+
+
+# [BL-093] 全ノード共通のツールループ（_query_AI_live）はモデルのreasoning（chain-of-thought
+# 生文章）を_StreamMessageでNone固定にして捨てており、次iterationでモデルは前回のtool_calls/
+# tool結果という骨組みだけから理由を再構築している。このツールに理由づけ（action/decided/why/
+# rejected/rejected_why）を書かせ、tool結果として即座に蓄積済み全履歴を返すことで、消える
+# reasoningチャネルから残るtool_callsチャネルへ理由づけを退避させる。todo/issues/notesは、
+# 複数回のpython_repl呼び出しを跨ぐ長いツールループ（Detector数値監査・task_planner・
+# task_plan_reviewer）で何を確認済みか・何が未解決かを機械的に追跡させるための可変メモ。
+# `summary`は自動reasoningダイジェスト（_query_AI_live）専用のフィールド。thinkを呼ぶかどうかを
+# モデルの任意判断に委ねると、大半のiterationでreasoningが結局失われることが判明したため
+# （ユーザー指摘）、ツール呼び出しを含む全iterationでthink+非空summaryを機械的に必須化する
+# （_query_AI_live側の強制ロジック、このツール定義側では`required`に含めるのみ）。
+THINK_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "think",
+        "description": (
+            "Record your reasoning for this step so it is not lost in the next iteration "
+            "(this tool loop discards your raw chain-of-thought between iterations; only tool "
+            "calls and their results persist). Also maintain a running todo list, issue list, "
+            "and free-form notes across iterations. "
+            "MANDATORY RULE (enforced mechanically, not a suggestion): EVERY SINGLE response you "
+            "send that contains ANY tool call -- including python_repl, write_agreement, etc., "
+            "and even a response that contains ONLY a think call -- MUST include a `think` call "
+            "with a non-empty `summary` IN THAT SAME RESPONSE. This check is re-applied fresh to "
+            "every response; calling think in an earlier response does NOT 'unlock' or satisfy it "
+            "for a later response. If you call e.g. python_repl without think+summary in that same "
+            "response, NONE of that response's tool calls (not even ones that would otherwise have "
+            "succeeded) will be executed, and you must resend a new response with both the think "
+            "call AND the same intended tool call(s) together. "
+            "On your very first call, list your initial todo breakdown before doing anything else. "
+            "You do not need to track the iteration number yourself; it is stamped automatically."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "What you are thinking about / trying to do in this step. Required every call."
+                },
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "A concise 1-3 sentence summary of what you worked on and concluded this "
+                        "step. REQUIRED and must be non-empty whenever this call accompanies any "
+                        "other tool call (or even on its own) -- this is what future iterations "
+                        "will see once this step ages out of the raw reasoning window, so make it "
+                        "self-contained enough to be understood without the original reasoning."
+                    )
+                },
+                "decided": {
+                    "type": "string",
+                    "description": "What you decided in this step, if anything."
+                },
+                "why": {
+                    "type": "string",
+                    "description": "The reason for the decision. Required if 'decided' is given."
+                },
+                "rejected": {
+                    "type": "string",
+                    "description": "An alternative you considered but rejected, if any."
+                },
+                "rejected_why": {
+                    "type": "string",
+                    "description": "Why you rejected it. Required if 'rejected' is given."
+                },
+                "todo": {
+                    "type": "array",
+                    "description": (
+                        "The FULL current todo list (not a diff). Include this only when it "
+                        "changes (new item added, or an item's status flips); omitting it means "
+                        "it is unchanged since your last call."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "item": {"type": "string"},
+                            "status": {"type": "string", "enum": ["open", "closed"]}
+                        },
+                        "required": ["item", "status"]
+                    }
+                },
+                "issues": {
+                    "type": "array",
+                    "description": (
+                        "The FULL current list of known issues/concerns (not a diff). Same "
+                        "omit-if-unchanged rule as todo."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "item": {"type": "string"},
+                            "status": {"type": "string", "enum": ["open", "closed"]}
+                        },
+                        "required": ["item", "status"]
+                    }
+                },
+                "notes": {
+                    "type": "string",
+                    "description": (
+                        "A new free-form note to append. This is append-only -- it never "
+                        "replaces or deletes previous notes, so you don't need to restate old ones."
+                    )
+                }
+            },
+            "required": ["action", "summary"]
+        }
+    }
+}
+
+# [BL-093] thinkツール専用のスクラッチパッド状態。1ノード呼び出し（query_AIの1回の
+# ツールループ）中だけ生きる想定で、DB/stateいずれにも永続化しない。呼び出しノード側
+# （call_detector数値監査パス/call_task_planner/call_task_plan_reviewer）で開始時にリセットする。
+_CURRENT_TOOL_LOOP_ITERATION: int = 0
+_THINK_REASONING_LOG: list[dict] = []
+_THINK_TODO: list[dict] = []
+_THINK_ISSUES: list[dict] = []
+_THINK_NOTES: list[str] = []
+
+
+def _reset_think_scratchpad() -> None:
+    """[BL-093] リセットを忘れると前のノード呼び出しのtodo/issues/notesが漏れ込むため、
+    thinkツールを付与する各ノード関数の呼び出し開始時に必ず呼ぶ。
+    """
+    global _CURRENT_TOOL_LOOP_ITERATION, _THINK_REASONING_LOG, _THINK_TODO, _THINK_ISSUES, _THINK_NOTES
+    _CURRENT_TOOL_LOOP_ITERATION = 0
+    _THINK_REASONING_LOG = []
+    _THINK_TODO = []
+    _THINK_ISSUES = []
+    _THINK_NOTES = []
+
+
+def _think_handler(args: dict) -> dict:
+    """[BL-093] thinkツールの実体。reasoningは追記専用ログに、todo/issuesは変更時のみ
+    全体を差し替え、notesは追記専用リストに保持する。iter番号はモデルの自己申告に頼らず
+    _CURRENT_TOOL_LOOP_ITERATION（_query_AI_liveが機械的に更新）から取る。永続化はせず、
+    ツールループ終了と同時に消える。`summary`の非空チェック（think+summary必須の機械的強制）は
+    ここではなく_query_AI_live側で行う（ここは単に受け取った値を保存するだけ）。
+    """
+    global _THINK_TODO, _THINK_ISSUES
+    entry = {
+        "iter": _CURRENT_TOOL_LOOP_ITERATION,
+        "action": args.get("action", ""),
+        "summary": args.get("summary", ""),
+        "decided": args.get("decided", ""),
+        "why": args.get("why", ""),
+        "rejected": args.get("rejected", ""),
+        "rejected_why": args.get("rejected_why", ""),
+    }
+    _THINK_REASONING_LOG.append(entry)
+    if "todo" in args:
+        _THINK_TODO = args["todo"]
+    if "issues" in args:
+        _THINK_ISSUES = args["issues"]
+    note = args.get("notes", "")
+    if note:
+        _THINK_NOTES.append(note)
+    return {
+        "reasoning_log_so_far": _THINK_REASONING_LOG,
+        "current_todo": _THINK_TODO,
+        "current_issues": _THINK_ISSUES,
+        "notes_so_far": _THINK_NOTES,
+    }
 
 
 def _read_verified_fact_handler(args: dict) -> dict | list:
@@ -743,10 +1025,43 @@ def _read_deliverable_file_handler(args: dict) -> dict | str:
         return {"status": "error", "message": str(e)}
 
 
+def _verify_whiteboard_excerpt_handler(args: dict) -> dict:
+    """[BL-079] Detectorが最終JSON出力のtarget_excerptを確定する前に、その引用が現在の
+    ホワイトボード本文で一意に一致するかを事前確認できるツール。実際の注釈挿入
+    （_annotate_whiteboard_with_detector_comment）と同じ完全一致→正規化緩い一致の
+    2段判定ロジックを流用し、ここで「一致する」と確認できたexcerptは事後処理でも
+    確実に一致する（挿入自体はdecision_id確定後のdetector_node側で行うため、ここでは
+    書き込みは行わずvalidateのみ）。
+    """
+    excerpt = args.get("excerpt", "")
+    if not excerpt:
+        return {"ok": False, "reason": "excerptが空文字です"}
+    if not _CURRENT_TASK_ID or not _CURRENT_PHASE_ID:
+        return {"ok": False, "reason": "現在のタスク/フェーズが特定できませんでした"}
+    latest = get_latest_whiteboard(get_active_conn(), _CURRENT_RUN_ID, _CURRENT_PHASE_ID, _CURRENT_TASK_ID)
+    if not latest:
+        return {"ok": False, "reason": "現在のタスクのホワイトボードが存在しません"}
+    content = latest["content"]
+    exact_count = content.count(excerpt)
+    if exact_count == 1:
+        return {"ok": True, "match_type": "exact"}
+    norm_content, _ = _normalize_for_loose_match(content)
+    norm_excerpt, _ = _normalize_for_loose_match(excerpt)
+    loose_count = norm_content.count(norm_excerpt) if norm_excerpt else 0
+    if loose_count == 1:
+        return {"ok": True, "match_type": "loose"}
+    if exact_count == 0:
+        reason = f"完全一致0件・正規化後（改行/空白/太字記法/全角半角を無視）の緩い一致も{loose_count}件でした。もっと正確に、または一意になるよう長めに引用し直してください。"
+    else:
+        reason = f"完全一致が{exact_count}件（一意でない）で、正規化後緩い一致も{loose_count}件でした。前後の文脈を含めて一意に特定できる長さまで引用を伸ばしてください。"
+    return {"ok": False, "reason": reason, "exact_count": exact_count, "loose_count": loose_count}
+
+
 # R3a/R3b共通: ツールハンドラのモジュールレベル変数（LangGraphの単一プロセス同期実行前提）
 _CURRENT_RUN_ID: str = ""
 _CURRENT_CALLER_ROLE: str = ""  # R3b: write_agreementの権限チェック用
 _CURRENT_TASK_ID: str = ""      # R3b: confirmed_variablesのsource_task_id用
+_CURRENT_PHASE_ID: str = ""     # [BL-079] verify_whiteboard_excerptツールのget_latest_whiteboard参照用
 _CURRENT_GOAL_TEXT: str = ""    # [BL-086] revise_goalが編集対象とする現在のgoal本文
 
 # [F-3.1] R3b: 書き込みツール定義
@@ -760,7 +1075,10 @@ WRITE_AGREEMENT_TOOL = {
             "For numeric claims, include Python REPL verification results in evidence (F-2.6). "
             "Expert can only use status='Proposed'. "
             "User AI can use all statuses. "
-            "Detector/Reviewer/Arbiter/Integrator can only use status='Rejected'."
+            "Detector/Reviewer/Arbiter/Integrator can only use status='Rejected'. "
+            "[BL-093] You must also call `think` with a non-empty `summary` in this SAME response "
+            "(not a separate later response), or none of this response's tool calls -- including "
+            "this one -- will be executed."
         ),
         "parameters": {
             "type": "object",
@@ -883,7 +1201,10 @@ FREEZE_AGREEMENT_TOOL = {
             "[R5 F-8.3] Permanently pin an existing agreement so it can never be superseded or "
             "updated again. Use only for decisions that must never be reversed (e.g. absolute "
             "budget/constraint values explicitly finalized by the human). This is irreversible "
-            "-- there is no unfreeze."
+            "-- there is no unfreeze. "
+            "[BL-093] You must also call `think` with a non-empty `summary` in this SAME response "
+            "(not a separate later response), or none of this response's tool calls -- including "
+            "this one -- will be executed."
         ),
         "parameters": {
             "type": "object",
@@ -948,7 +1269,10 @@ ESCALATE_PREMISE_CONCERN_TOOL = {
             "a general 'I can't meet this constraint' complaint, and it does NOT grant permission to act "
             "outside your current task's scope or write anything else. It only creates a record for the "
             "User (project owner) to review and decide. You must still complete your current task's "
-            "literal acceptance_criteria this turn -- raising this concern is not license to skip them."
+            "literal acceptance_criteria this turn -- raising this concern is not license to skip them. "
+            "[BL-093] You must also call `think` with a non-empty `summary` in this SAME response "
+            "(not a separate later response), or none of this response's tool calls -- including "
+            "this one -- will be executed."
         ),
         "parameters": {
             "type": "object",
@@ -972,7 +1296,10 @@ RESOLVE_PREMISE_CONCERN_TOOL = {
         "description": (
             "[BL-086] Reject an open escalation (raised via escalate_premise_concern): the constraint "
             "stands as-is. Use this when, after consideration, you judge the literal framing is correct "
-            "and should not change. Do not call this to accept a reframe -- use revise_goal for that."
+            "and should not change. Do not call this to accept a reframe -- use revise_goal for that. "
+            "[BL-093] You must also call `think` with a non-empty `summary` in this SAME response "
+            "(not a separate later response), or none of this response's tool calls -- including "
+            "this one -- will be executed."
         ),
         "parameters": {
             "type": "object",
@@ -994,7 +1321,10 @@ REVISE_GOAL_TOOL = {
             "premise, and (recommended) permanently freeze the agreement that embodies the accepted "
             "exception so Detector does not re-litigate it. If the exception is not yet recorded as an "
             "agreement, call write_agreement first (status='Approved') in this same turn, then call "
-            "revise_goal with its id as freeze_agreement_id."
+            "revise_goal with its id as freeze_agreement_id. "
+            "[BL-093] You must also call `think` with a non-empty `summary` in this SAME response "
+            "(not a separate later response), or none of this response's tool calls -- including "
+            "this one -- will be executed."
         ),
         "parameters": {
             "type": "object",
@@ -1416,6 +1746,9 @@ TOOL_DISPATCH = {
     "python_repl": _run_python_repl,
     "read_verified_fact": _read_verified_fact_handler,
     "read_deliverable_file": _read_deliverable_file_handler,
+    "verify_whiteboard_excerpt": _verify_whiteboard_excerpt_handler,
+    "diff_plan_draft_versions": _diff_plan_draft_versions_handler,
+    "think": _think_handler,
     "write_agreement": lambda args: _write_agreement_impl(
         args, get_active_conn(), _CURRENT_RUN_ID, _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
     ),
@@ -1669,11 +2002,11 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
             # ツール呼び出し前後の「つぶやき」をログで可視化する目的でlow reasoningを付与する。
             reasoning_effort_level = None
             if label_lower == "detector" or label_lower == "decision extractor":
-                reasoning_effort_level = "low"
-            elif label_lower == "reflection" or label_lower == "review":
                 reasoning_effort_level = "medium"
+            elif label_lower == "reflection" or label_lower == "review":
+                reasoning_effort_level = "high"
             elif tools is not None:
-                reasoning_effort_level = "low"
+                reasoning_effort_level = "medium"
 
             create_kwargs["max_tokens"] = get_max_tokens(label_lower)
             # 🌟 【追加部分】OpenRouter使用時のみ、高速プロバイダーを強制指定する
@@ -1739,13 +2072,29 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
             # ユーザー承認によりAGENTS.md §7準拠で5→10へ変更。挙動を見て今後絞る可能性あり。
             # ユーザー承認によりAGENTS.md §7準拠で10→15へ変更（BL-028）。1タスク自身の範囲内の
             # 検算だけでも上限に迫るケースが実ドライランで確認されたため、まずクラッシュ回避を優先。
-            MAX_TOOL_ITER = 15
+            # ユーザー承認によりAGENTS.md §7準拠で15→20へ変更（BL-093/D-071）。thinkツール導入で
+            # 単独呼び出し（他ツールとバンドルしない軽量な思考単位）を許容する方針としたため、
+            # 既にiter=15（旧上限ぎりぎり）に達した実績のあるtask_plan_reviewer等で予算超過が
+            # 現実的になった。ReAct本来の「思考・作業を短く切って繰り返す」設計を優先し引き上げ。
+            MAX_TOOL_ITER = 20
             loop_messages = list(messages)
             create_kwargs["messages"] = loop_messages
             create_kwargs["stream"] = True  # [UX] ツールループもstreamingで「思考中」感を出す
             tool_calls_used = 0
             python_calls_log: list[dict] = []  # BL-033: 実行したpython_replのcode/resultを蓄積
             reasoning_parts_all: list[str] = []  # [R5 F-2.1] 全iterationのreasoningを蓄積
+            # [BL-093/D-074] モデルがthinkツールを呼ぶかどうかに一切依存せず、reasoningの
+            # 引き継ぎをシステム側で自動化する。当初は「古いiterは機械的に文字数で切り詰め」を
+            # 検討したが、reasoning本文はiterによっては数百〜千字を超え（実ドライラン
+            # `log/2026-07-26/1535`で確認）、単純な先頭/末尾切り詰めでは実質的な情報が失われる
+            # （ユーザー指摘）。そこで「ツール呼び出しを含む全iterationはthinkをsummary付きで
+            # 併用することを機械的に必須化」し（下記の強制ロジック）、直近N iter分は生reasoning
+            # そのまま、それより古い分はモデル自身が書いた`summary`（機械的切り詰めではなく
+            # 意味のある要約）で持ち越す。light_system_prompt（BL-025）と同型の「同一位置への
+            # 差し替え」パターンでloop_messagesへ都度反映する（無限に新規追加はしない）。
+            auto_reasoning_history: list[tuple[int, str]] = []  # (iteration番号, reasoning全文)
+            _AUTO_REASONING_VERBATIM_ITERS = 2  # 直近何iter分を生reasoningのまま残すか
+            auto_reasoning_digest_index: int | None = None
             # [CONSTRAINT] BL-014原因A: python_replは1回のツールループの間だけ状態を保持する
             # 対話セッションとする（ノード・リトライをまたいだ状態共有はしない、毎回新規生成）。
             # try/finallyで、成功・非収束・例外いずれの終了経路でも子プロセスを確実に終了させる。
@@ -1758,6 +2107,11 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                     # （log/2026-07-23/1453、iter=15でwrite_agreement成功直後にクラッシュ）。
                     # 最終iterationのみ`tools`を外し、API側の構造としてツール呼び出しを不可能にすることで
                     # 必ずテキスト最終応答が返る（クラッシュしない）ことを保証する。
+                    # [BL-093] thinkツールのreasoning_log/python_repl生ログにiter番号を機械的に
+                    # 刻むため、ループ本体で唯一グローバルにこの値を公開する（モデルの自己申告に
+                    # 頼らない。ループ制御フロー自体は変更しない最小限の追加）。
+                    global _CURRENT_TOOL_LOOP_ITERATION
+                    _CURRENT_TOOL_LOOP_ITERATION = iteration
                     call_kwargs = create_kwargs
                     if iteration == MAX_TOOL_ITER and "tools" in create_kwargs:
                         call_kwargs = {k: v for k, v in create_kwargs.items() if k != "tools"}
@@ -1767,6 +2121,7 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                     # 断片的に届く（id/function.name/function.argumentsがそれぞれ複数chunkに
                     # またがることがある）ため、indexごとに文字列連結して復元する。
                     stream = client.chat.completions.create(**call_kwargs)
+                    _reasoning_start_idx = len(reasoning_parts_all)  # [BL-093] このiter分の切り出し用
                     content_parts: list[str] = []
                     reasoning_started = False
                     content_started = False
@@ -1829,66 +2184,130 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                         content = msg.content
                         return content if content is not None else "(APIから空の応答が返されました)"
                     loop_messages.append(msg.model_dump())
-                    for tc in msg.tool_calls:
-                        tool_calls_used += 1
-                        handler = TOOL_DISPATCH.get(tc.function.name)
-                        if handler is None:
-                            result = f"[REPL Error] unknown tool: {tc.function.name}"
-                            print(f"⚠️ [{label}] 未知のツール呼び出し（iter={iteration}）: {tc.function.name}")
-                        else:
-                            # [SAFETY] LLMが壊れた引数JSONを返した場合、例外を外に投げるのではなく
-                            # ツール結果としてモデルに返し、MAX_TOOL_ITERの予算内で自己修復させる（D-009）。
-                            try:
-                                args = json.loads(tc.function.arguments)
-                            except json.JSONDecodeError as e:
-                                print(f"⚠️ [{label}] tool_call引数のJSONパース失敗（iter={iteration}）: {e}")
-                                loop_messages.append({
-                                    "role": "tool", "tool_call_id": tc.id,
-                                    "content": json.dumps({"error": f"invalid arguments JSON: {e}"}, ensure_ascii=False),
-                                })
-                                continue
-                            if tc.function.name == "python_repl":
-                                result = repl_session.run(args.get("code", ""))
-                                python_calls_log.append({"code": args.get("code", ""), "result": result})
-                                # [BL-045] ループが正常終了する前（例: 次iterationでのAPIエラー例外）に
-                                # 途中終了しても、実際に行われた検算の記録がBL-033のフェイルクローズ判定から
-                                # 失われないよう、実行のたびに即時反映する（正常終了時のみの更新だと、
-                                # write_agreement成功後にAPIエラーで打ち切られた場合、検算済みなのに
-                                # 「python_repl未使用」と誤判定されホワイトボードが誤ロールバックされる：
-                                # log/2026-07-22/2217で実機確認）。
-                                _LAST_PYTHON_CALLS = python_calls_log
-                                print(f"🔧 [{label}] python_repl 実行（iter={iteration}）:\n{args.get('code','')}\n→ {result}\n")
-                            else:
-                                # [CONSTRAINT] R3: python_repl以外のツール（read_verified_fact,
-                                # read_deliverable_file, write_agreement等）は構造化された
-                                # args辞書（dict）を受け取るため、辞書全体を渡す。
-                                # 旧: handler(args.get("code","")) → 新: handler(args)
-                                result = handler(args)
-                                # [R3b §3.5.1] write_agreementが成功したらフラグをセット
-                                # ★修正（レビュー指摘H1）: resultは生dict（json.dumps済み文字列ではない）
-                                # なので、_safe_json_parseで再パースせず直接判定できる。
-                                if tc.function.name == "write_agreement":
-                                    if isinstance(result, dict) and result.get("success"):
-                                        global _LAST_WRITE_AGREEMENT_SUCCEEDED
-                                        _LAST_WRITE_AGREEMENT_SUCCEEDED = True
-                                elif tc.function.name == "revise_goal":
-                                    # [BL-086] revise_goalはツールハンドラ内でLangGraph stateに
-                                    # 触れられないため、成功時の新旧goalテキストをここで
-                                    # _LAST_GOAL_REVISIONへ橋渡しし、呼び出し元ノード
-                                    # （generate_user_utterance_node）がstate["goal"]へ反映する。
-                                    if isinstance(result, dict) and result.get("success"):
-                                        global _LAST_GOAL_REVISION
-                                        _LAST_GOAL_REVISION = {
-                                            "new_goal_text": result.get("new_goal_text"),
-                                            "old_goal_text": result.get("old_goal_text"),
-                                            "escalation_id": result.get("escalation_id"),
-                                        }
-                                print(f"🔧 [{label}] {tc.function.name} 実行（iter={iteration}）: {json.dumps(args, ensure_ascii=False)}\n→ {result}\n")
 
-                        loop_messages.append({
-                            "role": "tool", "tool_call_id": tc.id,
-                            "content": json.dumps(result, ensure_ascii=False),
-                        })
+                    # [BL-093/D-074] 「ツール呼び出しを含む全iterationはthinkをsummary付きで
+                    # 併用すること」を機械的に強制する。thinkを呼ぶかどうかをモデルの任意判断に
+                    # 委ねると、大半のiterationで結局reasoningが引き継がれないことが判明した
+                    # ため（ユーザー指摘）、違反時はツール呼び出しを一切実行せず差し戻す
+                    # （D-009の「壊れたJSON引数はエラーとして返し自己修復させる」と同型の設計）。
+                    _think_tc = next((tc for tc in msg.tool_calls if tc.function.name == "think"), None)
+                    _think_summary_ok = False
+                    if _think_tc is not None:
+                        try:
+                            _think_args_check = json.loads(_think_tc.function.arguments)
+                            _think_summary_ok = bool(str(_think_args_check.get("summary", "")).strip())
+                        except json.JSONDecodeError:
+                            _think_summary_ok = False
+
+                    if not _think_summary_ok:
+                        _enforcement_msg = (
+                            "[SYSTEM ENFORCEMENT] None of your tool calls in this response were "
+                            "executed (including this one). This check applies fresh to EVERY "
+                            "SINGLE response that contains a tool call -- calling `think` in an "
+                            "earlier response does NOT satisfy it for a later response; there is "
+                            "no 'unlocking'. To retry: send ONE new response that includes BOTH "
+                            "(a) a `think` call with a non-empty `summary`, AND (b) the exact "
+                            "same other tool call(s) you intended this time (e.g. re-issue your "
+                            "python_repl call with the same code) -- all together in that single "
+                            "response, not as separate follow-up responses."
+                        )
+                        print(f"⚠️ [{label}] think(summary付き)が無いためツール呼び出しを差し戻しました（iter={iteration}）")
+                        for tc in msg.tool_calls:
+                            loop_messages.append({
+                                "role": "tool", "tool_call_id": tc.id,
+                                "content": json.dumps({"error": _enforcement_msg}, ensure_ascii=False),
+                            })
+                    else:
+                        for tc in msg.tool_calls:
+                            tool_calls_used += 1
+                            handler = TOOL_DISPATCH.get(tc.function.name)
+                            if handler is None:
+                                result = f"[REPL Error] unknown tool: {tc.function.name}"
+                                print(f"⚠️ [{label}] 未知のツール呼び出し（iter={iteration}）: {tc.function.name}")
+                            else:
+                                # [SAFETY] LLMが壊れた引数JSONを返した場合、例外を外に投げるのではなく
+                                # ツール結果としてモデルに返し、MAX_TOOL_ITERの予算内で自己修復させる（D-009）。
+                                try:
+                                    args = json.loads(tc.function.arguments)
+                                except json.JSONDecodeError as e:
+                                    print(f"⚠️ [{label}] tool_call引数のJSONパース失敗（iter={iteration}）: {e}")
+                                    loop_messages.append({
+                                        "role": "tool", "tool_call_id": tc.id,
+                                        "content": json.dumps({"error": f"invalid arguments JSON: {e}"}, ensure_ascii=False),
+                                    })
+                                    continue
+                                if tc.function.name == "python_repl":
+                                    result = repl_session.run(args.get("code", ""))
+                                    # [BL-093] iter番号を機械的に記録（thinkツールのreasoning_logと
+                                    # 同じ「モデルの自己申告に頼らない」方針）。
+                                    python_calls_log.append({"code": args.get("code", ""), "result": result, "iteration": iteration})
+                                    # [BL-045] ループが正常終了する前（例: 次iterationでのAPIエラー例外）に
+                                    # 途中終了しても、実際に行われた検算の記録がBL-033のフェイルクローズ判定から
+                                    # 失われないよう、実行のたびに即時反映する（正常終了時のみの更新だと、
+                                    # write_agreement成功後にAPIエラーで打ち切られた場合、検算済みなのに
+                                    # 「python_repl未使用」と誤判定されホワイトボードが誤ロールバックされる：
+                                    # log/2026-07-22/2217で実機確認）。
+                                    _LAST_PYTHON_CALLS = python_calls_log
+                                    print(f"🔧 [{label}] python_repl 実行（iter={iteration}）:\n{args.get('code','')}\n→ {result}\n")
+                                else:
+                                    # [CONSTRAINT] R3: python_repl以外のツール（read_verified_fact,
+                                    # read_deliverable_file, write_agreement等）は構造化された
+                                    # args辞書（dict）を受け取るため、辞書全体を渡す。
+                                    # 旧: handler(args.get("code","")) → 新: handler(args)
+                                    result = handler(args)
+                                    # [R3b §3.5.1] write_agreementが成功したらフラグをセット
+                                    # ★修正（レビュー指摘H1）: resultは生dict（json.dumps済み文字列ではない）
+                                    # なので、_safe_json_parseで再パースせず直接判定できる。
+                                    if tc.function.name == "write_agreement":
+                                        if isinstance(result, dict) and result.get("success"):
+                                            global _LAST_WRITE_AGREEMENT_SUCCEEDED
+                                            _LAST_WRITE_AGREEMENT_SUCCEEDED = True
+                                    elif tc.function.name == "revise_goal":
+                                        # [BL-086] revise_goalはツールハンドラ内でLangGraph stateに
+                                        # 触れられないため、成功時の新旧goalテキストをここで
+                                        # _LAST_GOAL_REVISIONへ橋渡しし、呼び出し元ノード
+                                        # （generate_user_utterance_node）がstate["goal"]へ反映する。
+                                        if isinstance(result, dict) and result.get("success"):
+                                            global _LAST_GOAL_REVISION
+                                            _LAST_GOAL_REVISION = {
+                                                "new_goal_text": result.get("new_goal_text"),
+                                                "old_goal_text": result.get("old_goal_text"),
+                                                "escalation_id": result.get("escalation_id"),
+                                            }
+                                    print(f"🔧 [{label}] {tc.function.name} 実行（iter={iteration}）: {json.dumps(args, ensure_ascii=False)}\n→ {result}\n")
+
+                            loop_messages.append({
+                                "role": "tool", "tool_call_id": tc.id,
+                                "content": json.dumps(result, ensure_ascii=False),
+                            })
+
+                    # [BL-093/D-074] 自動reasoningダイジェストの再構築。直近N iter分は生reasoning
+                    # そのまま、それより古い分はthinkの`summary`（強制済みのため必ず存在するはず。
+                    # 強制ロジック自体が発火したiterationにはsummaryが無いため、その旨を明記する）。
+                    _this_iter_reasoning = "".join(reasoning_parts_all[_reasoning_start_idx:])
+                    if _this_iter_reasoning:
+                        auto_reasoning_history.append((iteration, _this_iter_reasoning))
+                    if auto_reasoning_history:
+                        _verbatim_entries = auto_reasoning_history[-_AUTO_REASONING_VERBATIM_ITERS:]
+                        _older_entries = (
+                            auto_reasoning_history[:-_AUTO_REASONING_VERBATIM_ITERS]
+                            if len(auto_reasoning_history) > _AUTO_REASONING_VERBATIM_ITERS else []
+                        )
+                        _digest_lines = []
+                        for _iter_no, _ in _older_entries:
+                            _matches = [e for e in _THINK_REASONING_LOG if e.get("iter") == _iter_no and e.get("summary")]
+                            _summary_text = _matches[-1]["summary"] if _matches else "(summaryが無くツール呼び出しが差し戻されたiterationです)"
+                            _digest_lines.append(f"[iter {_iter_no}の要約] {_summary_text}")
+                        for _iter_no, _text in _verbatim_entries:
+                            _digest_lines.append(f"[iter {_iter_no}の思考(全文)]\n{_text}")
+                        _digest_content = "【BL-093: 自動保存された思考ログ】\n" + "\n\n".join(_digest_lines)
+                        _digest_message = {"role": "system", "content": _digest_content}
+                        if auto_reasoning_digest_index is None:
+                            loop_messages.insert(1, _digest_message)
+                            auto_reasoning_digest_index = 1
+                        else:
+                            loop_messages[auto_reasoning_digest_index] = _digest_message
+
                     # [CONSTRAINT] BL-025 ②: 全フェーズ・全DB agreementsを含む巨大なsystem_promptは、
                     # 初回（全体計画の把握）にのみ必要と考え、iter=1完了後（iter=2以降の自問自答フェーズ）は
                     # 現在タスクの情報のみに絞った軽量版に差し替える。他タスクの詳細が常に視界に入り続けることで
@@ -1980,17 +2399,37 @@ def _safe_json_parse(raw: str | None, fallback: dict | list) -> dict | list:
     if not raw or not isinstance(raw, str):
         return fallback
     # 段階1: マークダウンコードブロック除去
+    # [BL-089] 従来は「先頭が```で始まるか」だけを見ており、(a)説明文の後に1つだけ
+    # フェンスが来るケース（BL-088、先頭判定に引っかからず素通りしていた）、(b)モデルが
+    # 「下書き（一部フィールドのプレビュー）」→「### 最終JSON出力」のように**複数の
+    # ```json...```ブロック**を続けて出すケース（実ドライラン`log/2026-07-25/1814`で
+    # 確認、task_plan_reviewerが正しく"major"と判定したのに、1つ目の小さな配列ブロックと
+    # 2つ目の完全なオブジェクトブロックが混線して構文エラーとなり、fallback
+    # （constraint_issue="none"）に化けて縮退計画がそのまま承認・実行されてしまった）
+    # のいずれも取りこぼしていた。正規表現で全フェンスブロックを検出し、**最後の**
+    # ブロック（モデルが「最終的な答え」を最後に書く慣習に従う）を優先的に採用する。
     cleaned = raw.strip()
-    if cleaned.startswith("```"):
+    fence_matches = list(re.finditer(r"```(?:json)?\s*\n?(.*?)```", cleaned, re.DOTALL))
+    if fence_matches:
+        cleaned = fence_matches[-1].group(1).strip()
+    elif cleaned.startswith("```"):
         cleaned = cleaned.removeprefix("```json").removeprefix("```").strip()
         idx = cleaned.find("```")
         if idx != -1:
             cleaned = cleaned[:idx].strip()
     # 段階2: 先頭が `{` や `[` でない場合、最初の { または [ を探す
+    # [BL-088] 従来はbrace_idxが見つかれば常にそちらを優先しており、トップレベルが配列
+    # （例: call_task_plannerのfallbackはlist）かつ、コードフェンス前に説明文が付く場合
+    # （例:「それでは、フェーズ分解を提示します。\n\n```json\n[{...}]」）、実際には
+    # bracket_idxの方が先に現れるのに、その手前の`[`を読み飛ばして`{`から開始してしまい、
+    # 有効なJSON配列が構文エラーとなりfallback（縮退した1タスク計画）に化けるバグがあった
+    # （実ドライラン`log/2026-07-25/1642`で2回連続再現、task_plan_reviewerの差し戻し
+    # リトライ上限を無駄撃ちさせた）。`{`/`[`のどちらが先に現れるかで判定する。
     if cleaned and cleaned[0] not in ("{", "["):
         brace_idx = cleaned.find("{")
         bracket_idx = cleaned.find("[")
-        start = brace_idx if brace_idx != -1 else bracket_idx
+        candidates = [i for i in (brace_idx, bracket_idx) if i != -1]
+        start = min(candidates) if candidates else -1
         if start != -1:
             cleaned = cleaned[start:]
     # 段階3: 余計な後続テキストを除去（最後の } または ] 以降をカット）
@@ -2159,6 +2598,16 @@ def init_db(conn: sqlite3.Connection) -> None:
         resolved_at REAL
     );
     CREATE INDEX IF NOT EXISTS idx_goal_escalations_run_status ON goal_escalations(run_id, status);
+
+    -- [BL-087 Stage3] task_planner分解より前に1回だけ行う「本質フェーズ」の結果。
+    -- BL-086のgoal_escalations（走行中に前提矛盾に気づいた際の事後エスカレーション）とは
+    -- 独立・併存する事前予防機構。run_idにつき1行のみ（goal_essence_nodeが冪等ガードで保証）。
+    CREATE TABLE IF NOT EXISTS goal_essence (
+        run_id TEXT PRIMARY KEY,
+        true_essence TEXT NOT NULL,
+        feasibility_notes TEXT,
+        created_at REAL NOT NULL
+    );
     """)
     _ensure_agreements_task_id_column(conn)
     _ensure_verified_facts_r3a_columns(conn)
@@ -2213,6 +2662,36 @@ def db_append_goal_shift_event(shift: dict, conn: sqlite3.Connection, run_id: st
             shift.get("evidence"), shift.get("triggered_by"), shift.get("triggering_agreement_id"),
             run_id,
         )
+    )
+
+
+def db_save_goal_essence(conn: sqlite3.Connection, run_id: str, true_essence: str, feasibility_notes: str) -> None:
+    """[BL-087 Stage3] goal_essence_nodeが1回だけ書き込む。run_idにつき1行のみの想定
+    （呼び出し側のgoal_essence_doneガードで保証、ここではINSERT OR REPLACEで冪等にしておく）。
+    """
+    conn.execute(
+        "INSERT OR REPLACE INTO goal_essence (run_id, true_essence, feasibility_notes, created_at) VALUES (?,?,?,?)",
+        (run_id, true_essence, feasibility_notes, time.time())
+    )
+
+
+def get_goal_essence(conn: sqlite3.Connection, run_id: str) -> dict | None:
+    """[BL-087 Stage3] 保存済みの本質フェーズ結果を取得する。未生成ならNone。"""
+    row = conn.execute("SELECT * FROM goal_essence WHERE run_id=?", (run_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def _get_goal_essence_text(conn: sqlite3.Connection, run_id: str) -> str:
+    """[BL-087 Stage3] 全ノードのシステムプロンプトへ、ゴール本文と並べて常時注入するための
+    整形済みテキスト。未生成（本質フェーズ未実行）の場合は空文字を返す。
+    """
+    essence = get_goal_essence(conn, run_id)
+    if not essence:
+        return ""
+    return (
+        "【🎯 本質（プロジェクト開始時の壁打ちで言語化した、真に達成すべきこと）】\n"
+        f"{essence['true_essence']}\n"
+        + (f"【実現可能性メモ】\n{essence['feasibility_notes']}\n" if essence.get('feasibility_notes') else "")
     )
 
 
@@ -2347,6 +2826,13 @@ _PLAN_DEFERRED_HEADING = "## 先送り事項（他タスクからの申し送り
 _PLAN_DEFERRED_PLACEHOLDER = "(まだありません)"
 _PLAN_DEFERRED_HEADING_RE = re.compile(r"(?m)^## 先送り事項（他タスクからの申し送り）\s*$")
 
+# [BL-087 Stage2改善] task_plan_reviewer_nodeの指摘をplan_draftsへ書き込むための第二セクション。
+# 「先送り事項」（他タスクからの申し送り、decision_extractor由来）とは別の見出しにするのは、
+# 出所（他タスクからの申し送り vs 実行前レビューの指摘）を読み手が混同しないようにするため。
+_PLAN_REVIEW_HEADING = "## レビュワーからの指摘（要修正）"
+_PLAN_REVIEW_PLACEHOLDER = "(まだありません)"
+_PLAN_REVIEW_HEADING_RE = re.compile(r"(?m)^## レビュワーからの指摘（要修正）\s*$")
+
 
 def get_latest_plan_draft(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str) -> dict | None:
     """[BL-082] get_latest_whiteboardの完全なミラー。指定task_idの最新バージョンの
@@ -2389,7 +2875,8 @@ def _render_plan_skeleton(task: dict) -> str:
         f"## 受入基準 (acceptance_criteria)\n{criteria_text}\n\n"
         f"## 依存タスク (depends_on)\n{depends_text}\n\n"
         f"## 確定すべき変数 (owns_variables)\n{owns_text}\n\n"
-        f"{_PLAN_DEFERRED_HEADING}\n{_PLAN_DEFERRED_PLACEHOLDER}\n"
+        f"{_PLAN_DEFERRED_HEADING}\n{_PLAN_DEFERRED_PLACEHOLDER}\n\n"
+        f"{_PLAN_REVIEW_HEADING}\n{_PLAN_REVIEW_PLACEHOLDER}\n"
     )
 
 
@@ -2435,6 +2922,43 @@ def _append_deferred_note_to_plan(
     return True
 
 
+def _append_reviewer_comment_to_plan(
+    conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str,
+    comment_text: str, task_for_skeleton: dict | None
+) -> bool:
+    """[BL-087 Stage2改善] _append_deferred_note_to_planの完全なミラー。対象がtask_id単位で
+    確実にマッチするため（Detectorのwhiteboard注釈のような文中excerpt一致は使わない。
+    LLM生成の自由文に対する引用文字列マッチングの脆さはBL-074/076で既知の問題）、
+    task_plan_reviewerの指摘を「レビュワーからの指摘（要修正）」セクションへ追記する。
+    """
+    latest = get_latest_plan_draft(conn, run_id, phase_id, task_id)
+    if latest:
+        content = latest["content"]
+    elif task_for_skeleton:
+        content = _render_plan_skeleton(task_for_skeleton)
+    else:
+        return False
+
+    match = _PLAN_REVIEW_HEADING_RE.search(content)
+    if not match:
+        return False
+
+    insert_at = match.end() + 1  # 見出し行の改行の直後
+    remainder = content[insert_at:]
+    bullet = f"- {comment_text}"
+    if remainder.startswith(_PLAN_REVIEW_PLACEHOLDER):
+        new_remainder = bullet + remainder[len(_PLAN_REVIEW_PLACEHOLDER):]
+    else:
+        new_remainder = bullet + "\n" + remainder
+    new_content = content[:insert_at] + new_remainder
+
+    apply_plan_patch(
+        conn, run_id, phase_id, task_id, new_content,
+        author_role="task_plan_reviewer", edit_summary=f"[レビュワー指摘] {comment_text[:60]}"
+    )
+    return True
+
+
 def _get_deferred_notes_text(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str) -> str:
     """[BL-082] 指定task_idの計画文書から「先送り事項」セクションの内容を抽出し、
     プロンプト埋め込み用のテキストを返す。文書が存在しない・プレースホルダのままの
@@ -2450,7 +2974,11 @@ def _get_deferred_notes_text(conn: sqlite3.Connection, run_id: str, phase_id: st
     match = _PLAN_DEFERRED_HEADING_RE.search(content)
     if not match:
         return ""
-    section = content[match.end():].strip()
+    # [BL-087 Stage2改善] 「レビュワーからの指摘」セクションが後続に追加されたため、
+    # 末尾までではなく次の見出し（もしあれば）の直前までに範囲を限定する。
+    next_heading = _PLAN_REVIEW_HEADING_RE.search(content, match.end())
+    section_end = next_heading.start() if next_heading else len(content)
+    section = content[match.end():section_end].strip()
     if not section or section == _PLAN_DEFERRED_PLACEHOLDER:
         return ""
     return f"【他タスクからの申し送り事項（先送り、要確認）】\n{section}\n"
@@ -2881,6 +3409,14 @@ class LineageState(TypedDict):
     # [BL-061] reflectionが検出した具体的な停滞・ドリフト理由（call_reflectionのnote）。
     # facilitator_nodeがなぜ自分が呼ばれたかを把握できるよう、reflection_nodeが都度上書きする。
     last_reflection_note: str
+    # [BL-087 Stage2] task_planner_node直後に1回だけ発火するtask_plan_reviewer_nodeの状態。
+    # plan_review_doneはチェックポイント再開時に毎回レビューし直さないためのガード
+    # （task_planner_nodeのturn_count==1ガードと同じ理由）。
+    plan_review_done: bool
+    plan_reviewer_retry_count: int
+    plan_reviewer_feedback: str  # 差し戻し時の指摘事項。task_planner再生成プロンプトに注入される。
+    # [BL-087 Stage3] task_planner分解より前に1回だけ行う「本質フェーズ」の冪等ガード。
+    goal_essence_done: bool
 
 class Appconfig(TypedDict): 
     pattern: int
@@ -3151,14 +3687,24 @@ def _build_task_scope_context(state: LineageState, conn: sqlite3.Connection) -> 
     }
 
 
-def call_task_planner(goal: str) -> list[dict]:
+def call_task_planner(goal: str, reviewer_feedback: str = "", goal_essence_text: str = "") -> list[dict]:
     """【SLM要約】
     Decomposition of a high-level goal into structured, actionable phases and detailed tasks by querying an AI planner.
 It serves as the initial planning layer for breaking down complex objectives across the system.
     """
-    
+    reviewer_feedback_block = (
+        f"""
+    【重要: 前回の計画案への差し戻し（BL-087 Stage2）】
+    前回生成した計画案は、実行開始前のレビューで以下の指摘を受け差し戻されました。
+    今回は必ずこの指摘を踏まえて再分解してください。
+    {reviewer_feedback}
+    """
+        if reviewer_feedback else ""
+    )
+
     prompt = f"""
-    以下の絶対目標を、独立して議論・検証可能な「フェーズ」に分解し、
+    {reviewer_feedback_block}
+    以下の目標を、独立して議論・検証可能な「フェーズ」に分解し、
     さらに各フェーズを実行可能な「タスク」に分解してください。
 
     【重要】
@@ -3187,8 +3733,43 @@ It serves as the initial planning layer for breaking down complex objectives acr
        あります）、両者の関係を明記するか、誤読を招く併記を避けてください。曖昧さが残る場合は
        description内で「これは位置を示す情報であり長さの定義ではない」等、解釈を一意に
        固定する注記を必ず加えてください。
+    5. 【暗算禁止】ゴール文中の数値制約から比率・分割・単位換算などの計算が必要な場合
+       （例：総面積に対する比率から距離を求める、総予算から購入可能台数の上限を見積もる等）、
+       暗算で済ませず python_repl ツールで実際に計算してから、その結果をacceptance_criteria/
+       descriptionの記述に反映してください。この計画分解はプロジェクト全体で最も上流の
+       判断であり、ここでの暗算・計算ミスはタスク4.の曖昧表記防止と同様、後続の全タスクへ
+       そのまま伝播するハルシネーションリスクとなります。
+    6. 【派生値には根拠条件を併記（重要）】比率や制約から計算・仮定した派生値（ゴール文に
+       直接の記載がない数値、例:「車両3台が上限」）をacceptance_criteria/owns_variablesに
+       書く際は、結論の数値だけでなく、その根拠となる前提条件を必ず併記してください
+       （例:「新品購入の場合、車両単価2,500万円×初期予算1億円から3台が上限（リース等の
+       代替調達手段がある場合はこの限りではない）」）。条件を欠いた断定は、後続のAIが
+       それを唯一絶対の制約と誤読し、代替案の検討余地を失わせる原因になります。また、
+       ゴール文自体が与えていない絶対値（例: 比率の分母となる総量そのもの）を、無理に
+       一意の数値として確定させないでください。判断に迷う場合は「不明である」旨を
+       description内に明記するに留め、根拠のない数値を作り出さないこと。
+    7. 【おなじ思考・計算・検証は各回2回まで、繰り返し確認しない（重要）】ツール呼び出しの回数には上限が
+       あります。同じ内容（例:「acceptance_criteriaが3個以内か」「depends_onの整合性」）を
+       python_replで繰り返し再確認しないでください。各検証項目は2回計算・確認できれば十分です。
+       新しい数値や新しい論点が無いまま「念のため最終確認」を重ねると、JSON出力そのものを
+       書く余地が無くなり、上限到達時に強制的に打ち切られたテキスト応答としてJSONを一度に
+       出力せざるを得なくなり、大規模な計画では出力が途中で切れて構文エラーになるリスクが
+       あります。必要な数値計算がすべて終わったら、それ以上の確認は行わず、直ちに最終的な
+       JSON配列の記述に移ってください。
+    8. 【BL-093: thinkツールで検討過程を残す】このタスク分解は複数回のpython_repl呼び出しを
+       跨ぐことが多く、自然に考えた理由づけの生文章は、thinkを使わなければ次のiterationには
+       引き継がれません（tool_callsの記録だけが残ります）。thinkを呼ぶと、その理由づけは次回
+       以降のtool結果として全履歴ごと返され、雪だるま式に引き継がれます。まずtodoにフェーズ・
+       タスク分解で確認すべき論点をリストアップしてから、各論点の検討時にaction/decided/why
+       （却下案があればrejected/rejected_why）を書いてください。他のツール呼び出しと同一の
+       応答内でまとめて呼んでも、単独で呼んでも構いません。
+       【重要】あなたが使えるツールはpython_replとthinkの2つです。python_replを呼ぶときは、
+       必ずその同じ応答の中にthink（summary必須）も一緒に含めてください。think無しで
+       python_replだけを呼ぶと、その応答のツール呼び出しは（python_replも含めて）一切
+       実行されず差し戻されます。
 
-    ■ 絶対目標: {goal}
+    ■ 目標: {goal}
+    {goal_essence_text}
 
     Return ONLY JSON array (必ず複数のフェーズとタスクに分割すること):
     [
@@ -3232,10 +3813,6 @@ It serves as the initial planning layer for breaking down complex objectives acr
         // ... (目標達成に必要な数だけフェーズを続けること)
     ]
     """
-    res = query_AI([{"role": "user", "content": prompt}],
-                   client=client_auditor, model=model_auditor,
-                   label="Task Planner")
-
     fallback_phase= [{
         "phase_id": "phase_1",
         "title": "全体",
@@ -3255,20 +3832,33 @@ It serves as the initial planning layer for breaking down complex objectives acr
         ]
     }]
 
-    return _safe_json_parse(res, fallback=fallback_phase)
+    # [BL-089] 層2リトライ（_query_and_parse_with_retry、D-005）でラップする。単発のパース失敗で
+    # 即座に縮退計画（fallback_phase）へ落ちると、実際には正しく分解されたプランが1回の
+    # フェンス構文の乱れだけで握りつぶされる（実ドライラン`log/2026-07-25/1814`で確認）。
+    _reset_think_scratchpad()  # [BL-093]
+    phases, parse_failed = _query_and_parse_with_retry(
+        prompt, client=client_auditor, model=model_auditor, label="Task Planner",
+        tools=[PYTHON_REPL_TOOL, THINK_TOOL], fallback=fallback_phase,
+    )
+    if parse_failed:
+        print("🚨 [Task Planner] JSON分解結果の取得に失敗しました。縮退計画にフォールバックします。")
+    return phases
 
 def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
     """【SLM要約】
     Construction of a comprehensive prompt by aggregating system state (goals, agreements, history) and user input to direct an LLM in selecting the most appropriate domain expert for task execution.
     """
-    goal_context = f"Goal: {state['goal']}\n" if config["agent_has_guardrail"] else "(自由にアシストしてください。)\n"
+    _conn = get_active_conn()
+    goal_context = (
+        f"Goal: {state['goal']}\n{_get_goal_essence_text(_conn, state['run_id'])}"
+        if config["agent_has_guardrail"] else "(自由にアシストしてください。)\n"
+    )
 
     recent_history = state["chat_history"][-config["chat_history_window"]:]
     recent_text = "\n".join([f"{'User' if m['role']=='user' else 'AI'}: {m['content']}" for m in recent_history])
     if not recent_text:
         recent_text = "(まだ履歴はありません)"
-        
-    _conn = get_active_conn()
+
     agreements_text = _build_agreements_context_from_db(_conn, state["run_id"])
     print(f"【プロジェクトの合意・決定事項・検討状況DB】\n {agreements_text} \n\n")
 
@@ -3304,10 +3894,14 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
         内容に即して1〜3点、実行可能な指示として書いてください（一般論・当たり前の心構えは不要）。
         該当する具体的な観点がなければ空文字でよい。\n
         \n
+        【BL-093: thinkツールで検討過程を残せます】必要であれば、thinkツールで検討過程を書き
+        残しても構いません（単独で呼んでも、以降の思考と同一応答内でまとめても構いません）。\n
+        \n
         Return ONLY JSON: {{"expert": "（生成した専門家の肩書き）", "reason": "...", "focus_guidance": "（このタスク固有の着眼点・注意点、無ければ空文字）"}}'
         """
     )
-    res = query_AI([{"role": "user", "content": prompt}], client=client_agent, model=model_agent, label="Orchestrator")
+    _reset_think_scratchpad()  # [BL-093]
+    res = query_AI([{"role": "user", "content": prompt}], client=client_agent, model=model_agent, label="Orchestrator", tools=[THINK_TOOL])
     parsed = _safe_json_parse(res, fallback={"expert": "", "reason": "", "focus_guidance": ""})
 
     # [CONSTRAINT] BL-018当時、専門家名を固定16種の配列に絞っていたが、call_expert/グラフのどちらも
@@ -3348,7 +3942,8 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
 
     if agent_has_guardrail:
         system_prompt += f"\n【あなたの絶対的な行動指針】\n👉 {state['goal']}\n"
-    
+        system_prompt += f"\n{_get_goal_essence_text(_conn, state['run_id'])}\n"
+
     system_prompt += f"\n⏳ 【制限時間】: 全 {max_turns} ターン中、現在は **{turn_count} ターン目** です。\n"
     system_prompt += f"\n5ターン毎に議論のサマリーを出力せよ。数値などは消さず明示的に示すこと。\n"
     system_prompt += f"\n【プロジェクトの合意・決定事項・検討状況DB（遵守必須）】\n{agreements_text}\n\n"
@@ -3415,6 +4010,16 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     system_prompt += (
         "\n【F-2.6 機械的検算ゲート（必須）】\n"
         "数値的根拠を提示する際は python_repl ツールで計算を実行し、結果を明示すること。暗算での提示は禁止します。\n"
+    )
+
+    system_prompt += (
+        "\n【同じ検証・計算を繰り返さない（重要）】\n"
+        "ツール呼び出しの回数には上限があります。同じ論点（例:「この数値は制約を満たすか」）を"
+        "python_replで繰り返し再確認しないでください。各検証項目は2回計算・確認できれば十分です。"
+        "新しい数値や新しい論点が無いまま「念のため最終確認」を重ねると、実際の回答を書く余地が"
+        "無くなり、上限到達時に強制的に打ち切られたテキスト応答とせざるを得なくなります"
+        "（大規模な成果物では応答が途中で切れて後工程に支障が出るリスクがあります）。必要な検算が"
+        "すべて終わったら、それ以上の確認は行わず、直ちに回答の記述に移ってください。\n"
     )
 
     system_prompt += (
@@ -3558,14 +4163,25 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "[BL-086] ゴール文の制約そのものが真の目的と矛盾していると具体的根拠を持って判断した場合のみ、"
         "escalate_premise_concernツールで懸念を提起できます（一般的な泣き言としては使用不可、"
         "今回のacceptance_criteriaは提起後も通常通り満たすこと）。\n"
+        "[BL-093] thinkツールで検討過程を残せます。自然に考えた理由づけの生文章は、thinkを使わ"
+        "なければ次のiterationには引き継がれません（tool_callsの記録だけが残ります）。thinkを"
+        "呼ぶと、その理由づけは次回以降のtool結果として全履歴ごと返され、雪だるま式に引き継がれ"
+        "ます。todoに確認すべき論点をリストアップし、action/decided/why（却下案があれば"
+        "rejected/rejected_why）を書いてください。他ツールと同一応答内でまとめて呼んでも単独で"
+        "呼んでも構いません。\n"
+        "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
+        "write_agreement・escalate_premise_concern・thinkです。think以外のいずれかを呼ぶときは、"
+        "必ずその同じ応答の中にthink（summary必須）も一緒に含めてください。think無しでこれらの"
+        "ツールだけを呼ぶと、その応答のツール呼び出しは一切実行されず差し戻されます。\n"
         f"\n[R4] {whiteboard_text}\n"
     )
 
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
     _CURRENT_CALLER_ROLE = "expert"
     _CURRENT_TASK_ID = state.get("current_task_id", "")
+    _reset_think_scratchpad()  # [BL-093]
     return query_AI(messages, client=client_agent, model=model_agent, label=f"Expert:{expert_name}",
-                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL], light_system_prompt=light_system_prompt)
+                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt)
 
 
 #def call_detector(goal: str, user_input: str, expert_output: str, decisions: list[Decision], current_phase: dict) -> dict:
@@ -3622,6 +4238,26 @@ def call_detector(state: LineageState, target_role: str) -> dict:
             f"数値主張が含まれる場合、Expertが「検算完了」等と自己申告していても絶対に鵜呑みにせず、"
             f"必ずあなた自身がpython_replで独立して検算してください。\n"
         )
+
+    # [BL-091] 今回評価対象のターンで、write_agreementが実際に成功したかどうかをDetectorに
+    # 明示する。最終iterationでツールが強制的に外された際、モデルが独自のツール呼び出し風の
+    # 疑似構文（例: DeepSeek系の<｜DSML｜...｜>疑似XML）をそのまま平文で出力することがあり、
+    # これは実際には一切実行されていないにもかかわらず、更新が完了したかのような説得力のある
+    # 文面になりうる（実ドライラン log/2026-07-25/1913 で確認。Detectorがこれを鵜呑みにし
+    # 「物理的矛盾は解消される」と誤って承認、Decision Extractorも虚偽のUPDATEをDBに記録した）。
+    _wrote_agreement_this_turn = state.get(
+        "user_wrote_agreement" if target_role == "user" else "expert_wrote_agreement", False
+    )
+    write_agreement_status_block = (
+        f"【BL-091: 今回のターンのwrite_agreement実行結果】write_agreementの呼び出しは"
+        + ("少なくとも1回成功しました。\n" if _wrote_agreement_this_turn else
+           "一度も成功していません。\n"
+           "もし下記のやり取りで相手が「更新しました」「修正版を提出しました」"
+           "「write_agreementで登録しました」等、ホワイトボード・DBへの反映を主張していても、"
+           "実際には一切反映されていません。上記の【R4: 現在タスクの成果物・最新ホワイトボード】"
+           "の内容のみが唯一の真実の状態です。発言内容がそれと食い違う場合はconstraint_issue="
+           "\"major\"としてください（ツール呼び出し失敗の見落とし、または虚偽の完了報告です）。\n")
+    )
 
     # [R5 F-2.1] Expert/User AIのreasoning（思考過程）を提示し、最終出力だけでなく思考過程自体も
     # 監査対象にする。プロバイダがreasoningを返さない場合は「(思考ログ取得不可)」を表示する。
@@ -3736,8 +4372,13 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"既に審議の上で承認した意図的な例外です。同じ論点をmajor/minorの根拠にしないでください"
         f"（ただし別の新しい問題点はこれまで通り厳格に評価してください）。\n\n"
         f"System Goal: {goal}\n"
+        f"{_get_goal_essence_text(get_active_conn(), state['run_id'])}\n"
+        f"[BL-087 Stage4] 上記【🎯 本質】に照らして、数値・条件設定自体は妥当でも本質から"
+        f"乖離していないか（手段の細部の帳尻合わせに終始し、本来達成すべきことを見失っていないか）"
+        f"も確認してください。乖離があればconstraint_issueをminor以上に引き上げる根拠にできます。\n\n"
         f"【現在タスクのacceptance_criteria】\n{criteria_text}\n\n"
         f"{whiteboard_block}"
+        f"{write_agreement_status_block}\n"
         f"{deferred_notes_block}"
         f"【今回評価するターンのやり取り】\n{history_text}\n\n"
         f"【BL-051軽量版: 気づき欄】constraint_issueの判定（none/minor/major）には至らないが、"
@@ -3748,11 +4389,13 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"指摘対象の箇所を一字一句そのまま（改変・要約せず）1〜2文だけ引用し'target_excerpt'に"
         f"入れてください（ホワイトボードへの注釈挿入に機械的に使うため、正確な引用が必須です）。"
         f"noneの場合や、ホワイトボードが存在せず引用できない場合は空文字にしてください。\n\n"
+        f"【BL-093】必要であれば、thinkツールで検討過程を書き残しても構いません。\n\n"
         f'Return ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用（無ければ空文字）", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
     )
+    _reset_think_scratchpad()  # [BL-093]
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
         domain_prompt, client=client_auditor, model=model_auditor, label="Detector (Domain Review)",
-        tools=None, fallback={"constraint_issue": "none", "comment": "", "target_excerpt": "", "observations": ""},
+        tools=[THINK_TOOL], fallback={"constraint_issue": "none", "comment": "", "target_excerpt": "", "observations": ""},
     )
     if domain_parse_failed:
         print("🚨 [Detector] ドメイン妥当性レビューのJSON判定取得に失敗しました。フェイルクローズ(major)します。")
@@ -3811,8 +4454,10 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"必ず python_repl ツールで機械的に再計算し、一致を確認してからでなければ constraint_issue=\"major\" としないでください。"
         f"暗算での承認・却下判定は禁止します。\n\n"
         f"{python_calls_block}\n"
+        f"{write_agreement_status_block}\n"
         f"{thought_process_audit}\n"
         f"System Goal: {goal}\n"
+        f"{_get_goal_essence_text(get_active_conn(), state['run_id'])}\n"
         f"Recent Decisions（参考程度）: {recent_decitions}\n\n"
         f"【プロジェクトの合意・決定事項・検討状況DB】\n{agreements_text}\n\n"
         f"【BL-086: 🔒Freeze済み項目の扱い】上記DBで🔒アイコンが付いている項目は、既に人間の発注者"
@@ -3840,6 +4485,11 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"「trial1: minor」のように結論だけ明記すればよく、毎回長い理由の再展開は不要です）、"
         f"3回のうち多数だった結論を最終的なconstraint_issueとして採用してください。"
         f"3回分の判定が出た時点で、それ以上の再検討・迷いは禁止します。\n\n"
+        f"【同じ計算を繰り返さない（重要）】上記の判定ブレ防止とは別に、同一の数値検算"
+        f"（例:「この合計は制約内か」）をpython_replで何度も繰り返さないでください。"
+        f"各検算は2回程度で十分です。ツール呼び出しの回数には上限があり、新しい論点が無いまま"
+        f"「念のため再確認」を重ねると、上限到達時に強制的に打ち切られたテキスト応答としてJSONを"
+        f"一度に出力せざるを得なくなり、出力が途中で切れるリスクがあります。\n\n"
         f"【今回評価するターンのやり取り】\n"
         f"{history_text}\n"
         f"【BL-051軽量版: 気づき欄】constraint_issueの判定（none/minor/major）には至らないが、"
@@ -3850,14 +4500,33 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"指摘対象の箇所を一字一句そのまま（改変・要約せず）1〜2文だけ引用し'target_excerpt'に"
         f"入れてください（ホワイトボードへの注釈挿入に機械的に使うため、正確な引用が必須です）。"
         f"noneの場合や、ホワイトボードが存在せず引用できない場合は空文字にしてください。\n\n"
+        f"【BL-079: 引用前に必ずverify_whiteboard_excerptで検証】target_excerptを確定する前に、"
+        f"必ずverify_whiteboard_excerptツールでその引用が一意に一致するか確認してください。"
+        f"ok=falseが返った場合は、そのままにせず、示された件数（完全一致/緩い一致）を参考に"
+        f"引用を長く・具体的にする等調整して再度呼び出し、一意に一致することを確認してから"
+        f"JSONに書いてください（一致しないtarget_excerptは、ホワイトボードへの注釈挿入が"
+        f"サイレントに失敗する原因になります）。\n\n"
+        f"【BL-093: thinkツールで検討過程を残す】この数値監査は複数回のpython_repl呼び出しを"
+        f"跨ぐことが多く、自然に考えた理由づけの生文章は、thinkを使わなければ次のiterationには"
+        f"引き継がれません（tool_callsの記録だけが残ります）。thinkを呼ぶと、その理由づけは次回"
+        f"以降のtool結果として全履歴ごと返され、雪だるま式に引き継がれます。まずtodoに確認すべき"
+        f"論点をリストアップしてから、各論点の検証時にaction/decided/why（却下案があればrejected/"
+        f"rejected_why）を書いてください。他のツール呼び出しと同一の応答内でまとめて呼んでも、"
+        f"単独で呼んでも構いません。\n\n"
+        f"【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
+        f"write_agreement・verify_whiteboard_excerpt・thinkです。think以外のいずれかを呼ぶときは、"
+        f"必ずその同じ応答の中にthink（summary必須）も一緒に含めてください。think無しでこれらの"
+        f"ツールだけを呼ぶと、その応答のツール呼び出しは一切実行されず差し戻されます。\n\n"
         f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由", "criteria_status": [true/false, ...], "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用（無ければ空文字）", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
     )
-    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID, _CURRENT_PHASE_ID
     _CURRENT_CALLER_ROLE = "detector"
     _CURRENT_TASK_ID = state.get("current_task_id", "")
+    _CURRENT_PHASE_ID = _current_phase_id
+    _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_auditor, model=model_auditor, label="Detector",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, THINK_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
     )
     if parse_failed:
         # [SAFETY] D-005: 層2リトライを使い切った場合はフェイルオープン（none）ではなくフェイルクローズ（major）に倒す。
@@ -3895,6 +4564,26 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         target_excerpt = domain_target_excerpt or numeric_target_excerpt
     else:
         target_excerpt = numeric_target_excerpt or domain_target_excerpt
+
+    # [BL-079] ドメイン妥当性レビューはverify_whiteboard_excerptを持たない（BL-093でthinkのみ
+    # 追加、excerpt検証ツールは数値監査パス専用のまま）ため、一致しないtarget_excerptをそのまま
+    # 出力しうる。severityより優先して選ばれた側の引用が
+    # 実際にはホワイトボードと一致しない場合、もう一方のパスの引用が一致するならそちらへ
+    # 差し替える（実際に注釈を挿入できることを優先する、プログラム側の最後の砦）。
+    def _excerpt_matches_uniquely(excerpt: str) -> bool:
+        if not excerpt or not _whiteboard:
+            return False
+        content = _whiteboard["content"]
+        if content.count(excerpt) == 1:
+            return True
+        norm_content, _ = _normalize_for_loose_match(content)
+        norm_excerpt, _ = _normalize_for_loose_match(excerpt)
+        return bool(norm_excerpt) and norm_content.count(norm_excerpt) == 1
+
+    if target_excerpt and not _excerpt_matches_uniquely(target_excerpt):
+        _fallback_excerpt = numeric_target_excerpt if target_excerpt == domain_target_excerpt else domain_target_excerpt
+        if _fallback_excerpt and _excerpt_matches_uniquely(_fallback_excerpt):
+            target_excerpt = _fallback_excerpt
 
     # [BL-051軽量版] 両パスの気づき欄を統合。severityとは独立に、非空であれば毎回蓄積対象とする。
     observations_parts = []
@@ -4098,6 +4787,8 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
 
     [BL-050] action_type="UPDATE"（既存topicの値を変更する）の場合、rationale には
     「新しい値が何故妥当か」だけでなく「前の値から何故・どう変わったのか」を必ず明記してください。
+
+    【BL-093】必要であれば、thinkツールで検討過程を書き残しても構いません。
     """
 
     # 共通のフォーマット指定（JSON出力部分など）
@@ -4137,7 +4828,8 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
     """
 
 
-    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Decision Extractor")
+    _reset_think_scratchpad()  # [BL-093]
+    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Decision Extractor", tools=[THINK_TOOL])
     parsed = _safe_json_parse(res, fallback={"extracted_events": []})
 
     transition = {}
@@ -4153,7 +4845,7 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
         return parsed, transition
     return [], transition
 
-def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict]) -> dict:
+def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goal_essence_text: str = "") -> dict:
     """【SLM要約】
     Delegation of resource reallocation decisions to an AI arbiter based on overall system goals and current phase allocations when constraints are exceeded.
     """
@@ -4161,13 +4853,14 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict]) -> 
         f"- {p['phase_id']}（{p['title']}）: 現在の取り分 {overrun['claiming_phases'].get(p['phase_id'], 0)}"
         for p in phases_info
     )
-    
+
     prompt = f"""
     あなたはプロジェクト全体の意思決定者です。
     リソース「{overrun['constraint']}」が、上限{overrun['cap']}に対し合計{overrun['claimed']}と、
     {overrun['over_by']}超過しています。
 
     ■ 絶対目標: {goal}
+    {goal_essence_text}
     ■ 競合している各フェーズの現在の配分:
     {phases_text}
 
@@ -4177,6 +4870,23 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict]) -> 
     - 優先度の高いフェーズに資源を多く配分し直す
 
     【F-2.6 機械的検算ゲート（必須）】予算超過判定は python_repl ツールで機械的に合計・比較してから行うこと。
+
+    【同じ検証・計算を繰り返さない（重要）】ツール呼び出しの回数には上限があります。同じ論点
+    （例:「この再配分案は上限内に収まるか」）をpython_replで繰り返し再確認しないでください。
+    各検証項目は2回程度の計算・確認で十分です。新しい数値や新しい論点が無いまま「念のため
+    最終確認」を重ねると、JSON出力そのものを書く余地が無くなり、上限到達時に強制的に打ち切られた
+    テキスト応答としてJSONを一度に出力せざるを得なくなり、出力が途中で切れて構文エラーになる
+    リスクがあります。必要な検算が終わったら、直ちに最終的なJSONオブジェクトの記述に移ってください。
+
+    【BL-093: thinkツールで検討過程を残す】自然に考えた理由づけの生文章は、thinkを使わなければ
+    次のiterationには引き継がれません（tool_callsの記録だけが残ります）。thinkを呼ぶと、その
+    理由づけ（action/decided/why、却下案があればrejected/rejected_why）は次回以降のtool結果として
+    全履歴ごと返され、雪だるま式に引き継がれます。まずtodoに確認すべき論点をリストアップして
+    ください。他のツール呼び出しと同一の応答内でまとめて呼んでも、単独で呼んでも構いません。
+    【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
+    write_agreement・thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の中にthink
+    （summary必須）も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、その応答の
+    ツール呼び出しは一切実行されず差し戻されます。
 
     【ゴール変容の検知（★R5 GoalShiftEvent）】
     提示する再配分案が、当初の絶対制約（このリソースのtotal_cap自体）を
@@ -4196,7 +4906,8 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict]) -> 
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
     _CURRENT_CALLER_ROLE = "arbiter"
     _CURRENT_TASK_ID = ""
-    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Resource Arbiter", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL])
+    _reset_think_scratchpad()  # [BL-093]
+    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Resource Arbiter", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL])
     return _safe_json_parse(res, fallback={})
 
 
@@ -4291,6 +5002,7 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
     一部だけが完成し、残りが「次回作成予定」のまま終わっている場合は "completed" にしないでください。
 
     ■ 当初の絶対ゴール: 👉 {state['goal']}
+    {_get_goal_essence_text(_conn, state['run_id'])}
     ■ 【決定事項DB】（これまでに確定した要件）:\n{agreements_text}
     ■ これまでのシステム判断のタイムライン:\n{timeline_str}
     ■ 直近の実際の会話の流れ:\n{history_text}
@@ -4324,6 +5036,8 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
        ※「ターン」は内部のやり取り往復の途中で足踏みすることがあるため、ここでは代わりに
        「ラウンド」（発注者Userの発言サイクルの周回数）を進行状況の目安として用いています。
 
+        【BL-093】必要であれば、thinkツールで検討過程を書き残しても構いません。
+
         Return ONLY JSON in the exact format below:
         {{
             "still_aligned": true/false,
@@ -4332,8 +5046,9 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
         }}
 
     """
-    
-    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Reflection")
+
+    _reset_think_scratchpad()  # [BL-093]
+    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Reflection", tools=[THINK_TOOL])
     parsed = _safe_json_parse(res, fallback={"still_aligned": False, "discussion_status": "stagnant", "note": "Parse error."})
     aligned_val = parsed.get("still_aligned", True)
     
@@ -4343,7 +5058,7 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
         "note": parsed.get("note", ""),
     }
 
-def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str = "") -> str:
+def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str = "", goal_essence_text: str = "") -> str:
     """【SLM要約】
     Generates a guiding prompt to help AI agents refocus discussions on key unresolved issues toward achieving the overall system goal.
     """
@@ -4379,14 +5094,18 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     その理由を無視・軽視することは避けてください。
 
     ■ プロジェクトの目標(Goal): {goal}
+    {goal_essence_text}
     {reflection_block}
     ■ 直近の会話:
     {history_text}
 
-    """
-    return query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Facilitator")
+    【BL-093】必要であれば、thinkツールで検討過程を書き残しても構いません。
 
-def call_integrator(goal: str, merged_text: str) -> dict:
+    """
+    _reset_think_scratchpad()  # [BL-093]
+    return query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Facilitator", tools=[THINK_TOOL])
+
+def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "") -> dict:
     """【SLM要約】
     Cross-checking of merged project artifacts against a defined goal to identify logical or numerical inconsistencies between tasks and phases.
     """
@@ -4396,9 +5115,27 @@ def call_integrator(goal: str, merged_text: str) -> dict:
     フェーズ間やタスク間で論理的・数値的な矛盾が生じていないか横断チェックしてください。
 
     ■ 絶対目標: {goal}
-    
+    {goal_essence_text}
+
     ■ 統合要件定義書:
     {merged_text}
+
+    【同じ検証・計算を繰り返さない（重要）】ツール呼び出しの回数には上限があります。同じ論点を
+    python_replで繰り返し再確認しないでください。各検証項目は2回程度の計算・確認で十分です。
+    新しい数値や新しい論点が無いまま「念のため最終確認」を重ねると、JSON出力そのものを書く余地が
+    無くなり、上限到達時に強制的に打ち切られたテキスト応答としてJSONを一度に出力せざるを得なく
+    なり、出力が途中で切れて構文エラーになるリスクがあります。必要な検証が終わったら、直ちに
+    最終的なJSONオブジェクトの記述に移ってください。
+
+    【BL-093: thinkツールで検討過程を残す】自然に考えた理由づけの生文章は、thinkを使わなければ
+    次のiterationには引き継がれません（tool_callsの記録だけが残ります）。thinkを呼ぶと、その
+    理由づけ（action/decided/why、却下案があればrejected/rejected_why）は次回以降のtool結果として
+    全履歴ごと返され、雪だるま式に引き継がれます。まずtodoに確認すべき論点をリストアップして
+    ください。他のツール呼び出しと同一の応答内でまとめて呼んでも、単独で呼んでも構いません。
+    【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
+    write_agreement・thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の中にthink
+    （summary必須）も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、その応答の
+    ツール呼び出しは一切実行されず差し戻されます。
 
     Return ONLY JSON:
     {{
@@ -4410,11 +5147,12 @@ def call_integrator(goal: str, merged_text: str) -> dict:
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
     _CURRENT_CALLER_ROLE = "integrator"
     _CURRENT_TASK_ID = ""
-    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Integrator", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL])
+    _reset_think_scratchpad()  # [BL-093]
+    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Integrator", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL])
     return _safe_json_parse(res, fallback={"contradictions": False, "affected_phases": [], "details": ""})
 
 
-def call_reviewer(goal: str, deliverable_text: str) -> dict:
+def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "") -> dict:
     """【SLM要約】
     Delegation of artifact validation to an AI QA reviewer, strictly enforcing adherence to defined goals against delivered documentation.
     """
@@ -4471,9 +5209,27 @@ def call_reviewer(goal: str, deliverable_text: str) -> dict:
 
     ■ 達成すべき【絶対目標(Goal)】:
     {goal}
+    {goal_essence_text}
 
     ■ ★最終成果物として登録されている内容（最重要・必ずこれを精査せよ）:
     {deliverable_text}
+
+    【同じ検証・計算を繰り返さない（重要）】ツール呼び出しの回数には上限があります。同じ論点を
+    python_replで繰り返し再確認しないでください。各検証項目は2回程度の計算・確認で十分です。
+    新しい数値や新しい論点が無いまま「念のため最終確認」を重ねると、JSON出力そのものを書く余地が
+    無くなり、上限到達時に強制的に打ち切られたテキスト応答としてJSONを一度に出力せざるを得なくなり、
+    出力が途中で切れて構文エラーになるリスクがあります。必要な検証が終わったら、直ちに最終的な
+    JSONオブジェクトの記述に移ってください。
+
+    【BL-093: thinkツールで検討過程を残す】自然に考えた理由づけの生文章は、thinkを使わなければ
+    次のiterationには引き継がれません（tool_callsの記録だけが残ります）。thinkを呼ぶと、その
+    理由づけ（action/decided/why、却下案があればrejected/rejected_why）は次回以降のtool結果として
+    全履歴ごと返され、雪だるま式に引き継がれます。まずtodoに確認すべき論点をリストアップして
+    ください。他のツール呼び出しと同一の応答内でまとめて呼んでも、単独で呼んでも構いません。
+    【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
+    write_agreement・thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の中にthink
+    （summary必須）も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、その応答の
+    ツール呼び出しは一切実行されず差し戻されます。
 
     Return ONLY JSON:
     {{
@@ -4485,9 +5241,10 @@ def call_reviewer(goal: str, deliverable_text: str) -> dict:
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
     _CURRENT_CALLER_ROLE = "reviewer"
     _CURRENT_TASK_ID = ""
+    _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_auditor, model=model_auditor, label="Reviewer QA",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL], fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"},
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL], fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"},
     )
     if parse_failed:
         # [SAFETY] D-005: 層2リトライを使い切った場合はフェイルクローズ（passed=False、差し戻し）に倒す。
@@ -4541,6 +5298,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             あなたの【絶対目標】は以下の通りです:\n"
             👉 {user_goal}\n\
             \n
+            {_get_goal_essence_text(_conn, state["run_id"])}\n
             現在までの決定事項・検討状況DB】\n"
             {agreements_text}\n\n"
             【直近の各役割の行動、評価、その理由リスト】"\n
@@ -4649,9 +5407,37 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         "その場ででっち上げていないか。\n"
         "計算結果そのものに強い違和感がある場合に限り、あなた自身も python_repl で検算してください"
         "（毎回のルーティンとして再検算する必要はありません）。\n"
+        "[BL-087 Stage4] さらに、上記の【🎯 本質】に照らして、Expertの提案の数値・条件設定が"
+        "本質から乖離していないかも確認してください。数式・ドメイン的妥当性の両方で問題が無くても、"
+        "本質に照らして違和感がある場合（例: 本質が「実質的な利便性の確保」なのに、手段の細部の"
+        "帳尻合わせに終始し本質を見失っている等）は、その点を具体的に指摘してください。疑義のある"
+        "数値は、python_replでの検算に加え、あなた自身の判断でも根拠を問い直してください。\n"
+    )
+
+    system_prompt += (
+        "\n【同じ検証・計算を繰り返さない（重要）】\n"
+        "ツール呼び出しの回数には上限があります。同じ論点をpython_replで繰り返し再確認しないで"
+        "ください。各検証項目は2回程度の計算・確認で十分です。新しい数値や新しい論点が無いまま"
+        "「念のため再確認」を重ねると、実際の発言を書く余地が無くなり、上限到達時に強制的に"
+        "打ち切られたテキスト応答とせざるを得なくなります。必要な検算が終わったら、それ以上の"
+        "確認は行わず、直ちに発言の記述に移ってください。\n"
     )
 
     system_prompt += _build_detector_observations_block(state)
+
+    system_prompt += (
+        "\n【BL-093: thinkツールで検討過程を残す】自然に考えた理由づけの生文章は、thinkを使わ"
+        "なければ次のiterationには引き継がれません（tool_callsの記録だけが残ります）。thinkを"
+        "呼ぶと、その理由づけは次回以降のtool結果として全履歴ごと返され、雪だるま式に引き継がれ"
+        "ます。todoに確認すべき論点をリストアップし、action/decided/why（却下案があれば"
+        "rejected/rejected_why）を書いてください。他のツール呼び出しと同一の応答内でまとめて"
+        "呼んでも、単独で呼んでも構いません。\n"
+        "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
+        "write_agreement・escalate_premise_concern・resolve_premise_concern・revise_goal・"
+        "freeze_agreement・thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の中に"
+        "think（summary必須）も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、"
+        "その応答のツール呼び出しは一切実行されず差し戻されます。\n"
+    )
 
     previous_user_input = state.get("user_input", "(取得不可)")
 
@@ -4717,7 +5503,8 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     _CURRENT_CALLER_ROLE = "user"
     _CURRENT_TASK_ID = state.get("current_task_id", "")
     _CURRENT_GOAL_TEXT = user_goal  # [BL-086] revise_goalの編集対象
-    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL])
+    _reset_think_scratchpad()  # [BL-093]
+    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, THINK_TOOL])
 
     if content is None or content.strip() == "" or content == "(APIから空の応答が返されました)":
         for retry in range(3):
@@ -4726,7 +5513,8 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             _CURRENT_CALLER_ROLE = "user"
             _CURRENT_TASK_ID = state.get("current_task_id", "")
             _CURRENT_GOAL_TEXT = user_goal
-            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL])
+            _reset_think_scratchpad()  # [BL-093]
+            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, THINK_TOOL])
             if content and content.strip() and content != "(APIから空の応答が返されました)":
                 break
         else:
@@ -4766,7 +5554,10 @@ def arbiter_node(state: LineageState) -> LineageState:
         return state
 
     overrun = overruns[0]
-    result = call_resource_arbiter(state["goal"], overrun, state["phases"])
+    result = call_resource_arbiter(
+        state["goal"], overrun, state["phases"],
+        goal_essence_text=_get_goal_essence_text(get_active_conn(), state["run_id"]),
+    )
     
     state["phases_to_revise"] = result.get("phases_to_revise", [])
     decision = make_decision(
@@ -4838,6 +5629,103 @@ def make_decision(who: str, what: str, why: str | None, internal_thought_process
         "internal_thought_process": internal_thought_process or "(記録なし)",
     }
 
+def call_goal_essence_analyst(goal: str) -> dict:
+    """[BL-087 Stage3] task_planner分解より前に1回だけ呼ばれる「本質フェーズ」の実体。
+    ゴールの文言をそのまま鵜呑みにする前に、(1) 明示された数値・制約からの大まかな
+    実現可能性の壁打ち（詳細な検算はF-2.6の役目であり、ここでは大まかなオーダー感の
+    把握に留めるが、暗算によるハルシネーションを避けるためpython_replでの機械計算を
+    使わせる）、(2) 文言上の制約が本来仕えるべき「真に達成すべきこと」の言語化、の
+    2点を行う。結果はgoal_essenceテーブルに保存され、以後全ノードのプロンプトへゴール本文と
+    並べて常時注入される（BL-086のescalate_premise_concernは走行中に矛盾に気づいた際の
+    事後エスカレーションであり、本フェーズはその手前の事前予防として独立・併存する）。
+    """
+    prompt = f"""
+    あなたは、プロジェクト開始前に発注者と行う「壁打ち」を担当する、経験豊富なコンサルタントです。
+    以下の絶対目標を鵜呑みにしてそのままタスク分解する前に、2つの観点で一度立ち止まって
+    検討してください。
+
+    ■ 絶対目標: {goal}
+
+    【観点1: 大まかな実現可能性の壁打ち】
+    ゴール文に明示されている数値制約（予算、台数、人数、時間等）から、大まかな見積もりで
+    実現可能性の見立てを行ってください。詳細な検算は後続の各タスクの役目なので、ここでは
+    「一見して無理筋に見える組み合わせ」がないかのオーダー感の確認に留めてください
+    （例: 「予算上限からすると設備の絶対数はごく少数に限られるが、要求されている需要規模は
+    その少数の設備では到底さばききれない可能性が高い」といった見立て）。
+    【重要】この大まかな見積もりであっても、暗算で数値を出さず、必ず python_repl ツールで
+    計算してください（大まかな見立てとはいえ、この本質フェーズはプロジェクト全体で最も
+    上流の判断であり、ここでの暗算・計算ミスは後続の全タスクに伝播するハルシネーション
+    リスクとなるため）。
+
+    【観点2: 目標の本質の言語化】
+    ゴール文に列挙されている個々の制約・条件は、あくまで「本来解決すべき本質的な課題」を
+    実現するための手段・例示に過ぎない可能性があります。この目標が本当に達成しようとしている
+    本質的な課題は何か（例: 特定の手段そのものではなく、対象となる住民にとっての実質的な
+    利便性・安全性の確保等）を、ゴール文の個々の制約から一段抽象化して言語化してください。
+    これは今後、個々のタスクが「手段の遂行」に没頭するあまり本質を見失った場合に立ち返る
+    基準として、プロジェクト全体を通じて参照され続けます。
+
+    【同じ検証・計算を繰り返さない（重要）】ツール呼び出しの回数には上限があります。同じ論点を
+    python_replで繰り返し再確認しないでください。各検証項目は2回程度の計算・確認で十分です。
+    新しい数値や新しい論点が無いまま「念のため最終確認」を重ねると、JSON出力そのものを書く余地が
+    無くなり、上限到達時に強制的に打ち切られたテキスト応答としてJSONを一度に出力せざるを得なくなり、
+    出力が途中で切れて構文エラーになるリスクがあります。必要な検算が終わったら、直ちに最終的な
+    JSONオブジェクトの記述に移ってください。
+
+    【JSON文字列内で全角鉤括弧を使う際の注意（重要）】文字列値の中で強調のために「」や『』を
+    使うのは構いませんが、文字列値の**末尾**を「」や『』で終えないでください。全角の閉じ鉤括弧
+    （」や』）のすぐ後にJSON構文上の閉じ引用符(")を書くのを忘れ、構文エラーになる事故が実際に
+    発生しています。文の最後に強調を置きたい場合は、鉤括弧で挟むのではなく地の文のまま書くか、
+    強調部分を文の途中に置き、文字列値の最後の文字は句点「。」などの通常の文字にしてください。
+
+    【BL-093: thinkツールで検討過程を残す】自然に考えた理由づけの生文章は、thinkを使わなければ
+    次のiterationには引き継がれません（tool_callsの記録だけが残ります）。thinkを呼ぶと、その
+    理由づけ（action/decided/why、却下案があればrejected/rejected_why）は次回以降のtool結果として
+    全履歴ごと返され、雪だるま式に引き継がれます。まずtodoに確認すべき論点をリストアップして
+    ください。他のツール呼び出しと同一の応答内でまとめて呼んでも、単独で呼んでも構いません。
+    【重要】あなたが使えるツールはpython_replとthinkの2つです。python_replを呼ぶときは、
+    必ずその同じ応答の中にthink（summary必須）も一緒に含めてください。think無しで
+    python_replだけを呼ぶと、その応答のツール呼び出しは（python_replも含めて）一切
+    実行されず差し戻されます。
+
+    Return ONLY JSON: {{"true_essence": "（本質の言語化、2〜4文程度）",
+    "feasibility_notes": "（大まかな実現可能性の見立て、無理筋に見える組み合わせがあれば
+    具体的に指摘。特に懸念がなければその旨を簡潔に）"}}
+    """
+    # [BL-089] 層2リトライ（_query_and_parse_with_retry、D-005）でラップする。本質フェーズは
+    # 全ノードへ常時注入される最上流の判断であり、単発のパース失敗でgoalそのままの
+    # フォールバックに落ちると本質フェーズの意味が失われる。
+    _reset_think_scratchpad()  # [BL-093]
+    parsed, parse_failed = _query_and_parse_with_retry(
+        prompt, client=client_auditor, model=model_auditor, label="Goal Essence Analyst",
+        tools=[PYTHON_REPL_TOOL, THINK_TOOL],
+        fallback={"true_essence": goal, "feasibility_notes": "(JSONパース失敗のため見立てなし)"},
+    )
+    if parse_failed:
+        print("🚨 [Goal Essence Analyst] JSON結果の取得に失敗しました。ゴール文そのままにフォールバックします。")
+    return parsed
+
+
+def goal_essence_node(state: LineageState) -> LineageState:
+    """[BL-087 Stage3] グラフの新しいentry_point。task_planner_nodeより前に1回だけ発火し、
+    本質フェーズの結果をgoal_essenceテーブルへ保存する。goal_essence_doneはチェックポイント
+    再開・毎ターンの再入場で再発火しないための冪等ガード（task_plan_reviewer_nodeの
+    plan_review_doneと同型）。
+    """
+    if state.get("goal_essence_done"):
+        return state
+
+    print("\n------ [goal_essence] が目標の本質を壁打ち中 ------\n")
+    result = call_goal_essence_analyst(state["goal"])
+    print(f"\n[goal_essence] 結果: {result}\n")
+
+    db_save_goal_essence(get_active_conn(), state["run_id"], result.get("true_essence", ""), result.get("feasibility_notes", ""))
+    state["goal_essence_done"] = True
+    decision = make_decision("goal_essence", "目標の本質を言語化", result.get("feasibility_notes", ""))
+    db_append_decision(decision, get_active_conn(), state["run_id"])
+    return state
+
+
 def task_planner_node(state: LineageState) -> LineageState:
     """【SLM要約】
     Initial planning and decomposition of the overall system goal into sequential phases and executable tasks.
@@ -4853,7 +5741,13 @@ Sets the starting phase for subsequent execution steps within the lineage state.
               \n------- 最初にゴール達成への道筋を、フェーズとタスクに分解して計画を立てます -------\n
               """)
         
-        phases = call_task_planner(state["goal"])
+        # [BL-087 Stage2] task_plan_reviewer_nodeが差し戻した際の指摘事項があれば反映する。
+        reviewer_feedback = state.get("plan_reviewer_feedback", "")
+        # [BL-087 Stage3] goal_essence_nodeがtask_planner直前に発火するため、ここで既に
+        # 保存済みの本質テキストを取得できる（ユーザー指摘：注入漏れ、9消費者リストは
+        # BL-086由来でtask_planner/task_plan_reviewerは含まれていなかった）。
+        goal_essence_text = _get_goal_essence_text(get_active_conn(), state["run_id"])
+        phases = call_task_planner(state["goal"], reviewer_feedback=reviewer_feedback, goal_essence_text=goal_essence_text)
         print(f"\n------ 完了 ------\n")
 
         phases_json = json.dumps(phases, ensure_ascii=False, indent=2)
@@ -4862,12 +5756,211 @@ Sets the starting phase for subsequent execution steps within the lineage state.
         state["phases"] = phases
         if phases:
             state["current_phase"] = phases[0]
+        # [BL-087 Stage2改善] task_plan_reviewer_nodeが動く前に、全タスク分のplan_draftsスケルトンを
+        # 事前生成しておく（従来は_append_deferred_note_to_plan経由の遅延生成のみだったため、
+        # レビュー時点では何も存在せず、レビュワーが指摘を書き込む先がなかった）。
+        _conn = get_active_conn()
+        for _phase in phases:
+            for _task in _phase.get("tasks", []):
+                apply_plan_patch(
+                    _conn, state["run_id"], _phase.get("phase_id", ""), _task.get("task_id", ""),
+                    _render_plan_skeleton(_task), author_role="task_planner", edit_summary="初期計画生成"
+                )
         state["global_constraints"] = []
+        state["plan_reviewer_feedback"] = ""  # 消費済みのためクリア
         decision = make_decision("task_planner", f"プロジェクトを {len(phases)} フェーズに分解", "初期計画策定")
         print(f"[task_planner]  プロジェクトを {len(phases)} フェーズに分解 初期計画策定)")
         db_append_decision(decision, get_active_conn(), state["run_id"])
     print("\n------ [task_planner] をパス ------\n")
     return state
+
+
+def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: str = "") -> dict:
+    """[BL-087 Stage2] task_planner_node直後に1回だけ呼ばれ、生成されたフェーズ・タスク
+    計画全体を実行開始前にレビューする。Detector同等のJSON形式（risk/constraint_issue/
+    comment）で返す実行前ゲート。
+    """
+    phases_json = json.dumps(phases, ensure_ascii=False, indent=2)
+    prompt = f"""
+    以下は、絶対目標を分解して生成された「フェーズ・タスク計画」です。実行を開始する前に、
+    この計画自体の質をレビューしてください（個々のタスクの中身の是非ではなく、計画の構造
+    そのものが後工程で無駄な手戻りを生まないかを見てください）。
+
+    ■ 絶対目標: {goal}
+    {goal_essence_text}
+    ■ 生成された計画:
+    {phases_json}
+
+    以下の観点でレビューしてください（1つに偏らず、4つとも同等以上に重視すること。実際に
+    後工程で最も高くつく手戻りは、数値の端数不一致よりも「タスクの欠落」や「順序矛盾」から
+    生じることが多いため、数値の細かい不整合ばかりを追いかけて2・3・4を見落とさないこと）:
+    1. 曖昧な表記: 各タスクのacceptance_criteria/descriptionに、AIが読み違えるような曖昧な
+       数量・比率・位置の表記がないか（例: 比率と絶対値が並記され、どちらが基準か不明瞭等）。
+    2. タスクの過不足: 絶対目標の達成に対して、明らかに欠けているタスク、または不要に
+       重複・過剰なタスクがないか。
+    3. 順序の妥当性: depends_onで示される依存関係が、フェーズ・タスクの記載順序と矛盾して
+       いないか（前提となるタスクが後のフェーズに配置されている等）。
+    4. 条件の明示: 比率や制約から計算・仮定した派生値（本文に直接の記載がない数値）が、
+       前提条件（例: 新品購入かリース等の代替を除くか等）を伴わずに絶対制約として断定されて
+       いないか。「◯◯が上限」のような断定は、その根拠となる条件と一緒に書かれているべきです。
+
+    【重要: 曖昧さの指摘とゴール文にない数値の捏造要求を混同しない】
+    ゴール文（絶対目標）自体が与えていない絶対値（例: 総ルート長そのもの）を、taskに無理やり
+    確定させるよう差し戻してはいけません。以前のレビューで「山間部2km≒ルート全体13.33km」と
+    いう、task_planner自身が注記付きで示した推定値（原文の12kmとの端数差はごくわずか）を
+    「矛盾」としてmajor判定した結果、再生成されたtask_plannerが「山間部12km＝ルート全体の
+    15%」という原文からは読み取れない解釈で「総ルート長80km」という、原文にない数値を
+    でっち上げてしまった実例があります。これは、Reviewerが絶対値の確定を強く求めすぎたことが
+    ハルシネーションを誘発した典型例です。ゴール文に絶対値の記載がなく、比率同士の整合性程度に
+    留まる疑義であれば、「不明である旨をdescriptionに明記させる」という軽い修正指示に留め、
+    具体的な数値を逆算・断定させる差し戻しをしないでください。
+
+    重大な問題（このまま実行すると手戻りがほぼ確実な曖昧表記・タスク欠落・順序矛盾・条件欠落）
+    がある場合のみ constraint_issue="major" としてください。軽微な改善余地はobservationsに
+    記載するに留め、"none"としてください（実行前の1回きりのゲートであり、些末な指摘で何度も
+    差し戻すと非効率です）。
+
+    【BL-092: 「検証せず削除して解消」を見抜く（重要）】このタスクを以前のラウンドでも
+    レビューし、特定のtask_idに具体的な指摘（数値の根拠不明・矛盾など）をした記憶がある場合、
+    今回そのtask_idの記述がどう変わったかを、あなたの記憶や印象だけで判断しないでください。
+    実際には、指摘された数値・記述が検算により訂正されたのではなく、該当するタスクの記述
+    自体が丸ごと削除されたり、別の抽象的な内容に差し替えられて矛盾が見えなくなっただけ、
+    ということが実際に起きています（reviewerの差し戻し圧力に対しtask_plannerが数値の
+    訂正ではなく記述の削除・抽象化で「解消」を図る抜け道）。以前指摘したtask_idについては
+    diff_plan_draft_versionsツールで前回との機械的な差分を確認し、指摘した論点が実際に
+    「数値が訂正された」のか「関連する記述ごと消えた」のかを区別してから判断してください。
+    後者（検証せず消しただけ）の場合、それ自体を新たな指摘としてcommentに明記してください。
+    曖昧な表記（例: 比率と絶対値の並記）が実際に矛盾を生むかどうか判断に迷う場合は、暗算で
+    決めつけず python_repl ツールで実際に数値を計算し確認してください（例: 「ルート全体の
+    15%」と「12km区間」が本当に整合するか等、この計画レビュー自体がプロジェクト全体で最も
+    上流の判断であり、ここでの暗算・計算ミスは後続の全タスクに伝播します）。ただし、計算で
+    「ゴール文に絶対値の記載がない」ことが判明した場合は、上記の通り数値の捏造要求はしないこと。
+
+    【同じ検証・計算を繰り返さない（重要）】ツール呼び出しの回数には上限があります。同じ論点
+    （例: 特定のタスクのacceptance_criteriaが曖昧かどうか、既に確認した数値の整合性）を
+    python_replや思考の中で何度も再検討・再計算しないでください。各論点は2回程度の確認・計算で
+    十分です。一度major/noneの判断がついた論点を、新しい情報が無いまま何度も蒸し返さないこと。
+    新しい論点が無いまま「もう一度よく考えよう」を繰り返すと、JSON出力そのものを書く余地が無く
+    なり、上限到達時に強制的に打ち切られたテキスト応答としてJSONを一度に出力せざるを得なくなり、
+    大規模な計画では出力が途中で切れて構文エラーになるリスクがあります。また、最終回答は
+    ```json ... ``` のコードブロックを**1つだけ**書いてください（下書き・プレビューとして
+    別のJSONブロックを先に書き、その後で「最終的な」ブロックを別途書く、という2段構成には
+    しないこと。複数のJSONブロックが混在すると機械的な抽出に失敗し、あなたの判定が正しく
+    伝わらない事故が実際に発生しています）。必要な検証が終わったら、直ちに最終的な
+    JSONオブジェクトを1つだけ記述してください。
+
+    【BL-093: thinkツールで検討過程を残す】このレビューは複数回のpython_repl/
+    diff_plan_draft_versions呼び出しを跨ぐことが多く、自然に考えた理由づけの生文章は、think
+    を使わなければ次のiterationには引き継がれません（tool_callsの記録だけが残ります）。think
+    を呼ぶと、その理由づけは次回以降のtool結果として全履歴ごと返され、雪だるま式に引き継がれ
+    ます。まずtodoに確認すべきtask_idや論点をリストアップしてから、各論点の検討時にaction/
+    decided/why（却下案があればrejected/rejected_why）を書いてください。他のツール呼び出しと
+    同一の応答内でまとめて呼んでも、単独で呼んでも構いません。
+    【重要】あなたが使えるツールはpython_repl・diff_plan_draft_versions・thinkです。think以外の
+    いずれかを呼ぶときは、必ずその同じ応答の中にthink（summary必須）も一緒に含めてください。
+    think無しでこれらのツールだけを呼ぶと、その応答のツール呼び出しは一切実行されず差し戻され
+    ます。
+
+    Return ONLY JSON: {{"risk": "low"/"medium"/"high", "constraint_issue": "none"/"major",
+    "comment": "（majorの場合、task_plannerへの差し戻し指摘。具体的な修正指示にすること）",
+    "observations": "（軽微な気づき、無ければ空文字）",
+    "per_task_comments": [{{"task_id": "該当タスクのtask_id", "comment": "そのタスク固有の指摘（フェーズ・タスク表のホワイトボードに直接書き込まれます）"}}]
+    （majorでもnoneでも、タスク固有の指摘があればここに列挙してください。無ければ空配列 []）}}
+    """
+    # [BL-089] 単発のquery_AI+_safe_json_parseではなく層2リトライ（_query_and_parse_with_retry、
+    # D-005）でラップする。パース失敗時にconstraint_issue="none"へ静かにフェイルオープンすると、
+    # レビュワーが実際には"major"と正しく判定していても握りつぶされ、縮退計画がそのまま
+    # 承認・実行されてしまう（実ドライラン`log/2026-07-25/1814`で確認：複数の```json
+    # ブロックが混線して構文エラーとなり、"major"判定が"none"にすり替わった）。
+    _reset_think_scratchpad()  # [BL-093]
+    parsed, parse_failed = _query_and_parse_with_retry(
+        prompt, client=client_auditor, model=model_auditor, label="Task Plan Reviewer",
+        tools=[PYTHON_REPL_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, THINK_TOOL],
+        fallback={"risk": "low", "constraint_issue": "none", "comment": "(JSONパース失敗のためnone扱い)",
+                  "observations": "", "per_task_comments": []},
+    )
+    if parse_failed:
+        print("🚨 [Task Plan Reviewer] JSON判定の取得に失敗しました。安全のためフェイルクローズ(major)します。")
+        return {
+            "risk": "high", "constraint_issue": "major",
+            "comment": "(レビューのJSON解析に失敗したため、安全のため差し戻します。計画内容自体に問題があったとは限りません)",
+            "observations": "", "per_task_comments": [],
+        }
+    return parsed
+
+
+def _find_phase_id_for_task(phases: list[dict], task_id: str) -> str:
+    """[BL-087 Stage2改善] phases配列から指定task_idを含むphase_idを探す。
+    見つからなければ空文字を返す（plan_drafts注釈はphase_id/task_id両方をキーにするため）。
+    """
+    for phase in phases:
+        for task in phase.get("tasks", []):
+            if task.get("task_id") == task_id:
+                return phase.get("phase_id", "")
+    return ""
+
+
+def _find_task_by_id(phases: list[dict], task_id: str) -> dict | None:
+    """[BL-087 Stage2改善] phases配列から指定task_idのタスク本体を探す。task_planner_nodeの
+    事前シードが何らかの理由で欠けていた場合でも、_append_reviewer_comment_to_planが
+    骨格文書を自前で生成できるようtask_for_skeletonとして渡すために使う。"""
+    for phase in phases:
+        for task in phase.get("tasks", []):
+            if task.get("task_id") == task_id:
+                return task
+    return None
+
+
+def task_plan_reviewer_node(state: LineageState) -> LineageState:
+    """[BL-087 Stage2] task_planner_node直後、実行が始まる前に1回だけ発火する計画レビュー
+    ゲート。majorと判定された場合はphasesをクリアしてtask_plannerへ差し戻す（最大2回まで、
+    上限到達後は指摘が残っていても計画を承認して進行する）。plan_review_doneはチェックポイント
+    再開時に毎回レビューし直さないためのガード（task_planner_nodeのturn_count==1ガードと同型）。
+    """
+    if state.get("plan_review_done") or not state.get("phases"):
+        return state
+
+    print("\n------ [task_plan_reviewer] が初期計画をレビュー中 ------\n")
+    result = call_task_plan_reviewer(
+        state["phases"], state["goal"],
+        goal_essence_text=_get_goal_essence_text(get_active_conn(), state["run_id"]),
+    )
+    print(f"\n[task_plan_reviewer] 判定: {result}\n")
+
+    # [BL-087 Stage2改善] タスク固有の指摘を、plan_drafts（フェーズ・タスク表のホワイトボード）
+    # へ直接書き込む。task_idキーで対象を特定するため、Detector注釈のような文中excerpt一致
+    # （BL-074/076既知の脆さ）は使わない。phasesをクリアする前に実行する必要がある
+    # （クリア後はどのphase_idに属していたか分からなくなるため）。
+    per_task_comments = result.get("per_task_comments", []) or []
+    _conn = get_active_conn()
+    feedback_parts = [result.get("comment", "")] if result.get("comment") else []
+    for item in per_task_comments:
+        task_id = item.get("task_id", "")
+        comment = item.get("comment", "")
+        if not task_id or not comment:
+            continue
+        phase_id = _find_phase_id_for_task(state["phases"], task_id)
+        if phase_id:
+            task_for_skeleton = _find_task_by_id(state["phases"], task_id)
+            _append_reviewer_comment_to_plan(_conn, state["run_id"], phase_id, task_id, comment, task_for_skeleton)
+        feedback_parts.append(f"[{task_id}] {comment}")
+    combined_feedback = "\n".join(feedback_parts)
+
+    retry_count = state.get("plan_reviewer_retry_count", 0)
+    if result.get("constraint_issue") == "major" and retry_count < 2:
+        state["plan_reviewer_retry_count"] = retry_count + 1
+        state["plan_reviewer_feedback"] = combined_feedback
+        state["phases"] = []  # task_planner_nodeの`not state.get("phases")`ガードにより再生成される
+        decision = make_decision("task_plan_reviewer", "初期計画を差し戻し", result.get("comment", ""))
+    else:
+        state["plan_review_done"] = True
+        decision = make_decision(
+            "task_plan_reviewer", "初期計画を承認",
+            result.get("comment") or "レビュー完了、重大な問題なし"
+        )
+    db_append_decision(decision, get_active_conn(), state["run_id"])
+    return state
+
 
 def orchestrator_node(state: LineageState) -> LineageState:
     """【SLM要約】
@@ -5376,7 +6469,10 @@ def facilitator_node(state: LineageState) -> LineageState:
         return state
 
     print(f"\n------ [facilitator] が思考中 ------")
-    feedback = call_facilitator(state["goal"], state["chat_history"], state.get("last_reflection_note", ""))
+    feedback = call_facilitator(
+        state["goal"], state["chat_history"], state.get("last_reflection_note", ""),
+        goal_essence_text=_get_goal_essence_text(get_active_conn(), state["run_id"]),
+    )
     print(f"\n------ 完了 ------")
     
     if state["chat_history"] and state["chat_history"][-1]["role"] == "assistant":
@@ -5472,7 +6568,10 @@ def integrator_node(state: LineageState) -> LineageState:
     final_text = "\n".join(master_document)
     
     # 統合したテキストをLLMに渡し、矛盾がないか最終チェックさせる
-    result = call_integrator(state["goal"], final_text)
+    result = call_integrator(
+        state["goal"], final_text,
+        goal_essence_text=_get_goal_essence_text(get_active_conn(), state["run_id"]),
+    )
     
     if result.get("contradictions"):
         print(f"⚠️ [integrator] 成果物間に矛盾を検出しました: {result.get('details')}")
@@ -5532,7 +6631,10 @@ def reviewer_node(state: LineageState) -> LineageState:
 
     arithmetic_warnings = verify_budget_arithmetic(master_doc)
     print(f"\n------ [reviewer] が思考中 ------")
-    result = call_reviewer(state["goal"], master_doc)
+    result = call_reviewer(
+        state["goal"], master_doc,
+        goal_essence_text=_get_goal_essence_text(get_active_conn(), state["run_id"]),
+    )
     print(f"\n------ 完了 ------")
     if arithmetic_warnings:
         result["passed"] = False
@@ -5582,7 +6684,9 @@ def build_graph():
     """
     graph = StateGraph(LineageState)
 # 1. ノードの登録（★関数は同じものを使い回し、名前で役割を分ける）
+    graph.add_node("goal_essence", goal_essence_node)
     graph.add_node("task_planner", task_planner_node)
+    graph.add_node("task_plan_reviewer", task_plan_reviewer_node)
     graph.add_node("generate_user_utterance", generate_user_utterance_node)
     
     # User AI用の監視と抽出
@@ -5610,8 +6714,26 @@ def build_graph():
     # ---------------------------------------------------------
     #  User AI 側の意思抽出後の分岐（★ここを新規作成）
     # ---------------------------------------------------------
-    graph.set_entry_point("task_planner")
-    graph.add_edge("task_planner", "generate_user_utterance")
+    graph.set_entry_point("goal_essence")
+    graph.add_edge("goal_essence", "task_planner")
+    graph.add_edge("task_planner", "task_plan_reviewer")
+
+    # [BL-087 Stage2] task_plan_reviewerがmajor判定でphasesをクリアした場合はtask_plannerへ
+    # 差し戻し、そうでなければ（承認 or 差し戻し上限到達）通常のフローへ進む。
+    def route_after_task_plan_reviewer(state: LineageState):
+        """【SLM要約】
+        Routes back to task_planner for regeneration when the plan reviewer clears phases
+        (major issue, retry budget remaining), otherwise proceeds to generate_user_utterance.
+        """
+        if not state.get("phases"):
+            return "task_planner"
+        return "generate_user_utterance"
+
+    graph.add_conditional_edges(
+        "task_plan_reviewer",
+        route_after_task_plan_reviewer,
+        {"task_planner": "task_planner", "generate_user_utterance": "generate_user_utterance"},
+    )
     graph.add_edge("generate_user_utterance", "user_detector")
 
     # --- ① User AI 直後の Detector 分岐 ---
@@ -5906,7 +7028,11 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
             "risk_register": [],
             "needs_revision_phases": [],
             "phases_to_revise": [],
-            "last_reflection_note": ""
+            "last_reflection_note": "",
+            "plan_review_done": False,
+            "plan_reviewer_retry_count": 0,
+            "plan_reviewer_feedback": "",
+            "goal_essence_done": False,
         }
 
     global _CURRENT_RUN_ID

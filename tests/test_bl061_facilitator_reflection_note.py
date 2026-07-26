@@ -100,7 +100,7 @@ def test_bl061_facilitator_node_passes_last_reflection_note(db_conn, monkeypatch
     conn, run_id = db_conn
     captured = {}
 
-    def fake_call_facilitator(goal, chat_history, reflection_note=""):
+    def fake_call_facilitator(goal, chat_history, reflection_note="", **kwargs):
         captured["reflection_note"] = reflection_note
         return "フィードバック"
 

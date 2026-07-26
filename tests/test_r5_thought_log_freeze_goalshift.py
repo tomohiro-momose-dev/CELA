@@ -247,7 +247,7 @@ def test_r5_arbiter_node_writes_goal_shift_event_when_required(db_conn, monkeypa
         "resource_claims": {"予算": {"phase_id": "task_2_1", "value": 60000000, "total_cap": 100000000}},
     })
 
-    monkeypatch.setattr(cela_main, "call_resource_arbiter", lambda goal, overrun, phases: {
+    monkeypatch.setattr(cela_main, "call_resource_arbiter", lambda goal, overrun, phases, **kwargs: {
         "phases_to_revise": ["task_1_1"],
         "rationale": "予算上限自体を引き上げる必要がある",
         "new_allocation": {"task_1_1": 70000000, "task_2_1": 60000000},

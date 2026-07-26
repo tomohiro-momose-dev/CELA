@@ -115,7 +115,7 @@ def test_bl041_arbiter_node_fires_on_real_overrun(db_conn, monkeypatch):
 
     called_with = {}
 
-    def fake_call_resource_arbiter(goal, overrun, phases):
+    def fake_call_resource_arbiter(goal, overrun, phases, **kwargs):
         called_with["overrun"] = overrun
         return {"phases_to_revise": ["task_1_1"], "rationale": "予算超過のため再配分"}
 

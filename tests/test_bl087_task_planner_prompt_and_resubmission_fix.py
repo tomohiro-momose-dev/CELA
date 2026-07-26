@@ -45,3 +45,15 @@ def test_bl087_generate_user_utterance_does_not_unconditionally_demand_resubmiss
     src = inspect.getsource(cela_main.generate_user_utterance)
     assert "未充足の項目はありません" in src
     assert "再提出を重ねて指示しないでください" in src
+
+
+def test_bl087_task_planner_prompt_forbids_redundant_reverification():
+    """[BL-087追記] 実ドライラン（log/2026-07-25/1705）で、task_plannerがacceptance_criteria
+    の個数やdepends_onの整合性を「最終確認」として複数回python_replで再検証し、
+    MAX_TOOL_ITER（15）の終盤5ターンを消費、最終iterationで26タスク分のJSON全体を
+    一度に強制出力させられる事態（大規模計画では途中で切れて構文エラーになるリスク）が
+    発生した。同じ検証内容を繰り返さず、確認済みなら直ちに最終JSONの記述に移るよう
+    明示する指示が追加されていること。"""
+    src = inspect.getsource(cela_main.call_task_planner)
+    assert "繰り返し再確認しないでください" in src
+    assert "強制的に打ち切られたテキスト応答" in src
