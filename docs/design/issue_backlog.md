@@ -128,6 +128,7 @@
 | BL-094 | 中 | `cela_main.py`（`call_expert`/`call_detector`数値監査パス/`call_resource_arbiter`/`call_integrator`/`call_reviewer`/`generate_user_utterance`/`call_task_planner`/`call_goal_essence_analyst`/`call_task_plan_reviewer`のプロンプト本文＋後半3関数への`READ_VERIFIED_FACT_TOOL`/`READ_DELIVERABLE_FILE_TOOL`新規配線） | 実ドライラン`log/2026-07-26/1749`のハルシネーション監査（別セッションのAgentによる全文精査＋本セッションでの主要箇所の裏取り）で、`read_verified_fact`/`read_deliverable_file`が`tools=[...]`に配線されツールスキーマの`description`も存在するにもかかわらず、実際にはどのノードもこれらを能動的に呼んでおらず、他タスクで既に確定した数値と矛盾する値を独自に仮定してしまう事故が繰り返し観測された（山間部片道時間が24分/36分で食い違ったまま放置、Goal Essence Analyst自身の推測が「実現可能性メモ」という架空の一次資料であるかのように後工程で「出典」扱いされる、等）。BL-093の「ツール説明文だけでは不十分で、各ノードのプロンプト本文に名指しした指示が要る」という教訓（追記修正3）と同型の問題と判断し、read_verified_fact/read_deliverable_fileを持つ当初6関数のプロンプト本文に、(1)両ツールの目的（全フェーズ横断の確定値検索／過去タスク成果物の前提込み全文参照）の説明、(2)「最低限iter=1で一度は関連キーワードでread_verified_factを呼び、他タスクの確定値・前提と文脈を同期してから作業を始めること」という思考フレームワーク上の指示、(3)思考中に「これは他タスクで既に扱われていたかもしれない」という気づきがあれば都度参照せよという指示、を追記した。Detectorには特に「数値の出所（ゴール文由来かAI自身の孫引きか）を追跡する」観点を明記。続けてユーザー指示により、当初ツール自体を持たず対象外としていた`call_task_planner`/`call_goal_essence_analyst`/`call_task_plan_reviewer`にも同ツールを新規配線し同型のオリエンテーションを追記（D-076）。新規`tests/test_bl094_read_tool_orientation.py`（32件）、既存`tests/test_bl093_think_tool_scratchpad.py`のツール名指し回帰テストを更新、`python -m py_compile`合格、関連クラスタ228件Pass。D-075/D-076として記録 | P2 |
 | BL-095 | 高 | `cela_main.py`（`_check_write_permission`のロール表拡張、`call_task_planner`/`call_goal_essence_analyst`/`call_task_plan_reviewer`への`WRITE_AGREEMENT_TOOL`新規配線） | BL-094完了後、情報の抽出・保存・伝搬の観点でシステムを棚卸しした際に発見。BL-094でこの3関数にread_verified_fact/read_deliverable_fileを配線したことで「他ノードの確定値は読めるが、自分の判断（なぜこのフェーズ構成にしたか、なぜrisk=mediumと判定したか等）を誰にも参照可能な形で書き残せない」という読み書き非対称が生じていた。ユーザーが「タスクプランナーの意図や理由は後続タスクで見れるべき」と明示指摘。task_planner/goal_essence_analystはExpert同様`status="Proposed"`限定、task_plan_reviewerはDetector等と同じ`status="Rejected"`限定（BL-062と同型のSUPERSEDEパターン）としてロール表を拡張し配線。新規`tests/test_bl095_task_planner_write_agreement.py`（25件）、`python -m py_compile`合格、関連クラスタ256件Pass。`done`化。 | P1 |
 | BL-096 | 中 | 新規（Detector等の監査系ノード全般、新設予定のissue/follow-up管理DB＋ツール） | 同じ棚卸しで発見。(1) Detectorの`observations`（軽微な気づき、BL-051）が`agreements`/`verified_facts`のどちらにも保存されず、直後数ターンのchat_history windowから外れると実質消滅する。(2) `constraint_issue`が`major`の場合はSUPERSEDEが強制されるが、`minor`は「記録するだけ」で終わり、後続タスクで実は重大だったと判明しても再浮上する保証がない。ユーザーは両者を同じ穴（正式なissue管理DBの不在）として統合し、「正式にissue管理DBと配線を作る時にそちらへ入れて管理する」方針。設計未着手（`open`、着手時は別途Plan modeで設計を詰める）。 | P2 |
+| BL-097 | 中 | `cela_main.py`（`think`ツールの構造化フィールド運用、確定値/推定値/運用ルールの区分表示、task_plan_reviewer等のスコープ逸脱防止・最終自己点検） | ユーザーが別AIに`log/2026-07-26`ドライランのログと本体プログラムを独立レビューさせた結果の指摘。(1) ログ上、どこまでがtask由来の確定値でどこからが今回追加した仮定・運用ルールかが埋もれやすい。(2) `think`の`decided`/`why`/`rejected`/`rejected_why`が空欄のまま進む場面があり、何を採用し何を捨てたかを後から追いにくい。改善提案として(a)数値の出所ラベル（確定値/推定値/運用ルール）の強制、(b)スコープ逸脱禁止の明文化（冒頭・末尾の両方で確認）、(c)最終チェックリスト固定化（確定値の引用漏れなし/新規数値の捏造なし/他タスクへの越境なし/責任分界が閉じている、の4項目自己点検）が挙げられた。BL-087 Fix A/C（アンチパターン明記・条件明示）およびBL-093/094の枠組みと同系統の改善。設計未着手（`open`、BL-096のPlan mode設計の後に着手予定）。 | P2 |
 
 ---
 
@@ -3117,6 +3118,31 @@ Detectorには特に「Agentの数値がゴール文の直接記載か、AI自�
 2. 再浮上トリガーの設計: 時限的な再監査、あるいは同一task_idに対するminor指摘の累積件数が閾値を超えたら機械的に`major`相当へ格上げする等、会話内で候補に挙がった案の是非を精査する。
 3. 既存の`agreements`/`verified_facts`との役割分担（本DBは「まだ解決していない懸念の追跡」に特化し、確定事項の記録は引き続き`agreements`/`verified_facts`が担う）。
 4. 新規ツール（書き込み用・読み取り用）をどのノードに配線するか（Detectorだけでなく、Reviewer/Arbiter/Integratorの`observations`相当の指摘も対象にするか）。
+
+**完了条件:** 未定（設計後に記載）。
+
+---
+
+### BL-097: ログの確定値/推定値/運用ルール区分表示・think空欄削減・スコープ逸脱防止の徹底
+
+**経緯:** ユーザーが別AI（本セッションとは独立したAgent）に`log/2026-07-26`のドライランログと`cela_main.py`本体を独立レビューさせた結果の指摘を受けて起票。BL-093/094/095で構築した「確定値と推定値の混同防止」「read_verified_fact/read_deliverable_fileによる同期」の路線を、ログの可読性・監査性の観点でさらに一段掘り下げる内容。
+
+**指摘内容（別AIレビューより）:**
+1. **数値の出所が埋もれる:** ログ上の数値自体は整合しているが、「どこまでがtask由来の確定値で、どこからが今回の設計仮定か」が読み手（人間レビュアー）から見て埋もれやすい。冒頭に「確定値」「補助仮定」「今回追加した運用ルール」を分けて提示するだけで可読性が上がる。
+2. **`think`の構造化フィールドの空欄:** `decided`/`why`/`rejected`/`rejected_why`が空のまま進む場面があり、後から見て「何を捨てて何を採ったか」が追いにくい。ストレステスト（品質監査）用途ではこの欄を埋めさせたほうが、後でプロンプトを改善しやすい。
+
+**改善提案（次に直すべきプロンプト設計）:**
+1. **数値の出所ラベルの強制:** 「確定値」「推定値」「運用ルール」の3区分を必ず出力させ、仮定混入の事故を減らす。
+2. **スコープ逸脱禁止の明文化:** 例えばtask_3_2なら「通信ロストのみ」「雪・追突は触れない」のように、冒頭と末尾の両方でスコープを確認させると安定する。
+3. **最終チェックリストの固定化:** 「確定値の引用漏れなし」「新規数値の捏造なし」「他タスクへの越境なし」「責任分界が3者（Expert/User AI/Detector等）で閉じている」の4項目を、最後に自己点検させる。
+
+**既存実装との関係:** BL-093（`think`ツールの`decided`/`why`/`rejected`/`rejected_why`フィールド新設）・BL-094（read_verified_fact/read_deliverable_fileによる確定値同期）・BL-087 Fix A/C（アンチパターン明記・派生値の条件明示）が土台にあるが、(a)出所ラベルの3区分強制、(b)`think`欄の空欄禁止、(c)スコープ逸脱防止の冒頭・末尾二重確認、(d)最終自己点検チェックリストの固定化、はいずれも未実装。
+
+**設計未着手（`open`）。** 着手時にPlan modeで検討すべき論点：
+1. 出所ラベル（確定値/推定値/運用ルール）をどの出力（`think`のsummary、最終JSON、ログ表示）に持たせるか。
+2. `think`の`decided`等を空欄禁止にする場合、機械的強制（BL-093同様のバリデーション）にするか、プロンプト指示に留めるか。
+3. 最終チェックリストの4項目を、どのノード（Expert/User AI/Detector/Reviewer全部か、一部か）に適用するか。
+4. BL-087 Fix Aのスコープ逸脱防止（task_plan_reviewer限定）を他ノードにも横展開するか。
 
 **完了条件:** 未定（設計後に記載）。
 
