@@ -1076,6 +1076,10 @@ WRITE_AGREEMENT_TOOL = {
             "Expert can only use status='Proposed'. "
             "User AI can use all statuses. "
             "Detector/Reviewer/Arbiter/Integrator can only use status='Rejected'. "
+            "[BL-095] task_planner/goal_essence_analyst can only use status='Proposed' (to record "
+            "their own planning/essence-analysis rationale as entry_type='Decision', queryable later "
+            "via read_verified_fact/read_deliverable_file). task_plan_reviewer can only use "
+            "status='Rejected' (same audit role as Detector/Reviewer). "
             "[BL-093] You must also call `think` with a non-empty `summary` in this SAME response "
             "(not a separate later response), or none of this response's tool calls -- including "
             "this one -- will be executed."
@@ -1483,6 +1487,11 @@ def _revise_goal_tool_impl(args: dict, conn: sqlite3.Connection, run_id: str, ca
 def _check_write_permission(args: dict, caller_role: str) -> str | None:
     """[F-3.2] 権限チェック: ロール×status許可表を全組み合わせで判定する。
     ExpertはProposedのみ、User AIは全status、Detector/Reviewer/Arbiter/IntegratorはRejectedのみ。
+    [BL-095] task_planner/goal_essence_analystはExpert同様、自らの計画・本質分析の判断根拠を
+    Proposed（提案・未承認）としてのみ記録できる（後続のtask_plan_reviewer/実行がこれを覆しうる
+    ため、Approvedを名乗らせない）。task_plan_reviewerはDetector/Reviewer等と同じ監査役として
+    Rejectedのみ許可し、既存のBL-062 SUPERSEDEパターン（誤りと判定した既存記録をRejectedで
+    無効化する）を踏襲する。
     """
     ALLOWED_STATUS_BY_ROLE = {
         "expert": {"Proposed"},
@@ -1491,6 +1500,9 @@ def _check_write_permission(args: dict, caller_role: str) -> str | None:
         "reviewer": {"Rejected"},
         "arbiter": {"Rejected"},
         "integrator": {"Rejected"},
+        "task_planner": {"Proposed"},
+        "goal_essence_analyst": {"Proposed"},
+        "task_plan_reviewer": {"Rejected"},
     }
     status = args.get("status")
     allowed = ALLOWED_STATUS_BY_ROLE.get(caller_role, set())
@@ -3772,10 +3784,20 @@ It serves as the initial planning layer for breaking down complex objectives acr
        ない数値を自分で仮定する前に必ずこの確認を行い、既存の確定値と矛盾する新しい仮定を
        勝手に作らないこと。【最低限、iter=1で一度は、関連しそうなキーワードでread_verified_fact
        を呼び、他ノードが既に確定・仮定した値と同期してから分解を始めてください】。
+    10. [BL-095: write_agreementで分解の判断根拠を書き残す] 最終的なJSON配列を出力する前に、
+       write_agreement（entry_type="Decision", status="Proposed", action_type="CREATE"）を
+       1回呼び、なぜこのフェーズ構成・タスク分割にしたか（フェーズ数、各フェーズのfocus_scope/
+       expected_time_axisの選定理由、特に判断が分かれた依存関係やタスク粒度の決定）を
+       decision_what/reason_whyとして記録してください。topicは「task_planner_phase_design」
+       のようにread_verified_fact/read_deliverable_fileで後から検索しやすい固定的な文字列に
+       してください。task_id/phase_idは特定の1タスクに紐づかないため省略して構いません。
+       これにより、後続のExpertやUser AIが「なぜこの分解になっているのか」を
+       read_deliverable_fileで遡って確認できるようになります（現状はJSON構造だけが伝わり、
+       設計意図・却下した代替案は誰にも参照できず失われています）。
        【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
-       thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の中にthink（summary必須）
-       も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、その応答のツール呼び出し
-       は一切実行されず差し戻されます。
+       write_agreement・thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の中に
+       think（summary必須）も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、
+       その応答のツール呼び出しは一切実行されず差し戻されます。
 
     ■ 目標: {goal}
     {goal_essence_text}
@@ -3844,10 +3866,13 @@ It serves as the initial planning layer for breaking down complex objectives acr
     # [BL-089] 層2リトライ（_query_and_parse_with_retry、D-005）でラップする。単発のパース失敗で
     # 即座に縮退計画（fallback_phase）へ落ちると、実際には正しく分解されたプランが1回の
     # フェンス構文の乱れだけで握りつぶされる（実ドライラン`log/2026-07-25/1814`で確認）。
+    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    _CURRENT_CALLER_ROLE = "task_planner"  # [BL-095]
+    _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
     phases, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_auditor, model=model_auditor, label="Task Planner",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, THINK_TOOL], fallback=fallback_phase,
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL], fallback=fallback_phase,
     )
     if parse_failed:
         print("🚨 [Task Planner] JSON分解結果の取得に失敗しました。縮退計画にフォールバックします。")
@@ -5752,10 +5777,15 @@ def call_goal_essence_analyst(goal: str) -> dict:
     正しい確認結果です）。もし何らかの理由で既に確定値・過去の成果物が存在する場合は、
     それを無視して独自に矛盾する仮定を置かないよう、iter=1で一度read_verified_factを
     呼んで確認してください。
+    [BL-095: write_agreementで検討過程を残す（任意）] true_essence/feasibility_notesの2フィールド
+    に収まらない検討過程（他に考えたが採用しなかった本質の言語化案とその却下理由等）があれば、
+    write_agreement（entry_type="Decision", status="Proposed", action_type="CREATE",
+    topic="goal_essence_analysis"）で任意に記録できます。true_essence/feasibility_notes自体は
+    既にgoal_essenceテーブルに保存され全ノードへ常時注入されるため、これは必須ではありません。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
-    thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の中にthink（summary必須）
-    も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、その応答のツール呼び出し
-    は一切実行されず差し戻されます。
+    write_agreement・thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の中にthink
+    （summary必須）も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、その応答の
+    ツール呼び出しは一切実行されず差し戻されます。
 
     Return ONLY JSON: {{"true_essence": "（本質の言語化、2〜4文程度）",
     "feasibility_notes": "（大まかな実現可能性の見立て、無理筋に見える組み合わせがあれば
@@ -5764,10 +5794,13 @@ def call_goal_essence_analyst(goal: str) -> dict:
     # [BL-089] 層2リトライ（_query_and_parse_with_retry、D-005）でラップする。本質フェーズは
     # 全ノードへ常時注入される最上流の判断であり、単発のパース失敗でgoalそのままの
     # フォールバックに落ちると本質フェーズの意味が失われる。
+    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    _CURRENT_CALLER_ROLE = "goal_essence_analyst"  # [BL-095]
+    _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_auditor, model=model_auditor, label="Goal Essence Analyst",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, THINK_TOOL],
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL],
         fallback={"true_essence": goal, "feasibility_notes": "(JSONパース失敗のため見立てなし)"},
     )
     if parse_failed:
@@ -5933,10 +5966,17 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     遡れない場合）は、それ自体を要指摘としてください。read_deliverable_fileでは、その値が
     どのタスクでどんな前提のもと確定したかを遡って確認できます。【最低限、iter=1で一度は、
     計画中の主要な派生値についてread_verified_factで確認してから判定を進めてください】。
+    [BL-095: task_plannerの判断根拠が誤っている場合はSUPERSEDEする]
+    read_deliverable_file（task_planner_phase_design）でtask_plannerが記録した分解の判断根拠を
+    確認した際、その根拠自体に誤り（存在しない前提を根拠にしている等）があり、それが今回の
+    constraint_issue="major"判定の理由になっている場合は、write_agreement（action_type=
+    "SUPERSEDE", status="Rejected", target_topic="task_planner_phase_design", reason_why=
+    "<何が誤りか>"）でその記録を無効化してください（既存のBL-062と同型のパターンです）。
+    そうしないと、誤った判断根拠が「記録済み」として残り続け、後続タスクが誤ってそれを参照します。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
-    diff_plan_draft_versions・thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の
-    中にthink（summary必須）も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、
-    その応答のツール呼び出しは一切実行されず差し戻されます。
+    diff_plan_draft_versions・write_agreement・thinkです。think以外のいずれかを呼ぶときは、
+    必ずその同じ応答の中にthink（summary必須）も一緒に含めてください。think無しでこれらの
+    ツールだけを呼ぶと、その応答のツール呼び出しは一切実行されず差し戻されます。
 
     Return ONLY JSON: {{"risk": "low"/"medium"/"high", "constraint_issue": "none"/"major",
     "comment": "（majorの場合、task_plannerへの差し戻し指摘。具体的な修正指示にすること）",
@@ -5949,10 +5989,13 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     # レビュワーが実際には"major"と正しく判定していても握りつぶされ、縮退計画がそのまま
     # 承認・実行されてしまう（実ドライラン`log/2026-07-25/1814`で確認：複数の```json
     # ブロックが混線して構文エラーとなり、"major"判定が"none"にすり替わった）。
+    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    _CURRENT_CALLER_ROLE = "task_plan_reviewer"  # [BL-095]
+    _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_auditor, model=model_auditor, label="Task Plan Reviewer",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, THINK_TOOL],
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL],
         fallback={"risk": "low", "constraint_issue": "none", "comment": "(JSONパース失敗のためnone扱い)",
                   "observations": "", "per_task_comments": []},
     )

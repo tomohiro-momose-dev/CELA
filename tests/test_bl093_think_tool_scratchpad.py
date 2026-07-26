@@ -212,7 +212,9 @@ def test_other_tools_remind_to_call_think_with_summary(tool_name):
 # 一文を追記した。ツール一覧が変わったのにこの一文の更新を忘れると検知できるよう、
 # ノードごとに期待されるツール名（プロンプト中に書いた素のツール名文字列）を回帰テスト化する。
 _NODE_TOOL_NAME_REMINDERS = {
-    "call_task_planner": ["python_repl", "read_verified_fact", "read_deliverable_file"],
+    "call_task_planner": [
+        "python_repl", "read_verified_fact", "read_deliverable_file", "write_agreement",
+    ],
     "call_expert": [
         "python_repl", "read_verified_fact", "read_deliverable_file",
         "write_agreement", "escalate_premise_concern",
@@ -234,9 +236,12 @@ _NODE_TOOL_NAME_REMINDERS = {
         "python_repl", "read_verified_fact", "read_deliverable_file", "write_agreement",
         "escalate_premise_concern", "resolve_premise_concern", "revise_goal", "freeze_agreement",
     ],
-    "call_goal_essence_analyst": ["python_repl", "read_verified_fact", "read_deliverable_file"],
+    "call_goal_essence_analyst": [
+        "python_repl", "read_verified_fact", "read_deliverable_file", "write_agreement",
+    ],
     "call_task_plan_reviewer": [
         "python_repl", "read_verified_fact", "read_deliverable_file", "diff_plan_draft_versions",
+        "write_agreement",
     ],
 }
 
