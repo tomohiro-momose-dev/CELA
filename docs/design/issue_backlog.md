@@ -3062,7 +3062,9 @@ BL-087 Fix Aは「reviewerが絶対値の確定を無理強いすると、task_p
 
 Detectorには特に「Agentの数値がゴール文の直接記載か、AI自身の推測の孫引きかを見分けるために使う」という、監査役固有の観点を明記した（`出所`という語で規定テスト化）。他の「参照系」ツール（`verify_whiteboard_excerpt`＝BL-079で既に「確定前に必ず検証」という同種の指示が存在、`diff_plan_draft_versions`＝BL-092で既に「以前指摘したtask_idについて確認」という同種の指示が存在）は、既存のプロンプト内オリエンテーションで十分と判断し、今回の追記対象外とした。`python_repl`/`write_agreement`/`escalate_premise_concern`/`resolve_premise_concern`/`revise_goal`/`freeze_agreement`も同様に既存の指示で足りると判断した。
 
-`call_task_planner`/`call_goal_essence_analyst`/`call_task_plan_reviewer`（`read_verified_fact`/`read_deliverable_file`を持たない）は対象外。これらのノードにも同種のツールを新規配線するかは、ツール自体の追加であり本BLのスコープ（既存ツールへのオリエンテーション追記）を超えるため、別途の判断（新規BL化）を要する未決事項として残す。
+`call_task_planner`/`call_goal_essence_analyst`/`call_task_plan_reviewer`（`read_verified_fact`/`read_deliverable_file`を持たない）は当初対象外とし、新規配線するかは別途の判断を要する未決事項として残していた。
+
+**追記（D-076、ユーザー指示によるツール配線の拡張）:** ユーザーから「call_task_planner／call_goal_essence_analyst／call_task_plan_reviewerはそもそもread_verified_fact/read_deliverable_file、監査や差戻し時呼び出せるように配線してください」と明示指示があり、上記の未決事項を解消。3関数の`tools=[...]`に`READ_VERIFIED_FACT_TOOL`/`READ_DELIVERABLE_FILE_TOOL`を追加配線し、同型のオリエンテーション（目的説明＋iter=1同期指示）をプロンプト本文に追記した。特に`call_task_planner`と`call_task_plan_reviewer`は「Task Plan Reviewerが差し戻し→task_plannerが再分解」というループを構成する関数対であり、実ドライラン`1749`で観測された「Goal Essence Analystが仮定した値にTask Plannerが気づかず、別の矛盾する値を再度仮定する」循環参照バグの再発防止を狙った配線である。`call_goal_essence_analyst`は通常プロジェクト最初期に1回だけ呼ばれ、その時点では確定値がまだ存在しないことが多いため実効性は限定的だが、一貫性と将来のグラフ設計変更への備えとして同様に配線した。ハンドラ実装（`_read_verified_fact_handler`/`_read_deliverable_file_handler`）は`_CURRENT_RUN_ID`のみに依存し呼び出し元ロールへの制限がないため、追加配線に伴う実装変更は`tools=[...]`とプロンプト文言のみで完結した。
 
 **完了条件:**
 
