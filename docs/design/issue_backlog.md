@@ -3068,9 +3068,10 @@ Detectorには特に「Agentの数値がゴール文の直接記載か、AI自�
 
 **完了条件:**
 
-- 新規`tests/test_bl094_read_tool_orientation.py`（17件）: 6関数それぞれが`BL-094`・`read_verified_fact`・`read_deliverable_file`を含むこと、`iter=1で`という同期指示を含むこと（パラメータ化テスト）、Detectorが「出所」という観点を明記していること、各関数固有の見出し文言が存在すること。
-- `python -m py_compile cela_main.py`合格、関連クラスタ213件Pass、`check_docs_consistency.py`合格。
-- 実LLM再ドライランでの効果確認（iter=1でのread_verified_fact呼び出しが実際に増えるか、数値の出所追跡が実際に機能するか）は次回待ち。
+- 新規`tests/test_bl094_read_tool_orientation.py`（32件）: 対象9関数（当初6関数＋追加配線3関数）それぞれが`BL-094`・`read_verified_fact`・`read_deliverable_file`を含むこと、`iter=1で`という同期指示を含むこと（パラメータ化テスト）、Detectorが「出所」という観点を明記していること、各関数固有の見出し文言が存在すること、追加配線3関数が実際に`READ_VERIFIED_FACT_TOOL`/`READ_DELIVERABLE_FILE_TOOL`を`tools=[...]`に渡していること（パラメータ化テスト）。
+- 既存`tests/test_bl093_think_tool_scratchpad.py`の`_NODE_TOOL_NAME_REMINDERS`（ツール名指しの回帰テスト）を、`call_task_planner`/`call_goal_essence_analyst`/`call_task_plan_reviewer`の新しいツール一覧に合わせて更新。
+- `python -m py_compile cela_main.py`合格、関連クラスタ228件Pass、`check_docs_consistency.py`合格。
+- 実LLM再ドライランでの効果確認（iter=1でのread_verified_fact呼び出しが実際に増えるか、数値の出所追跡・循環参照バグの再発防止が実際に機能するか）は次回待ち。
 
 ---
 
