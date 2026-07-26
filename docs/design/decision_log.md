@@ -1076,7 +1076,21 @@
 | 決定者 | t-momose（D-070の「reasoning消失は実害がない」という結論の矛盾を指摘し訂正させた上で、具体的な仕様（reasoningの構造化、todo/issuesのopen/closed必須、notesの追記専用化、iter番号の機械的付与、単独呼び出しの許容）を指定） / Claude Sonnet 5（技術検証・実装） |
 | **決定理由** | D-070は「`loop_messages`が全履歴を毎iteration再送するため、reasoning消失は実害がない」と結論したが、これは「tool_calls/tool結果という行動記録が保持される」事実と「reasoningという理由づけの生文章が保持される」事実を混同した誤りだった（`_StreamMessage.reasoning = None`固定により、reasoning自体はどのiterationにも再送されない。ユーザーが「思考1のreasoningは思考2に渡されているということでよいですね？」と直接確認した際に誤りが判明）。正しい結論は「reasoning消失問題は実在し、その解決策はtool_call引数という永続化されるチャネルへ理由づけを退避させること」であり、この認識のもとで設計をthinkツール（理由づけの構造化フィールドを持つ専用ツール）に一本化した。さらに、reasoningを1本の自由文にすると長いiterでモデル自身が読み返す際に取りこぼしが生じるため、action/decided/why/rejected/rejected_whyへの構造化が必要という指摘、todo/issuesは両方ともopen/closed必須のリストにすべきという指摘、notesは上書きされると過去の記録が消えるため追記専用リストにすべきという指摘、iter番号はモデルの自己申告に頼らずシステム側で機械的に付与すべき（LLMは計算・カウントを信用できないというAGENTS.md §5.1の原則と同根）という指摘、thinkは他ツールとのバンドルを必須にせず単独呼び出しも許容すべき（ReAct本来の設計思想の優先、D-071でMAX_TOOL_ITER引き上げとセット）という指摘を受け、これらすべてを最終仕様として確定した。 |
 | 決定内容 | 新規ツール`THINK_TOOL`/ハンドラ`_think_handler`を新設。引数は`action`（必須）/`decided`/`why`/`rejected`/`rejected_why`（構造化された理由づけ、蓄積済み全履歴をtool結果として即座に返すことで次iterationへ実質的に"注入"する）、`todo`/`issues`（`{item, status: open/closed}`のリスト、変更時のみ送信・省略時は前回状態を保持）、`notes`（追記専用）。iter番号は新設グローバル`_CURRENT_TOOL_LOOP_ITERATION`（`_query_AI_live`のループ先頭で機械的に設定、ループ本体への唯一の追加）から取得し`reasoning_log`・`python_calls_log`の双方に刻む。配線先はDetector数値監査パス・`call_task_planner`・`call_task_plan_reviewer`の3箇所（`_reset_think_scratchpad()`で呼び出し開始時にリセット）。 |
-| 影響 | `cela_main.py`（`THINK_TOOL`/`_think_handler`/`_reset_think_scratchpad`/`_CURRENT_TOOL_LOOP_ITERATION`の新設、`TOOL_DISPATCH`登録、`_query_AI_live`ループへの最小限の追加、3ノードのtools・プロンプト配線）。新規`tests/test_bl093_think_tool_scratchpad.py`（11件）。 |
+| 影響 | `cela_main.py`（`THINK_TOOL`/`_think_handler`/`_reset_think_scratchpad`/`_CURRENT_TOOL_LOOP_ITERATION`の新設、`TOOL_DISPATCH`登録、`_query_AI_live`ループへの最小限の追加、3ノードのtools・プロンプト配線）。新規`tests/test_bl093_think_tool_scratchpad.py`（11件）。**D-073でtools付与済み全ノードへ拡張。** |
+| 関連 BL | [BL-093](issue_backlog.md#bl-093-ノード内スクラッチパッド-thinkツール理由づけの退避ツールループ内の可変todoissuenotesメモ) |
+
+---
+
+### D-073: thinkツールの配線対象を、頻度・コストで絞った3ノードから、tools付与済みの全ノードへ拡張する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-26 |
+| 状態 | `decided`（実装済み。[D-072](decision_log.md#d-072-thinkツールの最終仕様を確定するthink専用ツールに理由づけの構造化フィールドtodoとissuesのopenclosed必須notesの追記専用化を持たせる)の対象ノード範囲を上書き） |
+| 決定者 | t-momose（「対象ノードは全ノードへ。ツール呼び出し回数というより、思考のやり方の環境の整備なので」と明示的に指示） / Claude Sonnet 5（実装、tools=None4関数を含めるかを確認質問） |
+| **決定理由** | D-072まではDetector数値監査パス・`call_task_planner`・`call_task_plan_reviewer`の3ノードに限定していた。これは「複数回のpython_repl呼び出しを跨ぐノードほどreasoning消失の被害を受けやすく、かつ呼び出し頻度が低いためコストが正当化される」という頻度・コストの多寡に基づく絞り込みだった。ユーザーはこの絞り込みの前提自体を退け、thinkツールの意義は個々の呼び出しのコスト対効果ではなく「思考のやり方の環境整備」という全ノード共通の基盤である、という立場を明確にした。この立場に立つと、頻度の高いノード（Expert/User等）や1回しか呼ばれないノード（Orchestrator/Reflection等）を除外する理由がなくなる。実装前に、現在`tools=None`（ツールループを一切通らない構造的に異なるコードパス）の4関数（`call_orchestrator`/`call_decision_extractor`/`call_reflection`/`call_facilitator`）を含めるかどうかをAskUserQuestionで確認し、「含める（真の全ノード）」の選択を得た。 |
+| 決定内容 | 既にtools付与済みだった残り6箇所（`call_expert`、`generate_user_utterance`の2呼び出し箇所、`call_goal_essence_analyst`、`call_reviewer`、`call_integrator`、`call_resource_arbiter`）に`THINK_TOOL`を追加。従来`tools=None`だった4関数（`call_orchestrator`/`call_decision_extractor`/`call_reflection`/`call_facilitator`）とDetectorのドメイン妥当性レビューパスを`tools=[THINK_TOOL]`へ変更し、単一応答パスからツールループパスへ切り替えた。 |
+| 影響 | `cela_main.py`（上記10箇所への`THINK_TOOL`追加・プロンプト指示・`_reset_think_scratchpad()`呼び出し）。tools=None→tools=[THINK_TOOL]化した5箇所（Detectorドメイン妥当性含む）は、初めてツールループの反復構造（残りiteration通知、最終iterationでのtools除去等）を経由するようになる構造的な変化であり、実LLM再ドライランでの想定外挙動の確認が次回待ち。既存`tests/test_bl087_stage3_4_goal_essence.py`のツール一覧完全一致アサーションを部分一致に更新。新規`tests/test_bl093_think_tool_scratchpad.py`を23件に拡張（パラメータ化テストで全ノードの配線を確認）。関連テストクラスタ174件Pass確認済み。 |
 | 関連 BL | [BL-093](issue_backlog.md#bl-093-ノード内スクラッチパッド-thinkツール理由づけの退避ツールループ内の可変todoissuenotesメモ) |
 
 ---
