@@ -1123,6 +1123,20 @@
 
 ---
 
+### D-076: `call_task_planner`/`call_goal_essence_analyst`/`call_task_plan_reviewer`にも`read_verified_fact`/`read_deliverable_file`を新規配線する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-26 |
+| 状態 | `decided`（実装済み） |
+| 決定者 | t-momose（D-075の「影響」欄で未決事項として残していた点について、「call_task_planner／call_goal_essence_analyst／call_task_plan_reviewerはそもそもread_verified_fact/read_deliverable_file、監査や差戻し時呼び出せるように配線してください」と明示指示） / Claude Sonnet 5（設計・実装） |
+| **決定理由** | D-075では、`read_verified_fact`/`read_deliverable_file`を持たない`call_task_planner`/`call_goal_essence_analyst`/`call_task_plan_reviewer`へのツール新規配線は「既存ツールへのオリエンテーション追記」というD-075のスコープを超えるとして対象外・未決事項とした。しかしBL-094監査で確認した実害（Goal Essence Analystが「12kmを総ルート長」と仮定して逆算した値を、Task Plannerが気づかず再度別の値で仮定し直す循環参照）は、まさにTask Planner／Task Plan Reviewerの差し戻し再分解ループで発生しており、この2関数がread_verified_factで他ノードの確定値を確認できないこと自体が根本原因の一部だった。ユーザーが「監査や差戻し時」に呼べるようにと明示指示したため、対象を広げることを決定した。 |
+| 決定内容 | `call_task_planner`（`tools=[PYTHON_REPL_TOOL, THINK_TOOL]`→`[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, THINK_TOOL]`）、`call_goal_essence_analyst`（同様に2ツール追加）、`call_task_plan_reviewer`（`tools=[PYTHON_REPL_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, THINK_TOOL]`に2ツール追加）へ配線を拡張。各関数のプロンプト本文にD-075と同型のオリエンテーション（目的説明＋iter=1同期指示）を追記。ハンドラ実装（`_read_verified_fact_handler`/`_read_deliverable_file_handler`）は呼び出し元ロールに依存せず`_CURRENT_RUN_ID`のみを参照するため、ロール制限等の実装変更は不要だった。 |
+| 影響 | `cela_main.py`（3関数のプロンプト本文＋`tools=[...]`)。`call_goal_essence_analyst`は通常プロジェクト最初期に1回だけ呼ばれるため、その時点では確定値がまだ存在せず実効性は限定的だが、一貫性と将来のグラフ設計変更への備えとして配線した。新規`tests/test_bl094_read_tool_orientation.py`への15件追加（計32件）、既存`tests/test_bl093_think_tool_scratchpad.py`のツール名指し回帰テストを更新。実LLM再ドライランでの効果確認（循環参照バグの再発防止が実際に機能するか）は次回待ち。 |
+| 関連 BL | [BL-094](issue_backlog.md#bl-094-read_verified_factread_deliverable_file等参照系ツールのノードプロンプトへのオリエンテーション追記) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
