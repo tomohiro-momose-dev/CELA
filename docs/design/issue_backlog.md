@@ -2983,39 +2983,38 @@ BL-087 Fix Aは「reviewerが絶対値の確定を無理強いすると、task_p
 
 ---
 
-### BL-093: ノード内スクラッチパッド `update_working_notes`（ツールループ内の可変todo/issueメモ）
+### BL-093: ノード内スクラッチパッド `think`ツール（理由づけの退避＋ツールループ内の可変todo/issue/notesメモ）
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（設計確定・実装未着手） |
+| 状態 | `done` |
 | 優先度 | P2 |
-| 関連 | [BL-092](issue_backlog.md#bl-092-reviewerの差し戻し圧力に対しtask_plannerが数値の検算訂正ではなく該当箇所の削除抽象化で解消してしまう)（同時期のスクラッチパッド議論の発端だが別テーマ）、[decision_log.md D-070](decision_log.md#d-070-ノード内スクラッチパッド機構はdecision_list要約圧縮を廃しglobal_working_notes全文上書き型のみに縮小する) |
+| 関連 | [BL-092](issue_backlog.md#bl-092-reviewerの差し戻し圧力に対しtask_plannerが数値の検算訂正ではなく該当箇所の削除抽象化で解消してしまう)（同時期のスクラッチパッド議論の発端だが別テーマ）、[decision_log.md D-070](decision_log.md#d-070-ノード内スクラッチパッド機構はdecision_list要約圧縮を廃しglobal_working_notes全文上書き型のみに縮小する)（誤った結論、D-072で訂正）、[decision_log.md D-071](decision_log.md#d-071-max_tool_iterを15から20へ引き上げthinkツールの単独呼び出しを許容する)（MAX_TOOL_ITER引き上げ）、[decision_log.md D-072](decision_log.md#d-072-thinkツールの最終仕様を確定するthink専用ツールに理由づけの構造化フィールドtodoとissuesのopenclosed必須notesの追記専用化を持たせる)（最終設計・実装） |
 
 **内容:**
 
-別チャットで「各ノードのquery_AI呼び出しに思考フレームワーク＋スクラッチパッド（ノート機能）を持たせる」構想が持ち込まれ、次の経緯で議論・検証した。
+別チャットで「各ノードのquery_AI呼び出しに思考フレームワーク＋スクラッチパッド（ノート機能）を持たせる」構想が持ち込まれ、次の経緯で議論・検証・訂正した。
 
-1. **発端**: `_query_AI_live`のツールループ（[cela_main.py:1958-1969](../../cela_main.py#L1958-L1969)）は、モデルの`reasoning`（chain-of-thought生文章）を`_StreamMessage`で`None`固定にして捨てており（`content`/`tool_calls`のみが`loop_messages`へ再送される）、次iterationでモデルは「前回どのツールを何の引数で呼んだか」という骨組みだけから理由を再構築している、という技術的事実を確認した（`_StreamMessage.reasoning = None`固定、`_LAST_REASONING_TEXT`はループ終了後に一括代入されるのみで途中iterationには還元されない）。
-2. これを問題視し複数の実装案（content内へのメモ書き、think専用ツール、構造化出力＋要約圧縮）を比較検討。Anthropic公式の"think tool"パターン（no-opツールとして呼ばせ、tool_calls＋tool結果という構造化ペアで確実にloop_messagesへ残す）が最も堅牢と判断しかけた。
-3. さらに「直前1iterの生ログ＋要約リスト＋decision_list＋global_working_notes」という発展案が提示されたが、検証の結果`loop_messages`はそもそもtruncateされず全履歴を毎iteration再送する実装であり（MAX_TOOL_ITER=15という短い上限もあるため）、reasoning以外の情報（tool_callsの引数含む）は何もしなくても既に全iteration分保持されることが判明。要約/windowing機構は「短いループには過剰設計」という、この発展案自身がパターン4（構造化出力＋要約圧縮）を退けた際の論理と矛盾しており、解決すべき問題が実質存在しない。`decision_list`（decided/why/rejected）も`write_agreement`が既に`agreements`テーブルへ構造化永続化している内容と重複すると判断した。
-4. 最終的にユーザー・別チャットの側で「iteration間のコンテキスト引き継ぎ自体は特に欠落なく、最低限のReAct定石通りに機能している」との訂正があり、当初の問題意識（reasoning消失による機能不全）自体が撤回された。
-5. 撤回後も残る価値として、append-onlyのtool呼び出し履歴では「過去のある時点の状態」しか表現できず、「今のtodo/issueの状態」を都度上書きできる可変メモは既存機構のどこにも存在しないことを確認した。これのみを`global_working_notes`として新設する。
+1. **発端**: `_query_AI_live`のツールループ（[cela_main.py:1958-1969](../../cela_main.py#L1958-L1969)、実装後は行番号が前後する）は、モデルの`reasoning`（chain-of-thought生文章）を`_StreamMessage`で`None`固定にして捨てており（`content`/`tool_calls`のみが`loop_messages`へ再送される）、次iterationでモデルは「前回どのツールを何の引数で呼んだか」という骨組みだけから理由を再構築している、という技術的事実を確認した。
+2. 複数の実装案（content内へのメモ書き、think専用ツール、構造化出力＋要約圧縮）を比較検討する中で、一時「`loop_messages`は全履歴を毎iteration再送するため、reasoning消失は実害がない」と誤って結論しかけた。これは「tool_calls/tool結果という行動記録が保持される」事実と「reasoningという理由づけの生文章が保持される」事実を混同した誤りであり、ユーザー指摘で訂正した（reasoning自体は`_StreamMessage.reasoning = None`固定のままどのiterationにも再送されず、この問題は実在する）。
+3. 一方で「直前1iterの生ログ＋要約リスト＋decision_list」という重い発展案は不要と判断した。`loop_messages`はそもそもtruncateされず全履歴を毎iteration再送する実装であり（MAX_TOOL_ITER＝短い上限もあるため）、いったんtool_call引数として書かれた情報は何もしなくても既に全iteration分保持される。要約/windowing機構は「短いループには過剰設計」という、この発展案自身がパターン4（構造化出力＋要約圧縮）を退けた際の論理と矛盾しており、解決すべき問題が実質存在しない。`decision_list`も`write_agreement`が既に`agreements`テーブルへ構造化永続化している内容と重複する。
+4. 最終的にユーザーから、reasoningは構造化フィールド（action/decided/why/rejected/rejected_why）として残すべき（自由文1本だと長いiterで読み返す際に取りこぼしが生じるため）、todo/issuesはopen/close必須のリスト、notesは上書きされない追記専用リストに分離すべき、iter番号はモデルの自己申告ではなく機械的に付与すべき、thinkは他ツールとバンドル必須にせず単独呼び出しも許容すべき（ReAct本来の「軽量な思考単位を繰り返す」設計を優先し、必要ならMAX_TOOL_ITERを引き上げる）、という具体的な仕様指定を受け、これに基づき設計・実装した。
 
-**設計（確定・実装は別途承認後）:**
+**設計・実装:**
 
-1. 新規ツール`update_working_notes`（引数: `notes: string`。常に現時点の完全な内容で全文上書き。差分ではない）。ハンドラは状態を持たず、受け取った引数を検証せずに`{"ok": True}`的なno-op応答を返すのみ（DB・stateいずれにも永続化しない。ツールループ終了と同時に消える、1ノード呼び出し限定のスクラッチパッド。既存の`loop_messages`再送の仕組みにそのまま乗るため、ツールループ本体の改修は不要）。
-2. 配線先はDetector数値監査パス（`call_detector`の`tools=[...]`。ドメイン妥当性パスは`tools=None`のため対象外）・`call_task_planner`・`call_task_plan_reviewer`の3箇所に限定する。複数回のpython_repl呼び出しを跨ぐノードのみが対象で、Expert/User対話ノード（`call_expert`/`generate_user_utterance`）はターン頻度が高くコストに見合わないため対象外とする。
-3. プロンプト指示: (a) 常に完全な現在のtodo/issue一覧を書くこと（差分ではなく前回分の全置換であること）、(b) ツール呼び出し回数には上限（MAX_TOOL_ITER=15）があるため、可能な限り実際の検証・計算ツール呼び出し（python_repl等）と同一の応答内でまとめて呼ぶこと（別iterationに分けて呼ばない）。
+1. 新規ツール`THINK_TOOL`/ハンドラ`_think_handler`（`cela_main.py`）。引数: `action`（必須、このiterで何を考え・しようとしているか）、`decided`/`why`（決定があれば）、`rejected`/`rejected_why`（却下案があれば）、`todo`/`issues`（`{item, status: open/closed}`のリスト、変更がある時だけ含めればよく省略時は前回状態を保持）、`notes`（追記専用、送るたびに新規1件が既存リストの末尾に追加され既存分は消えない）。
+2. ハンドラは`action`等を`_THINK_REASONING_LOG`に追記し、tool結果として**蓄積済み全reasoning履歴＋現在のtodo/issues/notes**を即座に返す。これにより、消える`reasoning`チャネルではなく、`loop_messages`に確実に残る`tool_calls`/tool結果チャネルへ理由づけを退避させる（ツールループ本体の改修は不要）。
+3. iter番号はモデルの自己申告に頼らず、新設グローバル`_CURRENT_TOOL_LOOP_ITERATION`（`_query_AI_live`のループ先頭で`iteration`変数から機械的に設定、この1行のみが唯一のループ本体への追加）から取得し、`_THINK_REASONING_LOG`の各エントリと`python_calls_log`（python_repl呼び出しの生ログ）の両方に刻む。
+4. `_reset_think_scratchpad()`で全状態をリセット（DB・stateいずれにも永続化しない、1ノード呼び出し限定のスクラッチパッド）。配線先はDetector数値監査パス（`call_detector`、ドメイン妥当性パスは`tools=None`のため対象外）・`call_task_planner`・`call_task_plan_reviewer`の3箇所（複数回のpython_repl呼び出しを跨ぐノードのみ。Expert/User対話ノードは頻度が高くコストに見合わないため対象外）。各関数呼び出し開始時に`_reset_think_scratchpad()`を呼ぶ。
+5. プロンプト指示: 初回でtodoを初期リストアップすること、以降はtodoに従って作業し途中の気づきは自由に追記・更新できること、他のツール呼び出しと同一応答内でまとめて呼んでも単独で呼んでもよいこと。
+6. `MAX_TOOL_ITER`を15→20へ引き上げ（D-071、AGENTS.md §7準拠でユーザー承認済み）。単独呼び出しを許容する方針により、既にiter=15（旧上限）に達した実績のある`task_plan_reviewer`等で予算超過が現実的になったため。
 
-**未決事項（実装時に判断）:**
+**完了条件:**
 
-まずは全文上書き方式で運用し、出力量・既存内容の消失/書き換わり（ハルシネ）頻度を実測する。問題が顕在化した場合は`apply_whiteboard_patch`と同型の差分パッチ方式への移行を検討するが、find&replace方式はBL-074/076/079で判明した「一意な引用一致」の脆さを伴うため、低スコープの使い捨てスクラッチパッドに最初からその複雑さを持ち込む必要は薄いと判断し、まずは全文上書きのみで開始する。
-
-**完了条件（実装時）:**
-
-- 新規テストで、ツール登録（`TOOL_DISPATCH`）・`call_detector`/`call_task_planner`/`call_task_plan_reviewer`への配線・プロンプト文言（全文上書き指示・同一応答内でまとめる指示）の存在を確認すること。
-- `python -m py_compile cela_main.py`合格、オフラインスモークテスト全件Pass。
-- 実装はこの設計へのユーザー承認後に着手する（本エントリ時点ではBL起票・設計確定のみ、コードは未着手）。
+- 新規`tests/test_bl093_think_tool_scratchpad.py`（11件）: ツール登録確認、reasoningへの機械的iter番号付与、複数回呼び出しでの累積、todo/issuesのopen/closed必須・変更時のみ更新（sticky）、notesの追記専用（上書きされない）、リセット、`MAX_TOOL_ITER=20`、ループ本体への`_CURRENT_TOOL_LOOP_ITERATION`/`"iteration"`付与、3ノードへの配線・プロンプト文言の存在確認。
+- 既存`tests/test_bl087_stage2_task_plan_reviewer_node.py`の`call_task_planner`ツール一覧完全一致アサーションを、ツールが増えても壊れないよう部分一致（`in`）に更新（BL-092で`call_task_plan_reviewer`側に行った修正と同型）。
+- `python -m py_compile cela_main.py`合格、関連クラスタ94件Pass、`check_docs_consistency.py`合格。
+- 実LLM再ドライランでの効果確認（thinkツールが実際に理由づけの再構築ミスを減らすか、MAX_TOOL_ITER=20が実際に十分か）は次回待ち。
 
 ---
 

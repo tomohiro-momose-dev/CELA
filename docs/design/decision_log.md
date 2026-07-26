@@ -1044,12 +1044,40 @@
 | 項目 | 内容 |
 |------|------|
 | 日付 | 2026-07-26 |
-| 状態 | `decided`（設計確定。実装はユーザー承認後） |
+| 状態 | `superseded`（[D-072](decision_log.md#d-072-thinkツールの最終仕様を確定するthink専用ツールに理由づけの構造化フィールドtodoとissuesのopenclosed必須notesの追記専用化を持たせる)で訂正・確定。本エントリの「reasoning消失は実害がない」という判断根拠自体が誤りだったため） |
 | 決定者 | t-momose（別チャットでの議論を持ち込み検討を主導。「iteration間のコンテキスト引き継ぎは盛大な勘違いだった」と当初の問題意識を撤回し、「working_notesだけまずはBL化して設計して」と指示） / Claude Sonnet 5（技術検証・設計） |
 | **決定理由** | 別チャットで「各ノードのquery_AI呼び出しに思考フレームワーク＋スクラッチパッドを持たせる」構想が提案され、動機として「ツールループの`_StreamMessage`がモデルのreasoningを`None`固定で捨てており（[cela_main.py:1958-1969](../../cela_main.py#L1958-L1969)）、次iterationでモデルは前回のtool_calls/tool結果という骨組みだけから理由を再構築している」という技術的事実を確認した。これに対しthink専用ツール（tool_calls＋tool結果の構造化ペアとして確実にloop_messagesへ残る、Anthropic公式の"think tool"パターン）が有力と判断しかけたが、さらなる発展案（直前1iter生ログ＋要約リスト＋decision_list＋global_working_notes、システム側で毎iterationダイジェストを組み立てる方式）が出た時点で検証したところ、`loop_messages`はそもそも一度もtruncateされず全履歴を毎iteration再送する実装であり（かつMAX_TOOL_ITER=15という短い上限があるため）、reasoning以外の情報（tool_callsの引数含む）は何もしなくても既に全iteration分保持されていることが判明した。要約/windowing機構は「短いループには過剰設計」という、この発展案自身がパターン4（構造化出力＋要約圧縮）を退けた論理と矛盾しており、解決すべき問題が実質存在しない。`decision_list`（decided/why/rejected）も`write_agreement`が`agreements`テーブルへ既に構造化永続化している内容と重複する。さらにユーザー・別チャット側で「iteration間のコンテキスト引き継ぎ自体はReAct定石通り欠落なく機能している」との訂正があり、当初の問題意識（reasoning消失による機能不全）自体が撤回された。撤回後も残る価値は、append-onlyのtool呼び出し履歴では表現できない「今のtodo/issueの状態」を上書き更新できる可変メモ（`global_working_notes`）のみであり、これに機構をスコープダウンする。 |
 | 決定内容 | 新規ツール`update_working_notes`（引数`notes: string`、常に全文上書き・差分ではない）のみを新設する。ハンドラは永続化しないno-op（`{"ok": True}`的な応答のみ）とし、ツールループ本体は無改修のまま既存の`loop_messages`再送に乗せる。配線先はDetector数値監査パス・`call_task_planner`・`call_task_plan_reviewer`の3箇所に限定（Expert/User対話ノードは高頻度でコストに見合わないため対象外）。プロンプトには「全文上書き（差分ではない）」「MAX_TOOL_ITER予算節約のため実際の検証ツール呼び出しと同一応答内でまとめて呼ぶこと」を明記する。差分パッチ方式（ホワイトボードの`edits`と同型）への移行は、全文上書き方式の実測結果を見てから判断する（BL-074/076/079で判明した一意引用一致の脆さを、低スコープのスクラッチパッドに最初から持ち込む必要は薄いと判断）。 |
 | 影響 | `cela_main.py`（新規`update_working_notes`ツール・ハンドラ・`TOOL_DISPATCH`登録、`call_detector`/`call_task_planner`/`call_task_plan_reviewer`のtools・プロンプト）は未実装。本エントリは設計決定の記録のみで、実装はユーザーの明示的な承認後に着手する。 |
-| 関連 BL | [BL-093](issue_backlog.md#bl-093-ノード内スクラッチパッド-update_working_notesツールループ内の可変todoissueメモ) |
+| 関連 BL | [BL-093](issue_backlog.md#bl-093-ノード内スクラッチパッド-thinkツール理由づけの退避ツールループ内の可変todoissuenotesメモ) |
+
+---
+
+### D-071: MAX_TOOL_ITERを15から20へ引き上げ、thinkツールの単独呼び出しを許容する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-26 |
+| 状態 | `decided` |
+| 決定者 | t-momose（think単独呼び出しを許容する方針を明言した上で、AskUserQuestionによる選択肢提示から「20へ引き上げ」を選択・承認） / Claude Sonnet 5（AGENTS.md §7準拠で事前に理由を提示し承認を仰いだ） |
+| **決定理由** | BL-093のthinkツールについて、ユーザーから「python_repl等の実作業ツールと同一応答内でまとめて呼ぶ」というバンドル必須ルールではなく、thinkツール単体でも自由に呼び出せるようにすべきという指示があった（ReAct本来の「思考・作業を可能な限り短く切り、軽量な作業単位を繰り返す」設計を優先し、必要ならiteration上限を引き上げる、という考え方）。単独呼び出しを許容すると、他ツールとバンドルする場合よりiteration消費が増えるため、既にiter=15（旧上限）に達した実績のある`task_plan_reviewer`（`log/2026-07-25/1913`）等で予算超過が現実的になる。`MAX_TOOL_ITER`はAGENTS.md §7の「重要定数」に該当し事前承認が必須のため、ユーザーに選択肢（15のまま様子見／20へ引き上げ／その他の値）を提示し、「20へ引き上げ」の選択を得た。 |
+| 決定内容 | `cela_main.py`の`_query_AI_live`内`MAX_TOOL_ITER`を15から20へ変更。 |
+| 影響 | `cela_main.py`（`_query_AI_live`の`MAX_TOOL_ITER`定数のみ）。全ノード共通のツールループに適用されるため、Detector/task_planner/task_plan_reviewer以外のノード（Expert/User等）にも同様に上限が20へ緩和される。実LLM再ドライランでの効果確認（thinkツール単独呼び出しの実際の消費量、20で十分か）は次回待ち。 |
+| 関連 BL | [BL-093](issue_backlog.md#bl-093-ノード内スクラッチパッド-thinkツール理由づけの退避ツールループ内の可変todoissuenotesメモ) |
+
+---
+
+### D-072: thinkツールの最終仕様を確定する（think専用ツールに理由づけの構造化フィールド、todoとissuesのopen/closed必須、notesの追記専用化を持たせる）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-26 |
+| 状態 | `decided`（実装済み。[D-070](decision_log.md#d-070-ノード内スクラッチパッド機構はdecision_list要約圧縮を廃しglobal_working_notes全文上書き型のみに縮小する)を訂正・確定） |
+| 決定者 | t-momose（D-070の「reasoning消失は実害がない」という結論の矛盾を指摘し訂正させた上で、具体的な仕様（reasoningの構造化、todo/issuesのopen/closed必須、notesの追記専用化、iter番号の機械的付与、単独呼び出しの許容）を指定） / Claude Sonnet 5（技術検証・実装） |
+| **決定理由** | D-070は「`loop_messages`が全履歴を毎iteration再送するため、reasoning消失は実害がない」と結論したが、これは「tool_calls/tool結果という行動記録が保持される」事実と「reasoningという理由づけの生文章が保持される」事実を混同した誤りだった（`_StreamMessage.reasoning = None`固定により、reasoning自体はどのiterationにも再送されない。ユーザーが「思考1のreasoningは思考2に渡されているということでよいですね？」と直接確認した際に誤りが判明）。正しい結論は「reasoning消失問題は実在し、その解決策はtool_call引数という永続化されるチャネルへ理由づけを退避させること」であり、この認識のもとで設計をthinkツール（理由づけの構造化フィールドを持つ専用ツール）に一本化した。さらに、reasoningを1本の自由文にすると長いiterでモデル自身が読み返す際に取りこぼしが生じるため、action/decided/why/rejected/rejected_whyへの構造化が必要という指摘、todo/issuesは両方ともopen/closed必須のリストにすべきという指摘、notesは上書きされると過去の記録が消えるため追記専用リストにすべきという指摘、iter番号はモデルの自己申告に頼らずシステム側で機械的に付与すべき（LLMは計算・カウントを信用できないというAGENTS.md §5.1の原則と同根）という指摘、thinkは他ツールとのバンドルを必須にせず単独呼び出しも許容すべき（ReAct本来の設計思想の優先、D-071でMAX_TOOL_ITER引き上げとセット）という指摘を受け、これらすべてを最終仕様として確定した。 |
+| 決定内容 | 新規ツール`THINK_TOOL`/ハンドラ`_think_handler`を新設。引数は`action`（必須）/`decided`/`why`/`rejected`/`rejected_why`（構造化された理由づけ、蓄積済み全履歴をtool結果として即座に返すことで次iterationへ実質的に"注入"する）、`todo`/`issues`（`{item, status: open/closed}`のリスト、変更時のみ送信・省略時は前回状態を保持）、`notes`（追記専用）。iter番号は新設グローバル`_CURRENT_TOOL_LOOP_ITERATION`（`_query_AI_live`のループ先頭で機械的に設定、ループ本体への唯一の追加）から取得し`reasoning_log`・`python_calls_log`の双方に刻む。配線先はDetector数値監査パス・`call_task_planner`・`call_task_plan_reviewer`の3箇所（`_reset_think_scratchpad()`で呼び出し開始時にリセット）。 |
+| 影響 | `cela_main.py`（`THINK_TOOL`/`_think_handler`/`_reset_think_scratchpad`/`_CURRENT_TOOL_LOOP_ITERATION`の新設、`TOOL_DISPATCH`登録、`_query_AI_live`ループへの最小限の追加、3ノードのtools・プロンプト配線）。新規`tests/test_bl093_think_tool_scratchpad.py`（11件）。 |
+| 関連 BL | [BL-093](issue_backlog.md#bl-093-ノード内スクラッチパッド-thinkツール理由づけの退避ツールループ内の可変todoissuenotesメモ) |
 
 ---
 
