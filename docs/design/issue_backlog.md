@@ -3005,16 +3005,26 @@ BL-087 Fix Aは「reviewerが絶対値の確定を無理強いすると、task_p
 1. 新規ツール`THINK_TOOL`/ハンドラ`_think_handler`（`cela_main.py`）。引数: `action`（必須、このiterで何を考え・しようとしているか）、`decided`/`why`（決定があれば）、`rejected`/`rejected_why`（却下案があれば）、`todo`/`issues`（`{item, status: open/closed}`のリスト、変更がある時だけ含めればよく省略時は前回状態を保持）、`notes`（追記専用、送るたびに新規1件が既存リストの末尾に追加され既存分は消えない）。
 2. ハンドラは`action`等を`_THINK_REASONING_LOG`に追記し、tool結果として**蓄積済み全reasoning履歴＋現在のtodo/issues/notes**を即座に返す。これにより、消える`reasoning`チャネルではなく、`loop_messages`に確実に残る`tool_calls`/tool結果チャネルへ理由づけを退避させる（ツールループ本体の改修は不要）。
 3. iter番号はモデルの自己申告に頼らず、新設グローバル`_CURRENT_TOOL_LOOP_ITERATION`（`_query_AI_live`のループ先頭で`iteration`変数から機械的に設定、この1行のみが唯一のループ本体への追加）から取得し、`_THINK_REASONING_LOG`の各エントリと`python_calls_log`（python_repl呼び出しの生ログ）の両方に刻む。
-4. `_reset_think_scratchpad()`で全状態をリセット（DB・stateいずれにも永続化しない、1ノード呼び出し限定のスクラッチパッド）。配線先はDetector数値監査パス（`call_detector`、ドメイン妥当性パスは`tools=None`のため対象外）・`call_task_planner`・`call_task_plan_reviewer`の3箇所（複数回のpython_repl呼び出しを跨ぐノードのみ。Expert/User対話ノードは頻度が高くコストに見合わないため対象外）。各関数呼び出し開始時に`_reset_think_scratchpad()`を呼ぶ。
+4. `_reset_think_scratchpad()`で全状態をリセット（DB・stateいずれにも永続化しない、1ノード呼び出し限定のスクラッチパッド）。各関数呼び出し開始時に`_reset_think_scratchpad()`を呼ぶ。
 5. プロンプト指示: 初回でtodoを初期リストアップすること、以降はtodoに従って作業し途中の気づきは自由に追記・更新できること、他のツール呼び出しと同一応答内でまとめて呼んでも単独で呼んでもよいこと。
 6. `MAX_TOOL_ITER`を15→20へ引き上げ（D-071、AGENTS.md §7準拠でユーザー承認済み）。単独呼び出しを許容する方針により、既にiter=15（旧上限）に達した実績のある`task_plan_reviewer`等で予算超過が現実的になったため。
 
+**対象ノードの全ノードへの拡張（D-072後の追加指示）:**
+
+当初はDetector数値監査パス・`call_task_planner`・`call_task_plan_reviewer`の3ノード限定（複数回のpython_repl呼び出しを跨ぐノードのみという頻度・コストベースの絞り込み）だったが、ユーザーから「対象ノードは全ノードへ。ツール呼び出し回数というより、思考のやり方の環境の整備なので」という指示を受けた。これは頻度・コストの多寡で対象を絞る発想自体を退け、「thinkは全ノードに共通の思考基盤である」という立場を明確にするもの。これに基づき、以下へ拡張した。
+
+- 既にtools付与済みだった残り6箇所（`call_expert`、`generate_user_utterance`の2呼び出し箇所、`call_goal_essence_analyst`、`call_reviewer`、`call_integrator`、`call_resource_arbiter`）に`THINK_TOOL`を追加。
+- 従来`tools=None`（単一応答・ツールループを一切通らない構造的に異なるコードパス）だった4関数（`call_orchestrator`、`call_decision_extractor`、`call_reflection`、`call_facilitator`）を`tools=[THINK_TOOL]`へ変更し、初めてツールループパスに乗せた。
+- Detectorのドメイン妥当性レビューパス（従来`tools=None`）も同様に`tools=[THINK_TOOL]`へ変更（数値監査パスは既にBL-093初版で対応済み）。
+
+合計でtools付与済みの全13呼び出し箇所（重複含む関数呼び出し地点ベース）に`think`ツールが行き渡った。
+
 **完了条件:**
 
-- 新規`tests/test_bl093_think_tool_scratchpad.py`（11件）: ツール登録確認、reasoningへの機械的iter番号付与、複数回呼び出しでの累積、todo/issuesのopen/closed必須・変更時のみ更新（sticky）、notesの追記専用（上書きされない）、リセット、`MAX_TOOL_ITER=20`、ループ本体への`_CURRENT_TOOL_LOOP_ITERATION`/`"iteration"`付与、3ノードへの配線・プロンプト文言の存在確認。
-- 既存`tests/test_bl087_stage2_task_plan_reviewer_node.py`の`call_task_planner`ツール一覧完全一致アサーションを、ツールが増えても壊れないよう部分一致（`in`）に更新（BL-092で`call_task_plan_reviewer`側に行った修正と同型）。
-- `python -m py_compile cela_main.py`合格、関連クラスタ94件Pass、`check_docs_consistency.py`合格。
-- 実LLM再ドライランでの効果確認（thinkツールが実際に理由づけの再構築ミスを減らすか、MAX_TOOL_ITER=20が実際に十分か）は次回待ち。
+- 新規`tests/test_bl093_think_tool_scratchpad.py`（23件）: ツール登録確認、reasoningへの機械的iter番号付与、複数回呼び出しでの累積、todo/issuesのopen/closed必須・変更時のみ更新（sticky）、notesの追記専用（上書きされない）、リセット、`MAX_TOOL_ITER=20`、ループ本体への`_CURRENT_TOOL_LOOP_ITERATION`/`"iteration"`付与、全10関数＋Detector両パスへの配線・プロンプト文言の存在確認（パラメータ化テスト）、旧`tools=None`4関数が`tools=[THINK_TOOL]`へ切り替わったことの確認。
+- 既存`tests/test_bl087_stage2_task_plan_reviewer_node.py`（`call_task_planner`）・`tests/test_bl087_stage3_4_goal_essence.py`（`call_goal_essence_analyst`）のツール一覧完全一致アサーションを、ツールが増えても壊れないよう部分一致（`in`）に更新（BL-092で`call_task_plan_reviewer`側に行った修正と同型）。
+- `python -m py_compile cela_main.py`合格、関連クラスタPass、`check_docs_consistency.py`合格。
+- 実LLM再ドライランでの効果確認（thinkツールが実際に理由づけの再構築ミスを減らすか、MAX_TOOL_ITER=20が実際に十分か、tools=None→[THINK_TOOL]化した4ノードで想定外の副作用がないか）は次回待ち。
 
 ---
 
