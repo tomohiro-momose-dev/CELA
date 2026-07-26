@@ -124,6 +124,7 @@
 | BL-090 | 中 | `cela_main.py` (`call_goal_essence_analyst`) | BL-089修正後のドライラン（`log/2026-07-25/1913`）をユーザーがレビューし発見。L424でgoal_essence_analystの応答が、`feasibility_notes`文字列値の末尾を全角鉤括弧「」で終えたため、JSON構文上の閉じ引用符(")を書き忘れた形になりパース失敗（`⚠️ JSON判定パース失敗を検知。層2リトライ 1/2...`でBL-089の層2リトライにより自己修復済み、実害なし）。プロンプトに「JSON文字列値の末尾を全角鉤括弧「」『』で終えない」旨の注意を追加し、そもそもこの種のパース失敗自体を減らす予防策とした。新規`tests/test_bl090_json_string_fullwidth_quote_guard.py`（1件）、`python -m py_compile`合格。D-066として記録 | P3 |
 | BL-091 | 高 | `cela_main.py` (`call_detector`) | `log/2026-07-25/1913`のtask_2_1修正で、Expertのwrite_agreement(edits)が「old_text不一致」で失敗し最終iterationでツールが強制的に外された後、モデル（DeepSeek系）が独自のツール呼び出し風疑似XML（`<｜DSML｜tool_calls>...`）を平文でそのまま出力。`get_last_write_agreement_succeeded()=False`とシステム自身は正しく記録していたが、この成否フラグが`call_detector`のプロンプトに一切渡っておらず、Detectorはこの平文の「主張」を鵜呑みにして誤って承認（物理的矛盾が解消された、acceptance_criteria充足）、Decision Extractorも虚偽のUPDATEをDBに記録した。実際のホワイトボードはV2のまま（V3は存在せず）、誤った記述・数値が残存。BL-033（Expertのpython_repl自己申告を鵜呑みにしない）と同根・同型の欠落。`call_detector`のドメイン妥当性レビュー・数値監査の両プロンプトに、今回のターンでwrite_agreementが実際に成功したか（`state["expert_wrote_agreement"]`/`state["user_wrote_agreement"]`）を明示するブロックを追加し、失敗時は「相手の発言内容にかかわらず現在の最新ホワイトボードのみが真実」「食い違えばmajor」と指示。新規`tests/test_bl091_write_agreement_status_and_bl079_excerpt_verify.py`、`python -m py_compile`合格。D-067として記録 | P0 |
 | BL-092 | 中 | `cela_main.py` (新設`DIFF_PLAN_DRAFT_VERSIONS_TOOL`/`_diff_plan_draft_versions_handler`、`call_task_plan_reviewer`) | 別AIによる`1913`ログの独立レビュー（12項目指摘）を、さらに別チャットで各項目を実際のログ行まで追跡させた結果、数値矛盾の指摘（#1 task_2_2の往復24km/48km混在、#3 task_3_4の「約1,200万円」、#4 task_3_3の赤字誤差、#7 「10人乗り」の根拠）が、task_plan_reviewerの差し戻しを経て「解消」した実態は、数値を検算・訂正したのではなく**該当する記述・タスク内容ごと削除するか抽象的な表現に差し替える**ことで、矛盾そのものを見えなくする形だったと判明。BL-087 Fix A（reviewerの過剰な精度要求がtask_plannerに存在しない数値の捏造を誘発する問題）とは逆方向の構造的パターン。ユーザー提案（ファイル化してdiffツールを使う）を受け、ファイル中心の編集への回帰（BL-074/034/040が既に解決した脆さの再導入）は避けつつ、既にDBでバージョン管理されている`plan_drafts`（BL-082、task_planner再生成のたびにauthor_role="task_planner"で版が積み増される）に対し`difflib`で機械的diffを取る方式を採用。task_plan_reviewerが以前指摘したtask_idについて記憶・印象ではなく実際の差分（数値が訂正されたか、記述ごと消えたか）で判断できるようにした。新規`tests/test_bl092_plan_draft_diff_verification.py`（8件）、`python -m py_compile`合格。D-069として記録 | P2 |
+| BL-093 | 中 | `cela_main.py`（新設予定`update_working_notes`ツール。設計確定・実装は未着手。`call_detector`数値監査パス/`call_task_planner`/`call_task_plan_reviewer`への配線を想定） | スクラッチパッド議論（別チャット共有）の結論。当初「ツールループのiteration間でreasoningが失われ、モデルが毎回理由を再構築している」問題への対策として、think専用ツール＋直前1iter生ログ＋要約リスト＋decision_listという発展案を検討したが、`loop_messages`が元々全履歴を毎iteration再送する実装（MAX_TOOL_ITER=15という短い上限もあり）であるため要約/windowingは解決すべき問題が実質存在せず、`decision_list`も`write_agreement`の既存永続化と重複すると判明。さらにユーザー・別チャット側で「iteration間のコンテキスト引き継ぎ自体はReAct定石通り欠落なく機能している」との訂正があり、当初の問題意識自体を撤回。最終的に既存機構で代替できない価値として残ったのは、append-onlyのtool呼び出し履歴では表現できない「今のtodo/issueの状態」を上書き更新できる可変メモ（`global_working_notes`）のみと判断し、全文上書き方式のno-opツールとして設計を確定。D-070として記録 | P2 |
 
 ---
 
@@ -2979,6 +2980,42 @@ BL-087 Fix Aは「reviewerが絶対値の確定を無理強いすると、task_p
 - 既存`tests/test_bl087_stage2_task_plan_reviewer_node.py`のツール一覧完全一致アサーションを、ツールが増えても壊れないよう部分一致（`in`）に更新。
 - `python -m py_compile cela_main.py`合格、オフラインスモークテスト全件Pass。
 - 実LLM再ドライランでの効果確認（reviewerが実際にこのツールを使い、「削除による解消」を新たな指摘として検出できるか）は次回待ち。
+
+---
+
+### BL-093: ノード内スクラッチパッド `update_working_notes`（ツールループ内の可変todo/issueメモ）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計確定・実装未着手） |
+| 優先度 | P2 |
+| 関連 | [BL-092](issue_backlog.md#bl-092-reviewerの差し戻し圧力に対しtask_plannerが数値の検算訂正ではなく該当箇所の削除抽象化で解消してしまう)（同時期のスクラッチパッド議論の発端だが別テーマ）、[decision_log.md D-070](decision_log.md#d-070-ノード内スクラッチパッド機構はdecision_list要約圧縮を廃しglobal_working_notes全文上書き型のみに縮小する) |
+
+**内容:**
+
+別チャットで「各ノードのquery_AI呼び出しに思考フレームワーク＋スクラッチパッド（ノート機能）を持たせる」構想が持ち込まれ、次の経緯で議論・検証した。
+
+1. **発端**: `_query_AI_live`のツールループ（[cela_main.py:1958-1969](../../cela_main.py#L1958-L1969)）は、モデルの`reasoning`（chain-of-thought生文章）を`_StreamMessage`で`None`固定にして捨てており（`content`/`tool_calls`のみが`loop_messages`へ再送される）、次iterationでモデルは「前回どのツールを何の引数で呼んだか」という骨組みだけから理由を再構築している、という技術的事実を確認した（`_StreamMessage.reasoning = None`固定、`_LAST_REASONING_TEXT`はループ終了後に一括代入されるのみで途中iterationには還元されない）。
+2. これを問題視し複数の実装案（content内へのメモ書き、think専用ツール、構造化出力＋要約圧縮）を比較検討。Anthropic公式の"think tool"パターン（no-opツールとして呼ばせ、tool_calls＋tool結果という構造化ペアで確実にloop_messagesへ残す）が最も堅牢と判断しかけた。
+3. さらに「直前1iterの生ログ＋要約リスト＋decision_list＋global_working_notes」という発展案が提示されたが、検証の結果`loop_messages`はそもそもtruncateされず全履歴を毎iteration再送する実装であり（MAX_TOOL_ITER=15という短い上限もあるため）、reasoning以外の情報（tool_callsの引数含む）は何もしなくても既に全iteration分保持されることが判明。要約/windowing機構は「短いループには過剰設計」という、この発展案自身がパターン4（構造化出力＋要約圧縮）を退けた際の論理と矛盾しており、解決すべき問題が実質存在しない。`decision_list`（decided/why/rejected）も`write_agreement`が既に`agreements`テーブルへ構造化永続化している内容と重複すると判断した。
+4. 最終的にユーザー・別チャットの側で「iteration間のコンテキスト引き継ぎ自体は特に欠落なく、最低限のReAct定石通りに機能している」との訂正があり、当初の問題意識（reasoning消失による機能不全）自体が撤回された。
+5. 撤回後も残る価値として、append-onlyのtool呼び出し履歴では「過去のある時点の状態」しか表現できず、「今のtodo/issueの状態」を都度上書きできる可変メモは既存機構のどこにも存在しないことを確認した。これのみを`global_working_notes`として新設する。
+
+**設計（確定・実装は別途承認後）:**
+
+1. 新規ツール`update_working_notes`（引数: `notes: string`。常に現時点の完全な内容で全文上書き。差分ではない）。ハンドラは状態を持たず、受け取った引数を検証せずに`{"ok": True}`的なno-op応答を返すのみ（DB・stateいずれにも永続化しない。ツールループ終了と同時に消える、1ノード呼び出し限定のスクラッチパッド。既存の`loop_messages`再送の仕組みにそのまま乗るため、ツールループ本体の改修は不要）。
+2. 配線先はDetector数値監査パス（`call_detector`の`tools=[...]`。ドメイン妥当性パスは`tools=None`のため対象外）・`call_task_planner`・`call_task_plan_reviewer`の3箇所に限定する。複数回のpython_repl呼び出しを跨ぐノードのみが対象で、Expert/User対話ノード（`call_expert`/`generate_user_utterance`）はターン頻度が高くコストに見合わないため対象外とする。
+3. プロンプト指示: (a) 常に完全な現在のtodo/issue一覧を書くこと（差分ではなく前回分の全置換であること）、(b) ツール呼び出し回数には上限（MAX_TOOL_ITER=15）があるため、可能な限り実際の検証・計算ツール呼び出し（python_repl等）と同一の応答内でまとめて呼ぶこと（別iterationに分けて呼ばない）。
+
+**未決事項（実装時に判断）:**
+
+まずは全文上書き方式で運用し、出力量・既存内容の消失/書き換わり（ハルシネ）頻度を実測する。問題が顕在化した場合は`apply_whiteboard_patch`と同型の差分パッチ方式への移行を検討するが、find&replace方式はBL-074/076/079で判明した「一意な引用一致」の脆さを伴うため、低スコープの使い捨てスクラッチパッドに最初からその複雑さを持ち込む必要は薄いと判断し、まずは全文上書きのみで開始する。
+
+**完了条件（実装時）:**
+
+- 新規テストで、ツール登録（`TOOL_DISPATCH`）・`call_detector`/`call_task_planner`/`call_task_plan_reviewer`への配線・プロンプト文言（全文上書き指示・同一応答内でまとめる指示）の存在を確認すること。
+- `python -m py_compile cela_main.py`合格、オフラインスモークテスト全件Pass。
+- 実装はこの設計へのユーザー承認後に着手する（本エントリ時点ではBL起票・設計確定のみ、コードは未着手）。
 
 ---
 

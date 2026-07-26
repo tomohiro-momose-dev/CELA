@@ -1039,6 +1039,20 @@
 
 ---
 
+### D-070: ノード内スクラッチパッド機構は、decision_list/要約圧縮を廃し`global_working_notes`（全文上書き型）のみに縮小する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-26 |
+| 状態 | `decided`（設計確定。実装はユーザー承認後） |
+| 決定者 | t-momose（別チャットでの議論を持ち込み検討を主導。「iteration間のコンテキスト引き継ぎは盛大な勘違いだった」と当初の問題意識を撤回し、「working_notesだけまずはBL化して設計して」と指示） / Claude Sonnet 5（技術検証・設計） |
+| **決定理由** | 別チャットで「各ノードのquery_AI呼び出しに思考フレームワーク＋スクラッチパッドを持たせる」構想が提案され、動機として「ツールループの`_StreamMessage`がモデルのreasoningを`None`固定で捨てており（[cela_main.py:1958-1969](../../cela_main.py#L1958-L1969)）、次iterationでモデルは前回のtool_calls/tool結果という骨組みだけから理由を再構築している」という技術的事実を確認した。これに対しthink専用ツール（tool_calls＋tool結果の構造化ペアとして確実にloop_messagesへ残る、Anthropic公式の"think tool"パターン）が有力と判断しかけたが、さらなる発展案（直前1iter生ログ＋要約リスト＋decision_list＋global_working_notes、システム側で毎iterationダイジェストを組み立てる方式）が出た時点で検証したところ、`loop_messages`はそもそも一度もtruncateされず全履歴を毎iteration再送する実装であり（かつMAX_TOOL_ITER=15という短い上限があるため）、reasoning以外の情報（tool_callsの引数含む）は何もしなくても既に全iteration分保持されていることが判明した。要約/windowing機構は「短いループには過剰設計」という、この発展案自身がパターン4（構造化出力＋要約圧縮）を退けた論理と矛盾しており、解決すべき問題が実質存在しない。`decision_list`（decided/why/rejected）も`write_agreement`が`agreements`テーブルへ既に構造化永続化している内容と重複する。さらにユーザー・別チャット側で「iteration間のコンテキスト引き継ぎ自体はReAct定石通り欠落なく機能している」との訂正があり、当初の問題意識（reasoning消失による機能不全）自体が撤回された。撤回後も残る価値は、append-onlyのtool呼び出し履歴では表現できない「今のtodo/issueの状態」を上書き更新できる可変メモ（`global_working_notes`）のみであり、これに機構をスコープダウンする。 |
+| 決定内容 | 新規ツール`update_working_notes`（引数`notes: string`、常に全文上書き・差分ではない）のみを新設する。ハンドラは永続化しないno-op（`{"ok": True}`的な応答のみ）とし、ツールループ本体は無改修のまま既存の`loop_messages`再送に乗せる。配線先はDetector数値監査パス・`call_task_planner`・`call_task_plan_reviewer`の3箇所に限定（Expert/User対話ノードは高頻度でコストに見合わないため対象外）。プロンプトには「全文上書き（差分ではない）」「MAX_TOOL_ITER予算節約のため実際の検証ツール呼び出しと同一応答内でまとめて呼ぶこと」を明記する。差分パッチ方式（ホワイトボードの`edits`と同型）への移行は、全文上書き方式の実測結果を見てから判断する（BL-074/076/079で判明した一意引用一致の脆さを、低スコープのスクラッチパッドに最初から持ち込む必要は薄いと判断）。 |
+| 影響 | `cela_main.py`（新規`update_working_notes`ツール・ハンドラ・`TOOL_DISPATCH`登録、`call_detector`/`call_task_planner`/`call_task_plan_reviewer`のtools・プロンプト）は未実装。本エントリは設計決定の記録のみで、実装はユーザーの明示的な承認後に着手する。 |
+| 関連 BL | [BL-093](issue_backlog.md#bl-093-ノード内スクラッチパッド-update_working_notesツールループ内の可変todoissueメモ) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
