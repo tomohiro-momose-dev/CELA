@@ -1137,6 +1137,20 @@
 
 ---
 
+### D-077: `call_task_planner`/`call_goal_essence_analyst`/`call_task_plan_reviewer`に`write_agreement`を配線し、role×status許可表を拡張する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-26 |
+| 状態 | `decided`（実装済み） |
+| 決定者 | t-momose（「このシステムの中で情報の抽出、保存、伝搬の観点でまだ足りないもの、あるいは未配線等ははるか？」という棚卸し依頼への回答に対し、「call_task_planner/call_goal_essence_analyst/call_task_plan_reviewerはそもそもWRITE_AGREEMENT_TOOLが配線されていない、これは問題ですね、タスクプランナーの意図や理由は後続タスクで見れるべきです」と明示指摘、続けて「1を修正後、issueの機能の計画に入ります」と実装順序を指示） / Claude Sonnet 5（設計・実装） |
+| **決定理由** | BL-094でこの3関数に`read_verified_fact`/`read_deliverable_file`（read専用）を配線したことで、「他ノードの確定値・成果物は読めるが、自分自身の判断根拠を誰にも参照可能な形で書き残せない」という読み書き非対称が生じていた。特にtask_plannerのフェーズ・タスク分解の意図（なぜこの構成にしたか、却下した代替案は何か）は、現状JSON構造としてしか伝わらず、後続のExpert/User AIが「なぜこうなっているのか」を辿る手段が一切ない。ユーザーはこれを明確な欠陥と判断し、既存の`write_agreement`ロール制限パターン（Expert=Proposed限定、Detector等=Rejected限定）を延長する形での解消を指示した。 |
+| 決定内容 | `_check_write_permission`の`ALLOWED_STATUS_BY_ROLE`に3ロールを追加：`task_planner`＝`{"Proposed"}`、`goal_essence_analyst`＝`{"Proposed"}`（Expertと同型、あくまで提案でありtask_plan_reviewer/実行に覆されうる）、`task_plan_reviewer`＝`{"Rejected"}`（Detector/Reviewer等と同じ監査役）。`call_task_planner`は最終JSON出力前に`write_agreement`（`entry_type="Decision"`, `topic="task_planner_phase_design"`固定文字列）でフェーズ構成の判断根拠を記録するよう必須指示。`call_goal_essence_analyst`は`true_essence`/`feasibility_notes`に収まらない検討過程がある場合のみの任意指示（本体の2フィールドは既に`goal_essence`テーブルで別途伝搬されているため）。`call_task_plan_reviewer`は`task_planner_phase_design`の記録内容に誤りがあり`major`判定の理由になっている場合、`write_agreement`（`action_type="SUPERSEDE"`, `status="Rejected"`）でSUPERSEDEするよう指示（BL-062と同型）。 |
+| 影響 | `cela_main.py`（`_check_write_permission`、`WRITE_AGREEMENT_TOOL`の`description`、3関数のプロンプト本文＋`tools=[...]`＋`_CURRENT_CALLER_ROLE`設定）。新規`tests/test_bl095_task_planner_write_agreement.py`（25件）、既存`tests/test_bl093_think_tool_scratchpad.py`のツール名指し回帰テストを更新。実LLM再ドライランでの効果確認（task_plannerが実際に記録するか、後続ノードが実際に参照するか）は次回待ち。ユーザー指示により、次はBL-096（issue管理DB）の設計をPlan modeで行う。 |
+| 関連 BL | [BL-095](issue_backlog.md#bl-095-call_task_plannercall_goal_essence_analystcall_task_plan_reviewerへのwrite_agreement_tool配線読み書き非対称の解消) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
