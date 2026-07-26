@@ -2989,7 +2989,7 @@ BL-087 Fix Aは「reviewerが絶対値の確定を無理強いすると、task_p
 |------|------|
 | 状態 | `done` |
 | 優先度 | P2 |
-| 関連 | [BL-092](issue_backlog.md#bl-092-reviewerの差し戻し圧力に対しtask_plannerが数値の検算訂正ではなく該当箇所の削除抽象化で解消してしまう)（同時期のスクラッチパッド議論の発端だが別テーマ）、[decision_log.md D-070](decision_log.md#d-070-ノード内スクラッチパッド機構はdecision_list要約圧縮を廃しglobal_working_notes全文上書き型のみに縮小する)（誤った結論、D-072で訂正）、[decision_log.md D-071](decision_log.md#d-071-max_tool_iterを15から20へ引き上げthinkツールの単独呼び出しを許容する)（MAX_TOOL_ITER引き上げ）、[decision_log.md D-072](decision_log.md#d-072-thinkツールの最終仕様を確定するthink専用ツールに理由づけの構造化フィールドtodoとissuesのopenclosed必須notesの追記専用化を持たせる)（最終設計・実装） |
+| 関連 | [BL-092](issue_backlog.md#bl-092-reviewerの差し戻し圧力に対しtask_plannerが数値の検算訂正ではなく該当箇所の削除抽象化で解消してしまう)（同時期のスクラッチパッド議論の発端だが別テーマ）、[decision_log.md D-070](decision_log.md#d-070-ノード内スクラッチパッド機構はdecision_list要約圧縮を廃しglobal_working_notes全文上書き型のみに縮小する)（誤った結論、D-072で訂正）、[decision_log.md D-071](decision_log.md#d-071-max_tool_iterを15から20へ引き上げthinkツールの単独呼び出しを許容する)（MAX_TOOL_ITER引き上げ）、[decision_log.md D-072](decision_log.md#d-072-thinkツールの最終仕様を確定するthink専用ツールに理由づけの構造化フィールドtodoとissuesのopenclosed必須notesの追記専用化を持たせる)（最終設計・実装）、[decision_log.md D-074](decision_log.md#d-074-thinksummaryを機械的に必須化し自動reasoningダイジェストへ切り替える)（think呼び出しのモデル任意性を廃し機械的強制へ） |
 
 **内容:**
 
@@ -3019,12 +3019,23 @@ BL-087 Fix Aは「reviewerが絶対値の確定を無理強いすると、task_p
 
 合計でtools付与済みの全13呼び出し箇所（重複含む関数呼び出し地点ベース）に`think`ツールが行き渡った。
 
+**自動reasoning引き継ぎの機械的強制（D-074、実ドライラン`log/2026-07-26/1535`レビュー後の追加指示）:**
+
+実ドライランレビューで、Expert等がpython_replのみを呼びthinkを呼ばないiterationが多数あることが判明した。ユーザーから「thinkを呼ぶかどうかがモデル任せでは、reasoning引き継ぎ自体が機能しない。メモ帳（think）はあくまでメモ帳で、reasoningの引き継ぎは自動でなければ文脈が通らない」との指摘を受け、以下へ設計変更した。
+
+1. `THINK_TOOL`に`summary`フィールドを新設（1〜3文の要約、`required`に追加）。
+2. `_query_AI_live`に機械的強制ロジックを追加: あるiterationにツール呼び出しが1件でも含まれる場合、その中に`think`呼び出しがあり、かつ`summary`が非空であることを必須とする。満たさない場合、そのiterationの**ツール呼び出しを一切実行せず**（python_repl等の実処理を走らせない）、`[SYSTEM ENFORCEMENT]`エラーをtool結果として差し戻し、モデルに再試行を強制する（BL-009の「壊れたJSON引数は自己修復させる」と同型の設計）。ユーザーから「thinkのみの単独呼び出しも対象に含める」との明示指示があり、他ツールを伴わないthink単独呼び出しでもsummary必須とした（think自身もいずれ`_AUTO_REASONING_VERBATIM_ITERS`の窓外へ古くなるため、summaryが無いと持ち越す情報が欠損するという理由）。
+3. 当初「古いiterationは機械的に文字数で切り詰める（例: 先頭150字）」という代替案を検討したが、reasoning本文は実測で数百〜1,500字超に及び、単純な文字数切り詰めでは結論部分が失われ「ほとんど意味を成さない」とユーザーに却下された。理想は専用の軽量要約LLMだが、追加のLLM呼び出しを避けるため、代わりに機械的強制によって**モデル自身に意味のある要約を書かせる**方式（プロンプト制約で乗り切る）を採用した。
+4. 自動ダイジェスト: `_query_AI_live`内のローカル変数（グローバル化不要、1回の呼び出し内で完結）で各iterationの生reasoningを蓄積し、直近`_AUTO_REASONING_VERBATIM_ITERS`（=2）件は生reasoningそのまま、それより古い分は`_THINK_REASONING_LOG`（`think`ハンドラが機械的なiter番号付きで既に記録済み）から該当iterの`summary`を引いてダイジェスト1メッセージに集約する。`light_system_prompt`（BL-025）と同型の「system直後の固定位置（index 1）への差し替え」パターンで`loop_messages`へ都度反映し、無限に新規追加はしない。
+5. 強制ロジックの副作用としてリトライがMAX_TOOL_ITER予算を消費する点はユーザーも認識済み。恒久対策（1タスクあたりのiteration予算が逼迫する場合はtask_plannerの分解粒度を上げる、または1タスクを複数回に分けて思考させるノードループの再設計）は将来の課題としてここでは対応しない。
+
 **完了条件:**
 
 - 新規`tests/test_bl093_think_tool_scratchpad.py`（23件）: ツール登録確認、reasoningへの機械的iter番号付与、複数回呼び出しでの累積、todo/issuesのopen/closed必須・変更時のみ更新（sticky）、notesの追記専用（上書きされない）、リセット、`MAX_TOOL_ITER=20`、ループ本体への`_CURRENT_TOOL_LOOP_ITERATION`/`"iteration"`付与、全10関数＋Detector両パスへの配線・プロンプト文言の存在確認（パラメータ化テスト）、旧`tools=None`4関数が`tools=[THINK_TOOL]`へ切り替わったことの確認。
+- 新規`tests/test_bl093_d074_auto_reasoning_enforcement.py`（6件）: OpenAI streamingレスポンスを模したフェイククライアントで`_query_AI_live`を直接検証。think無しのツール呼び出しが実行されず差し戻されること、think+summary付きは正常実行されること、think単独でもsummary必須で拒否されること、直近2iter分は生reasoning・それより古い分はsummaryでダイジェストが構築されることを、実際に`create()`へ渡されたmessages配列を検査して確認。
 - 既存`tests/test_bl087_stage2_task_plan_reviewer_node.py`（`call_task_planner`）・`tests/test_bl087_stage3_4_goal_essence.py`（`call_goal_essence_analyst`）のツール一覧完全一致アサーションを、ツールが増えても壊れないよう部分一致（`in`）に更新（BL-092で`call_task_plan_reviewer`側に行った修正と同型）。
-- `python -m py_compile cela_main.py`合格、関連クラスタPass、`check_docs_consistency.py`合格。
-- 実LLM再ドライランでの効果確認（thinkツールが実際に理由づけの再構築ミスを減らすか、MAX_TOOL_ITER=20が実際に十分か、tools=None→[THINK_TOOL]化した4ノードで想定外の副作用がないか）は次回待ち。
+- `python -m py_compile cela_main.py`合格、関連クラスタ91件Pass、`check_docs_consistency.py`合格。
+- 実LLM再ドライランでの効果確認（機械的強制が実際に自己修復ループとして機能するか、要約の質、MAX_TOOL_ITER=20が実際に十分か）は次回待ち。
 
 ---
 
