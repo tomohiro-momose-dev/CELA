@@ -1109,6 +1109,20 @@
 
 ---
 
+### D-075: `read_verified_fact`/`read_deliverable_file`を、ツール配線だけでなく各ノードのプロンプト本文でオリエンテーションする
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-26 |
+| 状態 | `decided`（実装済み） |
+| 決定者 | t-momose（実ドライラン`log/2026-07-26/1749`のハルシネーション監査結果を受け、「read_verified_fact・read_deliverable_fileなどですが、各ノードのプロンプトで、それらのツールでこれまでの決定や理由・確定した数字を参照できるという説明を書き、さらに思考フレームワークとして最低でもiter=1で呼び出して、これまでのタスクでの決定や理由・成果物を確認し情報と文脈を同期せよ、また思考中にも、ヒントがないか積極的に参照せよと指示を書いてください。多分すべてのツールはプロンプトで使い方をオリエンテーションしないと、付け加えただけじゃAIは思った通りに動いてくれません」と指摘・指示） / Claude Sonnet 5（監査結果の裏取り・設計・実装） |
+| **決定理由** | `log/2026-07-26/1749`の全文監査（別セッションのgeneral-purpose Agentに委託、本セッションで主要指摘を実ログ・`cela_main.py`と突き合わせて裏取り済み）で、`read_verified_fact`/`read_deliverable_file`が`tools=[...]`に配線されツールスキーマの`description`も存在するにもかかわらず、実際にはどのノードも能動的に呼んでおらず、他タスクで既に確定した数値と矛盾する値を独自に仮定してしまう事故（山間部片道時間が24分/36分で食い違ったまま放置、Goal Essence Analyst自身の推測が「実現可能性メモ」という架空の一次資料であるかのように後工程で「出典」扱いされる等）が繰り返し観測された。これはBL-093で判明した「ツール説明文だけでは不十分で、各ノードのプロンプト本文に名指しした指示が要る」（追記修正3、D-074関連）という教訓と同型の問題であり、ツールを`tools=[...]`に追加しスキーマに説明を書くだけでは、モデルは実際にはそれを使わないと判断した。 |
+| 決定内容 | `read_verified_fact`/`read_deliverable_file`を持つ全6関数（`call_expert`/`call_detector`数値監査パス/`call_resource_arbiter`/`call_integrator`/`call_reviewer`/`generate_user_utterance`）のプロンプト本文に、(1)両ツールの目的説明（全フェーズ横断の確定値検索／過去タスク成果物の前提込み全文参照）、(2)「最低限iter=1で一度は関連キーワードでread_verified_factを呼び、他タスクの確定値・前提と文脈を同期してから作業を始めること」という思考フレームワーク上の指示、(3)思考中に気づきがあれば都度参照せよという指示、を追記した。Detectorには特に「数値の出所（ゴール文由来かAI自身の孫引きか）を追跡する」という監査役固有の観点を明記した。`verify_whiteboard_excerpt`（BL-079）・`diff_plan_draft_versions`（BL-092）は既存のプロンプト内オリエンテーションで同種の指示が既に存在すると判断し、対象外とした。 |
+| 影響 | `cela_main.py`（6関数のプロンプト本文）。`call_task_planner`/`call_goal_essence_analyst`/`call_task_plan_reviewer`はそもそも`read_verified_fact`/`read_deliverable_file`を持たないため対象外とした。これらのノードにも同種のツールを新規配線するかは、ツール自体の追加であり本決定のスコープ（既存ツールへのオリエンテーション追記）を超えるため、未決事項として残す。新規`tests/test_bl094_read_tool_orientation.py`（17件）。実LLM再ドライランでの効果確認（iter=1でのread_verified_fact呼び出しが実際に増えるか）は次回待ち。 |
+| 関連 BL | [BL-094](issue_backlog.md#bl-094-read_verified_factread_deliverable_file等参照系ツールのノードプロンプトへのオリエンテーション追記) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
