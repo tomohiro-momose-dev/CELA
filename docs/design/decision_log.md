@@ -1263,6 +1263,20 @@
 
 ---
 
+### D-087: `_query_AI_live`の自動reasoningダイジェストをindex固定差し替えから末尾再配置へ変更する（BL-106）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-27 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（BL-104適用後もキャッシュヒット率が1時間平均5.5%と改善しないことを報告し原因調査を依頼。私の初期説明中「古いiterの要約部分は不変のはずでは」と的確な反証を提示し、原因の切り分けを訂正させた上で「修正してください、ドライランで様子を見ます」と実装を承認） / Claude Sonnet 5（`_query_AI_live`のツールループ内部を再調査し、digestの挿入位置がindex 1固定であることを発見・報告。ユーザーの反証を受けて説明を訂正し、根本原因（可変部分と不変部分が同一メッセージに同居し、かつtool履歴より手前にある）を再整理・実装） |
+| **決定理由** | BL-093/D-074の自動reasoningダイジェストは、system prompt（index 0）直後のindex 1へ`insert`し、以降は同じindexへ上書きしていた。これはindex 2以降にある実質的な会話履歴（tool呼び出し・tool結果。iterごとに肥大化し、本来最もキャッシュ効果が大きいはずの部分）より**手前**に位置する。ユーザーからの指摘を受けて検証した結果、digest内の既に確定したthink summary部分自体は不変であることを確認したが、それは可変部分（直近`_AUTO_REASONING_VERBATIM_ITERS`件の生reasoning全文）と同一の1メッセージに同居しており、そのメッセージ自体がindex 2以降より手前にあるため、digestの総文字数がiterごとに伸縮するたびに、それより後ろの全メッセージの絶対位置がずれ、プレフィックスキャッシュ（絶対位置での先頭一致方式）がindex 2以降で毎iterミスしていたことが根本原因と判明した。BL-104が確立した「固定・安定した内容を先頭、変化する内容を末尾に」という原則を、このツールループ内部のdigest配置だけが逆に踏んでいたことになる。 |
+| 決定内容 | digestメッセージを固定index（1）ではなくオブジェクト参照（`auto_reasoning_digest_message`）で追跡し、都度`loop_messages`の末尾から前回分を取り除いて末尾に付け直す方式に変更（`cela_main.py`のツールループ内、旧`auto_reasoning_digest_index`変数を廃止）。これによりdigestより前の会話履歴のプレフィックスキャッシュを維持しつつ、変化し続けるdigest自体はBL-104の原則どおり末尾に閉じ込める。 |
+| 影響 | `cela_main.py`（`_query_AI_live`内の自動reasoningダイジェスト配置ロジック）。既存テスト`tests/test_bl093_d074_auto_reasoning_enforcement.py`のdigest位置検証（旧: index 1固定）を新方式（末尾）に合わせて更新。`python -m py_compile`合格、`tests/test_bl093_think_tool_scratchpad.py`/`tests/test_bl093_d074_auto_reasoning_enforcement.py`/`tests/test_r3_smoke.py`/`tests/test_bl104_project_plan_toc_and_prompt_reorder.py`計135件Pass。実LLM再ドライランでの効果確認はユーザーが実施予定。 |
+| 関連 BL | [BL-106](back_log/issue_backlog.md#bl-106-_query_ai_liveの自動reasoningダイジェストがtool呼び出し履歴より手前index-1に居座り毎iterプレフィックスキャッシュを破壊していた)、[BL-104](back_log/issue_backlog.md#bl-104-call_expertのphases_json目次化read_project_planツール新設プロンプトのキャッシュ効率改善)、BL-093（think必須化・機械的強制） |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
