@@ -1291,6 +1291,20 @@
 
 ---
 
+### D-089: 自動reasoningダイジェストの「直近N iterは生・古いのは要約」窓方式を廃止し、要約せず全iterを単純累積する方式へ全面置換する（BL-108）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-28 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（BL-107適用後「改善したがやはり微妙かもしれない」と報告し、digestの実際の書かれている位置を確認するよう依頼。実測データ（要約方式6,341文字 vs 単純累積19,324文字）の提示を受けて「要約せず、単純に生ログを積み上げたほうがキャッシュが働き、結果的に安いしシンプルかな？」と提案し、複数案の比較提示から「累積方式に完全置換え」を明示選択） / Claude Sonnet 5（`log_with_prompt.md`がiteration 2以降を記録していないことを発見、`log_no_prompt.md`から実際のコードロジックで digest を再構築して実測データを提示、ユーザー提案の妥当性を試算で検証し実装） |
+| **決定理由** | `log/2026-07-28/0033`の実ログ（Detectorノード）を再構築した結果、窓方式（`_AUTO_REASONING_VERBATIM_ITERS=2`）では要約済み部分は数十〜数百文字と軽微な一方、直近2iter分の生reasoning全文は1回あたり数千文字（最大6,077文字）に達し、digest全体の大半を占めていることを確認した。窓の境界に当たる古いiterが生reasoning全文→summaryへ切り替わるたびdigestの中身自体が毎iter変化しており、BL-106でdigestを末尾に固定した後もこの「窓の境界変化」という不安定要因が残っていた。ユーザー提案（要約廃止・単純累積）を同ログで試算した結果、プロンプトの絶対サイズは増える（iter8時点で6,341文字→19,324文字、約3倍）ものの、既存部分が二度と書き換えられない単調増加構造になるため、BL-106のtail配置と合わせて既存部分のプレフィックスキャッシュがより確実に機能する。加えてAI自身の`summary`による情報欠落リスクも無くなり、`_AUTO_REASONING_VERBATIM_ITERS`の窓管理・`_THINK_REASONING_LOG`逆引きロジックが不要になる副次的な単純化効果もある。プロンプトサイズ増加というトレードオフはユーザーに明示した上で承認を得た。 |
+| 決定内容 | `_query_AI_live`のツールループ内（`cela_main.py`）で、`_AUTO_REASONING_VERBATIM_ITERS`の窓管理と`_THINK_REASONING_LOG`からのsummary逆引きを廃止。`auto_reasoning_history`に蓄積した全iterationの生reasoningを要約せず`[iter Nの思考(全文)]`としてそのまま末尾追記し続ける方式に統一する。BL-106のdigest末尾配置（オブジェクト参照での追跡・付け替え）ロジック自体は変更しない。 |
+| 影響 | `cela_main.py`（`_query_AI_live`の自動reasoningダイジェスト構築部）。既存テスト`test_auto_reasoning_digest_uses_verbatim_for_recent_and_summary_for_older`を`test_auto_reasoning_digest_accumulates_without_summarizing`に改名し窓方式の検証を削除、`test_auto_reasoning_digest_content_captured_via_create_kwargs`をiter1も生reasoningのまま含まれることを確認するよう修正。`python -m py_compile`合格、`tests/test_bl093_think_tool_scratchpad.py`/`tests/test_bl093_d074_auto_reasoning_enforcement.py`/`tests/test_r3_smoke.py`/`tests/test_bl104_project_plan_toc_and_prompt_reorder.py`計135件Pass、フルオフラインスイート実行中。実LLM再ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-108](back_log/issue_backlog.md#bl-108-自動reasoningダイジェストの直近n-iterは生それより古いのは要約窓方式が要約への切り替わり自体で毎iter不安定になっていたため要約を廃止し単純な累積方式へ全面置換)、[BL-106](back_log/issue_backlog.md#bl-106-_query_ai_liveの自動reasoningダイジェストがtool呼び出し履歴より手前index-1に居座り毎iterプレフィックスキャッシュを破壊していた)、[BL-107](back_log/issue_backlog.md#bl-107-providerorder固定がopenrouterのsticky-routingを無効化しておりtoolsループ内の連続リクエストでキャッシュが構造的に0だった)、BL-093 |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
