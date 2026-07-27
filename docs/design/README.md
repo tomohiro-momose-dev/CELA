@@ -14,7 +14,7 @@
 | **要件の出発点・作業用マスター** | [要件定義書_v35.md](要件定義書_v35.md) | 背景・タスク・完了条件・調査結果。**設計フェーズの正** |
 | **実装ロードマップ・Phase** | [cela_roadmap_v25.md](cela_roadmap_v25.md) | Phase分解・完了条件 |
 | **詳細設計・実装仕様** | `r0_planning/` `r1_r2_r3b_core/` `r4/` `r5/` `phase6plus/` | R番号（ロードマップの実装単位）ごとの How・制約・テスト観点 |
-| **未決・実装タスク** | [issue_backlog.md](../back_log/issue_backlog.md) | BL-xxx（バグ、未実装、未確定） |
+| **未決・実装タスク** | [issue_backlog.md](back_log/issue_backlog.md) | BL-xxx（バグ、未実装、未確定） |
 | **意思決定** | [decision_log.md](decision_log.md) | **決定理由必須**（Why。BL の「何を直すか」とは分離） |
 | **意思決定の系譜（対話）** | [decision_lineage.md](decision_lineage.md) | `decision_log.md` の D-xxx を導いた議論の経緯（誰が何を主張し、誰が決めたか。AI起点の提案も明記）。D-xxx/BL-xxx と相互リンク |
 | **進捗・完了判定** | [STATUS.md](STATUS.md) / [phase_gates.md](phase_gates.md) / [traceability.md](traceability.md) | 今どこか、いつ Done か、要件カバレッジ |
@@ -49,7 +49,7 @@ flowchart TB
 |------|---------|------|
 | 1 | **[STATUS.md](STATUS.md)** | 今のフェーズ・ブロッカー・次アクション |
 | 2 | **[要件定義書_v35.md](要件定義書_v35.md)** | 要件マスター |
-| 3 | **[issue_backlog.md](../back_log/issue_backlog.md)** | 実装タスク・未確定（BL-xxx） |
+| 3 | **[issue_backlog.md](back_log/issue_backlog.md)** | 実装タスク・未確定（BL-xxx） |
 | 4 | **[phase_gates.md](phase_gates.md)** | Phase / プロジェクト完了の定義 |
 
 ---
@@ -107,7 +107,7 @@ flowchart TB
 | 内容 | 置き場 |
 |------|--------|
 | PASS/FAIL 要約 | [traceability.md](traceability.md) T-* |
-| 失敗・次に直すこと | [issue_backlog.md](../back_log/issue_backlog.md) BL-* |
+| 失敗・次に直すこと | [issue_backlog.md](back_log/issue_backlog.md) BL-* |
 | 手順・環境の詳細 | `phaseN/phaseN_dryrun.md` |
 | 生ログ | プロジェクトで決めたログディレクトリ |
 

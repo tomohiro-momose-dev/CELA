@@ -4,10 +4,10 @@
 
 | 種別 | 正しい参照先 |
 |------|-------------|
-| 要件・背景・完了条件 | [要件定義書_v35.md](要件定義書_v35.md) |
-| Phase 詳細設計 | [r0_planning/](r0_planning/) [r1_r2_r3b_core/](r1_r2_r3b_core/) |
-| 意思決定（なぜ） | [decision_log.md](decision_log.md) |
-| 索引 | [README.md](README.md) |
+| 要件・背景・完了条件 | [要件定義書_v35.md](../要件定義書_v35.md) |
+| Phase 詳細設計 | [r0_planning/](../r0_planning/) [r1_r2_r3b_core/](../r1_r2_r3b_core/) |
+| 意思決定（なぜ） | [decision_log.md](../decision_log.md) |
+| 索引 | [README.md](../README.md) |
 
 ---
 
@@ -127,7 +127,7 @@
 | BL-093 | 中 | `cela_main.py`（新設`THINK_TOOL`/`_think_handler`/`_reset_think_scratchpad`、`_query_AI_live`の`_CURRENT_TOOL_LOOP_ITERATION`＋think+summary機械的強制＋自動reasoningダイジェスト、tools付与済み全13関数呼び出し箇所への配線） | スクラッチパッド議論（別チャット共有）の結論。ツールループの`_StreamMessage`がモデルのreasoningを`None`固定で捨てており、次iterでモデルは前回のtool_calls/tool結果という記録だけから理由を再構築している問題を確認。当初は「reasoning消失は実害なし」と誤って結論しかけたが（`loop_messages`が全履歴を再送する事実と、reasoning自体が再送されない事実を混同）、ユーザー指摘で訂正。理由づけ（action/decided/why/rejected/rejected_why）を書かせ、tool結果として即座に全履歴を返す`think`ツールを新設し、消えるreasoningチャネルから残るtool_callsチャネルへ理由づけを退避させた。todo/issuesはopen/close必須のリスト、notesは上書きされない追記専用リストとして分離。iter番号はモデルの自己申告に頼らず`_CURRENT_TOOL_LOOP_ITERATION`から機械的に付与。MAX_TOOL_ITERを15→20へ引き上げ（D-071）。当初はDetector数値監査パス/task_planner/task_plan_reviewerの3ノード限定だったが、ユーザー指示「対象ノードは全ノードへ」を受け、tools付与済みの全ノード＋従来tools=None（単一応答パス）だった4関数＋Detectorドメイン妥当性パスをtools=[THINK_TOOL]へ変更し拡張（D-072）。さらにユーザーから「thinkを呼ぶかはモデル任せでは意味がない、reasoning引き継ぎは自動でなければならない」との指摘を受け、`think`に`summary`フィールドを追加しrequired化、「ツール呼び出しを含む全iterationはthink+非空summaryを併用すること」を`_query_AI_live`側で機械的に強制（違反時は一切実行せず差し戻し）。直近2iter分は生reasoningそのまま・それより古い分はthinkのsummaryを使う自動ダイジェストメッセージをloop_messagesへ都度差し替える設計に確定（D-074、機械的な文字数切り詰め案は「意味を成さない」と却下）。さらに、ツールスキーマの説明文修正だけでは同種の差し戻しが再発したため、各ノードのプロンプト本文にも利用可能ツール名を名指しした指示を追記（追記修正3）。新規`tests/test_bl093_think_tool_scratchpad.py`（42件、他ツール全10種のリマインダー確認・各ノードのプロンプト本文でのツール名指しを含む）・`tests/test_bl093_d074_auto_reasoning_enforcement.py`（6件、フェイクstreamingクライアントで`_query_AI_live`を直接検証）、既存テスト2件の妥当な緩和（完全一致→含有確認）、`python -m py_compile`合格。D-070（誤りを訂正・superseded）/D-071/D-072/D-074として記録 | P2 |
 | BL-094 | 中 | `cela_main.py`（`call_expert`/`call_detector`数値監査パス/`call_resource_arbiter`/`call_integrator`/`call_reviewer`/`generate_user_utterance`/`call_task_planner`/`call_goal_essence_analyst`/`call_task_plan_reviewer`のプロンプト本文＋後半3関数への`READ_VERIFIED_FACT_TOOL`/`READ_DELIVERABLE_FILE_TOOL`新規配線） | 実ドライラン`log/2026-07-26/1749`のハルシネーション監査（別セッションのAgentによる全文精査＋本セッションでの主要箇所の裏取り）で、`read_verified_fact`/`read_deliverable_file`が`tools=[...]`に配線されツールスキーマの`description`も存在するにもかかわらず、実際にはどのノードもこれらを能動的に呼んでおらず、他タスクで既に確定した数値と矛盾する値を独自に仮定してしまう事故が繰り返し観測された（山間部片道時間が24分/36分で食い違ったまま放置、Goal Essence Analyst自身の推測が「実現可能性メモ」という架空の一次資料であるかのように後工程で「出典」扱いされる、等）。BL-093の「ツール説明文だけでは不十分で、各ノードのプロンプト本文に名指しした指示が要る」という教訓（追記修正3）と同型の問題と判断し、read_verified_fact/read_deliverable_fileを持つ当初6関数のプロンプト本文に、(1)両ツールの目的（全フェーズ横断の確定値検索／過去タスク成果物の前提込み全文参照）の説明、(2)「最低限iter=1で一度は関連キーワードでread_verified_factを呼び、他タスクの確定値・前提と文脈を同期してから作業を始めること」という思考フレームワーク上の指示、(3)思考中に「これは他タスクで既に扱われていたかもしれない」という気づきがあれば都度参照せよという指示、を追記した。Detectorには特に「数値の出所（ゴール文由来かAI自身の孫引きか）を追跡する」観点を明記。続けてユーザー指示により、当初ツール自体を持たず対象外としていた`call_task_planner`/`call_goal_essence_analyst`/`call_task_plan_reviewer`にも同ツールを新規配線し同型のオリエンテーションを追記（D-076）。新規`tests/test_bl094_read_tool_orientation.py`（32件）、既存`tests/test_bl093_think_tool_scratchpad.py`のツール名指し回帰テストを更新、`python -m py_compile`合格、関連クラスタ228件Pass。D-075/D-076として記録 | P2 |
 | BL-095 | 高 | `cela_main.py`（`_check_write_permission`のロール表拡張、`call_task_planner`/`call_goal_essence_analyst`/`call_task_plan_reviewer`への`WRITE_AGREEMENT_TOOL`新規配線） | BL-094完了後、情報の抽出・保存・伝搬の観点でシステムを棚卸しした際に発見。BL-094でこの3関数にread_verified_fact/read_deliverable_fileを配線したことで「他ノードの確定値は読めるが、自分の判断（なぜこのフェーズ構成にしたか、なぜrisk=mediumと判定したか等）を誰にも参照可能な形で書き残せない」という読み書き非対称が生じていた。ユーザーが「タスクプランナーの意図や理由は後続タスクで見れるべき」と明示指摘。task_planner/goal_essence_analystはExpert同様`status="Proposed"`限定、task_plan_reviewerはDetector等と同じ`status="Rejected"`限定（BL-062と同型のSUPERSEDEパターン）としてロール表を拡張し配線。新規`tests/test_bl095_task_planner_write_agreement.py`（25件）、`python -m py_compile`合格、関連クラスタ256件Pass。`done`化。 | P1 |
-| BL-096 | 中 | 新規（Detector等の監査系ノード全般、新設予定のissue/follow-up管理DB＋ツール） | 同じ棚卸しで発見。(1) Detectorの`observations`（軽微な気づき、BL-051）が`agreements`/`verified_facts`のどちらにも保存されず、直後数ターンのchat_history windowから外れると実質消滅する。(2) `constraint_issue`が`major`の場合はSUPERSEDEが強制されるが、`minor`は「記録するだけ」で終わり、後続タスクで実は重大だったと判明しても再浮上する保証がない。ユーザーは両者を同じ穴（正式なissue管理DBの不在）として統合し、「正式にissue管理DBと配線を作る時にそちらへ入れて管理する」方針。設計未着手（`open`、着手時は別途Plan modeで設計を詰める）。 | P2 |
+| BL-096 | 中 | 新規（`issue_log`テーブル、`WRITE_ISSUE_TOOL`/`READ_OPEN_ISSUES_TOOL`、`call_detector`/`generate_user_utterance`への配線） | 同じ棚卸しで発見。(1) Detectorの`observations`（軽微な気づき、BL-051）が`agreements`/`verified_facts`のどちらにも保存されず、直後数ターンのchat_history windowから外れると実質消滅する。(2) `constraint_issue`が`major`の場合はSUPERSEDEが強制されるが、`minor`は「記録するだけ」で終わり、後続タスクで実は重大だったと判明しても再浮上する保証がない。ユーザーは両者を同じ穴（正式なissue管理DBの不在）として統合し、「正式にissue管理DBと配線を作る時にそちらへ入れて管理する」方針。**基本設計確定**（累積回数しきい値による機械的エスカレーション、MVPはDetector/User AIの2ノード限定、詳細は[BL096_basic_design.md](BL-096/BL096_basic_design.md)）。`open`・実装未着手。 | P2 |
 | BL-097 | 中 | `cela_main.py`（`think`ツールの構造化フィールド運用、確定値/推定値/運用ルールの区分表示、task_plan_reviewer等のスコープ逸脱防止・最終自己点検） | ユーザーが別AIに`log/2026-07-26`ドライランのログと本体プログラムを独立レビューさせた結果の指摘。(1) ログ上、どこまでがtask由来の確定値でどこからが今回追加した仮定・運用ルールかが埋もれやすい。(2) `think`の`decided`/`why`/`rejected`/`rejected_why`が空欄のまま進む場面があり、何を採用し何を捨てたかを後から追いにくい。改善提案として(a)数値の出所ラベル（確定値/推定値/運用ルール）の強制、(b)スコープ逸脱禁止の明文化（冒頭・末尾の両方で確認）、(c)最終チェックリスト固定化（確定値の引用漏れなし/新規数値の捏造なし/他タスクへの越境なし/責任分界が閉じている、の4項目自己点検）が挙げられた。BL-087 Fix A/C（アンチパターン明記・条件明示）およびBL-093/094の枠組みと同系統の改善。設計未着手（`open`、BL-096のPlan mode設計の後に着手予定）。 | P2 |
 | BL-098 | 低 | `cela_main.py`（ファイル分割：永続化層/ツール層/プロンプト・ノード層/UI・ログ層） | ユーザーが別AIに`cela_main.py`本体を独立レビューさせた指摘（続報）。`cela_main.py`が7300行超で、ロギング・DBスキーマ・python_repl・Record/Replay・各種ツール定義・LangGraphノード実装・プロンプト本文までを単一ファイルで抱えており「巨大な一枚岩」状態。プロトタイプとしては成立しているが、商用の長期運用を見据えると責務分離（少なくとも永続化層／ツール層／プロンプト・ノード層／UI・ログ層の4分割）が保守性のために望ましいとの指摘。設計未着手（`open`、MVP機能追加より優先度は低く、機能面が一段落してから着手する方針）。 | P3 |
 | BL-099 | 中 | `cela_main.py`（モジュールレベルグローバル`_CURRENT_RUN_ID`/`_CURRENT_CALLER_ROLE`/`_CURRENT_TASK_ID`等、`get_max_tokens`の`label.lower()`部分一致制御、`think`必須化の実効性がモデル遵守に依存する構造） | 同じ別AIレビューの指摘。(1) `_CURRENT_RUN_ID`等（`cela_main.py:1061`付近）のようなモジュールレベル変数に状態管理をかなり依存しており、規模が上がると再現性・追跡性が落ちやすい。(2) `get_max_tokens`（`cela_main.py:318`）が`label.lower()`の部分一致（`MAX_TOKENS_BY_ROLE`のキーワード）でmax tokenを切り替える「ゆるい制御」になっている。(3) BL-093の`think`必須化は`_query_AI_live`側で機械的強制済みだが、最終的には「この応答に`think`が入っていること」を前提にフローが回っており、tool-call層でのより網羅的な機械的バリデーションの余地がまだ残る、との指摘。設計未着手（`open`、(1)(2)はBL-098の層分離と合わせて検討、(3)は既存のBL-093機械的強制の延長として個別に検討可能）。 | P2 |
@@ -144,7 +144,7 @@
 | 状態 | `done` |
 | 優先度 | P1 |
 | 依存 | R1完了 |
-| 関連 | [cela_phase1_impl_Plan.md §2.3, §9](r1_r2_r3b_core/cela_r1_impl_Plan.md)、[decision_log.md D-003](decision_log.md) |
+| 関連 | [cela_phase1_impl_Plan.md §2.3, §9](../r1_r2_r3b_core/cela_r1_impl_Plan.md)、[decision_log.md D-003](../decision_log.md) |
 
 **内容:**
 
@@ -152,7 +152,7 @@ R1では「壊さない」優先で、既存の`Agreement` TypedDict（`content`
 
 **2026-07-19完了**: `Agreement` TypedDictのキーを`decision_what`/`reason_why`に統一し、`db_append_agreement`/`get_agreements_from_db`のcontent/rationaleエイリアス変換コードを除去した。呼び出し側（`_build_agreements_context`、`call_reflection`、`decision_extractor_node`のUPDATE/CREATE両分岐、`integrator_node`、`reviewer_node`）を全箇所`decision_what`/`reason_why`参照に追従。ダミーデータによるDB往復スモークテストでcontent/rationaleキーが復元されないことを確認済み（実LLM呼び出しなし）。
 
-**2026-07-19追記（実LLM本番実行で検出した移行漏れ）**: ユーザーが実際に`cela_main.py`を実行したところ、`decision_extractor_node`内のターミナル表示用print文（[cela_main.py:2363](../../cela_main.py)、`agreement['rationale']`）がリネーム対象から漏れており、`KeyError: 'rationale'`で本番実行がクラッシュした。この行は`Agreement`辞書の構築（`decision_what`/`reason_why`、L2340-2341）とは別に存在するデバッグ出力で、DB往復のみを見るオフラインスモークテスト（T-6）ではこの`print`文自体を経由しないため検出できなかった。`agreement['reason_why']`に修正し、`python -m py_compile`で構文確認済み。他に`agreement[...]`/`a[...]`形式で`content`/`rationale`旧キーを参照している箇所がないことをgrepで確認済み（該当なし）。**教訓**: フェイククライアントによるオフラインテストは`_query_AI_live`の分岐網羅には有効だが、グラフノード内の表示・整形ロジックまでは通らないため、実LLM実行によるE2Eドライランでしか拾えない不具合がある。
+**2026-07-19追記（実LLM本番実行で検出した移行漏れ）**: ユーザーが実際に`cela_main.py`を実行したところ、`decision_extractor_node`内のターミナル表示用print文（[cela_main.py:2363](../../../cela_main.py)、`agreement['rationale']`）がリネーム対象から漏れており、`KeyError: 'rationale'`で本番実行がクラッシュした。この行は`Agreement`辞書の構築（`decision_what`/`reason_why`、L2340-2341）とは別に存在するデバッグ出力で、DB往復のみを見るオフラインスモークテスト（T-6）ではこの`print`文自体を経由しないため検出できなかった。`agreement['reason_why']`に修正し、`python -m py_compile`で構文確認済み。他に`agreement[...]`/`a[...]`形式で`content`/`rationale`旧キーを参照している箇所がないことをgrepで確認済み（該当なし）。**教訓**: フェイククライアントによるオフラインテストは`_query_AI_live`の分岐網羅には有効だが、グラフノード内の表示・整形ロジックまでは通らないため、実LLM実行によるE2Eドライランでしか拾えない不具合がある。
 
 **完了条件:**
 
@@ -169,15 +169,15 @@ R1では「壊さない」優先で、既存の`Agreement` TypedDict（`content`
 | 状態 | `blocked`（構造的一致は確認済み。指標A・B・Cの実測はR2待ち） |
 | 優先度 | P0 |
 | 依存 | R2（F-2.6 Python REPL機械的検算ゲート実装） |
-| 関連 | [cela_phase1_design_v7.md §3.4, §5, §5.1](r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md)、[traceability.md T-5](traceability.md)、[decision_log.md D-002](decision_log.md) |
+| 関連 | [cela_phase1_design_v7.md §3.4, §5, §5.1](../r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md)、[traceability.md T-5](../traceability.md)、[decision_log.md D-002](../decision_log.md) |
 
 **内容:**
 
 今回のR1実装セッションでは、`get_db_connection`/`init_db`/`db_append_*`/`get_*_from_db`/`_build_*_context_from_db`/`build_graph()`のダミーデータによるスモークテストと`python -m py_compile`による構文検証のみを実施した。設計書§5の評価メトリクスA（却下案の回避率）・B（制約の維持率）・C（収束性とコストのトレードオフ）は、実際のLLM API呼び出しを伴う`run_ai_vs_ai_loop`本体のE2E実行（過疎地域バスシナリオ）が必要であり、未実施。
 
-**2026-07-18追記**: `phase1/phase1_dryrun.md`のStep 1〜4を実施し、list版ベースラインとSQLite版の**構造的一致**（agreements/decisions件数、status分布、topic登録順序）を実データで確認した（[traceability.md T-5](traceability.md)、Pass）。これはBL-003の完了条件を満たすものであり、BL-002が要求する指標A（却下案の回避率）・B（制約の維持率）・C（収束性とコストのトレードオフ、最低5試行）の**実測比較そのものはまだ行っていない**。
+**2026-07-18追記**: `phase1/phase1_dryrun.md`のStep 1〜4を実施し、list版ベースラインとSQLite版の**構造的一致**（agreements/decisions件数、status分布、topic登録順序）を実データで確認した（[traceability.md T-5](../traceability.md)、Pass）。これはBL-003の完了条件を満たすものであり、BL-002が要求する指標A（却下案の回避率）・B（制約の維持率）・C（収束性とコストのトレードオフ、最低5試行）の**実測比較そのものはまだ行っていない**。
 
-**2026-07-18追記2（[D-002](decision_log.md)）**: 上記ドライランの実ログで、`numerical_allocator`が提示する数値提案（トリップ時間・処理能力・予算試算等）がdetectorに何度も数値矛盾（major）で差し戻される事態が繰り返し観測された。これはLLMの暗算（機械的検算なし）が原因であり、設計書付録A「暗算は原理的に信頼できない」の実例そのもの。F-2.6検算ゲート（Python REPL、R2で実装予定）が無い現状で指標A・B・Cを測定しても、「検算ゲート欠如による差し戻し」と「R1永続化基盤自体の効果」が混在し、R1固有の効果を分離評価できない。したがって**指標A・B・Cの実測比較は、R2実装後まで意味を持たないと判断し、依存をR2に変更した**。R1スコープの検証自体は構造的一致（BL-003, T-5）で完了とみなす。
+**2026-07-18追記2（[D-002](../decision_log.md)）**: 上記ドライランの実ログで、`numerical_allocator`が提示する数値提案（トリップ時間・処理能力・予算試算等）がdetectorに何度も数値矛盾（major）で差し戻される事態が繰り返し観測された。これはLLMの暗算（機械的検算なし）が原因であり、設計書付録A「暗算は原理的に信頼できない」の実例そのもの。F-2.6検算ゲート（Python REPL、R2で実装予定）が無い現状で指標A・B・Cを測定しても、「検算ゲート欠如による差し戻し」と「R1永続化基盤自体の効果」が混在し、R1固有の効果を分離評価できない。したがって**指標A・B・Cの実測比較は、R2実装後まで意味を持たないと判断し、依存をR2に変更した**。R1スコープの検証自体は構造的一致（BL-003, T-5）で完了とみなす。
 
 **完了条件:**
 
@@ -194,13 +194,13 @@ R1では「壊さない」優先で、既存の`Agreement` TypedDict（`content`
 | 状態 | `done` |
 | 優先度 | P1 |
 | 依存 | BL-002 |
-| 関連 | [cela_phase1_impl_Plan.md §7](r1_r2_r3b_core/cela_r1_impl_Plan.md)、[traceability.md T-5](traceability.md) |
+| 関連 | [cela_phase1_impl_Plan.md §7](../r1_r2_r3b_core/cela_r1_impl_Plan.md)、[traceability.md T-5](../traceability.md) |
 
 **内容:**
 
 `query_AI`のREPLAY_MODE（record/replay/off）・call_seqキー機構・キャッシュミス時の例外送出は、ダミークライアントによるスモークテストのみ実施済み。実際のLLM応答を使い、list版ベースラインの実行結果と、SQLite版をreplay実行した結果を比較する回帰確認（impl_Plan §7.2の合格基準1「構造的一致」・2「Hydrate再現性」）は未実施。
 
-**2026-07-18完了**: list版ベースライン（コミット`5ef0382`にRecord/Replayスタブを移植）をRecordモードで実行（過疎地域バスシナリオ、Turn 1〜2完了直後に[D-001](decision_log.md)準拠で打ち切り）、記録した45件のフィクスチャをSQLite版（コミット`2133989`）でReplay実行。合格基準1「構造的一致」（agreements 15=15件、decisions 47=47件、status分布・topic登録順序一致）を確認。Replayはlist版の停止点と完全に一致するタイミングで想定通りのキャッシュミス例外を出して停止した。合格基準2「Hydrate再現性」・合格基準3「再起動後保持」は本試験の対象外（詳細は[traceability.md T-5](traceability.md)）。
+**2026-07-18完了**: list版ベースライン（コミット`5ef0382`にRecord/Replayスタブを移植）をRecordモードで実行（過疎地域バスシナリオ、Turn 1〜2完了直後に[D-001](../decision_log.md)準拠で打ち切り）、記録した45件のフィクスチャをSQLite版（コミット`2133989`）でReplay実行。合格基準1「構造的一致」（agreements 15=15件、decisions 47=47件、status分布・topic登録順序一致）を確認。Replayはlist版の停止点と完全に一致するタイミングで想定通りのキャッシュミス例外を出して停止した。合格基準2「Hydrate再現性」・合格基準3「再起動後保持」は本試験の対象外（詳細は[traceability.md T-5](../traceability.md)）。
 
 **完了条件:**
 
@@ -216,7 +216,7 @@ R1では「壊さない」優先で、既存の`Agreement` TypedDict（`content`
 | 状態 | `open` |
 | 優先度 | P3 |
 | 依存 | なし |
-| 関連 | [cela_phase1_design_v7.md §6](r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md) |
+| 関連 | [cela_phase1_design_v7.md §6](../r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md) |
 
 **内容:**
 
@@ -235,7 +235,7 @@ R1では「壊さない」優先で、既存の`Agreement` TypedDict（`content`
 | 状態 | `open` |
 | 優先度 | P2 |
 | 依存 | なし |
-| 関連 | [cela_phase1_design_v7.md §3.1](r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md)（グラフトポロジは維持、R1では触っていない既存プロトタイプ由来の挙動） |
+| 関連 | [cela_phase1_design_v7.md §3.1](../r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md)（グラフトポロジは維持、R1では触っていない既存プロトタイプ由来の挙動） |
 
 **内容:**
 
@@ -255,7 +255,7 @@ R1では「壊さない」優先で、既存の`Agreement` TypedDict（`content`
 - 対応方針（`turn_count`をノード内でインクリメントする／指標Cの集計方法を「グラフ内部ループを含む実際の対話ラウンド数」に変更する／現状維持でドキュメントに注記するのみ、等）をR2着手前までに決定し、`decision_log.md`にD-xxxとして記録する。
 - 既存プロトタイプの動作実績（設計書§1「既に実装済みで実運用ログで高い検出精度が確認されている」）を壊さないことを優先し、修正する場合は最小差分に留める。
 
-**2026-07-19追記（影響範囲の再評価：安全網が事実上無効化されていたことが判明）**: 表示上のずれだけでなく、より深刻な副作用が実ドライラン（`log/2026-07-19/2056`）で確認された。`route_after_expert_decision`の`state["turn_count"] % state["reflection_interval"] == 0`判定は、`turn_count`が凍結されている間は`reflection`（延いてはその先の`facilitator`）に一度も到達できない。今回のドライランでは同一タスク（task_1_2）へのDetector差し戻しが3回連続発生したが、`turn_count`が1のまま（`reflection_interval`デフォルト3の倍数にならない）だったため、`reflection`は一度も発火せず、`facilitator`も出現しなかった。つまり本Issueは「表示のずれ」ではなく「周期的な議論健全性チェック（reflection）とその先の調停機構（facilitator）が丸ごと機能停止しうる」問題であり、優先度の見直しが必要（詳細は[decision_lineage.md 論点19](decision_lineage.md)、[BL-017](issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)）。ユーザー方針として、本修正はR4（ホワイトボード化・スコープ制御の検討）と合わせて着手する。
+**2026-07-19追記（影響範囲の再評価：安全網が事実上無効化されていたことが判明）**: 表示上のずれだけでなく、より深刻な副作用が実ドライラン（`log/2026-07-19/2056`）で確認された。`route_after_expert_decision`の`state["turn_count"] % state["reflection_interval"] == 0`判定は、`turn_count`が凍結されている間は`reflection`（延いてはその先の`facilitator`）に一度も到達できない。今回のドライランでは同一タスク（task_1_2）へのDetector差し戻しが3回連続発生したが、`turn_count`が1のまま（`reflection_interval`デフォルト3の倍数にならない）だったため、`reflection`は一度も発火せず、`facilitator`も出現しなかった。つまり本Issueは「表示のずれ」ではなく「周期的な議論健全性チェック（reflection）とその先の調停機構（facilitator）が丸ごと機能停止しうる」問題であり、優先度の見直しが必要（詳細は[decision_lineage.md 論点19](../decision_lineage.md)、[BL-017](issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)）。ユーザー方針として、本修正はR4（ホワイトボード化・スコープ制御の検討）と合わせて着手する。
 
 **2026-07-23追記（reflection発火の症状のみBL-048で迂回、`turn_count`本体は依然未修正）**: [BL-048](issue_backlog.md#bl-048-reflectionfacilitatorの周期発火を新設round_countで復旧するturn_count本体は未修正)により、reflection/facilitatorの周期発火という副作用症状のみ`round_count`という別カウンタで迂回・解消した。しかし本Issueの本体（`turn_count`自体の意味、外側ターン表示・`max_turns`上限判定が実態と乖離している点）は未修正のまま残っており、本Issueは引き続き`open`とする。
 
@@ -268,7 +268,7 @@ R1では「壊さない」優先で、既存の`Agreement` TypedDict（`content`
 | 状態 | `done` |
 | 優先度 | P1 |
 | 依存 | BL-001（R2頭で実施） |
-| 関連 | [D-008](decision_log.md#d-008-r201ツール呼び出しループをquery_aiに集約する設計を承認)、[decision_lineage.md 論点7](decision_lineage.md)、impl_Plan R2.0.1 |
+| 関連 | [D-008](../decision_log.md#d-008-r201ツール呼び出しループをquery_aiに集約する設計を承認)、[decision_lineage.md 論点7](../decision_lineage.md)、impl_Plan R2.0.1 |
 
 **内容:**
 
@@ -291,7 +291,7 @@ R2 実装計画（impl_Plan R2.0.1）の方針に基づき、ツール呼び出�
 | 状態 | `done` |
 | 優先度 | P1 |
 | 依存 | なし |
-| 関連 | [D-006](decision_log.md#d-006-python-replサンドボックスはビルトイン呼び出しのast検査多層防御を追加する)、[decision_lineage.md 論点5](decision_lineage.md)、impl_Plan R2.2 |
+| 関連 | [D-006](../decision_log.md#d-006-python-replサンドボックスはビルトイン呼び出しのast検査多層防御を追加する)、[decision_lineage.md 論点5](../decision_lineage.md)、impl_Plan R2.2 |
 
 **内容:**
 
@@ -314,7 +314,7 @@ Python REPL サンドボックス（`_run_python_repl`）の AST 検査を、`as
 | 状態 | `done` |
 | 優先度 | P2 |
 | 依存 | なし |
-| 関連 | [D-007](decision_log.md#d-007-python-repl許可モジュールからrandomを除去しdecimalfractionsは理由付きで維持する)、[decision_lineage.md 論点6](decision_lineage.md)、impl_Plan R2.2 |
+| 関連 | [D-007](../decision_log.md#d-007-python-repl許可モジュールからrandomを除去しdecimalfractionsは理由付きで維持する)、[decision_lineage.md 論点6](../decision_lineage.md)、impl_Plan R2.2 |
 
 **内容:**
 
@@ -336,7 +336,7 @@ Python REPL サンドボックス（`_run_python_repl`）の AST 検査を、`as
 | 状態 | `done` |
 | 優先度 | P3 |
 | 依存 | BL-006 |
-| 関連 | [D-004](decision_log.md#d-004-ツール呼び出しループは既存のtryexceptリトライブロック内に配置する)、[decision_lineage.md 論点3](decision_lineage.md)、impl_Plan R2.3 |
+| 関連 | [D-004](../decision_log.md#d-004-ツール呼び出しループは既存のtryexceptリトライブロック内に配置する)、[decision_lineage.md 論点3](../decision_lineage.md)、impl_Plan R2.3 |
 
 **内容:**
 
@@ -358,7 +358,7 @@ Python REPL サンドボックス（`_run_python_repl`）の AST 検査を、`as
 | 状態 | `done` |
 | 優先度 | P1 |
 | 依存 | BL-006 |
-| 関連 | [D-009](decision_log.md#d-009-r2ツールループの例外処理を一時的api障害とロジックエラーに区別する)、[decision_lineage.md 論点9](decision_lineage.md)、impl_Plan R2.3 |
+| 関連 | [D-009](../decision_log.md#d-009-r2ツールループの例外処理を一時的api障害とロジックエラーに区別する)、[decision_lineage.md 論点9](../decision_lineage.md)、impl_Plan R2.3 |
 
 **内容:**
 
@@ -381,7 +381,7 @@ Python REPL サンドボックス（`_run_python_repl`）の AST 検査を、`as
 | 状態 | `open` |
 | 優先度 | P2 |
 | 依存 | なし |
-| 関連 | [D-010](decision_log.md#d-010-プロバイダ別function-calling対応の網羅検証はmvp段階では見送りblに留める)、[decision_lineage.md 論点10](decision_lineage.md)、要件定義書v35 付録B.5.3 |
+| 関連 | [D-010](../decision_log.md#d-010-プロバイダ別function-calling対応の網羅検証はmvp段階では見送りblに留める)、[decision_lineage.md 論点10](../decision_lineage.md)、要件定義書v35 付録B.5.3 |
 
 **内容:**
 
@@ -401,7 +401,7 @@ Python REPL サンドボックス（`_run_python_repl`）の AST 検査を、`as
 | 状態 | `done`（テスト実装済み。実LLM呼び出しでの実行はユーザー指示待ち） |
 | 優先度 | P1 |
 | 依存 | なし |
-| 関連 | [D-011](decision_log.md#d-011-b51既知誤判定detectorの偽陽性の非退行テストを指標dと対で追加する)、[decision_lineage.md 論点11](decision_lineage.md)、impl_Plan R2.6・R2.9・R2.10 |
+| 関連 | [D-011](../decision_log.md#d-011-b51既知誤判定detectorの偽陽性の非退行テストを指標dと対で追加する)、[decision_lineage.md 論点11](../decision_lineage.md)、impl_Plan R2.6・R2.9・R2.10 |
 
 **内容:**
 
@@ -409,7 +409,7 @@ Python REPL サンドボックス（`_run_python_repl`）の AST 検査を、`as
 
 **2026-07-19完了**: `tests/test_f26_detection.py`を新規作成。`test_detector_flags_numeric_contradiction_5_of_5`（Detector側指標D、5/5でmajor検出）、`test_reviewer_flags_numeric_contradiction_5_of_5`（Reviewer側指標D、5/5でpassed=False）、`test_detector_no_false_positive_within_cap`（B.5.1非退行、3回連続でnone/minorのままmajorが混入しないこと）の3テストを実装。シナリオは「申告合計は上限内に見えるが内訳の実合計は上限超過」（矛盾側）と「内訳・申告・上限すべて整合」（非退行側）の2種で、いずれも`python_repl`による再計算なしには検出できない設計とした（`python -m pytest --collect-only`で3件収集確認済み）。テストはDetector/Reviewerが使う`client_auditor`のAPIキー（`DSEEK_V4_FLASH_USER_KEY`）が未設定の環境では自動スキップする。
 
-**2026-07-19追記（実LLM実行完了、T-7）**: ユーザーが実LLM呼び出しで実行。1回目はBL-013の不具合（`python_repl`が`print()`なしの裸の式で無出力になる問題）により1件非収束でFAILEDしたが、BL-013修正（ツール説明文に`print()`必須を明記）後の再実行で**3 passed**（Detector 5/5 major、Reviewer 5/5 passed=False、B.5.1非退行3/3 none）。指標D（5/5検出率）を実LLMで達成確認。詳細は[traceability.md T-7](traceability.md)参照。
+**2026-07-19追記（実LLM実行完了、T-7）**: ユーザーが実LLM呼び出しで実行。1回目はBL-013の不具合（`python_repl`が`print()`なしの裸の式で無出力になる問題）により1件非収束でFAILEDしたが、BL-013修正（ツール説明文に`print()`必須を明記）後の再実行で**3 passed**（Detector 5/5 major、Reviewer 5/5 passed=False、B.5.1非退行3/3 none）。指標D（5/5検出率）を実LLMで達成確認。詳細は[traceability.md T-7](../traceability.md)参照。
 
 **完了条件:**
 
@@ -450,7 +450,7 @@ Python REPL サンドボックス（`_run_python_repl`）の AST 検査を、`as
 | 状態 | `done`（A・B・Cすべて実装・オフライン確認済み。実LLMでの本番再ドライランは未実施） |
 | 優先度 | P0 |
 | 依存 | なし |
-| 関連 | [D-014](decision_log.md#d-014-max_tool_iterを5から10へ引き上げる暫定挙動を見て調整)、`cela_main.py` `_run_python_repl`・`_query_AI_live` |
+| 関連 | [D-014](../decision_log.md#d-014-max_tool_iterを5から10へ引き上げる暫定挙動を見て調整)、`cela_main.py` `_run_python_repl`・`_query_AI_live` |
 
 **内容:**
 
@@ -489,7 +489,7 @@ Python REPL サンドボックス（`_run_python_repl`）の AST 検査を、`as
 | 状態 | `open`（設計相談中、実装未着手） |
 | 優先度 | P2 |
 | 依存 | なし |
-| 関連 | [decision_lineage.md 論点15](decision_lineage.md)、`cela_main.py` `_PythonReplSession`（BL-014原因A、スコープ設計の先例） |
+| 関連 | [decision_lineage.md 論点15](../decision_lineage.md)、`cela_main.py` `_PythonReplSession`（BL-014原因A、スコープ設計の先例） |
 
 **内容:**
 
@@ -521,7 +521,7 @@ Python REPL サンドボックス（`_run_python_repl`）の AST 検査を、`as
 | 状態 | `done`（2点とも実装・オフライン確認済み。実LLMでの本番再ドライランは未実施） |
 | 優先度 | P0 |
 | 依存 | なし |
-| 関連 | [D-016](decision_log.md#d-016-bl-016探索的タスクでの10回ツール呼び出し非収束へ2点の対応を実施する)、[decision_lineage.md 論点16](decision_lineage.md)、`cela_main.py` `_query_AI_live`・`call_detector`、`log/2026-07-19/1012/log_no_prompt.md`（実ログ） |
+| 関連 | [D-016](../decision_log.md#d-016-bl-016探索的タスクでの10回ツール呼び出し非収束へ2点の対応を実施する)、[decision_lineage.md 論点16](../decision_lineage.md)、`cela_main.py` `_query_AI_live`・`call_detector`、`log/2026-07-19/1012/log_no_prompt.md`（実ログ） |
 
 **内容:**
 
@@ -531,7 +531,7 @@ BL-014（A・B・C）修正後の本番ドライランで、`Expert:requirement_
 
 **Detectorの役割との関係**: この差し戻しループの直前、Detectorは2回にわたり本質的に妥当な差し戻しを行っている。1回目は「指摘4点のうち3点に無回答のままTask 1.2も未提出」という完了度不足の指摘。2回目は機械的検算による本物の誤り3件の指摘（山間部区間で加重平均速度37km/hを誤用（制約上は20km/h指定）、シフトモデルが「最低2名常駐」要件を満たさない、システム維持費の内訳合計と主張額の64万円の不一致）。特に2回目はF-2.6が存在する理由そのものの実例であり、Detectorの厳格さ自体は正しく機能している。問題は、Detectorの完了度判定が「ユーザーの指摘全点に一度で完全に応える」という二値判定しかなく、「部分的に妥当な結論に達した時点で受理し残りは申し送りとする」という中間経路がないため、Expertが局所改善のループから抜け出せずMAX_TOOL_ITERを使い切ってしまう点にある。
 
-**2026-07-19完了**: ユーザー承認（[D-016](decision_log.md#d-016-bl-016探索的タスクでの10回ツール呼び出し非収束へ2点の対応を実施する)）のもと2点を実装。
+**2026-07-19完了**: ユーザー承認（[D-016](../decision_log.md#d-016-bl-016探索的タスクでの10回ツール呼び出し非収束へ2点の対応を実施する)）のもと2点を実装。
 
 1. **残りiter数の意識づけ**: `_query_AI_live`のツールループで、各iterationのツール実行結果を`loop_messages`に追加した直後に`remaining_iters = MAX_TOOL_ITER - iteration`を計算し、`0 < remaining_iters <= 2`の場合に`[SYSTEM NOTICE] ツール呼び出しの残り回数はあと{remaining_iters}回です...`という注意喚起メッセージを`role: "user"`として注入する。数値検算そのものの厳格さ（F-2.6ゲート）には触れない。
 2. **Detector完了度判定の緩和**: `call_detector`のAgent評価用プロンプト（役割別分岐）と共通major定義の両方に、「未対応項目が残っていても、何が未着手かを具体的に名指しした上で次のステップとして明示している場合は、それだけでは major にせず minor とする」という明示的な例外規定を追加。数値矛盾・計算ミスの検算要求（python_repl必須）はそのまま維持。
@@ -554,7 +554,7 @@ BL-014（A・B・C）修正後の本番ドライランで、`Expert:requirement_
 | 状態 | `open`（構想段階、設計要） |
 | 優先度 | P2 |
 | 依存 | なし |
-| 関連 | [BL-016](issue_backlog.md#bl-016-detectorの完全性判定の硬直性により探索的タスクでツールループが非収束クラッシュする)、[decision_lineage.md 論点16](decision_lineage.md)、[decision_lineage.md 論点20](decision_lineage.md)、要件定義書_v35.md F-9・F-10.2〜F-10.6（本Issueの上位互換にあたる既存仕様、下記追記参照） |
+| 関連 | [BL-016](issue_backlog.md#bl-016-detectorの完全性判定の硬直性により探索的タスクでツールループが非収束クラッシュする)、[decision_lineage.md 論点16](../decision_lineage.md)、[decision_lineage.md 論点20](../decision_lineage.md)、要件定義書_v35.md F-9・F-10.2〜F-10.6（本Issueの上位互換にあたる既存仕様、下記追記参照） |
 
 **内容:**
 
@@ -598,7 +598,7 @@ BL-014（A・B・C）修正後の本番ドライランで、`Expert:requirement_
 | 状態 | `open`（構想段階、設計要） |
 | 優先度 | P2 |
 | 依存 | なし |
-| 関連 | [decision_lineage.md 論点16](decision_lineage.md)、`cela_main.py` `LineageState`（`current_task_summary`）、`whiteboard_drafts`テーブル（`phase_id`/`task_id`列） |
+| 関連 | [decision_lineage.md 論点16](../decision_lineage.md)、`cela_main.py` `LineageState`（`current_task_summary`）、`whiteboard_drafts`テーブル（`phase_id`/`task_id`列） |
 
 **内容:**
 
@@ -631,7 +631,7 @@ BL-014（A・B・C）修正後の本番ドライランで、`Expert:requirement_
 | 状態 | `done` |
 | 優先度 | P1 |
 | 依存 | なし |
-| 関連 | [D-017](decision_log.md#d-017-openrouterのreasoningパラメータ形式を修正しツール付与ノードにも思考ログを追加する)、[decision_lineage.md 論点18](decision_lineage.md) |
+| 関連 | [D-017](../decision_log.md#d-017-openrouterのreasoningパラメータ形式を修正しツール付与ノードにも思考ログを追加する)、[decision_lineage.md 論点18](../decision_lineage.md) |
 
 **内容:**
 
@@ -718,7 +718,7 @@ BL-020（出力言語の強制）対応時、ユーザーから「本当はす�
 | 状態 | `done` |
 | 優先度 | P0 |
 | 依存 | なし |
-| 関連 | [D-009](decision_log.md#d-009-r2ツールループの例外処理を一時的api障害とロジックエラーに区別する)（本Issueの元となった絞り込み）、`cela_main.py` `_query_AI_live` |
+| 関連 | [D-009](../decision_log.md#d-009-r2ツールループの例外処理を一時的api障害とロジックエラーに区別する)（本Issueの元となった絞り込み）、`cela_main.py` `_query_AI_live` |
 
 **内容:**
 
@@ -752,10 +752,10 @@ D-009の本来の狙いは「一時的なAPI障害はリトライ、ロジック
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（設計完了、実装未着手。Phase A→Phase Cの順で着手する方針決定済み、[D-020](decision_log.md#d-020-bl-023の対応をphase-atask_planneruser-aiのスコープ是正phase-c予算カスケードの仮説化から着手しphase-bbl-005-reflectionfacilitator復旧は後回しにする)） |
+| 状態 | `open`（設計完了、実装未着手。Phase A→Phase Cの順で着手する方針決定済み、[D-020](../decision_log.md#d-020-bl-023の対応をphase-atask_planneruser-aiのスコープ是正phase-c予算カスケードの仮説化から着手しphase-bbl-005-reflectionfacilitator復旧は後回しにする)） |
 | 優先度 | P1 |
 | 依存 | なし（BL-002の指標C計測はむしろ本Issue完了後に着手すべき）。Phase B（reflection/facilitatorへの森レベル整合性の委譲）のみBL-005の解消が前提だが、Phase A・Cの着手には不要（D-020） |
-| 関連 | [BL-002](issue_backlog.md#bl-002-r1完了条件の実データabドライラン未実施)、[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)（別軸、下記参照）、[BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)（Phase Bの前提、非ブロッカーとして後回し、[D-020](decision_log.md#d-020-bl-023の対応をphase-atask_planneruser-aiのスコープ是正phase-c予算カスケードの仮説化から着手しphase-bbl-005-reflectionfacilitator復旧は後回しにする)）、[D-018](decision_log.md#d-018-r4ホワイトボード編集方式はコーディングエージェント方式遅延取得機械的照合パッチを採用する)、`log/2026-07-19/2056/log_no_prompt.md` |
+| 関連 | [BL-002](issue_backlog.md#bl-002-r1完了条件の実データabドライラン未実施)、[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)（別軸、下記参照）、[BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)（Phase Bの前提、非ブロッカーとして後回し、[D-020](../decision_log.md#d-020-bl-023の対応をphase-atask_planneruser-aiのスコープ是正phase-c予算カスケードの仮説化から着手しphase-bbl-005-reflectionfacilitator復旧は後回しにする)）、[D-018](../decision_log.md#d-018-r4ホワイトボード編集方式はコーディングエージェント方式遅延取得機械的照合パッチを採用する)、`log/2026-07-19/2056/log_no_prompt.md` |
 
 **内容:**
 
@@ -783,7 +783,7 @@ D-009の本来の狙いは「一時的なAPI障害はリトライ、ロジック
 2. **予算のトップダウン・カスケード**: 全体予算をワーカーが毎回自力で帳尻合わせするのではなく、フェーズ／タスク単位のサブ予算枠を先に配分してから渡す。**ただし、このサブ予算枠は絶対制約ではなく仮説（hypothesis）として扱うこと** — ユーザーが指摘した通り、現実の（特に日本の）委託開発で頻発する「無理な予算枠を現場に押し付け、しわ寄せを後工程に送る」病理を再現してはならない。Expertが代替案を尽くした上で「このサブ枠は構造的に非現実的」と誠実に結論した場合、それをDetectorの`major`（手抜き）として即座に差し戻すのではなく、`resource_arbiter`への調停提起として扱う明示的なエスカレーション経路が必要。現行のExpert system prompt（「制約緩和を提案しないでください」「諦めないでください」、`cela_main.py` 1379〜1384行）は、この誠実なフィージビリティ判断とただの思考停止を区別していないため、文言の見直しも本Issueのスコープに含める。
 3. **森レベルの整合性はreflection/facilitatorに戻す**（[BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)と直結）: 現状BL-005によりreflection/facilitatorが実質発火不能なため、User AIが個々のタスク指示ごとに森レベルの整合性チェックを肩代わりし、結果的に指示文が肥大化している。BL-023（粒度是正）とBL-005（reflection/facilitator復旧）は並行して対応しないと、粒度を細分化してもUser AIが別の形で森の番人役を抱え込み直す可能性が高い。
 
-**着手順序（[D-020](decision_log.md#d-020-bl-023の対応をphase-atask_planneruser-aiのスコープ是正phase-c予算カスケードの仮説化から着手しphase-bbl-005-reflectionfacilitator復旧は後回しにする)、2026-07-20決定）:**
+**着手順序（[D-020](../decision_log.md#d-020-bl-023の対応をphase-atask_planneruser-aiのスコープ是正phase-c予算カスケードの仮説化から着手しphase-bbl-005-reflectionfacilitator復旧は後回しにする)、2026-07-20決定）:**
 
 実ログで直接実証された直接原因（Phase A）と、ユーザーが強く懸念する将来リスク（Phase C）を優先し、確度の低い間接要因（Phase B＝BL-005）は非ブロッカーとして後回しにする。実装はPhase A（影響範囲小・確度の高い原因への対応）を先行させ、動作確認後にPhase C（新規機構・影響範囲大）に着手する。
 
@@ -810,7 +810,7 @@ D-009の本来の狙いは「一時的なAPI障害はリトライ、ロジック
 - 各Phaseの実装前に、AGENTS.md §5.2の設計ブループリントを提示しユーザー承認を得る。
 - 指標C（BL-002）の本格計測は、少なくともPhase Aの対応が完了してから着手する方針とする。
 
-**詳細設計**: [`docs/design/r1_r2_r3b_core/cela_r2_design_BL023_task_state.md`](r1_r2_r3b_core/cela_r2_design_BL023_task_state.md)（BL-024・issue_backlog相当のDeferredステータス・traceability相当のacceptance_criteria充足チェック・確定値共有ストア`verified_facts`を含む統合設計）。
+**詳細設計**: [`docs/design/r1_r2_r3b_core/cela_r2_design_BL023_task_state.md`](../r1_r2_r3b_core/cela_r2_design_BL023_task_state.md)（BL-024・issue_backlog相当のDeferredステータス・traceability相当のacceptance_criteria充足チェック・確定値共有ストア`verified_facts`を含む統合設計）。
 
 ---
 
@@ -879,7 +879,7 @@ BL-023 Phase Aの実ドライラン（`log/2026-07-20/1204`）で、`generate_us
 | 状態 | `done` |
 | 優先度 | P3 |
 | 依存 | なし |
-| 関連 | [D-024](decision_log.md#d-024-orchestratorの専門家選択を固定16種配列から自由記述に変更する) |
+| 関連 | [D-024](../decision_log.md#d-024-orchestratorの専門家選択を固定16種配列から自由記述に変更する) |
 
 **内容:**
 
@@ -907,7 +907,7 @@ BL-023 Phase Aの実ドライラン（`log/2026-07-20/1204`）で、`generate_us
 | 状態 | `done` |
 | 優先度 | P3 |
 | 依存 | なし |
-| 関連 | [D-025](decision_log.md#d-025-multiloggerの起動を__main__ガード内に限定する) |
+| 関連 | [D-025](../decision_log.md#d-025-multiloggerの起動を__main__ガード内に限定する) |
 
 **内容:**
 
@@ -933,7 +933,7 @@ BL-025/BL-026の検証用にこのセッション内で実行したオフライ�
 | 状態 | `done` |
 | 優先度 | P1 |
 | 依存 | [BL-014](issue_backlog.md#bl-014-本番ドライランexpertノードで非収束クラッシュ-3つの複合原因)（5→10へ変更した際の経緯）、[BL-025](issue_backlog.md#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする) |
-| 関連 | [D-026](decision_log.md#d-026-max_tool_iterを10から15へ引き上げる) |
+| 関連 | [D-026](../decision_log.md#d-026-max_tool_iterを10から15へ引き上げる) |
 
 **内容:**
 
@@ -956,7 +956,7 @@ BL-025/BL-026の検証用にこのセッション内で実行したオフライ�
 | 状態 | `done` |
 | 優先度 | P2 |
 | 依存 | [BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)（`owned_variable_values`/`verified_facts`の導入元） |
-| 関連 | [D-027](decision_log.md#d-027-owned_variable_valuesはcontentと目的が異なることをプロンプトで明記する)、[BL-030](issue_backlog.md#bl-030-owned_variable_valuesを依存関係参照専用の要約レポートとして独立フィールド化する拡張案) |
+| 関連 | [D-027](../decision_log.md#d-027-owned_variable_valuesはcontentと目的が異なることをプロンプトで明記する)、[BL-030](issue_backlog.md#bl-030-owned_variable_valuesを依存関係参照専用の要約レポートとして独立フィールド化する拡張案) |
 
 **内容:**
 
@@ -981,7 +981,7 @@ BL-025/BL-026の検証用にこのセッション内で実行したオフライ�
 | 状態 | `open` |
 | 優先度 | P3 |
 | 依存 | [BL-029](issue_backlog.md#bl-029-owned_variable_valuesにcontentの全文がそのまま混入する事故を修正) |
-| 関連 | [D-027](decision_log.md#d-027-owned_variable_valuesはcontentと目的が異なることをプロンプトで明記する) |
+| 関連 | [D-027](../decision_log.md#d-027-owned_variable_valuesはcontentと目的が異なることをプロンプトで明記する) |
 
 **内容:**
 
@@ -1003,7 +1003,7 @@ BL-029の議論から派生した設計アイデア。現状の`owned_variable_v
 | 状態 | `open` |
 | 優先度 | P3 |
 | 依存 | なし |
-| 関連 | [D-028](decision_log.md#d-028-プレフィックスキャッシュヒット率改善はmvp完成後のコスト最適化枠として据え置く)、[BL-025](issue_backlog.md#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする)（`light_system_prompt`によるコンテキスト軽量化、本Issueと同根の関心） |
+| 関連 | [D-028](../decision_log.md#d-028-プレフィックスキャッシュヒット率改善はmvp完成後のコスト最適化枠として据え置く)、[BL-025](issue_backlog.md#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする)（`light_system_prompt`によるコンテキスト軽量化、本Issueと同根の関心） |
 
 **内容:**
 
@@ -1031,7 +1031,7 @@ BL-029の議論から派生した設計アイデア。現状の`owned_variable_v
 | 状態 | `open`（設計確定・実装承認済み、未着手） |
 | 優先度 | P2 |
 | 依存 | なし |
-| 関連 | [D-029](decision_log.md#d-029-同一task_idの兄弟decisionへの承認カスケードをdetector判定でガードして実装する)、[BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)（`task_criteria_status`/`owns_variables`基盤） |
+| 関連 | [D-029](../decision_log.md#d-029-同一task_idの兄弟decisionへの承認カスケードをdetector判定でガードして実装する)、[BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)（`task_criteria_status`/`owns_variables`基盤） |
 
 **内容:**
 
@@ -1061,7 +1061,7 @@ BL-029の議論から派生した設計アイデア。現状の`owned_variable_v
 | 状態 | `done` |
 | 優先度 | P1 |
 | 依存 | なし |
-| 関連 | [D-030](decision_log.md#d-030-expertの検算未実施を検出しdetectorへ提示しつつ複合失敗のみ強制差し戻しする) |
+| 関連 | [D-030](../decision_log.md#d-030-expertの検算未実施を検出しdetectorへ提示しつつ複合失敗のみ強制差し戻しする) |
 
 **内容:**
 
@@ -1097,7 +1097,7 @@ BL-029の議論から派生した設計アイデア。現状の`owned_variable_v
 | 状態 | `partial`（2026-07-22: R4実装によりwrite_agreement経由の主経路はwhiteboard_drafts方式へ移行し、ファイルの承認前無条件保存・孤児ファイル問題は解消。ただしdecision_extractor_nodeの安全網フォールバック経路は旧来のファイル保存ロジックのまま残っており、そちらは未解消） |
 | 優先度 | P3 |
 | 依存 | なし |
-| 関連 | [D-031](decision_log.md#d-031-deliverableの物理ファイル保存を承認前提にする設計変更はr4のホワイトボード化まで見送る)、[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)（`whiteboard_drafts`/R4）、[cela_r4_impl_Plan.md](r4/cela_r4_impl_Plan.md) |
+| 関連 | [D-031](../decision_log.md#d-031-deliverableの物理ファイル保存を承認前提にする設計変更はr4のホワイトボード化まで見送る)、[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)（`whiteboard_drafts`/R4）、[cela_r4_impl_Plan.md](../r4/cela_r4_impl_Plan.md) |
 
 **内容:**
 
@@ -1121,8 +1121,8 @@ BL-029の議論から派生した設計アイデア。現状の`owned_variable_v
 |------|------|
 | 状態 | `open`（記録のみ、実装はF-3.8実装時に統合） |
 | 優先度 | P2 |
-| 依存 | [F-3.8](要件定義書_v35.md)（自律的DB/ファイル読み取りツール、未実装） |
-| 関連 | [D-032](decision_log.md#d-032-フェーズ横断の確定値成果物アクセスはエージェント自律の読み取りツールf-38を新規追加して解決する) |
+| 依存 | [F-3.8](../要件定義書_v35.md)（自律的DB/ファイル読み取りツール、未実装） |
+| 関連 | [D-032](../decision_log.md#d-032-フェーズ横断の確定値成果物アクセスはエージェント自律の読み取りツールf-38を新規追加して解決する) |
 
 **内容:**
 
@@ -1155,8 +1155,8 @@ for t in state.get("current_phase", {}).get("tasks", []):
 |------|------|
 | 状態 | `open`（参考記録のみ、F-3.8実装後の再ドライランで実効性を再評価） |
 | 優先度 | P2 |
-| 依存 | [BL-035](issue_backlog.md#bl-035-_build_task_scope_contextがフェーズ横断のdepends_on参照を解決できない)、[F-3.8](要件定義書_v35.md)（自律的DB/ファイル読み取りツール、未実装） |
-| 関連 | [D-033](decision_log.md#d-033-最終計画書の数値ドリフトはbl-035の既知原因による予想された結果として参考記録に留める)、[D-035](decision_log.md#d-035-bl-036bl-037の解決方針としてnpu-context-saver由来の時間減衰検索構造化ファクトストアをf-84f-39として要件化する)（F-3.9構造化ファクトストアで解決を狙う） |
+| 依存 | [BL-035](issue_backlog.md#bl-035-_build_task_scope_contextがフェーズ横断のdepends_on参照を解決できない)、[F-3.8](../要件定義書_v35.md)（自律的DB/ファイル読み取りツール、未実装） |
+| 関連 | [D-033](../decision_log.md#d-033-最終計画書の数値ドリフトはbl-035の既知原因による予想された結果として参考記録に留める)、[D-035](../decision_log.md#d-035-bl-036bl-037の解決方針としてnpu-context-saver由来の時間減衰検索構造化ファクトストアをf-84f-39として要件化する)（F-3.9構造化ファクトストアで解決を狙う） |
 
 **内容:**
 
@@ -1191,8 +1191,8 @@ for t in state.get("current_phase", {}).get("tasks", []):
 |------|------|
 | 状態 | `open`（記録のみ、F-3.1〜F-3.7実装時に理由記載の強制粒度を再設計） |
 | 優先度 | P2 |
-| 依存 | [F-3.1〜F-3.7](要件定義書_v35.md)（自律的DB書き込みツール、`decision_extractor_node`の縮小・撤廃） |
-| 関連 | [D-034](decision_log.md#d-034-decisionagreementの理由記載の薄さはbl起票のみに留めf-3系統合時に再設計する)、[D-035](decision_log.md#d-035-bl-036bl-037の解決方針としてnpu-context-saver由来の時間減衰検索構造化ファクトストアをf-84f-39として要件化する)（F-3.9で「暫定/確定」区別を含む理由記載を要件化）、[BL-034](issue_backlog.md#bl-034-deliverableのファイル保存がユーザー承認前に無条件で発生する)、[BL-035](issue_backlog.md#bl-035-_build_task_scope_contextがフェーズ横断のdepends_on参照を解決できない)、[BL-036](issue_backlog.md#bl-036-最終計画書の財務需要数値が統合パスのたびに再ドリフトするbl-035f-38の射程がコスト計算にも及ぶ実例) |
+| 依存 | [F-3.1〜F-3.7](../要件定義書_v35.md)（自律的DB書き込みツール、`decision_extractor_node`の縮小・撤廃） |
+| 関連 | [D-034](../decision_log.md#d-034-decisionagreementの理由記載の薄さはbl起票のみに留めf-3系統合時に再設計する)、[D-035](../decision_log.md#d-035-bl-036bl-037の解決方針としてnpu-context-saver由来の時間減衰検索構造化ファクトストアをf-84f-39として要件化する)（F-3.9で「暫定/確定」区別を含む理由記載を要件化）、[BL-034](issue_backlog.md#bl-034-deliverableのファイル保存がユーザー承認前に無条件で発生する)、[BL-035](issue_backlog.md#bl-035-_build_task_scope_contextがフェーズ横断のdepends_on参照を解決できない)、[BL-036](issue_backlog.md#bl-036-最終計画書の財務需要数値が統合パスのたびに再ドリフトするbl-035f-38の射程がコスト計算にも及ぶ実例) |
 
 **内容:**
 
@@ -1235,8 +1235,8 @@ for t in state.get("current_phase", {}).get("tasks", []):
 |------|------|
 | 状態 | `done`（根本原因特定・修正済み、オフラインスモークテスト66件通過。**2026-07-22、実LLMドライラン（`log/2026-07-22/1804`）で`expert_wrote_agreement=True`の正常伝播と`⏭️`スキップ（同一ターンで10件全て）を確認、修正の実効性を確定**） |
 | 優先度 | P1 |
-| 依存 | [cela_r3_impl_Plan.md §3.5/§3.5.1](r1_r2_r3b_core/cela_r3_impl_Plan.md)（`wrote_agreement_this_turn`検知機構） |
-| 関連 | [D-036](decision_log.md#d-036-r2をd-002同様の扱いでクローズしr3をr3a自律的読み取りf-38f-39r3b自律的書き込み旧来のr3に再編する)（R3b実装）、[D-038](decision_log.md#d-038-bl-038の根本原因をlanggraphの未宣言typeddictキー消失と特定しlineagestateへのフィールド追加とdecision_extractorフォールバックのwhiteboard保護で対応する)（根本原因特定・修正） |
+| 依存 | [cela_r3_impl_Plan.md §3.5/§3.5.1](../r1_r2_r3b_core/cela_r3_impl_Plan.md)（`wrote_agreement_this_turn`検知機構） |
+| 関連 | [D-036](../decision_log.md#d-036-r2をd-002同様の扱いでクローズしr3をr3a自律的読み取りf-38f-39r3b自律的書き込み旧来のr3に再編する)（R3b実装）、[D-038](../decision_log.md#d-038-bl-038の根本原因をlanggraphの未宣言typeddictキー消失と特定しlineagestateへのフィールド追加とdecision_extractorフォールバックのwhiteboard保護で対応する)（根本原因特定・修正） |
 
 **内容:**
 
@@ -1278,7 +1278,7 @@ R3b実装後の実ドライラン（`log/2026-07-21/2248`）で発見。task_1.1
 | 状態 | `done`（オフラインスモークテスト済み、実LLM再ドライラン未実施） |
 | 優先度 | P0 |
 | 依存 | [BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)（`_get_current_task`によるスコープ限定機構）、[BL-024](issue_backlog.md#bl-024-current_phaseが初期化後フリーズしtask_id単位の状態追跡が存在しない)（`current_phase`/`current_task_id`の状態管理）、[BL-025](issue_backlog.md#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする)（Expertスコープガードレール） |
-| 関連 | [decision_lineage.md 論点24・26](decision_lineage.md)（BL-023/BL-025設計時の議論） |
+| 関連 | [decision_lineage.md 論点24・26](../decision_lineage.md)（BL-023/BL-025設計時の議論） |
 
 **内容:**
 
@@ -1313,7 +1313,7 @@ task_1.4 → task_1.5 遷移時 / task_1.5 → task_2.1 遷移時 / task_2.1 →
 |------|------|
 | 状態 | `done`（オフラインスモークテスト済み、実LLM再ドライラン未実施。2026-07-22: R4実装によりper-task Deliverableの主経路はwhiteboard_drafts方式へ移行したため、`_Vn`バージョニング＋`old/`退避は現在`integrator_node`の最終統合文書専用。ファイル・ホワイトボードどちらの場合も`read_deliverable_file`は同一インターフェースで解決できることを維持） |
 | 優先度 | P1 |
-| 依存 | F-3.8（自律的DB/ファイル読み取りツール、[decision_log.md D-036](decision_log.md)） |
+| 依存 | F-3.8（自律的DB/ファイル読み取りツール、[decision_log.md D-036](../decision_log.md)） |
 | 関連 | [BL-035](issue_backlog.md#bl-035-_build_task_scope_contextがフェーズ横断のdepends_on参照を解決できない)・[BL-036](issue_backlog.md#bl-036-最終計画書の財務需要数値が統合パスのたびに再ドリフトするbl-035f-38の射程がコスト計算にも及ぶ実例)（F-3.8導入の動機となった読み取りアクセス欠如の系譜） |
 
 **内容:**
@@ -1345,7 +1345,7 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 |------|------|
 | 状態 | `partial`（暫定値デフォルト化は実装済み。facilitator再設計・すり合わせタスクは設計判断待ち） |
 | 優先度 | P1 |
-| 関連 | [BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)（reflection/facilitatorが同様に発火不能という既知の系譜）、[BL-017](issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)（facilitatorの調停行動そのものの設計不足、本Issueと統合予定）、[decision_lineage.md 論点42](decision_lineage.md)（根本原因の再診断とユーザー提案の詳細）、[cela_facilitator_arbiter_redesign_BL041.md](r1_r2_r3b_core/cela_facilitator_arbiter_redesign_BL041.md)（設計ドラフト、2026-07-22、未承認） |
+| 関連 | [BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)（reflection/facilitatorが同様に発火不能という既知の系譜）、[BL-017](issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)（facilitatorの調停行動そのものの設計不足、本Issueと統合予定）、[decision_lineage.md 論点42](../decision_lineage.md)（根本原因の再診断とユーザー提案の詳細）、[cela_facilitator_arbiter_redesign_BL041.md](../r1_r2_r3b_core/cela_facilitator_arbiter_redesign_BL041.md)（設計ドラフト、2026-07-22、未承認） |
 
 **内容:**
 
@@ -1359,7 +1359,7 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 
 **実害:** 今回は顕在化しなかったが、タスク分解の粒度やタスク自身のacceptance_criteriaの書き方次第では、後続タスクが解決不能な制約矛盾に陥ったまま`expert_retry_count>=3`で`reflection`に丸投げされ、そこでも収束が保証されない（BL-005/BL-017参照）ため、無限の差し戻しループやフェイルオープンでの通過につながるリスクがある。
 
-**ユーザーによる根本原因の再診断（2026-07-22、[decision_lineage.md 論点42](decision_lineage.md)）:**
+**ユーザーによる根本原因の再診断（2026-07-22、[decision_lineage.md 論点42](../decision_lineage.md)）:**
 
 「木を見て森を見ず」状態が発生していた。task_1.1が「必要車両台数の選定」という狭いスコープだったため、AIはそのスコープ内でのみ作業し、予算全体最適という視座を持てなかった。解決の方向性として3点を提示：
 
@@ -1385,7 +1385,7 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 |------|------|
 | 状態 | `open`（プロンプト指示による軽量対策を実装、実LLM再ドライランでの効果確認待ち） |
 | 優先度 | P2 |
-| 依存 | [D-038](decision_log.md#d-038-bl-038の根本原因をlanggraphの未宣言typeddictキー消失と特定しlineagestateへのフィールド追加とdecision_extractorフォールバックのwhiteboard保護で対応する)（同じドライランで発見） |
+| 依存 | [D-038](../decision_log.md#d-038-bl-038の根本原因をlanggraphの未宣言typeddictキー消失と特定しlineagestateへのフィールド追加とdecision_extractorフォールバックのwhiteboard保護で対応する)（同じドライランで発見） |
 | 関連 | なし |
 
 **内容:**
@@ -1417,8 +1417,8 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 |------|------|
 | 状態 | `open`（BL起票のみ、実装はJSONパース失敗が実害として頻発した場合に着手） |
 | 優先度 | P3 |
-| 依存 | [D-009](decision_log.md)（`write_agreement`等のツール呼び出しで確立済みの、引数JSON破損時の自己修復パターン） |
-| 関連 | `_safe_json_parse`・`_query_and_parse_with_retry`（[../../cela_main.py](../../cela_main.py)、現行の層2リトライ、D-005） |
+| 依存 | [D-009](../decision_log.md)（`write_agreement`等のツール呼び出しで確立済みの、引数JSON破損時の自己修復パターン） |
+| 関連 | `_safe_json_parse`・`_query_and_parse_with_retry`（[../../cela_main.py](../../../cela_main.py)、現行の層2リトライ、D-005） |
 
 **内容:**
 
@@ -1448,7 +1448,7 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 | 状態 | `done`（実装・オフラインスモークテスト4件Pass。実LLMドライランでのCtrl+C→`--resume`往復の実地確認は未実施） |
 | 優先度 | P2 |
 | 依存 | [BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)（`turn_count`がグラフ内部ループの間更新されないため、ターン境界でのチェックポイントでは粒度が粗すぎると判明した経緯） |
-| 関連 | [D-039](decision_log.md)、[decision_lineage.md 論点45](decision_lineage.md) |
+| 関連 | [D-039](../decision_log.md)、[decision_lineage.md 論点45](../decision_lineage.md) |
 
 **内容:**
 
@@ -1480,7 +1480,7 @@ task_1_3_cost_analysis.md → not_found（ドライラン停止直前も含め�
 |------|------|
 | 状態 | `done` |
 | 優先度 | P1 |
-| 依存 | [D-038](decision_log.md#d-038-bl-038の根本原因をlanggraphの未宣言typeddictキー消失と特定しlineagestateへのフィールド追加とdecision_extractorフォールバックのwhiteboard保護で対応する)（`_LAST_WRITE_AGREEMENT_SUCCEEDED`と`_LAST_PYTHON_CALLS`の非対称という同系統の状態管理欠陥） |
+| 依存 | [D-038](../decision_log.md#d-038-bl-038の根本原因をlanggraphの未宣言typeddictキー消失と特定しlineagestateへのフィールド追加とdecision_extractorフォールバックのwhiteboard保護で対応する)（`_LAST_WRITE_AGREEMENT_SUCCEEDED`と`_LAST_PYTHON_CALLS`の非対称という同系統の状態管理欠陥） |
 | 関連 | BL-033（フェイルクローズ本体） |
 
 **内容:**
@@ -1557,7 +1557,7 @@ BL-045修正後の再開ドライラン（`log/2026-07-22/2300`）をユーザ�
 |------|------|
 | 状態 | `done`（reflection発火の症状のみ復旧。BL-005本体＝`turn_count`自体の意味修正は未着手） |
 | 優先度 | P1 |
-| 依存 | [BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)、[D-039](decision_log.md#d-039-ドライランの一時停止再開をappstreamによるノード単位チェックポイントで実装するターン境界方式は不採用)（ラウンド定義を踏襲） |
+| 依存 | [BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)、[D-039](../decision_log.md#d-039-ドライランの一時停止再開をappstreamによるノード単位チェックポイントで実装するターン境界方式は不採用)（ラウンド定義を踏襲） |
 | 関連 | `docs/design/r5/cela_r5_design_v2.md` §1.3（F-2.1拡張、でっちあげ検出の設計） |
 
 **内容:**
@@ -1566,7 +1566,7 @@ BL-045修正後の再開ドライラン（`log/2026-07-22/2300`）をユーザ�
 
 ユーザーが、このお題自体が構想初期にGeminiとの壁打ちで「あえて無理な制約を与えAI達がどう格闘するか見る」という趣旨で発案されたものであり、CELA前身プログラムの会話ログをGeminiに読ませた際にも同じ指摘（AIが適当にでっちあげる）を受けていたこと、「3ターンに一回reflectorが会話ログを見て、適当にでっちあげていないか？と制約違反を見つけていた記憶がある」という経緯を共有した。実際、`docs/design/r5/cela_r5_design_v2.md` §1.3にはこの現象（「計算ツールを使っていないのに適当な数字を出している」「都合の悪い制約から意図的に目を逸らして結論を急いでいる」）を検出する思考ログ監査の設計が既に存在していた。しかし`route_after_expert_decision`のreflection発火判定（`state["turn_count"] % state["reflection_interval"] == 0`）はBL-005（`turn_count`はグラフ内部ループでは更新されず凍結し得る）の影響で実質的に一度も成立せず、reflection自体が発火していなかった。
 
-Web検索ツールを与えて実在地域のデータで裏取りする代替案も検討したが、「地図情報なしで推論から妥当な数値を探る」という今回のお題の実験条件自体が崩れるため、まずreflection復旧を優先する方針とした（詳細は[decision_lineage.md 論点46](decision_lineage.md)）。
+Web検索ツールを与えて実在地域のデータで裏取りする代替案も検討したが、「地図情報なしで推論から妥当な数値を探る」という今回のお題の実験条件自体が崩れるため、まずreflection復旧を優先する方針とした（詳細は[decision_lineage.md 論点46](../decision_lineage.md)）。
 
 **実装（`cela_main.py`）:**
 
@@ -1590,7 +1590,7 @@ Web検索ツールを与えて実在地域のデータで裏取りする代替�
 | 状態 | `done` |
 | 優先度 | P1 |
 | 依存 | なし |
-| 関連 | [D-041](decision_log.md#d-041-f-26検算ゲートによる注意力の偏りを是正するためdetectoruser-aiexpertの数値検算とドメイン妥当性レビューを分離する) |
+| 関連 | [D-041](../decision_log.md#d-041-f-26検算ゲートによる注意力の偏りを是正するためdetectoruser-aiexpertの数値検算とドメイン妥当性レビューを分離する) |
 
 **内容:**
 
@@ -1627,7 +1627,7 @@ AIは当初Detectorのみを2段構成に分割する案（または新規グラ
 | 状態 | `partial`（完了条件1・2は実装済み。役割転換は未着手） |
 | 優先度 | P2 |
 | 依存 | [BL-037](issue_backlog.md#bl-037-decisionagreementのreason_whyが薄くdetector自身も後から数値の根拠を辿れない)、[BL-043](issue_backlog.md#bl-043-decision_extractorのjson出力をfunction-calling方式に作り替え既存の自己修復ループd-009に一本化する) |
-| 関連 | [D-041](decision_log.md#d-041-f-26検算ゲートによる注意力の偏りを是正するためdetectoruser-aiexpertの数値検算とドメイン妥当性レビューを分離する)（役割分担の考え方が地続き） |
+| 関連 | [D-041](../decision_log.md#d-041-f-26検算ゲートによる注意力の偏りを是正するためdetectoruser-aiexpertの数値検算とドメイン妥当性レビューを分離する)（役割分担の考え方が地続き） |
 
 **内容:**
 
@@ -1757,7 +1757,7 @@ BL-050（理由監査役）・BL-051（issue_bl）とセットで設計するの
 | 状態 | `done` |
 | 優先度 | P2 |
 | 依存 | BL-049 |
-| 関連 | [BL-049](issue_backlog.md#bl-049-f-26検算ゲートによる注意力の偏りを是正する-数値検算とドメイン妥当性レビューの分離), [D-041](decision_log.md) |
+| 関連 | [BL-049](issue_backlog.md#bl-049-f-26検算ゲートによる注意力の偏りを是正する-数値検算とドメイン妥当性レビューの分離), [D-041](../decision_log.md) |
 
 **内容:**
 
@@ -1942,7 +1942,7 @@ BL-057で「残り回数」通知のしきい値を前倒し（残り3回・2回
 |------|------|
 | 状態 | `done` |
 | 優先度 | P1 |
-| 関連 | [BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)（facilitatorのエスカレーション機構未実装という既存の指摘とは別種・より具体的な伝達漏れバグ）、[decision_lineage.md 論点59](decision_lineage.md) |
+| 関連 | [BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)（facilitatorのエスカレーション機構未実装という既存の指摘とは別種・より具体的な伝達漏れバグ）、[decision_lineage.md 論点59](../decision_lineage.md) |
 
 **内容:**
 
@@ -1973,7 +1973,7 @@ facilitatorは「なぜ自分が呼ばれたか」を一切知らされないま
 | 状態 | `partial`（Detector限定で実装済み。Reviewer/Arbiter/Integratorへの拡張はBL-070として分離） |
 | 優先度 | P1 |
 | 依存 | [BL-034](issue_backlog.md#bl-034-deliverableのファイル保存がユーザー承認前に無条件で発生する)（decision_extractorの役目縮小傾向の指摘、同系統） |
-| 関連 | [cela_r5_impl_Plan.md](r5/cela_r5_impl_Plan.md)、[decision_log.md D-045](decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する)、[BL-070](issue_backlog.md#bl-070-supersede運用指示をreviewerarbiterintegratorにも拡張するかの検討)、[decision_lineage.md 論点61](decision_lineage.md)・[論点64](decision_lineage.md) |
+| 関連 | [cela_r5_impl_Plan.md](../r5/cela_r5_impl_Plan.md)、[decision_log.md D-045](../decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する)、[BL-070](issue_backlog.md#bl-070-supersede運用指示をreviewerarbiterintegratorにも拡張するかの検討)、[decision_lineage.md 論点61](../decision_lineage.md)・[論点64](../decision_lineage.md) |
 
 **内容:**
 
@@ -1989,7 +1989,7 @@ R5実装計画（F-8.3 Freeze機能）の設計相談中、Freezeされた項目
 
 **実害:** 現時点で具体的な実データ破損は確認されていないが、Detectorが`major`判定を出しても、対応するAgreementがDB上「承認済み」のまま残り、後続タスクや最終統合（integrator）がこれを正当な確定値として参照し続けるリスクがある。F-8.3 Freeze機能は`user`ロールのみに権限を限定することで、この課題があってもFreeze自体の意味（恒久ピン留め）は損なわれないよう設計したが、Freeze対象でない通常のAgreement全般には本課題がそのまま残る。
 
-**2026-07-24追記（解消・Detector限定）:** ユーザーがFreeze機能（D-044）とBL-062のどちらを優先するか再検討し、「検証手段のないままユーザー/AIの決定を絶対視するFreeze」より「Detectorの正しい否決がDBに反映されず永続化する矛盾」の解消を優先する判断をした（[D-045](decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する)）。実装前の再調査で、完了条件の①案（権限モデル拡張）は**そもそも不要**と判明した——`_check_write_permission`は`status`のみを制限し`action_type`は無制限で、Detector/Reviewer/Arbiter/Integratorは全員既に`WRITE_AGREEMENT_TOOL`を保有し`status='Rejected'`かつ`action_type='SUPERSEDE'`を呼べる権限を最初から持っていた。真の欠落は権限ではなく、(a) Detector等がそもそも既存agreements DBのtopic一覧をプロンプト上受け取っておらず`target_topic`を指定する材料がなかったこと、(b) SUPERSEDEを使えという運用指示がなかったこと、の2点だった。
+**2026-07-24追記（解消・Detector限定）:** ユーザーがFreeze機能（D-044）とBL-062のどちらを優先するか再検討し、「検証手段のないままユーザー/AIの決定を絶対視するFreeze」より「Detectorの正しい否決がDBに反映されず永続化する矛盾」の解消を優先する判断をした（[D-045](../decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する)）。実装前の再調査で、完了条件の①案（権限モデル拡張）は**そもそも不要**と判明した——`_check_write_permission`は`status`のみを制限し`action_type`は無制限で、Detector/Reviewer/Arbiter/Integratorは全員既に`WRITE_AGREEMENT_TOOL`を保有し`status='Rejected'`かつ`action_type='SUPERSEDE'`を呼べる権限を最初から持っていた。真の欠落は権限ではなく、(a) Detector等がそもそも既存agreements DBのtopic一覧をプロンプト上受け取っておらず`target_topic`を指定する材料がなかったこと、(b) SUPERSEDEを使えという運用指示がなかったこと、の2点だった。
 
 `call_detector`に`_build_agreements_context_from_db`によるDBビューを新規注入し、`constraint_issue="major"`時にはwrite_agreementを`action_type="SUPERSEDE"`, `status="Rejected"`, `target_topic=<DBのtopic文字列>`で呼び出すよう明示的に指示する一文を追加した。Reviewer/Arbiter/Integratorは成果物全体審査・リソース配分・フェーズ横断統合という別種の役割であり、topic単位のSUPERSEDEが同じ意味を持つか自明でないため、ユーザーの判断で今回はDetector限定とし、他3ロールへの拡張検討はBL-070として分離した。
 
@@ -2009,7 +2009,7 @@ R5実装計画（F-8.3 Freeze機能）の設計相談中、Freezeされた項目
 |------|------|
 | 状態 | `done` |
 | 優先度 | P2 |
-| 関連 | [cela_r5_design_v2.md](r5/cela_r5_design_v2.md)、[cela_r5_impl_Plan.md](r5/cela_r5_impl_Plan.md)、[BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)、[BL-050](issue_backlog.md#bl-050-decision_extractorの役割転換抽出役理由監査役決定事項の変遷履歴の可視化)、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)、[decision_log.md D-044](decision_log.md)、[decision_lineage.md 論点61](decision_lineage.md) |
+| 関連 | [cela_r5_design_v2.md](../r5/cela_r5_design_v2.md)、[cela_r5_impl_Plan.md](../r5/cela_r5_impl_Plan.md)、[BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)、[BL-050](issue_backlog.md#bl-050-decision_extractorの役割転換抽出役理由監査役決定事項の変遷履歴の可視化)、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)、[decision_log.md D-044](../decision_log.md)、[decision_lineage.md 論点61](../decision_lineage.md) |
 
 **内容:**
 
@@ -2017,7 +2017,7 @@ R5実装計画（F-8.3 Freeze機能）の設計相談中、Freezeされた項目
 
 1. **F-2.1拡張（思考プロセス監査）**: `_query_AI_live`のstreaming処理が受け取る`delta.reasoning`を、従来は💭表示で印字するのみで破棄していたが、新規モジュールグローバル`_LAST_REASONING_TEXT`（`get_last_reasoning_text()`ゲッター、BL-033の`_LAST_PYTHON_CALLS`と同型パターン）へ蓄積するよう変更。`LineageState`に`expert_last_reasoning`/`user_last_reasoning`を新設し、`expert_node`/`generate_user_utterance_node`がそれぞれセット。`call_detector`に「思考プロセス監査」ブロックを追加し、target_roleに応じてExpert/User AIいずれかのreasoningを提示する（数値監査パスに配線、v2設計書§1.3）。
 2. **F-3.7（思考ログの強制記録）**: `make_decision`に`internal_thought_process`パラメータを追加（既存呼び出しは省略可、後方互換）。トークンコスト抑制のため全件記録はせず、Detectorの`major`判定時・Reflectionの`stagnant`判定時・agreementsの`status='Rejected'`書き込み時のみ`get_last_reasoning_text()`をスナップショット保存する限定運用とした（v2設計書§2の方針通り）。
-3. **F-8.3 Freeze機能**: 新規`freeze_agreement()`関数＋専用ツール`FREEZE_AGREEMENT_TOOL`（`agreement_id`, `reason`のみのシンプルなスキーマ、既存`WRITE_AGREEMENT_TOOL`は汚さない）を追加し、User AIのtoolsリストにのみ配線（`user`ロール限定、D-044）。`_commit_agreement_from_tool`のSUPERSEDE/UPDATE分岐に、対象行が`is_frozen==1`の場合は処理を拒否するガードを追加（unfreeze機構は設けない、恒久ピン留め）。`_build_agreements_context`に`is_frozen`優先のソートキーと🔒アイコン表示を追加。**2026-07-24追記**: [D-045](decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する)によりFreezeは一時休止（User AIのtoolsリストから`FREEZE_AGREEMENT_TOOL`を除去。本体・ガード・表示ロジックは温存）。BL-062（Detectorの誤判定がApprovedを覆せず永続化する矛盾）の解消を優先した判断のため。
+3. **F-8.3 Freeze機能**: 新規`freeze_agreement()`関数＋専用ツール`FREEZE_AGREEMENT_TOOL`（`agreement_id`, `reason`のみのシンプルなスキーマ、既存`WRITE_AGREEMENT_TOOL`は汚さない）を追加し、User AIのtoolsリストにのみ配線（`user`ロール限定、D-044）。`_commit_agreement_from_tool`のSUPERSEDE/UPDATE分岐に、対象行が`is_frozen==1`の場合は処理を拒否するガードを追加（unfreeze機構は設けない、恒久ピン留め）。`_build_agreements_context`に`is_frozen`優先のソートキーと🔒アイコン表示を追加。**2026-07-24追記**: [D-045](../decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する)によりFreezeは一時休止（User AIのtoolsリストから`FREEZE_AGREEMENT_TOOL`を除去。本体・ガード・表示ロジックは温存）。BL-062（Detectorの誤判定がApprovedを覆せず永続化する矛盾）の解消を優先した判断のため。
 4. **GoalShiftEvent**: `init_db`に`goal_shift_events`テーブルを新規追加（v2設計書§4.1のDDLに`run_id`列を追加、他テーブルとの一貫性のため）。`call_resource_arbiter`のプロンプト・JSON出力スキーマに`requires_goal_constraint_change`を追加。新規`detect_goal_shift()`関数（v2設計書§4.2の擬似コード通り）と`db_append_goal_shift_event()`ヘルパーを追加し、`arbiter_node`が`call_resource_arbiter`呼び出し直後に配線。
 
 **今回のスコープ外（Plan mode相談で確定）:**
@@ -2177,7 +2177,7 @@ BL-064（Agreementの3軸区分）の議論の中で、ユーザーが直近で�
 |------|------|
 | 状態 | `open` |
 | 優先度 | P2 |
-| 依存 | [BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（Detector限定で先行実装済み）、[decision_log.md D-045](decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する) |
+| 依存 | [BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（Detector限定で先行実装済み）、[decision_log.md D-045](../decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する) |
 
 **内容:**
 
@@ -2341,7 +2341,7 @@ BL-089レビュー中にユーザーが`log/2026-07-25/1913/log_no_prompt.md` L1
 |------|------|
 | 状態 | `done` |
 | 優先度 | P1 |
-| 関連 | [D-047](decision_log.md#d-047-f-73ホワイトボードロールバックを撤廃し部分修正誘導プロンプトへ置き換える) |
+| 関連 | [D-047](../decision_log.md#d-047-f-73ホワイトボードロールバックを撤廃し部分修正誘導プロンプトへ置き換える) |
 
 **内容:**
 
@@ -2377,7 +2377,7 @@ BL-089レビュー中にユーザーが`log/2026-07-25/1913/log_no_prompt.md` L1
 |------|------|
 | 状態 | `done` |
 | 優先度 | P2 |
-| 関連 | [BL-075](issue_backlog.md#bl-075-f-73ホワイトボードロールバックが1つ前は健全という前提に反し修正済み問題を無警告で再導入する)、[D-048](decision_log.md#d-048-detectorのmajor指摘をホワイトボード本文にも永続的な注釈として埋め込む) |
+| 関連 | [BL-075](issue_backlog.md#bl-075-f-73ホワイトボードロールバックが1つ前は健全という前提に反し修正済み問題を無警告で再導入する)、[D-048](../decision_log.md#d-048-detectorのmajor指摘をホワイトボード本文にも永続的な注釈として埋め込む) |
 
 **内容:**
 
@@ -2446,7 +2446,7 @@ BL-089レビューの延長で、ユーザーとtask_2_1（安全基準・運休
 |------|------|
 | 状態 | `done` |
 | 優先度 | P2 |
-| 関連 | [D-049](decision_log.md#d-049-orchestratorの専門家選定時の考察をfocus_guidanceとしてexpertへ注入する) |
+| 関連 | [D-049](../decision_log.md#d-049-orchestratorの専門家選定時の考察をfocus_guidanceとしてexpertへ注入する) |
 
 **内容:**
 
@@ -2508,7 +2508,7 @@ BL-074のtarget_excerpt正規化フォールバックを相談する中で、ユ
 |------|------|
 | 状態 | `done` |
 | 優先度 | P0 |
-| 関連 | [BL-075](issue_backlog.md#bl-075-f-73ホワイトボードロールバックが1つ前は健全という前提に反し修正済み問題を無警告で再導入する)（誘因となったプロンプト）、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（無効化用途との後方互換）、[D-051](decision_log.md#d-051-write_agreementのsupersedeがdeliverableの全文更新を破棄していた問題の修正) |
+| 関連 | [BL-075](issue_backlog.md#bl-075-f-73ホワイトボードロールバックが1つ前は健全という前提に反し修正済み問題を無警告で再導入する)（誘因となったプロンプト）、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（無効化用途との後方互換）、[D-051](../decision_log.md#d-051-write_agreementのsupersedeがdeliverableの全文更新を破棄していた問題の修正) |
 
 **内容:**
 
@@ -2544,7 +2544,7 @@ Detector・Userの判定自体は「ホワイトボードが更新されてい�
 |------|------|
 | 状態 | `done` |
 | 優先度 | P1 |
-| 関連 | [BL-080](issue_backlog.md#bl-080-write_agreementのsupersedeがdeliverableの全文更新を破棄し実質何もしないツール呼び出しになっていた)（誘因となった失敗経路）、[BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)（同根の正規化緩い一致手法）、[D-052](decision_log.md#d-052-write_agreementのeditsold_textnew_textにも正規化した緩い一致フォールバックを適用する) |
+| 関連 | [BL-080](issue_backlog.md#bl-080-write_agreementのsupersedeがdeliverableの全文更新を破棄し実質何もしないツール呼び出しになっていた)（誘因となった失敗経路）、[BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)（同根の正規化緩い一致手法）、[D-052](../decision_log.md#d-052-write_agreementのeditsold_textnew_textにも正規化した緩い一致フォールバックを適用する) |
 
 **内容:**
 
@@ -2580,7 +2580,7 @@ Detector・Userの判定自体は「ホワイトボードが更新されてい�
 |------|------|
 | 状態 | `done` |
 | 優先度 | P1 |
-| 関連 | [BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)（Directive無条件除外の原因となった対症療法）、[D-053](decision_log.md#d-053-task_plannerの計画をplan_draftsとして永続化し先送り事項をタスク間で申し送る) |
+| 関連 | [BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)（Directive無条件除外の原因となった対症療法）、[D-053](../decision_log.md#d-053-task_plannerの計画をplan_draftsとして永続化し先送り事項をタスク間で申し送る) |
 
 **内容:**
 
@@ -2660,7 +2660,7 @@ BL-059/BL-072と同型の問題である。`_query_AI_live`の例外タプルは
 |------|------|
 | 状態 | `done` |
 | 優先度 | P0 |
-| 関連 | [BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)（今回解消した「まだopen」の完了条件）、[BL-081](issue_backlog.md#bl-081-write_agreementのeditsold_textnew_textがmarkdownテーブル行頭の全角スペースパイプ記号の有無で完全一致に失敗しやすかった)（真因ではなかったと判明した緩い一致フォールバック）、[D-054](decision_log.md#d-054-entry_typedeliverableのupdatesupersede対象特定をtopic文字列ではなくphase_id-task_idで行う) |
+| 関連 | [BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)（今回解消した「まだopen」の完了条件）、[BL-081](issue_backlog.md#bl-081-write_agreementのeditsold_textnew_textがmarkdownテーブル行頭の全角スペースパイプ記号の有無で完全一致に失敗しやすかった)（真因ではなかったと判明した緩い一致フォールバック）、[D-054](../decision_log.md#d-054-entry_typedeliverableのupdatesupersede対象特定をtopic文字列ではなくphase_id-task_idで行う) |
 
 **内容:**
 
@@ -2705,7 +2705,7 @@ for a in reversed(get_agreements_from_db(conn, run_id)):
 |------|------|
 | 状態 | `done` |
 | 優先度 | P3 |
-| 関連 | [D-055](decision_log.md#d-055-ホワイトボード保存時にdbと並行してmarkdownファイルへ書き出す)、[BL-027](issue_backlog.md#bl-027-cela_mainpyのロガーがimport時点で無条件起動し本番log配下にテスト実行の痕跡が混入する)（同じ理由でテスト時の書き出しをガードした先例） |
+| 関連 | [D-055](../decision_log.md#d-055-ホワイトボード保存時にdbと並行してmarkdownファイルへ書き出す)、[BL-027](issue_backlog.md#bl-027-cela_mainpyのロガーがimport時点で無条件起動し本番log配下にテスト実行の痕跡が混入する)（同じ理由でテスト時の書き出しをガードした先例） |
 
 **内容:**
 
@@ -2731,11 +2731,11 @@ BL-027（`MultiLogger`のimport時副作用防止）と同じ理由で、`getatt
 |------|------|
 | 状態 | `done` |
 | 優先度 | P1 |
-| 関連 | [D-056](decision_log.md#d-056-前提エスカレーションをツール呼び出し型で実装する)、[D-057](decision_log.md#d-057-freeze機構を再有効化しdetectorのプロンプトに尊重指示を追加する)、[D-058](decision_log.md#d-058-stategoalへの部分パッチとgoalshifteventの新規shift_kindpremise_revisionでゴール改定を実消費化する)、[BL-025](issue_backlog.md#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする)（スコープガードレールは変更せず維持）、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（Freeze一時休止の原因、今回両立させた）、[BL-065](issue_backlog.md#bl-065-r5で新設したdb永続化情報internal_thought_processgoal_shift_eventsの消費表示経路が未設計)（GoalShiftEventの書きっぱなし問題、今回初めて消費経路ができた） |
+| 関連 | [D-056](../decision_log.md#d-056-前提エスカレーションをツール呼び出し型で実装する)、[D-057](../decision_log.md#d-057-freeze機構を再有効化しdetectorのプロンプトに尊重指示を追加する)、[D-058](../decision_log.md#d-058-stategoalへの部分パッチとgoalshifteventの新規shift_kindpremise_revisionでゴール改定を実消費化する)、[BL-025](issue_backlog.md#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする)（スコープガードレールは変更せず維持）、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（Freeze一時休止の原因、今回両立させた）、[BL-065](issue_backlog.md#bl-065-r5で新設したdb永続化情報internal_thought_processgoal_shift_eventsの消費表示経路が未設計)（GoalShiftEventの書きっぱなし問題、今回初めて消費経路ができた） |
 
 **内容:**
 
-ユーザーが`log/2026-07-24/2054`の抽出済みホワイトボードをレビューする中で、「必要車両台数を2台、35人定員としているが、オンデマンドバスで35人乗りは変では」と指摘。調査の結果、この矛盾は`task_2_1`（[phase_2_task_2_1_V1.md](../../log/2026-07-24/2054/whiteboards/phase_2_task_2_1_V1.md)）で予算制約（導入台数上限2台）を先に固定し、そこから「ピーク需要をρ<1で捌くには定員をいくつまで上げればよいか」を逆算した結果であり、オンデマンド輸送は本来分散した需要に小型車両で即応するのが定石であるという前提とは根本的に矛盾していることが判明した。
+ユーザーが`log/2026-07-24/2054`の抽出済みホワイトボードをレビューする中で、「必要車両台数を2台、35人定員としているが、オンデマンドバスで35人乗りは変では」と指摘。調査の結果、この矛盾は`task_2_1`（[phase_2_task_2_1_V1.md](../../../log/2026-07-24/2054/whiteboards/phase_2_task_2_1_V1.md)）で予算制約（導入台数上限2台）を先に固定し、そこから「ピーク需要をρ<1で捌くには定員をいくつまで上げればよいか」を逆算した結果であり、オンデマンド輸送は本来分散した需要に小型車両で即応するのが定石であるという前提とは根本的に矛盾していることが判明した。
 
 ユーザーがさらに「そもそも論というか、視座の設計が大事」「今の状態ではコンサルが数字をこねくり回して実際のPOCで即死するのが見える」と、より一般的な構造上の問題を指摘。調査の結果、以下の三重の構造的欠陥を特定した。
 
@@ -2930,9 +2930,9 @@ BL-089修正後のドライラン（`log/2026-07-25/1913`）をユーザーが�
 
 ユーザーが`log/2026-07-25/1913`の続きをレビューし「detectorがホワイトボードを更新できないまま、事故が起きました」と報告。フォレンジック調査の結果、以下の事故を確認した:
 
-1. task_2_1（安全基準・運休判断基準）の修正で、Expertがwrite_agreementの`edits`（正規のツール呼び出し）を試みるが「old_textが現在のホワイトボード内容に見つかりませんでした」で失敗（[L44719](../../log/2026-07-25/1913/log_no_prompt.md)）。
+1. task_2_1（安全基準・運休判断基準）の修正で、Expertがwrite_agreementの`edits`（正規のツール呼び出し）を試みるが「old_textが現在のホワイトボード内容に見つかりませんでした」で失敗（[L44719](../../../log/2026-07-25/1913/log_no_prompt.md)）。
 2. これが最終iteration（15）だったため、ツールが強制的に外され「テキスト最終応答を強制」された。
-3. ツールを持たないはずのこの最終応答で、モデル（DeepSeek系）が独自のツール呼び出し風の疑似XML構文（`<｜DSML｜tool_calls>...<｜DSML｜invoke name="write_agreement">...`）をそのまま平文として出力した（[L44744](../../log/2026-07-25/1913/log_no_prompt.md)）。これは実際には一切実行されていない（システム自身が`[DEBUG] expert_node: get_last_write_agreement_succeeded()=False`と正しく記録している）。
+3. ツールを持たないはずのこの最終応答で、モデル（DeepSeek系）が独自のツール呼び出し風の疑似XML構文（`<｜DSML｜tool_calls>...<｜DSML｜invoke name="write_agreement">...`）をそのまま平文として出力した（[L44744](../../../log/2026-07-25/1913/log_no_prompt.md)）。これは実際には一切実行されていない（システム自身が`[DEBUG] expert_node: get_last_write_agreement_succeeded()=False`と正しく記録している）。
 4. しかし`call_detector`のプロンプトにはこの成否フラグ（`state["expert_wrote_agreement"]`/`state["user_wrote_agreement"]`）が一切渡っておらず（`expert_last_python_calls`(BL-033)や`expert_last_reasoning`(F-2.1)は渡っているのに、このフラグだけが欠落していた）、Detectorはこの偽のツール呼び出しテキストの「主張内容」を鵜呑みにし、「物理的矛盾は解消される」「acceptance_criteriaを充足している」としてrisk=low, constraint_issue=noneで承認してしまった。Decision Extractorも「UPDATE - Proposed」としてDBに記録した。
 5. 実害の確認: 実際のホワイトボードファイルは`phase_2_task_2_1_V2.md`のまま（V3は存在しない）。物理的に不可能な記述（「停車後約40.5秒で通信障害エリアを通過するため通信が自然復旧する」）と誤った数値（600秒）が今も残存しているにもかかわらず、DB上は「修正済みで承認」という偽の記録が残っていた。
 
@@ -2996,13 +2996,13 @@ BL-087 Fix Aは「reviewerが絶対値の確定を無理強いすると、task_p
 |------|------|
 | 状態 | `done` |
 | 優先度 | P2 |
-| 関連 | [BL-092](issue_backlog.md#bl-092-reviewerの差し戻し圧力に対しtask_plannerが数値の検算訂正ではなく該当箇所の削除抽象化で解消してしまう)（同時期のスクラッチパッド議論の発端だが別テーマ）、[decision_log.md D-070](decision_log.md#d-070-ノード内スクラッチパッド機構はdecision_list要約圧縮を廃しglobal_working_notes全文上書き型のみに縮小する)（誤った結論、D-072で訂正）、[decision_log.md D-071](decision_log.md#d-071-max_tool_iterを15から20へ引き上げthinkツールの単独呼び出しを許容する)（MAX_TOOL_ITER引き上げ）、[decision_log.md D-072](decision_log.md#d-072-thinkツールの最終仕様を確定するthink専用ツールに理由づけの構造化フィールドtodoとissuesのopenclosed必須notesの追記専用化を持たせる)（最終設計・実装）、[decision_log.md D-074](decision_log.md#d-074-thinksummaryを機械的に必須化し自動reasoningダイジェストへ切り替える)（think呼び出しのモデル任意性を廃し機械的強制へ） |
+| 関連 | [BL-092](issue_backlog.md#bl-092-reviewerの差し戻し圧力に対しtask_plannerが数値の検算訂正ではなく該当箇所の削除抽象化で解消してしまう)（同時期のスクラッチパッド議論の発端だが別テーマ）、[decision_log.md D-070](../decision_log.md#d-070-ノード内スクラッチパッド機構はdecision_list要約圧縮を廃しglobal_working_notes全文上書き型のみに縮小する)（誤った結論、D-072で訂正）、[decision_log.md D-071](../decision_log.md#d-071-max_tool_iterを15から20へ引き上げthinkツールの単独呼び出しを許容する)（MAX_TOOL_ITER引き上げ）、[decision_log.md D-072](../decision_log.md#d-072-thinkツールの最終仕様を確定するthink専用ツールに理由づけの構造化フィールドtodoとissuesのopenclosed必須notesの追記専用化を持たせる)（最終設計・実装）、[decision_log.md D-074](../decision_log.md#d-074-thinksummaryを機械的に必須化し自動reasoningダイジェストへ切り替える)（think呼び出しのモデル任意性を廃し機械的強制へ） |
 
 **内容:**
 
 別チャットで「各ノードのquery_AI呼び出しに思考フレームワーク＋スクラッチパッド（ノート機能）を持たせる」構想が持ち込まれ、次の経緯で議論・検証・訂正した。
 
-1. **発端**: `_query_AI_live`のツールループ（[cela_main.py:1958-1969](../../cela_main.py#L1958-L1969)、実装後は行番号が前後する）は、モデルの`reasoning`（chain-of-thought生文章）を`_StreamMessage`で`None`固定にして捨てており（`content`/`tool_calls`のみが`loop_messages`へ再送される）、次iterationでモデルは「前回どのツールを何の引数で呼んだか」という骨組みだけから理由を再構築している、という技術的事実を確認した。
+1. **発端**: `_query_AI_live`のツールループ（[cela_main.py:1958-1969](../../../cela_main.py#L1958-L1969)、実装後は行番号が前後する）は、モデルの`reasoning`（chain-of-thought生文章）を`_StreamMessage`で`None`固定にして捨てており（`content`/`tool_calls`のみが`loop_messages`へ再送される）、次iterationでモデルは「前回どのツールを何の引数で呼んだか」という骨組みだけから理由を再構築している、という技術的事実を確認した。
 2. 複数の実装案（content内へのメモ書き、think専用ツール、構造化出力＋要約圧縮）を比較検討する中で、一時「`loop_messages`は全履歴を毎iteration再送するため、reasoning消失は実害がない」と誤って結論しかけた。これは「tool_calls/tool結果という行動記録が保持される」事実と「reasoningという理由づけの生文章が保持される」事実を混同した誤りであり、ユーザー指摘で訂正した（reasoning自体は`_StreamMessage.reasoning = None`固定のままどのiterationにも再送されず、この問題は実在する）。
 3. 一方で「直前1iterの生ログ＋要約リスト＋decision_list」という重い発展案は不要と判断した。`loop_messages`はそもそもtruncateされず全履歴を毎iteration再送する実装であり（MAX_TOOL_ITER＝短い上限もあるため）、いったんtool_call引数として書かれた情報は何もしなくても既に全iteration分保持される。要約/windowing機構は「短いループには過剰設計」という、この発展案自身がパターン4（構造化出力＋要約圧縮）を退けた際の論理と矛盾しており、解決すべき問題が実質存在しない。`decision_list`も`write_agreement`が既に`agreements`テーブルへ構造化永続化している内容と重複する。
 4. 最終的にユーザーから、reasoningは構造化フィールド（action/decided/why/rejected/rejected_why）として残すべき（自由文1本だと長いiterで読み返す際に取りこぼしが生じるため）、todo/issuesはopen/close必須のリスト、notesは上書きされない追記専用リストに分離すべき、iter番号はモデルの自己申告ではなく機械的に付与すべき、thinkは他ツールとバンドル必須にせず単独呼び出しも許容すべき（ReAct本来の「軽量な思考単位を繰り返す」設計を優先し、必要ならMAX_TOOL_ITERを引き上げる）、という具体的な仕様指定を受け、これに基づき設計・実装した。
@@ -3116,13 +3116,14 @@ Detectorには特に「Agentの数値がゴール文の直接記載か、AI自�
 
 いずれも「監査系ノードが見つけた軽微な懸念を、忘れずに後で拾い上げて追跡する」ための正式な永続層が存在しないことが根本原因であり、ユーザーは両者を1つの「issue管理DB」に統合する方針を示した。
 
-**設計未着手（`open`）。** 着手時にPlan modeで検討すべき論点（会話内で既に出た候補）：
-1. スキーマ: severity、対象task_id/phase_id、raised_by（どのノードが起票したか）、status（open/resurfaced/resolved等）、再浮上条件を持つテーブル。
-2. 再浮上トリガーの設計: 時限的な再監査、あるいは同一task_idに対するminor指摘の累積件数が閾値を超えたら機械的に`major`相当へ格上げする等、会話内で候補に挙がった案の是非を精査する。
-3. 既存の`agreements`/`verified_facts`との役割分担（本DBは「まだ解決していない懸念の追跡」に特化し、確定事項の記録は引き続き`agreements`/`verified_facts`が担う）。
-4. 新規ツール（書き込み用・読み取り用）をどのノードに配線するか（Detectorだけでなく、Reviewer/Arbiter/Integratorの`observations`相当の指摘も対象にするか）。
+**基本設計確定（`open`、実装未着手）。** Plan modeで設計を確定（詳細は[BL096_basic_design.md](BL-096/BL096_basic_design.md)）：
+1. スキーマ: 新規`issue_log`テーブル（`topic`/`raised_by`/`severity`/`status`/`occurrence_count`等）。
+2. 再浮上トリガー: ユーザー選択により**累積回数しきい値**方式を採用（時限方式は不採用）。同一topicで再度`CREATE`されると`occurrence_count`が加算され、2回に達した時点で機械的に`severity="major"`・`status="escalated"`へ昇格（モデル判断に依存しない）。
+3. 既存の`agreements`/`verified_facts`との役割分担: 本DBは「まだ解決していない懸念の追跡」に特化し、確定事項の記録は引き続き`agreements`/`verified_facts`が担う。
+4. ノード配線: ユーザー指示により、MVPは**Detector・User AI（`generate_user_utterance`）の2ノードに限定**（`CREATE`は両方、`RESOLVE`はUser AIのみ）。理由は(a)User AIがExpertへ出す訂正指示自体の忘却リスクをissue化する価値、(b)issueをクローズする役目はUser AI（ユーザー側の代理）という認識。Reviewer/Arbiter/Integratorへの拡張は将来課題として据え置き。
+5. reflectionへのエスカレーション到達は、モデルのツール呼び出しに依存せずPython側の直接DB問い合わせで保証する設計とした（BL-099の「モデル遵守依存」問題をこの経路では発生させない）。
 
-**完了条件:** 未定（設計後に記載）。
+**完了条件:** 未定（実装後に記載）。
 
 ---
 
@@ -3213,42 +3214,42 @@ Detectorには特に「Agentの数値がゴール文の直接記載か、AI自�
 | 2026-07-18 | BL-010・BL-011を新規起票（別チャットClaudeのR2レビュー指摘、D-009・D-010準拠）。 |
 | 2026-07-18 | BL-012を新規起票（別チャットClaudeのR2レビュー指摘、D-011準拠）。 |
 | 2026-07-19 | R2実装完了に伴い、BL-001・BL-006・BL-007・BL-008・BL-009・BL-010・BL-012を`done`化。実装は`cela_main.py`に反映済み、実LLM呼び出しなしのオフラインスモークテスト（`_run_python_repl`単体、フェイククライアントによる`query_AI`ツールループ、BL-001のDB往復）で検証済み。BL-011（プロバイダ別Function Calling検証）はD-010どおりMVP後に据え置き、`open`のまま。テスト実行基盤としてpytestを`requirements-dev.txt`に追加し導入（ユーザー承認済み）。 |
-| 2026-07-19 | BL-015を新規起票（ユーザー提案：資料由来の一次情報・python_repl出力の機械的再利用によるハルシネリスク低減。決定はまだなく設計相談中、[decision_lineage.md 論点15](decision_lineage.md)）。 |
-| 2026-07-19 | BL-016・BL-017・BL-018を新規起票。本番ドライランでの10回ツール呼び出し非収束クラッシュの原因分析（BL-016）、差し戻しループ沼からの脱出機構構想（BL-017）、task_planner由来のタスク間依存関係の状態未構造化（BL-018）。いずれも設計相談中、[decision_lineage.md 論点16](decision_lineage.md)。 |
-| 2026-07-19 | BL-016を`done`化。ツールループへの残りiter数通知の注入と、Detector完了度判定の緩和（数値検算の厳格さは維持）をユーザー承認のもと実装（[D-016](decision_log.md)）。オフラインスモークテストで確認済み、実LLM再ドライラン待ち。BL-017はユーザー訂正を受け、ファシリテーター自体は`facilitator_node`として既存であり、差し戻しループ検知のトリガーのみ未実装と内容を修正。 |
-| 2026-07-19 | BL-019を新規起票・`done`化。OpenRouterのreasoningパラメータがフラットキーで無効化されていた実装バグを実機検証で発見・修正し、ツール付与ノードにも思考ログ出力を追加（[D-017](decision_log.md)）。実機検証で思考ログの出力を確認済み。 |
+| 2026-07-19 | BL-015を新規起票（ユーザー提案：資料由来の一次情報・python_repl出力の機械的再利用によるハルシネリスク低減。決定はまだなく設計相談中、[decision_lineage.md 論点15](../decision_lineage.md)）。 |
+| 2026-07-19 | BL-016・BL-017・BL-018を新規起票。本番ドライランでの10回ツール呼び出し非収束クラッシュの原因分析（BL-016）、差し戻しループ沼からの脱出機構構想（BL-017）、task_planner由来のタスク間依存関係の状態未構造化（BL-018）。いずれも設計相談中、[decision_lineage.md 論点16](../decision_lineage.md)。 |
+| 2026-07-19 | BL-016を`done`化。ツールループへの残りiter数通知の注入と、Detector完了度判定の緩和（数値検算の厳格さは維持）をユーザー承認のもと実装（[D-016](../decision_log.md)）。オフラインスモークテストで確認済み、実LLM再ドライラン待ち。BL-017はユーザー訂正を受け、ファシリテーター自体は`facilitator_node`として既存であり、差し戻しループ検知のトリガーのみ未実装と内容を修正。 |
+| 2026-07-19 | BL-019を新規起票・`done`化。OpenRouterのreasoningパラメータがフラットキーで無効化されていた実装バグを実機検証で発見・修正し、ツール付与ノードにも思考ログ出力を追加（[D-017](../decision_log.md)）。実機検証で思考ログの出力を確認済み。 |
 | 2026-07-19 | BL-019に追記。tool_calls同梱content読み捨ての防御的対応と、実本番ログで確認した空白content表示の小修整。BL-020を新規起票・`done`化。中国語系モデル経由の言語逸脱対策として`query_AI`集約点に日本語出力の強制指示を注入（`_inject_japanese_output_directive`）。 |
 | 2026-07-19 | BL-021を新規起票（ユーザー提案：全11箇所のプロンプト生成関数の英語化。BL-020の対症療法に対する根本対応の候補。設計未着手、`open`）。 |
-| 2026-07-19 | BL-005を重要度「高」に更新（reflection/facilitatorが事実上発火不能という副作用が実ログで判明）。BL-017を大幅加筆（当初のreflection/Facilitator設計意図の想起、「ゴール抽象化・そもそも論」という本来の調停行動の具体例、現行`call_facilitator`実装との乖離、「生産的な反復」と「本当の膠着」を区別するトリガー設計の必要性を記録）。いずれもR4着手時に合わせて対応する方針（[decision_lineage.md 論点19](decision_lineage.md)）。 |
-| 2026-07-19 | BL-017を再定義：要件定義書_v35.md F-9・F-10.2〜F-10.6として既に仕様化・Phase 6以降に配置済みだったことが判明し、BL-017はその「MVP範囲での先行縮小実装」と位置づけ直した。D-018（R4パッチ方式の決定）を新規記録（[decision_lineage.md 論点20](decision_lineage.md)）。 |
+| 2026-07-19 | BL-005を重要度「高」に更新（reflection/facilitatorが事実上発火不能という副作用が実ログで判明）。BL-017を大幅加筆（当初のreflection/Facilitator設計意図の想起、「ゴール抽象化・そもそも論」という本来の調停行動の具体例、現行`call_facilitator`実装との乖離、「生産的な反復」と「本当の膠着」を区別するトリガー設計の必要性を記録）。いずれもR4着手時に合わせて対応する方針（[decision_lineage.md 論点19](../decision_lineage.md)）。 |
+| 2026-07-19 | BL-017を再定義：要件定義書_v35.md F-9・F-10.2〜F-10.6として既に仕様化・Phase 6以降に配置済みだったことが判明し、BL-017はその「MVP範囲での先行縮小実装」と位置づけ直した。D-018（R4パッチ方式の決定）を新規記録（[decision_lineage.md 論点20](../decision_lineage.md)）。 |
 | 2026-07-19 | BL-022を新規起票・`done`化。本番ドライランのフルトレースバック解析により、OpenRouter経由の壊れたレスポンスがopenai SDK内部で生の`json.JSONDecodeError`を送出しD-009の絞り込んだexceptを素通りしていたことが判明。exceptタプルに`json.JSONDecodeError`を追加し修正（D-019）。 |
-| 2026-07-19 | BL-023を新規起票。指標C計測（BL-002）着手時に判明した、task_plannerの分解粒度の粗さによる検証コストの乗算的増大（今日のtask_1.2ドライランで実証）を記録。ユーザーは指標C計測・R4・BL-018のいずれよりも本Issueを最優先で対応する方針（[decision_lineage.md 論点21](decision_lineage.md)）。 |
-| 2026-07-20 | BL-023に追記。ログ精査により真の増幅源が`generate_user_utterance`（User AI）側のスコープ肥大にもあることが判明し、設計対象をtask_plannerのみから拡張。さらにユーザーとの議論で「共有変数の一元所有（BL-018）」「予算のトップダウン・カスケード（ただし仮説であり絶対制約としない）」「森レベルの整合性はreflection/facilitator（BL-005）に戻す」の3点セット設計が必要と判明し、関連BLとBL-005を追加、完了条件を更新（[decision_lineage.md 論点22](decision_lineage.md)）。 |
-| 2026-07-20 | BL-023の着手順序を決定（D-020）。Phase A（task_planner/User AIのスコープ是正）・Phase C（予算カスケードの仮説化）を先行させ、Phase B（BL-005 reflection/facilitator復旧）は非ブロッカーとして後回しにする方針。完了条件をPhase A/B/C別に再構成（[decision_lineage.md 論点23](decision_lineage.md)）。 |
-| 2026-07-20 | BL-023の設計をこのプロジェクト自身の統治構造（issue_backlog/decision_lineage/phase_gate/STATUS/traceability/確定値の再利用）に対応する情報構造としてstateへ統合する方向で拡張。BL-024（`current_phase`初期化後フリーズ、`task_id`単位の状態追跡不在）を新規起票し、詳細設計を`docs/design/phase2/cela_phase2_design_BL023_task_state.md`として作成（[decision_lineage.md 論点24](decision_lineage.md)）。 |
+| 2026-07-19 | BL-023を新規起票。指標C計測（BL-002）着手時に判明した、task_plannerの分解粒度の粗さによる検証コストの乗算的増大（今日のtask_1.2ドライランで実証）を記録。ユーザーは指標C計測・R4・BL-018のいずれよりも本Issueを最優先で対応する方針（[decision_lineage.md 論点21](../decision_lineage.md)）。 |
+| 2026-07-20 | BL-023に追記。ログ精査により真の増幅源が`generate_user_utterance`（User AI）側のスコープ肥大にもあることが判明し、設計対象をtask_plannerのみから拡張。さらにユーザーとの議論で「共有変数の一元所有（BL-018）」「予算のトップダウン・カスケード（ただし仮説であり絶対制約としない）」「森レベルの整合性はreflection/facilitator（BL-005）に戻す」の3点セット設計が必要と判明し、関連BLとBL-005を追加、完了条件を更新（[decision_lineage.md 論点22](../decision_lineage.md)）。 |
+| 2026-07-20 | BL-023の着手順序を決定（D-020）。Phase A（task_planner/User AIのスコープ是正）・Phase C（予算カスケードの仮説化）を先行させ、Phase B（BL-005 reflection/facilitator復旧）は非ブロッカーとして後回しにする方針。完了条件をPhase A/B/C別に再構成（[decision_lineage.md 論点23](../decision_lineage.md)）。 |
+| 2026-07-20 | BL-023の設計をこのプロジェクト自身の統治構造（issue_backlog/decision_lineage/phase_gate/STATUS/traceability/確定値の再利用）に対応する情報構造としてstateへ統合する方向で拡張。BL-024（`current_phase`初期化後フリーズ、`task_id`単位の状態追跡不在）を新規起票し、詳細設計を`docs/design/phase2/cela_phase2_design_BL023_task_state.md`として作成（[decision_lineage.md 論点24](../decision_lineage.md)）。 |
 | 2026-07-20 | BL-023 Phase AとBL-024を実装し`done`化。`Task`型新設・`Phase`/`Agreement`/`LineageState`拡張・DBマイグレーション（`agreements.task_id`列・`verified_facts`テーブル）・`call_task_planner`のacceptance_criteria/depends_on/owns_variablesスキーマ拡張・`decision_extractor`の状態遷移一元管理＋Deferredステータス＋確定値抽出・Detectorのcriteria_status充足チェック・`generate_user_utterance`のペルソナ分離＋スコープ限定を実装。`python -m py_compile`合格、オフラインスモークテスト（DBマイグレーション・`verified_facts` upsert・`_get_current_task`・`_resolve_task_transition`のフェイルクローズ）はすべてPass。**実LLM呼び出しを伴う実機ドライランでの効果確認は未実施** — Phase C（予算カスケード）着手前にユーザーの指示待ち。 |
 | 2026-07-20 | BL-023 Phase Aの実ドライラン（`log/2026-07-20/1204`）をレビュー。task_planner出力が全タスクでacceptance_criteria（3個以内）・depends_on・owns_variablesを適切に生成し、以前task_1.2で束ねられていた車両台数・初期費用・ランニングコスト・感度分析が別タスク（task_2_2/4_1/4_2/4_3）に分割され、共有変数の一元所有パターンが機能していることを確認。`generate_user_utterance`も現在タスクの範囲に指示を限定できていた。副次的発見として、Decision Extractor/Orchestratorの`reasoning`フィールドの中国語出力を確認したが、ユーザー判断によりBL-020のスコープ外と決定（D-022、BL-020にスコープ明確化を追記）。 |
-| 2026-07-20 | 同ドライランでExpertが他タスク（task_2_2）のowns_variables（車両台数・システム費内訳・サイクルタイム）まで自発的に計算しツールループが10回で非収束クラッシュしたことを発見。BL-025を新規起票し、①call_expertへのスコープガードレール注入、②ツールループ2周目以降のsystem_prompt軽量化（`light_system_prompt`）の2案をユーザー承認のもと実装着手（D-023、[decision_lineage.md 論点26](decision_lineage.md)）。 |
+| 2026-07-20 | 同ドライランでExpertが他タスク（task_2_2）のowns_variables（車両台数・システム費内訳・サイクルタイム）まで自発的に計算しツールループが10回で非収束クラッシュしたことを発見。BL-025を新規起票し、①call_expertへのスコープガードレール注入、②ツールループ2周目以降のsystem_prompt軽量化（`light_system_prompt`）の2案をユーザー承認のもと実装着手（D-023、[decision_lineage.md 論点26](../decision_lineage.md)）。 |
 | 2026-07-20 | BL-025を実装し`done`化。`_build_task_scope_context`ヘルパーを新設し`generate_user_utterance`/`call_expert`で共通化。`call_expert`にスコープガードレール（①）を注入。`query_AI`/`_query_AI_live`に`light_system_prompt`引数を追加し、`_JAPANESE_OUTPUT_DIRECTIVE`を定数化した上でツールループiter=2以降のsystem_promptを軽量版に差し替え（②）。`python -m py_compile`合格、フェイククライアントによるオフラインスモークテスト2件（ガードレール注入確認、iter=1フル文脈/iter=2以降軽量文脈への切替確認）はすべてPass。実機再ドライラン確認は未実施。 |
-| 2026-07-20 | ユーザーの設計問い直しを受け、専門家選択の固定16種配列（`valid_experts`）がグラフ・`call_expert`のどちらでも分岐に使われておらず無用な足かせだったと判明。BL-026を新規起票・`done`化し、`call_orchestrator`を自由記述の専門家肩書き生成＋軽量フォールバックに変更（D-024、[decision_lineage.md 論点27](decision_lineage.md)）。専門家ごとの個別ノード・個別グラフ構造はMVP未完成の現時点では見送り。 |
-| 2026-07-20 | 実ドライラン（`log/2026-07-20/1421`）レビュー中に、同時刻帯の不自然な小ログフォルダ（`1455`・`1458`）を発見。原因は`cela_main.py`の`sys.stdout = MultiLogger()`がモジュールのトップレベルにあり、`import cela_main`するだけで本番`log/`配下に新規ディレクトリが作られる構造だったこと（このセッションのオフラインスモークテストが誤って混入させていた）。BL-027を新規起票・`done`化し、`__main__`ガード内への移動で修正、誤生成ログを削除（D-025、[decision_lineage.md 論点28](decision_lineage.md)）。 |
-| 2026-07-20 | 同ドライラン継続分（〜23278行）のレビューで、task_2_2のExpert呼び出しが`iter=10/tool_calls=9`とMAX_TOOL_ITER上限ぎりぎりで終了していたことを確認。BL-028を新規起票・`done`化し、クラッシュ回避を優先してMAX_TOOL_ITERを10→15に引き上げ（D-026、[decision_lineage.md 論点29](decision_lineage.md)）。この変更はソース修正であり、レビュー時点で実行中だった1421プロセス自体には反映されない。 |
-| 2026-07-20 | 同ドライラン継続分のレビューで、task_2_2の`verified_facts`（`operation_schedule`）にレポート全文がそのまま混入する事故を発見。`content`向けの「要約禁止」指示が`owned_variable_values`に波及していたことが原因と判明。ユーザーへの確認により、`content`の要約禁止は「部分成果物を後で製本する」設計思想に基づく意図的な仕様であり変更しないこと、`owned_variable_values`は目的が異なる簡潔な要約であるべきことが整理された。BL-029を新規起票・`done`化しプロンプトに目的の区別を明記（D-027、[decision_lineage.md 論点30](decision_lineage.md)）。あわせて、独立フィールド化の拡張案をBL-030として起票（`open`、`decision_extractor`が将来補助的役割に縮小する設計と合わせて再検討）。 |
-| 2026-07-20 | task_3_1レビューでUser AIがtask_2_3のコスト内訳との整合性を正しく取っていた挙動を分析。実際にはBL-023 Phase Aの構造化機構ではなく、`chat_history_window`の隣接性（task_2_3が直前タスクだったため生の全文がまだウィンドウ内に残っていた）による偶発的な副作用であり、`depends_on`宣言も実態を過少申告していることが判明。BL-018への追記として記録（[decision_lineage.md 論点31](decision_lineage.md)）。 |
-| 2026-07-20 | ユーザーがOpenRouter実績（直近24時間4.6Mトークン、キャッシュヒット率19.7%、コスト$0.65）を共有。本日のログレビューで確認した可変ブロック（Recent Decisions再掲・task_planner出力JSON全体等）の毎ターン再送がヒット率を下げている可能性を指摘し、BL-031として新規起票（`open`、MVP完成後のコスト最適化枠、D-028、[decision_lineage.md 論点32](decision_lineage.md)）。 |
-| 2026-07-20 | ユーザーが「合意・決定事項・検討状況DB」のプロンプト出力を確認し、task_2_3の4件のDecisionが親Deliverable承認後も永久にProposedのまま取り残されていることを発見。承認カスケードの単純な機械化は本当の未検討事項を隠蔽するリスクがあるというユーザー指摘を受け、同ターンのDetector判定（`constraint_issue`/`task_criteria_status`）が清浄な場合のみカスケードするガード付き設計を採用。BL-032を新規起票（`open`、設計確定・実装承認済み、D-029、[decision_lineage.md 論点33](decision_lineage.md)）。 |
-| 2026-07-20 | ユーザーがtask_5_2のログで、Expertがpython_repl未使用のまま「検算完了」と虚偽申告していた事故（Detectorの独立検算により実害なし）を発見。単純な強制差し戻しの無限ループリスクをユーザー自ら指摘し、①Expertの実行記録をDetectorに提示②Expert/Detector双方が未使用の場合のみ強制差し戻し、の2段構えに加え、実行記録の保存・提示という追加提案を統合してBL-033を新規起票・`done`化。`_query_AI_live`/`expert_node`/`call_detector`/`detector_node`を実装し、オフラインスモークテスト4件（記録保存・空リスト記録・複合失敗ガード発火・独立検算時の非発火）で確認（D-030、[decision_lineage.md 論点34](decision_lineage.md)）。 |
-| 2026-07-20 | ユーザーがtask_6_3のログで、`decision_extractor_node`がDeliverableの`status`（Proposed/Approved）を問わずCREATE判定時点で無条件にファイル保存していることを発見。`integrator_node`が`status=="Approved"`のみを集約するため正当性は壊れていないが、却下・修正版のたびに旧版が孤児ファイルとして残る衛生上の課題として整理。ユーザーはR4のホワイトボード化（md差分読み書き）で構造的に解消される見込みと判断し、現時点では実装せずBL-034として記録のみ起票（`open`、D-031、[decision_lineage.md 論点35](decision_lineage.md)）。 |
-| 2026-07-20 | ユーザーがtask_6_3で、Expertのピーク輸送力誤計算（正しくは39.1人/時、ピーク需要66.7人/時を下回る）によるDetector差し戻しを報告。検算の結果これは別フェーズ（task_2_1）確定済みの車両台数の不足という根深い問題と判明。`_build_task_scope_context`が現在フェーズ内のタスクのみを走査しフェーズ横断の`depends_on`参照を構造的に解決できないバグを発見しBL-035として起票。即応パッチではなく、要件定義書に新規追加したF-3.8（自律的DB/ファイル読み取りツール、v35.1）実装時にまとめて解消する方針をユーザーが決定（D-032、[decision_lineage.md 論点36](decision_lineage.md)）。 |
-| 2026-07-21 | ユーザー依頼により`log/2026-07-20/1421`の全21成果物を内容面でレビュー。「最終計画書」の財務数値（年間ランニングコスト・実質赤字額・補助金使用率）が統合パスのたびにPhase 3承認値と最大4.26倍乖離し、需要数値（人口・1日総需要）も根拠なくドリフトしていることを発見。BL-035と同一原因（統合パスが承認済みファイルを読み返せない）の別事例と判明したため、BL-036として起票。ユーザー判断により、既知原因からの予想された結果として参考記録に留め、F-3.8実装後の再ドライランで実効性を評価する方針とした（D-033、[decision_lineage.md 論点37](decision_lineage.md)）。 |
-| 2026-07-21 | ユーザーが「decisionなどの理由記載が甘い」と指摘。Detector自身の思考ログに、対象人口5,200人・1周回15分・80km/ルート等の数値の根拠を辿れず「根拠が不明」と繰り返し書かれている箇所を確認。①中間仮定がDecisionとして抽出されずreason_why欄自体が存在しない、②抽出されても理由が結論の言い換えに留まる、の2種の欠落と判明。BL-034〜036と同系統だが対象がreason_why欄の記載品質・抽出粒度である点で異なるためBL-037として起票。ユーザー判断により、まずBL記載のみに留め、F-3.1〜F-3.7（自律的書き込みツールへの移行）着手時にあわせて再設計する方針とした（D-034、[decision_lineage.md 論点38](decision_lineage.md)）。 |
-| 2026-07-21 | ユーザーがCELAの前身プロジェクトNPU-Context-Saverでの実運用実績（時間減衰RAG検索＋決定/否決ターンの自動セイリエンス固定、タイムスタンプ順の時系列復元読み、値・理由・引用元の三つ組をトピック検索できるファクトストア）を共有し、これらをBL-036/BL-037の解決方針として要件化するよう提案。理由（reason）は絶対的な正しさを要求せず「暫定値として進めた」こと自体を正当な理由として認め、暫定/確定の区別を後の再検討トリガーとして機能させる設計を追加提起。要件定義書にF-8.4・F-3.9を新規追加（v35.2、D-035）し、BL-036・BL-037にこの解決方針への参照を追記した（[decision_lineage.md 論点39](decision_lineage.md)）。 |
+| 2026-07-20 | ユーザーの設計問い直しを受け、専門家選択の固定16種配列（`valid_experts`）がグラフ・`call_expert`のどちらでも分岐に使われておらず無用な足かせだったと判明。BL-026を新規起票・`done`化し、`call_orchestrator`を自由記述の専門家肩書き生成＋軽量フォールバックに変更（D-024、[decision_lineage.md 論点27](../decision_lineage.md)）。専門家ごとの個別ノード・個別グラフ構造はMVP未完成の現時点では見送り。 |
+| 2026-07-20 | 実ドライラン（`log/2026-07-20/1421`）レビュー中に、同時刻帯の不自然な小ログフォルダ（`1455`・`1458`）を発見。原因は`cela_main.py`の`sys.stdout = MultiLogger()`がモジュールのトップレベルにあり、`import cela_main`するだけで本番`log/`配下に新規ディレクトリが作られる構造だったこと（このセッションのオフラインスモークテストが誤って混入させていた）。BL-027を新規起票・`done`化し、`__main__`ガード内への移動で修正、誤生成ログを削除（D-025、[decision_lineage.md 論点28](../decision_lineage.md)）。 |
+| 2026-07-20 | 同ドライラン継続分（〜23278行）のレビューで、task_2_2のExpert呼び出しが`iter=10/tool_calls=9`とMAX_TOOL_ITER上限ぎりぎりで終了していたことを確認。BL-028を新規起票・`done`化し、クラッシュ回避を優先してMAX_TOOL_ITERを10→15に引き上げ（D-026、[decision_lineage.md 論点29](../decision_lineage.md)）。この変更はソース修正であり、レビュー時点で実行中だった1421プロセス自体には反映されない。 |
+| 2026-07-20 | 同ドライラン継続分のレビューで、task_2_2の`verified_facts`（`operation_schedule`）にレポート全文がそのまま混入する事故を発見。`content`向けの「要約禁止」指示が`owned_variable_values`に波及していたことが原因と判明。ユーザーへの確認により、`content`の要約禁止は「部分成果物を後で製本する」設計思想に基づく意図的な仕様であり変更しないこと、`owned_variable_values`は目的が異なる簡潔な要約であるべきことが整理された。BL-029を新規起票・`done`化しプロンプトに目的の区別を明記（D-027、[decision_lineage.md 論点30](../decision_lineage.md)）。あわせて、独立フィールド化の拡張案をBL-030として起票（`open`、`decision_extractor`が将来補助的役割に縮小する設計と合わせて再検討）。 |
+| 2026-07-20 | task_3_1レビューでUser AIがtask_2_3のコスト内訳との整合性を正しく取っていた挙動を分析。実際にはBL-023 Phase Aの構造化機構ではなく、`chat_history_window`の隣接性（task_2_3が直前タスクだったため生の全文がまだウィンドウ内に残っていた）による偶発的な副作用であり、`depends_on`宣言も実態を過少申告していることが判明。BL-018への追記として記録（[decision_lineage.md 論点31](../decision_lineage.md)）。 |
+| 2026-07-20 | ユーザーがOpenRouter実績（直近24時間4.6Mトークン、キャッシュヒット率19.7%、コスト$0.65）を共有。本日のログレビューで確認した可変ブロック（Recent Decisions再掲・task_planner出力JSON全体等）の毎ターン再送がヒット率を下げている可能性を指摘し、BL-031として新規起票（`open`、MVP完成後のコスト最適化枠、D-028、[decision_lineage.md 論点32](../decision_lineage.md)）。 |
+| 2026-07-20 | ユーザーが「合意・決定事項・検討状況DB」のプロンプト出力を確認し、task_2_3の4件のDecisionが親Deliverable承認後も永久にProposedのまま取り残されていることを発見。承認カスケードの単純な機械化は本当の未検討事項を隠蔽するリスクがあるというユーザー指摘を受け、同ターンのDetector判定（`constraint_issue`/`task_criteria_status`）が清浄な場合のみカスケードするガード付き設計を採用。BL-032を新規起票（`open`、設計確定・実装承認済み、D-029、[decision_lineage.md 論点33](../decision_lineage.md)）。 |
+| 2026-07-20 | ユーザーがtask_5_2のログで、Expertがpython_repl未使用のまま「検算完了」と虚偽申告していた事故（Detectorの独立検算により実害なし）を発見。単純な強制差し戻しの無限ループリスクをユーザー自ら指摘し、①Expertの実行記録をDetectorに提示②Expert/Detector双方が未使用の場合のみ強制差し戻し、の2段構えに加え、実行記録の保存・提示という追加提案を統合してBL-033を新規起票・`done`化。`_query_AI_live`/`expert_node`/`call_detector`/`detector_node`を実装し、オフラインスモークテスト4件（記録保存・空リスト記録・複合失敗ガード発火・独立検算時の非発火）で確認（D-030、[decision_lineage.md 論点34](../decision_lineage.md)）。 |
+| 2026-07-20 | ユーザーがtask_6_3のログで、`decision_extractor_node`がDeliverableの`status`（Proposed/Approved）を問わずCREATE判定時点で無条件にファイル保存していることを発見。`integrator_node`が`status=="Approved"`のみを集約するため正当性は壊れていないが、却下・修正版のたびに旧版が孤児ファイルとして残る衛生上の課題として整理。ユーザーはR4のホワイトボード化（md差分読み書き）で構造的に解消される見込みと判断し、現時点では実装せずBL-034として記録のみ起票（`open`、D-031、[decision_lineage.md 論点35](../decision_lineage.md)）。 |
+| 2026-07-20 | ユーザーがtask_6_3で、Expertのピーク輸送力誤計算（正しくは39.1人/時、ピーク需要66.7人/時を下回る）によるDetector差し戻しを報告。検算の結果これは別フェーズ（task_2_1）確定済みの車両台数の不足という根深い問題と判明。`_build_task_scope_context`が現在フェーズ内のタスクのみを走査しフェーズ横断の`depends_on`参照を構造的に解決できないバグを発見しBL-035として起票。即応パッチではなく、要件定義書に新規追加したF-3.8（自律的DB/ファイル読み取りツール、v35.1）実装時にまとめて解消する方針をユーザーが決定（D-032、[decision_lineage.md 論点36](../decision_lineage.md)）。 |
+| 2026-07-21 | ユーザー依頼により`log/2026-07-20/1421`の全21成果物を内容面でレビュー。「最終計画書」の財務数値（年間ランニングコスト・実質赤字額・補助金使用率）が統合パスのたびにPhase 3承認値と最大4.26倍乖離し、需要数値（人口・1日総需要）も根拠なくドリフトしていることを発見。BL-035と同一原因（統合パスが承認済みファイルを読み返せない）の別事例と判明したため、BL-036として起票。ユーザー判断により、既知原因からの予想された結果として参考記録に留め、F-3.8実装後の再ドライランで実効性を評価する方針とした（D-033、[decision_lineage.md 論点37](../decision_lineage.md)）。 |
+| 2026-07-21 | ユーザーが「decisionなどの理由記載が甘い」と指摘。Detector自身の思考ログに、対象人口5,200人・1周回15分・80km/ルート等の数値の根拠を辿れず「根拠が不明」と繰り返し書かれている箇所を確認。①中間仮定がDecisionとして抽出されずreason_why欄自体が存在しない、②抽出されても理由が結論の言い換えに留まる、の2種の欠落と判明。BL-034〜036と同系統だが対象がreason_why欄の記載品質・抽出粒度である点で異なるためBL-037として起票。ユーザー判断により、まずBL記載のみに留め、F-3.1〜F-3.7（自律的書き込みツールへの移行）着手時にあわせて再設計する方針とした（D-034、[decision_lineage.md 論点38](../decision_lineage.md)）。 |
+| 2026-07-21 | ユーザーがCELAの前身プロジェクトNPU-Context-Saverでの実運用実績（時間減衰RAG検索＋決定/否決ターンの自動セイリエンス固定、タイムスタンプ順の時系列復元読み、値・理由・引用元の三つ組をトピック検索できるファクトストア）を共有し、これらをBL-036/BL-037の解決方針として要件化するよう提案。理由（reason）は絶対的な正しさを要求せず「暫定値として進めた」こと自体を正当な理由として認め、暫定/確定の区別を後の再検討トリガーとして機能させる設計を追加提起。要件定義書にF-8.4・F-3.9を新規追加（v35.2、D-035）し、BL-036・BL-037にこの解決方針への参照を追記した（[decision_lineage.md 論点39](../decision_lineage.md)）。 |
 | 2026-07-21 | R3b実装後の実ドライラン（`log/2026-07-21/2248`）レビュー中に、Expertの`write_agreement`成功（task_1.1、`vehicle_count`確定）後も`decision_extractor_node`のAgreement抽出がスキップされず、同一トピックでDecision/Deliverableの二重書き込みが発生していることを発見。オフライン再現テストでは`expert_node`単体の状態伝播（`state["expert_wrote_agreement"]`）は正常動作したため、原因は実グラフ実行中の状態伝播バグか、`write_agreement`の部分的カバレッジ（Decisionのみ、Deliverableは別経路）を想定できていない設計の粒度不足のいずれかに絞り込んだ。原因未確定のためBL-038として新規起票、次回ドライラン前に診断ログの追加を推奨する内容を記録した。 |
 | 2026-07-22 | 同ドライラン（`log/2026-07-21/2248`、`log_no_prompt.md`）を`log_with_prompt.md`に続けてレビューし、`decision_extractor`が出力する`advances_to_task_id`のドット表記（`task_1.1`）と実際の`task_id`のアンダースコア表記（`task_1_1`）の不一致により、ログ全体8箇所すべてでタスク遷移が失敗し、`current_task_id`が一度も更新されないままドライラン全体を通じてBL-023/BL-025のスコープガードレールが実質無効化されていたことを発見。`call_detector`・`call_expert`・`decision_extractor_node`のスコープ限定機構すべてに波及する広範なバグと判断し、BL-039として新規起票（`open`、P0）。 |
 | 2026-07-22 | 同ドライラン継続分（〜52569行、停止時点まで）のレビューで2件追加発見。①`read_deliverable_file`呼び出し31回中21回（約68%）が、ファイル名のタイムスタンプ部分を予測できずnot_foundになっていたことを発見しBL-040として起票。②ユーザーからの「車両台数4台の決定をどう覆すか」という問いかけを受けて`arbiter_node`/`global_constraints`を再調査し、資源超過を集約する処理がコードベース中に存在せず、実ドライラン全文検索でもResource Arbiter/facilitator/reflectionが1件も発火していないことを確認、一度確定した決定を後続タスクの発見から自動的に再検討させる仕組みが現状存在しないことをBL-041として起票（設計判断待ちのため実装は見送り）。ユーザー指示によりBL-039・BL-040は`cela_main.py`を直接修正（task_id表記のドット→アンダースコア正規化＋LLMへのtask_id一覧提示、`read_deliverable_file`のtask_id/topic_keywordによるDB逆引き＋agreements.task_id列の`_CURRENT_TASK_ID`フォールバック）、`tests/test_r3_smoke.py`にオフラインスモークテスト4件を追加し全49件Pass、`python -m py_compile`合格を確認。両BLとも`done`化（実LLM再ドライランでの効果確認は次回待ち）。 |
-| 2026-07-22 | ユーザーがBL-041を「木を見て森を見ず」（task_1.1の狭いスコープ内で作業していたことが真因）と再診断し、①暫定値デフォルト化（F-3.9のconfidence活用）②すり合わせタスク／上書き機構③facilitatorのエスカレーション役への再定義（`reflection`同様の周期的発火）の3方向を提案（[decision_lineage.md 論点42](decision_lineage.md)）。ユーザー指示により①はcela_main.py（Expertプロンプト・WRITE_AGREEMENT_TOOLスキーマのconfidenceデフォルトを`confirmed`→`provisional`に変更）に実装、③はBL-017と統合し設計書を先に作成する方針とし実装は見送り。あわせてBL-040にユーザー提案（ファイル名を`_Vn`バージョン連番化し旧版は`old/`へ退避）を追加実装。`tests/test_r3_smoke.py`にテスト1件追加、全50件Pass。 |
+| 2026-07-22 | ユーザーがBL-041を「木を見て森を見ず」（task_1.1の狭いスコープ内で作業していたことが真因）と再診断し、①暫定値デフォルト化（F-3.9のconfidence活用）②すり合わせタスク／上書き機構③facilitatorのエスカレーション役への再定義（`reflection`同様の周期的発火）の3方向を提案（[decision_lineage.md 論点42](../decision_lineage.md)）。ユーザー指示により①はcela_main.py（Expertプロンプト・WRITE_AGREEMENT_TOOLスキーマのconfidenceデフォルトを`confirmed`→`provisional`に変更）に実装、③はBL-017と統合し設計書を先に作成する方針とし実装は見送り。あわせてBL-040にユーザー提案（ファイル名を`_Vn`バージョン連番化し旧版は`old/`へ退避）を追加実装。`tests/test_r3_smoke.py`にテスト1件追加、全50件Pass。 |
 | 2026-07-22 | `decision_extractor`の`owned_variable_values`安全網パス（Expertがwrite_agreementを呼ばない場合）も暫定値原則の抜け穴になっていた点を修正。`upsert_verified_fact`のデフォルト引数を`confidence="confirmed"`→`"provisional"`に変更し、既存テストの期待値も更新（全50件Pass）。`cela_main.py`・`tests/test_r3_smoke.py`をコミット（c08bbd8）。あわせてBL-041のfacilitator/Resource Arbiter再設計ドラフトを`cela_facilitator_arbiter_redesign_BL041.md`として作成（未承認・未実装、実装前にユーザー確認が必要な未決事項4点を明記）。 |
-| 2026-07-22 | ユーザーがR4（ホワイトボード差分パッチ化）をBL-041実装より優先着手する決定（ドライランの長時間化・トークン消費が理由、[decision_lineage.md 論点43](decision_lineage.md)）。Plan modeで実装計画を策定し、既存R4設計書が未定義のまま残していた「Expertの変更箇所を既存完全版へどうマージするか」をClaude Code自身のEditツール方式（old_text完全一致検索→new_text置換）で解決。`cela_main.py`に`whiteboard_drafts`のCRUD・`_apply_text_edits`を実装し、`WRITE_AGREEMENT_TOOL`に`edits`パラメータを追加。Deliverableの主経路をwhiteboard_drafts方式に全面移行（`integrator_node`最終統合文書のみ旧来のファイル方式を維持）。Expert/Detector/User AIのプロンプトに現在タスクの最新ホワイトボードを注入し、`read_deliverable_file`・ロールバック（F-7.3）も対応。`cela_r4_design.md`・`cela_r4_impl_Plan.md`を更新・新規作成。`tests/test_r4_smoke.py`（14件）新規追加、既存`test_r3_smoke.py`の3件（R3b-T12・T13、BL-040バージョニングテスト）をWHITEBOARD方式に合わせて更新。オフラインスモークテスト計64件Pass、`python -m py_compile`合格。BL-034・BL-040のステータスをR4実装反映済みに更新（`partial`/`done`のまま補足追記）。 |
+| 2026-07-22 | ユーザーがR4（ホワイトボード差分パッチ化）をBL-041実装より優先着手する決定（ドライランの長時間化・トークン消費が理由、[decision_lineage.md 論点43](../decision_lineage.md)）。Plan modeで実装計画を策定し、既存R4設計書が未定義のまま残していた「Expertの変更箇所を既存完全版へどうマージするか」をClaude Code自身のEditツール方式（old_text完全一致検索→new_text置換）で解決。`cela_main.py`に`whiteboard_drafts`のCRUD・`_apply_text_edits`を実装し、`WRITE_AGREEMENT_TOOL`に`edits`パラメータを追加。Deliverableの主経路をwhiteboard_drafts方式に全面移行（`integrator_node`最終統合文書のみ旧来のファイル方式を維持）。Expert/Detector/User AIのプロンプトに現在タスクの最新ホワイトボードを注入し、`read_deliverable_file`・ロールバック（F-7.3）も対応。`cela_r4_design.md`・`cela_r4_impl_Plan.md`を更新・新規作成。`tests/test_r4_smoke.py`（14件）新規追加、既存`test_r3_smoke.py`の3件（R3b-T12・T13、BL-040バージョニングテスト）をWHITEBOARD方式に合わせて更新。オフラインスモークテスト計64件Pass、`python -m py_compile`合格。BL-034・BL-040のステータスをR4実装反映済みに更新（`partial`/`done`のまま補足追記）。 |
 | 2026-07-22 | R4実装後の実LLMドライラン（`log/2026-07-22/1407`）レビュー中、DBを直接クエリしてBL-038の実データ破損（WHITEBOARDポインタがdecision_extractorのフォールバック経路でプレーンテキスト上書きされSupersededになる事故）を確認。インストール済みLangGraph（v1.2.9）の最小再現コードで、`StateGraph`のスキーマ（`LineageState` TypedDict）に宣言されていないキーはノード間で伝播せず消えることを実証し、`expert_wrote_agreement`/`user_wrote_agreement`/`expert_last_whiteboard_edit`のTypedDict宣言漏れが真因と特定（D-038）。`LineageState`へのフィールド追加、decision_extractorフォールバックへの`WHITEBOARD:`保護分岐の追加、実グラフ経由の回帰テスト2件を`tests/test_r4_smoke.py`へ追加し、オフラインスモークテスト計66件Pass。BL-038を`done`化。 |
 | 2026-07-22 | 同ドライラン継続中のログ（`log/2026-07-22/1804`）レビューで、Detectorのconstraint_issue判定（minor/major境界）が同じ論点を8〜9 iter以上再検討し続ける非効率を発見。ユーザー提案の「3回思考し多数決を取る」方式を、`call_detector`プロンプトへの指示追加（3回だけ判定し多数決で確定、以降の再検討を禁止）として実装。BL-042として新規起票（`open`、プロンプト指示のみで様子見。守られない場合はコード側で暫定判定を強制カウントし機械的に打ち切る案へ進む）。同セッションで、`task_planner`の体感的な遅さの相談を機に`_query_AI_live`へstreaming描画（tools無し・tools付きツールループの両方）を追加、`MultiLogger.write()`の`flush()`欠落（ログファイルがターミナル表示より遅れて書き込まれる原因）も修正。 |
 | 2026-07-22 | 同ドライラン継続（`log/2026-07-22/1804`）で、`[DEBUG] decision_extractor target_role='expert' expert_wrote_agreement=True ... -> wrote_agreement_this_turn=True`と、同一ターンで抽出された10件全てへの`⏭️`スキップログを確認し、BL-038（D-038）の修正が実機で正しく機能することを確定。あわせて、ユーザー提案の「JSONパース失敗時にツールでの構造確認・フィードバック・部分修正」を、既存のツール呼び出し引数の自己修復ループ（D-009）へ`decision_extractor`をFunction Calling化して一本化する案として整理し、BL-043を新規起票（`open`、設計変更がやや大きいためBL起票のみに留め、JSONパース失敗が実害として頻発した場合に実装着手）。 |
@@ -3268,7 +3269,7 @@ Detectorには特に「Agentの数値がゴール文の直接記載か、AI自�
 | 2026-07-23 | 同ドライランで、Expertが組合せ探索中に`import itertools`を試みホワイトリスト外で拒否されていたことをユーザーが発見。「サンドボックスから抜け出せないような標準的なツール群は許可したらどうか」と提案。AIがI/O・OS・ネットワークアクセスを持たない純粋計算モジュール候補（itertools/functools/collections/operator/re）を提示し、AskUserQuestionでユーザーが一括追加を選択。`_ALLOWED_IMPORTS`（AGENTS.md§7の承認済み定数変更）に5モジュールを追加。BL-058として新規起票・`done`化、オフラインスモークテスト計71件Pass、`python -m py_compile`合格、`import itertools`が実際に動作することを手動確認。 |
 | 2026-07-23 | ユーザーが実際のクラッシュ（`httpx.RemoteProtocolError: peer closed connection without sending complete message body`が`detector_node`のstreaming受信中に未捕捉のままプロセス全体をクラッシュさせたトレースバック）を報告。BL-022（`json.JSONDecodeError`が絞り込んだ例外タプルから漏れていた事例）と同型の問題と特定し、`httpx`をimportした上で`_query_AI_live`の例外タプルに`httpx.RemoteProtocolError`を追加してリトライ対象化。BL-059として新規起票・`done`化、オフラインスモークテスト計71件Pass、`python -m py_compile`合格。 |
 | 2026-07-23 | 続くドライラン（`log/2026-07-23/1453`）で、Expertが最終許容iteration（15回目）でも`write_agreement`を呼び出し、次のiterationが存在せずMAX_TOOL_ITER非収束クラッシュに至ったことをユーザーが報告。BL-016/BL-057の「残り回数」通知はあくまで依頼に過ぎずモデルが従わない限り防げないという限界を特定し、最終iterationのみAPI呼び出しから`tools`を除いて構造的にツール呼び出しを不可能にし、テキスト最終応答を強制する方式に変更。BL-060として新規起票・`done`化、オフラインスモークテスト計71件Pass、`python -m py_compile`合格。 |
-| 2026-07-23 | ユーザーの依頼により、当日（2026-07-23）の一連のドライラン（`log/1122`〜`1656`）を通しで再レビューし、BL修正の実効性を棚卸しした（[decision_lineage.md 論点57](decision_lineage.md)）。**確認済み**: BL-048（reflectionのround_count発火・ゴール逸脱の実検出、`drift_flag`経由の差し戻しまで機能）、BL-049/054（ドメイン先行監査が数値監査とは異なる種類の欠陥＝Expert自身の検算コードのハードコードバグを独立に発見）、BL-057/060以降のクラッシュ非再発（`1358`/`1656`でTraceback 0件）。**未確認のまま**: BL-058（itertools等の実際の活用、修正後のセッションでは組合せ探索自体が発生せず）、BL-059（httpx.RemoteProtocolErrorの再発自体がなくキャッチの実地確認は未了）、BL-056（`round_count`表示を伴う新規reflection呼び出し自体がまだ観測できていない）。あわせてBL-041に、reflectionの検出精度向上によりエスカレーション機構未実装のギャップがより明確になった旨を追記。 |
+| 2026-07-23 | ユーザーの依頼により、当日（2026-07-23）の一連のドライラン（`log/1122`〜`1656`）を通しで再レビューし、BL修正の実効性を棚卸しした（[decision_lineage.md 論点57](../decision_lineage.md)）。**確認済み**: BL-048（reflectionのround_count発火・ゴール逸脱の実検出、`drift_flag`経由の差し戻しまで機能）、BL-049/054（ドメイン先行監査が数値監査とは異なる種類の欠陥＝Expert自身の検算コードのハードコードバグを独立に発見）、BL-057/060以降のクラッシュ非再発（`1358`/`1656`でTraceback 0件）。**未確認のまま**: BL-058（itertools等の実際の活用、修正後のセッションでは組合せ探索自体が発生せず）、BL-059（httpx.RemoteProtocolErrorの再発自体がなくキャッチの実地確認は未了）、BL-056（`round_count`表示を伴う新規reflection呼び出し自体がまだ観測できていない）。あわせてBL-041に、reflectionの検出精度向上によりエスカレーション機構未実装のギャップがより明確になった旨を追記。 |
 | 2026-07-23 | ユーザーの「R5実装前につぶすBLはあるか」との問いを受け、R5設計書（`cela_r5_design_v2.md`）のGoalShiftEvent（§4）が`call_resource_arbiter`の拡張に依存する一方、BL-041で確認済みの通りarbiterが死んだコードパスであること、R5のFreeze機能（§3）が`_build_agreements_context`と同系統のクエリを拡張する一方、BL-050で確認済みの視認性ギャップ（Superseded除外）がその土台に残っていることを指摘し、R5着手前にBL-041・BL-050を潰す方針で合意。Plan modeで、既存ドラフト`cela_facilitator_arbiter_redesign_BL041.md`のうち§3.1（`global_constraints`の実働化）相当のみに絞ったMVPスコープの実装計画を策定（4段階エスカレーションメニュー・facilitator再設計・BL-005根本修正は今回スコープ外として明示的に据え置き）。`cela_main.py`に`resource_claims`のスキーマ具体化（`{名前: {phase_id, value, total_cap}}`、AGENTS.md§7該当・本Planの承認をもって承認済み）、新規`_aggregate_global_constraints`ヘルパー、`arbiter_node`冒頭での動的再集約配線（BL-041）、`_build_agreements_context`への直前Superseded版差分表示＋現行行自身のreason_why表示、`WRITE_AGREEMENT_TOOL.reason_why`/decision_extractor抽出プロンプトへのUPDATE時変更理由明記要求（BL-050）を実装。新規`tests/test_bl041_bl050.py`（8件）を含めオフラインスモークテスト計78件Pass、`python -m py_compile`合格。両BLとも`partial`のまま残し、実装済み範囲と未着手範囲を完了条件に明記。 |
 | 2026-07-23 | ユーザーが`log/2026-07-23/1656`でfacilitatorが発火したログを報告し確認を依頼。調査の結果、直前のreflectionが5点の具体的な未解決問題（与条件無断変更・でっちあげ疑い数値等）を検出し`stagnant`と判定していたにもかかわらず、facilitator自身は「膠着していない」と独立に再判断し無関係な軽微な論点だけを促す食い違ったメッセージを出力していたことを発見。真因は`call_facilitator`の`decisions`引数がプロンプト内で完全に未使用（デッドパラメータ）で、reflectionの判定理由がfacilitatorへ一切伝わっていなかったこと。「このバグは今直してください」との指示により、`LineageState`に`last_reflection_note`を新設し`reflection_node`が保存、`call_facilitator`のプロンプトにこれを最優先の出発点として明示する形に修正。BL-061として新規起票・`done`化、新規`tests/test_bl061_facilitator_reflection_note.py`（4件）を含めオフラインスモークテスト計82件Pass、`python -m py_compile`合格。 |
 | 2026-07-23 | ユーザーの「R5の設計はV2としてすでにありますが...実装プランを作成」との依頼を受けPlan modeでR5実装計画を策定中、F-8.3 Freeze機能の設計相談で「Detectorがユーザー/エキスパートの決定まで破棄できたか？」というユーザーの根本的な疑問から、Detector等の`major`判定・`Rejected`書き込みが既存Agreementを構造的にSUPERSEDE/無効化する仕組みを持たず、実効果は差し戻しのみに留まることを発見。これはFreeze固有の課題ではなくwrite_agreement権限モデル全体の課題と判断し、R5実装とは切り離しBL-062として新規起票（`open`、実装は見送り）。R5実装計画自体は`docs/design/r5/cela_r5_impl_Plan.md`として保存し、F-8.3 Freezeの権限は`user`ロールのみに限定する設計で確定。 |
@@ -3304,3 +3305,4 @@ Detectorには特に「Agentの数値がゴール文の直接記載か、AI自�
 | 2026-07-26 | ユーザーが別AIに`log/2026-07-26`ドライランのログと本体プログラムを独立レビューさせた結果を共有。数値の出所（確定値/推定値/運用ルール）の区分表示、`think`の`decided`/`why`/`rejected`等の空欄削減、スコープ逸脱禁止の明文化・最終チェックリスト固定化の3提案をBL-097として新規起票（`open`、設計未着手）。ユーザー方針により、BL-095コミット後・BL-096のPlan mode設計に先立ち起票のみ実施。 |
 | 2026-07-26 | 同じ別AIレビューの続報を共有。`cela_main.py`が責務を密に抱えた「巨大な一枚岩」であるとの指摘をBL-098（永続化層/ツール層/プロンプト・ノード層/UI・ログ層への分離）として新規起票。`_CURRENT_*`モジュールレベルグローバルへの依存、`get_max_tokens`等の文字列部分一致による「ゆるい制御」、`think`必須化が最終的にはモデル遵守に依存する構造、の3点をBL-099として新規起票。いずれも`open`・設計未着手、機能面が一段落してから着手する方針。 |
 | 2026-07-27 | 同じ別AIレビューのさらなる続報。前提を疑い代替案を提案する際、「疑った前提・疑った理由・代替仮説・期待される利点・採用に必要な追加情報」の5項目セットを構造化して系譜として残すべきとの指摘をBL-100として新規起票（`open`、設計未着手）。既存の`ESCALATE_PREMISE_CONCERN_TOOL`（BL-086）が前半3項目に相当するフィールドを持つ一方、期待される利点の定量化・採用に必要な追加情報の2項目が欠けていることを確認。BL-096（issue_log）との統合可否を含め設計未着手。 |
+| 2026-07-27 | BL-096（issue管理DB）の基本設計をPlan modeで確定。再浮上トリガーは累積回数しきい値方式（ユーザー選択）、書き込み権限はMVPでDetector/User AIの2ノードに限定（CREATE両方、RESOLVEはUser AIのみ）とした。設計内容は`docs/back_log/BL-096/BL096_basic_design.md`に保存。あわせてユーザー指示により文書構造を再編：`docs/design/issue_backlog.md`を`docs/back_log/issue_backlog.md`へ移動し、BL番号ごとの基本設計書を`docs/back_log/BL-xxx/`配下に保存する運用を新設（今後のBLもこの規則に従う）。移動に伴い`docs/design/`側の参照8ファイルの相対リンクを修正し、`scripts/check_docs_consistency.py`の`DOCS_DIR`/`issue_backlog.md`参照パスも更新、`[OK]`を確認。実装はまだ着手していない。 |
