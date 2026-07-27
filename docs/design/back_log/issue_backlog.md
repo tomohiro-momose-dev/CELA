@@ -3126,7 +3126,10 @@ Detectorには特に「Agentの数値がゴール文の直接記載か、AI自�
 7. **エスカレーション解除の復帰通知**: `current_task_id`等の作業状態自体はreflection/facilitatorに破壊されないが、facilitatorが開く「広い問い直しモード」から自力で抜け出す合図がないというユーザー指摘を受け、escalated件数が0件に戻った瞬間を検知し、次のExpert/User AI呼び出し時に一度だけ「エスカレーション解消・通常のタスク遂行に戻ってよい」という復帰通知を注入する機構を追加。
 8. 読み取りツールは`read_issues`（「openのものしか見えない」という誤解を避けるため改名）。デフォルトで解決済み（resolution_note込み）も検索結果に含め、無条件の全件取得は明示的な`list_all`スイッチに分離。
 
-**完了条件:** 未定（実装後に記載）。
+**完了条件:**
+- 新規`tests/test_bl096_issue_log.py`（42件）: `_check_issue_permission`のロール×アクション直接検証、`_write_issue_impl`のCREATE（新規・再発・major即時escalated・トランケーション・権限拒否）、RESOLVE（成功・権限拒否・存在しないtopic・escalation_cleared判定）、`get_issues_from_db`/`_read_issues_handler`（resolved込みデフォルト・description LIKE検索・list_all・フィルタ必須エラー）、READ経由の再発カウント4条件（topic_keyword+task_id必須・別task_idでのみカウント・同一task_idや`task_id`単独やresolved行は対象外）、`_get_escalated_issues`、`TOOL_DISPATCH`配線、`call_detector`/`generate_user_utterance`のtools=[...]・プロンプトオリエンテーション、`detector_node`の自動バックアップ、`reflection_node`/`call_reflection`/`facilitator_node`/`call_facilitator`の機械的接続、`_build_escalation_resume_notice`、`LineageState`フィールドを検証。
+- `python -m py_compile cela_main.py`合格、`pytest tests/ -q -k "bl093 or bl094 or bl095 or bl096 or bl087"`198件Pass、`check_docs_consistency.py`合格。
+- 実LLM再ドライランでの効果確認（Detector/User AIが実際にwrite_issue/read_issuesを使うか、エスカレーション→reflection→facilitatorの機械的接続が実際に発火するか、復帰通知が機能するか）は次回待ち。
 
 ---
 
