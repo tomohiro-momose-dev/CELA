@@ -1277,6 +1277,20 @@
 
 ---
 
+### D-088: `provider.order`固定を`session_id`ベースのsticky routingへ切り替える（BL-107）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-27 |
+| 状態 | `decided`（実装完了、フラグでの復元手段を維持） |
+| 決定者 | t-momose（BL-106修正後も「iter時はキャッシュヒット0%のまま」と報告。私の初期仮説（provider.order常設が原因）に対し「provider固定はだいぶ前からで、それでも50%前後あった。26日17時台以降に急落した」と時系列の矛盾を指摘し、より精密な原因整理を要求した上で「分かりましたsession_idに変えてください。ただし、もとに戻せるようにして下さい」と実装を承認・復元手段を明示的に要求） / Claude Sonnet 5（WebFetchでOpenRouter公式ドキュメント・ブログを調査しsticky routingとprovider.orderの排他関係を発見、ユーザーの時系列指摘を`git log`で裏付け照合し原因を再整理・実装） |
+| **決定理由** | OpenRouter公式ドキュメント（[Prompt Caching Guide](https://openrouter.ai/docs/guides/best-practices/prompt-caching)）・公式ブログ（[Sticky Routing](https://openrouter.ai/blog/tutorials/prompt-caching-sticky-routing/)）に「`provider.order`を手動指定するとsticky routingが無効化される」と明記されている。既存コードは`_query_AI_live`内で常時`provider.order=["novita/fp8","parasail/fp8"]`（`allow_fallbacks: False`）を指定しており、これがsticky routingを恒常的に無効化していた。ユーザーからの反証（provider固定は古くからあり、それでも50%前後の実績があった）を受けて`git log`を確認したところ、BL-093コミット（`4a0bb46`、2026-07-26 18:03、"Wire THINK_TOOL into every LLM-calling node including previously tools=None single-shot ones"）以前は多くのノードが`tools=None`の単発呼び出しであり、そちらはsticky routing不要のクロスコールキャッシュ（同一の固定指示文プレフィックスを持つ別リクエスト同士でのヒット）で50%前後を維持できていたと判明。BL-093でほぼ全ノードがtoolsループ経由に切り替わったことで、元々存在した「ループ内（sticky routing必須）はprovider.orderのせいで0%」という弱点の影響範囲が急拡大し、平均値の急落として表面化したと整理し、ユーザーの時系列指摘と技術的に矛盾しないことを確認した上で決定した。 |
+| 決定内容 | `_query_AI_live`内に切り替えフラグ`_USE_STICKY_SESSION_ROUTING`（`cela_main.py`、`provider_preferences`定義直後）を新設。`True`の場合は`provider.order`を送らず、`extra_body["session_id"] = f"{_CURRENT_RUN_ID}-{label_lower}"`（run_id＋ノード種別で安定したID）を渡してsticky routingを有効化する。`False`に戻せば元の`provider.order`固定（novita/parasail限定・fallback禁止）へワンラインで復元できる（ユーザーの「もとに戻せるように」という明示要求への対応）。速度低下等の問題が実測された場合はこのフラグをFalseに戻す。 |
+| 影響 | `cela_main.py`（`_query_AI_live`の`extra_body`構築部）。`python -m py_compile`合格、`tests/test_bl093_think_tool_scratchpad.py`/`tests/test_bl093_d074_auto_reasoning_enforcement.py`/`tests/test_r3_smoke.py`/`tests/test_bl104_project_plan_toc_and_prompt_reorder.py`計135件Pass（挙動を変えない構造のため新規テストは追加していない）。実LLM再ドライランでの速度・キャッシュヒット率への効果確認はユーザーが実施予定。 |
+| 関連 BL | [BL-107](back_log/issue_backlog.md#bl-107-providerorder固定がopenrouterのsticky-routingを無効化しておりtoolsループ内の連続リクエストでキャッシュが構造的に0だった)、[BL-106](back_log/issue_backlog.md#bl-106-_query_ai_liveの自動reasoningダイジェストがtool呼び出し履歴より手前index-1に居座り毎iterプレフィックスキャッシュを破壊していた)、BL-093 |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
