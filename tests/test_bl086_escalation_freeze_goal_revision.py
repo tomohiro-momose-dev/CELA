@@ -273,9 +273,14 @@ def test_bl086_generate_user_utterance_node_applies_goal_revision_to_state(monke
     monkeypatch.setattr(cela_main, "get_last_goal_revision", lambda: {
         "new_goal_text": "改定後のゴール文", "old_goal_text": "改定前", "escalation_id": "ESC-1",
     })
+    # [BL-103] generate_user_utterance_nodeがUser AIの発言をdecisionsへ記録するようになった
+    # ため、このstate遷移限定テストではDB書き込みをモックで無効化する。
+    monkeypatch.setattr(cela_main, "get_active_conn", lambda: None)
+    monkeypatch.setattr(cela_main, "db_append_decision", lambda *a, **k: None)
+    monkeypatch.setattr(cela_main, "get_last_think_summary", lambda: "")
     state = {
         "goal": "改定前", "round_count": 0, "constraint_issue": "none",
-        "user_retry_count": 0, "chat_history": [],
+        "user_retry_count": 0, "chat_history": [], "run_id": "test-run",
     }
     result = cela_main.generate_user_utterance_node(state)
     assert result["goal"] == "改定後のゴール文"
@@ -287,9 +292,12 @@ def test_bl086_generate_user_utterance_node_keeps_goal_unchanged_when_no_revisio
     monkeypatch.setattr(cela_main, "get_last_write_agreement_succeeded", lambda: False)
     monkeypatch.setattr(cela_main, "get_last_reasoning_text", lambda: "")
     monkeypatch.setattr(cela_main, "get_last_goal_revision", lambda: None)
+    monkeypatch.setattr(cela_main, "get_active_conn", lambda: None)
+    monkeypatch.setattr(cela_main, "db_append_decision", lambda *a, **k: None)
+    monkeypatch.setattr(cela_main, "get_last_think_summary", lambda: "")
     state = {
         "goal": "変わらないゴール", "round_count": 0, "constraint_issue": "none",
-        "user_retry_count": 0, "chat_history": [],
+        "user_retry_count": 0, "chat_history": [], "run_id": "test-run",
     }
     result = cela_main.generate_user_utterance_node(state)
     assert result["goal"] == "変わらないゴール"

@@ -20,7 +20,7 @@
 | **進捗・完了判定** | [STATUS.md](STATUS.md) / [phase_gates.md](phase_gates.md) / [traceability.md](traceability.md) | 今どこか、いつ Done か、要件カバレッジ |
 | **展開** | [rollout_plan.md](rollout_plan.md) | 本番導入（不要なら削除） |
 | **任意: エピック入口** | GitHub Issue（短文） | 外部向け要約 + 本 README へのリンクのみ |
-| **任意: 外部プロジェクト参考メモ（未決）** | [npu_context_saver_reference_notes.md](npu_context_saver_reference_notes.md) | 前身プロジェクト（NPU-Context-Saver）から輸入を検討中のアイデア。**未決定・議論用**、正式な要件ではない |
+| **任意: 外部プロジェクト参考メモ（未決）** | [npu_context_saver_reference_notes.md](../refs/npu_context_saver_reference_notes.md) | 前身プロジェクト（NPU-Context-Saver）から輸入を検討中のアイデア。**未決定・議論用**、正式な要件ではない |
 
 ```mermaid
 flowchart TB

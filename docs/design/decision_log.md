@@ -1235,6 +1235,34 @@
 
 ---
 
+### D-084: hydrate（ノード間コンテキスト引き継ぎ）にissue_log pinとthink要約を導入し、User AI発言の欠落・無制限タイムラインを修正する（BL-103）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-27 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（NPU-Context-Saverの過去設計との対比を依頼し、pin導入・think要約採用・escalated issue詳細込み注入の3点を承認。実装直前に`user_always_remember`フラグの意図を確認され、当初計画通り窓付き統一を承認） / Claude Sonnet 5（NPU側コード調査、CELA側の欠落2件の発見、設計提案・実装） |
+| **決定理由** | `_build_hydrate_context`は`decisions`直近N件を機械的にスライスするだけで、窓の外は要約すら残らず消える設計だった。ユーザーが過去に設計したNPU-Context-Saverのhydrate機構（pin・RAG・トークン予算による段階的間引き）と対比した結果、CELAはRAGの代替として`read_verified_fact`等のプル型ツールを既に持つためRAG導入は過剰投資、トークン予算制御はNPU固有の事情（ローカルSLMのcontext枯渇）でありCELAには不要と判断し見送った。一方「pin」（重要情報を recency に関係なく常時提示）は低コスト・高効果と判断し、BL-096で新設済みの`issue_log` escalated行を転用することで新規インフラなしに実現できると判断した。facilitatorのフィードバックがchat_history末尾追記のみでwindow超過後に消える設計（cela_main.py:7130-7136）だったため、call_expert/generate_user_utteranceへのescalated issue注入は「同じ内容の二重表明」ではなく「facilitatorの発言が消えた後の穴埋め」と整理し、ユーザーは詳細込みでの注入を選択した。調査中、`generate_user_utterance_node`がUser AIの発言を一度も`decisions`テーブルに記録しておらずhydrate要約チャネルから完全に欠落していること、`generate_user_utterance`内の独自インラインタイムラインが`get_decisions_from_db`の全件を無制限に展開しExpert側の窓付き実装と非対称であることを発見し、スコープに追加した。 |
+| 決定内容 | 新規`get_last_think_summary()`（`get_last_reasoning_text()`と同パターンで、BL-093 thinkスクラッチパッドの最終`decided`/`why`を要約として返す）を追加。`expert_node`の`make_decision`呼び出しを`why=get_last_think_summary() or (output or "")[:150]`に改善。`generate_user_utterance_node`に欠落していた`make_decision`/`db_append_decision`呼び出しを新規追加。`generate_user_utterance`内の無制限インラインタイムラインを`_build_hydrate_context_from_db`呼び出しへ置き換え、Expert側と同じ窓・要約ロジックに統一。新規`_build_escalation_pin_text()`をcall_expert/generate_user_utterance双方のhydrate_context直後に連結。`call_reflection`内の同種インラインタイムラインは「定期的な全履歴監査」という別役割のため対象外とし変更しない。新規テーブル・スキーマ変更なし。 |
+| 影響 | `cela_main.py`（`get_last_think_summary`/`_build_escalation_pin_text`新設、`expert_node`/`generate_user_utterance_node`/`generate_user_utterance`/`call_expert`の変更）。設計書は`docs/design/back_log/BL-103/BL103_basic_design.md`。新規`tests/test_bl103_hydrate_context_improvements.py`（12件）で検証。既存`tests/test_bl086_escalation_freeze_goal_revision.py`の2テストが`generate_user_utterance_node`の新規DB書き込みで壊れたため、DBモック追加で修正（BL-061と同型の回帰）。`python -m py_compile`合格、関連クラスタ179件Pass。実LLM再ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-103](back_log/issue_backlog.md#bl-103-hydrateノード間コンテキスト引き継ぎの改善)、[BL-096](back_log/issue_backlog.md#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)、BL-093（think必須化・機械的強制） |
+
+---
+
+### D-085: call_expertのphases_json全文表示を目次＋on-demandツールへ変更し、プロンプトを「固定指示文が先頭、動的データが末尾」の順に並び替える（BL-104）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-27 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（「フェーズ・タスク表全体はuser以外はツール呼び出しで必要な時に見るようにしても支障ないか？」と提案、OpenRouterのキャッシュヒット率40%→5%急落を報告し「固定文字はプロンプトの上にできるだけまとめてキャッシュヒット率の改善になるかとも思っています」と仮説を提示、「OK進めて。他のノードも順次プロンプト順の整理を進めてください」「並び変え続行してください」と実装を承認、ドライラン`log/2026-07-27/1911`でキャッシュヒット率13-15%への改善を報告） / Claude Sonnet 5（`phases_json`の重複性・BL-025整合性の調査、プレフィックスキャッシュの構造分析、設計・実装、ドライランログのレビュー） |
+| **決定理由** | DBから直接測定した結果、`call_expert`の`phases_json`（13,361文字、毎回全文）は`_build_task_scope_context`が既に提供する`current_task_json`/`verified_facts_json`/`deferred_notes_text`とほぼ機能的に重複しており、BL-025のスコープガードレール（Expertが他タスクのowns_variables領域に踏み込むことを防ぐ）の趣旨からもむしろ逆効果であると判断した。また`light_system_prompt`への差し替えロジック（cela_main.py:2734）により`phases_json`はtool loopのiter=1にしか実際には見えていないことも確認した。プロンプトキャッシュの急落については、`call_expert`のプロンプト組み立て順を実際にトレースした結果、変動する内容（expert_name・ターン数表示・agreements_text）が冒頭に、分量として最大の固定指示文ブロックがその後ろに配置されており、プレフィックスキャッシュ（先頭一致ベース）が冒頭のわずかな変動で後続の固定ブロックごとキャッシュミスする構造だったことを確認した。ツールループの反復回数増加による希薄化（別要因）も併発している可能性はあるが、40%→5%という急落幅の大きさからプレフィックス不一致が主因と判断した。 |
+| 決定内容 | 新規`READ_PROJECT_PLAN_TOOL`/`_read_project_plan_handler`/`_build_project_plan_toc`/`_CURRENT_PHASES`を追加し、`call_expert`の`phases_json`全文表示を`phase_id`/`task_id`/`title`のみの軽量ToCに変更、全文が必要な場合は`read_project_plan`ツールで能動的に取得させる（User AI/`call_task_plan_reviewer`は全体像把握が本質的に必要なため`phases_json`全文を維持）。あわせて`call_expert`のプロンプトを、各ブロックの位置的参照（「上記の」等）の有無を個別に確認した上で、固定指示文グループを冒頭にまとめ、`agreements_text`・ターン数表示・`hydrate_context`等の最も変動が激しい内容を末尾に配置する順序へ並び替える。他ノード（`generate_user_utterance`・`call_detector`等）へも同一原則を順次展開する。 |
+| 影響 | `cela_main.py`（新規ツール・ヘルパー、`call_expert`/`generate_user_utterance`/`call_detector`(domain_prompt・数値監査prompt両方)/`call_orchestrator`/`call_resource_arbiter`/`call_facilitator`/`call_integrator`/`call_reviewer`/`call_task_plan_reviewer`の構造変更）。設計書は`docs/design/back_log/BL-104/BL104_basic_design.md`。新規`tests/test_bl104_project_plan_toc_and_prompt_reorder.py`（36件）で検証、関連クラスタ327件Pass。`call_reflection`は位置的参照の多段連鎖により機械的分離が困難と判断し自己完結するBL-093説明の移動のみに留めた。`call_task_planner`（reviewer_feedback_blockの先頭配置を前提とする位置的参照あり、かつ低頻度）・`call_goal_essence_analyst`（1回しか呼ばれずキャッシュ効果ゼロ）は意図的に見送り。ドライラン`log/2026-07-27/1911`（call_expert等3ノードまで適用時点でのチェックポイント再開）でキャッシュヒット率5%→13-15%への改善を確認し、ログレビューでも異常挙動・品質劣化は検出されなかった。全ノード適用後の実際のキャッシュヒット率改善確認は次回ドライラン待ち。 |
+| 関連 BL | [BL-104](back_log/issue_backlog.md#bl-104-call_expertのphases_json目次化read_project_planツール新設プロンプトのキャッシュ効率改善)、BL-025（スコープガードレール）、[BL-103](back_log/issue_backlog.md#bl-103-hydrateノード間コンテキスト引き継ぎの改善) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）

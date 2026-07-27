@@ -899,6 +899,47 @@ def _read_plan_draft_handler(args: dict) -> dict:
     return draft
 
 
+READ_PROJECT_PLAN_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_project_plan",
+        "description": (
+            "Read the full project plan (all phases and tasks, including each task's "
+            "description/acceptance_criteria/depends_on/owns_variables) -- the complete structure "
+            "that only a lightweight table-of-contents (phase_id/task_id/title) is shown for by "
+            "default. Call this only if the table-of-contents in the prompt is not enough context "
+            "for your current task (e.g. you need to understand another task's exact requirements "
+            "or dependency structure). "
+            "[BL-093] You must also call `think` with a non-empty `summary` in this SAME response "
+            "(not a separate later response), or none of this response's tool calls -- including "
+            "this one -- will be executed."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+
+def _read_project_plan_handler(args: dict) -> list:
+    """[BL-104] read_project_planツールの実体。呼び出しノード（call_expert）が事前に
+    _CURRENT_PHASESへコピーしたstate["phases"]をそのまま返す薄いラッパー。
+    """
+    return list(_CURRENT_PHASES)
+
+
+def _build_project_plan_toc(phases: list[dict]) -> str:
+    """[BL-104] call_expertの常時表示用に、全フェーズ・全タスクのphase_id/task_id/titleのみを
+    箇条書きの目次（table of contents）として整形する。descriptionやacceptance_criteria等の
+    詳細はread_project_planツールで能動的に取得させる（BL-025のスコープガードレールの趣旨とも
+    整合し、常時表示するphases_json全文（13,000字超）に比べ大幅に軽量）。
+    """
+    lines = []
+    for phase in phases:
+        lines.append(f"- [{phase.get('phase_id', '?')}] {phase.get('title', '?')}")
+        for task in phase.get("tasks", []):
+            lines.append(f"  - [{task.get('task_id', '?')}] {task.get('title', '?')}")
+    return "\n".join(lines) if lines else "(まだフェーズ・タスク計画がありません)"
+
+
 # [BL-093] 全ノード共通のツールループ（_query_AI_live）はモデルのreasoning（chain-of-thought
 # 生文章）を_StreamMessageでNone固定にして捨てており、次iterationでモデルは前回のtool_calls/
 # tool結果という骨組みだけから理由を再構築している。このツールに理由づけ（action/decided/why/
@@ -1191,6 +1232,7 @@ _CURRENT_CALLER_ROLE: str = ""  # R3b: write_agreementの権限チェック用
 _CURRENT_TASK_ID: str = ""      # R3b: confirmed_variablesのsource_task_id用
 _CURRENT_PHASE_ID: str = ""     # [BL-079] verify_whiteboard_excerptツールのget_latest_whiteboard参照用
 _CURRENT_GOAL_TEXT: str = ""    # [BL-086] revise_goalが編集対象とする現在のgoal本文
+_CURRENT_PHASES: list = []      # [BL-104] read_project_planツールが返すstate["phases"]のコピー
 
 # [F-3.1] R3b: 書き込みツール定義
 WRITE_AGREEMENT_TOOL = {
@@ -2050,6 +2092,24 @@ def _get_escalated_issues(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _build_escalation_pin_text(conn: sqlite3.Connection, run_id: str) -> str:
+    """[BL-103] issue_logのescalated行を、recency（chat_history_window/expert_history_window）
+    に関係なく常時hydrate_contextへ差し込むための整形テキストを返す（無ければ空文字）。
+    facilitatorのフィードバックはchat_history末尾に追記されるだけで窓を過ぎると消えるため
+    （facilitator_node）、本関数はそれとは別に、call_expert/generate_user_utteranceの
+    ambient contextへ「facilitatorの発言が消えた後の穴埋め」として毎ターン注入する用途。
+    フォーマットはfacilitator_nodeのescalated_issues_text組み立てと同一にする。
+    """
+    escalated = _get_escalated_issues(conn, run_id)
+    if not escalated:
+        return ""
+    return "\n".join(
+        f"- topic={i['topic']}: {i['description']}（累積{i['occurrence_count']}回発生、"
+        f"raised_by={i['raised_by']}）"
+        for i in escalated
+    )
+
+
 def _build_escalation_resume_notice(state: LineageState) -> str:
     """[BL-096] エスカレーション解消の直後、次にExpert/User AIが呼ばれる際、一度だけ
     「facilitatorの提起した論点への深掘りは終了し、通常のタスク遂行に戻ってよい」という
@@ -2145,6 +2205,7 @@ TOOL_DISPATCH = {
     ),
     "read_issues": _read_issues_handler,
     "read_plan_draft": _read_plan_draft_handler,
+    "read_project_plan": _read_project_plan_handler,
 }
 
 # BL-033: 直前のquery_AI呼び出しでLLMが実際に実行したpython_replの(code, result)記録。
@@ -2217,6 +2278,24 @@ def get_last_reasoning_text() -> str:
     プロバイダがreasoningを返さない場合は空文字列。
     """
     return _LAST_REASONING_TEXT
+
+
+def get_last_think_summary() -> str:
+    """[BL-103] 直前のノード呼び出し（_reset_think_scratchpad()〜次のノードの
+    _reset_think_scratchpad()まで）でモデルがthinkツールに書き残した最後のエントリから、
+    decisions.whyに使える一文要約を作って返す。生テキストの先頭を機械的に切るだけの
+    劣化版要約（旧: (output or "")[:100]）の代わりに、BL-093で全ノードに既に必須化されて
+    いるthinkの`decided`/`why`（無ければ`summary`）を使う。thinkが一度も呼ばれていない
+    場合は空文字を返す（呼び出し元は従来通りのフォールバックを行う）。
+    """
+    if not _THINK_REASONING_LOG:
+        return ""
+    last = _THINK_REASONING_LOG[-1]
+    decided = last.get("decided", "")
+    why = last.get("why", "")
+    if decided:
+        return f"{decided}（{why}）" if why else decided
+    return last.get("summary", "")
 
 
 def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unknown Node", tools: list[dict] | None = None,
@@ -4334,21 +4413,18 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
         all_text = "\n".join([f"{'User' if m['role']=='user' else 'AI'}: {m['content']}" for m in state["chat_history"]])
         history_text = f"【これまでの全対話文脈】\n{all_text}" if all_text else "(まだ履歴はありません)"
 
+    # [BL-104] プロンプトキャッシュのヒット率向上のため、固定指示文（役割説明・BL-078・BL-093の
+    # 説明・JSON形式の指示）を先頭付近にまとめ、ターンごとに変わる動的な内容（user_input・
+    # 決定事項DB・対話履歴）は末尾に配置する。位置的参照（「上記」「後述」）を持つブロックは
+    # このプロンプトには存在しないため、全ブロックを自由に並び替えている。
     prompt = (
         f"""
         {goal_context}\n
-        \n
-        Task(ユーザーAIの指示): {state["user_input"]}\n
         \n
         Taskを遂行するために最も適した専門家の肩書き（役職名）を、固定リストから選ぶのではなく、
         このタスクの内容に即して自由に生成してください。\n
         例: 「地域公共交通の需要予測専門家」「自動運転車両の安全基準アナリスト」のように、
         タスクの実態に即した具体的な肩書きにしてください（漠然とした「アシスタント」等は避ける）。\n
-        \n
-        【プロジェクトの合意・決定事項・検討状況DB】
-        {agreements_text}\n
-        \n
-        {history_text}\n
         \n
         回答は簡潔で論理的にせよ\n
         \n
@@ -4361,6 +4437,13 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
         \n
         【BL-093: thinkツールで検討過程を残せます】必要であれば、thinkツールで検討過程を書き
         残しても構いません（単独で呼んでも、以降の思考と同一応答内でまとめても構いません）。\n
+        \n
+        Task(ユーザーAIの指示): {state["user_input"]}\n
+        \n
+        【プロジェクトの合意・決定事項・検討状況DB】
+        {agreements_text}\n
+        \n
+        {history_text}\n
         \n
         Return ONLY JSON: {{"expert": "（生成した専門家の肩書き）", "reason": "...", "focus_guidance": "（このタスク固有の着眼点・注意点、無ければ空文字）"}}'
         """
@@ -4393,39 +4476,24 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     is_stateless_mode = config["is_stateless_mode"]
     user_input = state["user_input"]
     chat_history_window = config["chat_history_window"]
-    phases_json = json.dumps(state.get("phases", []), ensure_ascii=False, indent=2)
+    # [BL-104] read_project_planツールが参照するグローバルへ、このノード呼び出し分のみコピーする
+    # （tool handlerはstateを直接参照できないため、_CURRENT_TASK_ID等と同じパターンを踏襲）。
+    global _CURRENT_PHASES
+    _CURRENT_PHASES = state.get("phases", [])
+    project_plan_toc = _build_project_plan_toc(_CURRENT_PHASES)
 
+    # [BL-104] プロンプトキャッシュ（OpenRouter含め大半のプロバイダが自動で行うプレフィックス
+    # キャッシュ）のヒット率を上げるため、実行中いつでも内容が同一の固定指示文を先頭にまとめ、
+    # ターンごとに変わる動的データ（決定事項DB・現在タスク情報・ホワイトボード等）は末尾（chat_history
+    # への引き渡し直前）に配置する。各ブロックの移動前に「上記の」等の位置的参照が無いことを
+    # 個別に確認済み（詳細はBL104_basic_design.md）。「⚠️【厳守事項】上記の【決定事項DB】は…」と
+    # 「⚠️【重要：Detectorからの差し戻し】上記📋セクションに示されている…」の2ブロックは、それぞれ
+    # agreements_text／ホワイトボード表示への位置的参照を持つため、この並び替えの対象外とし、
+    # 元の相対位置（参照先の直後）を維持する。
     system_prompt = f"あなたは有能な{expert_name}の分野の専門家です。\n"
 
-    # [BL-078] Orchestratorが専門家選定時に考察した、このタスク固有の着眼点・注意点。
-    # Detectorの「観点を変えるだけで仕事ぶりが変わる」効果と同じ発想で、Expertの思考を
-    # 個々のタスクの実態に最適化する狙い（従来はOrchestratorの選定理由としてログに残るのみで、
-    # Expertには一切伝わっていなかった）。
-    expert_focus_guidance = state.get("expert_focus_guidance", "")
-    if expert_focus_guidance:
-        system_prompt += f"\n🎯 【このタスクで特に注意すべき観点（Orchestratorより）】\n{expert_focus_guidance}\n"
-
-    if agent_has_guardrail:
-        system_prompt += f"\n【あなたの絶対的な行動指針】\n👉 {state['goal']}\n"
-        system_prompt += f"\n{_get_goal_essence_text(_conn, state['run_id'])}\n"
-
-    system_prompt += f"\n⏳ 【制限時間】: 全 {max_turns} ターン中、現在は **{turn_count} ターン目** です。\n"
     system_prompt += f"\n5ターン毎に議論のサマリーを出力せよ。数値などは消さず明示的に示すこと。\n"
-    system_prompt += f"\n【プロジェクトの合意・決定事項・検討状況DB（遵守必須）】\n{agreements_text}\n\n"
-    
-    # 【追加】Agent AIの越権行為（勝手なDB更新）を禁止する
-    system_prompt += (
-        "⚠️ 【厳守事項】\n"
-        "上記の【決定事項DB】はシステム側で自動管理されます。\n"
-        "あなたの回答内に「決定事項DB」のブロックを自分で書いたり、勝手に「✅ 決定事項」と宣言したりしないでください。\n"
-        "あなたはあくまでUserに『提案・報告』を行う立場です。\n"
-    )
 
-    if turn_count >= max_turns - 2:
-        system_prompt += "🚨 【超重要・最終盤】これが最後の回答です。これまでの議論と『決定事項DB』の内容をすべて網羅し、集大成としての成果物を出力してください。\n"
-    elif turn_count > max_turns * 0.5:
-        system_prompt += "⚠️ 【議論の後半戦】新しい案の提示は控えてください。これまでの決定事項を具体化し、ドキュメント化にフォーカスしてください。\n"
-    
     system_prompt += (f"""
        \n🔥 【エージェントとしての行動原則】\n
         あなたはプロフェッショナルとして、制約（予算・時間・性能・規模など）の壁に直面しても、\n
@@ -4497,12 +4565,52 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "現実には成立しない場合は、そのことを隠さず明示的に指摘・報告してください。\n"
     )
 
+    # [BL-041] 「木を見て森を見ず」対策: 狭いタスクスコープ内で導出した数値が、
+    # 実は他タスクの制約と衝突する可能性を残したまま無条件に確定値として扱われ、
+    # 後から発覚しても誰も再検討しない（Expertはスコープガードレールで他タスクに
+    # 踏み込めず、write_agreementのSUPERSEDEも自発的には使われない）問題への対応。
+    # ゴールで与えられた絶対制約と、タスク内で導出した暫定値を区別させ、
+    # write_agreementのconfirmed_variables.confidenceで機械可読に記録させる。
+    system_prompt += (f"""
+    \n🔀 【確定値と暫定値の区別（重要）】\n
+    ゴールで直接与えられた絶対的な制約（例:「予算上限1億円」「上限3,000万円」）はconfidence判断の対象外です。\n
+    一方、あなたがこのタスクの範囲内で導出した数値（例：車両台数、内訳金額）は、他タスクの制約と
+    まだ突き合わせが済んでいない可能性があるため、原則として\n
+    write_agreementのconfirmed_variablesでは confidence="provisional" として記録してください。\n
+    confidence="confirmed" にしてよいのは、この数値がプロジェクト全体を通じて他のどのタスクの
+    制約からも影響を受けないと明確に判断できる場合、またはUserが明示的にこの値を最終確定と
+    承認した場合に限ります。\n
+    暫定値は後続タスクで矛盾が判明した際に再検討される前提の値であり、暫定として記録すること自体は
+    後退ではありません。\n
+    """)
+
+    # ここから先は実行中に変化する動的な内容（プレフィックスキャッシュの都合上、末尾側に配置）。
+
+    # [BL-078] Orchestratorが専門家選定時に考察した、このタスク固有の着眼点・注意点。
+    # Detectorの「観点を変えるだけで仕事ぶりが変わる」効果と同じ発想で、Expertの思考を
+    # 個々のタスクの実態に最適化する狙い（従来はOrchestratorの選定理由としてログに残るのみで、
+    # Expertには一切伝わっていなかった）。
+    expert_focus_guidance = state.get("expert_focus_guidance", "")
+    if expert_focus_guidance:
+        system_prompt += f"\n🎯 【このタスクで特に注意すべき観点（Orchestratorより）】\n{expert_focus_guidance}\n"
+
+    if agent_has_guardrail:
+        system_prompt += f"\n【あなたの絶対的な行動指針】\n👉 {state['goal']}\n"
+        system_prompt += f"\n{_get_goal_essence_text(_conn, state['run_id'])}\n"
+
     system_prompt += _build_detector_observations_block(state)
 
+    # [BL-104] 全フェーズ・全タスクの完全なJSON（phases_json）は、read_verified_fact/
+    # read_deliverable_fileと機能的にほぼ重複する上、BL-025のスコープガードレールの趣旨
+    # （他タスクのowns_variables領域に踏み込ませない）とも逆行するため、常時表示は
+    # phase_id/task_id/titleのみの軽量な目次（ToC）にとどめ、詳細が必要な場合のみ
+    # read_project_planツールで能動的に取得させる。
     system_prompt += (f"""
-    \n📊 [プロジェクト進行計画]
-    目標達成への道しるべとして、Task Plannerが作成したフェーズとタスクの一覧を以下に示します。\n
-    {phases_json}\n\n
+    \n📊 [プロジェクト進行計画 目次]
+    Task Plannerが作成したフェーズとタスクの一覧（目次）を以下に示します。各タスクの詳細
+    （description・acceptance_criteria・depends_on・owns_variables）が必要な場合は、
+    read_project_planツールで全文を確認してください。\n
+    {project_plan_toc}\n\n
     指示があったフェーズ、タスクに関しては、必ずこの計画を参照し、逸脱や矛盾がないよう思考してください\n
     \n
     """)
@@ -4542,25 +4650,6 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     if _escalation_status_text:
         system_prompt += f"\n{_escalation_status_text}\n"
 
-    # [BL-041] 「木を見て森を見ず」対策: 狭いタスクスコープ内で導出した数値が、
-    # 実は他タスクの制約と衝突する可能性を残したまま無条件に確定値として扱われ、
-    # 後から発覚しても誰も再検討しない（Expertはスコープガードレールで他タスクに
-    # 踏み込めず、write_agreementのSUPERSEDEも自発的には使われない）問題への対応。
-    # ゴールで与えられた絶対制約と、タスク内で導出した暫定値を区別させ、
-    # write_agreementのconfirmed_variables.confidenceで機械可読に記録させる。
-    system_prompt += (f"""
-    \n🔀 【確定値と暫定値の区別（重要）】\n
-    ゴールで直接与えられた絶対的な制約（例:「予算上限1億円」「上限3,000万円」）はconfidence判断の対象外です。\n
-    一方、あなたがこのタスクの範囲内で導出した数値（例：車両台数、内訳金額）は、他タスクの制約と
-    まだ突き合わせが済んでいない可能性があるため、原則として\n
-    write_agreementのconfirmed_variablesでは confidence="provisional" として記録してください。\n
-    confidence="confirmed" にしてよいのは、この数値がプロジェクト全体を通じて他のどのタスクの
-    制約からも影響を受けないと明確に判断できる場合、またはUserが明示的にこの値を最終確定と
-    承認した場合に限ります。\n
-    暫定値は後続タスクで矛盾が判明した際に再検討される前提の値であり、暫定として記録すること自体は
-    後退ではありません。\n
-    """)
-
     # 履歴からは消えた「前回の自分のNG発言」をStateから復元して突きつける
     previous_output = state.get("expert_output", "(取得不可)")
 
@@ -4596,17 +4685,40 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     [-----以下は直近の会話です-----]\n
     """)
 
+    # [BL-104] ここから先は最も変動が激しい内容（毎ターン必ず変わる）のため、プレフィックス
+    # キャッシュへの影響を最小化するべく末尾に配置する。
+    system_prompt += f"\n⏳ 【制限時間】: 全 {max_turns} ターン中、現在は **{turn_count} ターン目** です。\n"
+    if turn_count >= max_turns - 2:
+        system_prompt += "🚨 【超重要・最終盤】これが最後の回答です。これまでの議論と『決定事項DB』の内容をすべて網羅し、集大成としての成果物を出力してください。\n"
+    elif turn_count > max_turns * 0.5:
+        system_prompt += "⚠️ 【議論の後半戦】新しい案の提示は控えてください。これまでの決定事項を具体化し、ドキュメント化にフォーカスしてください。\n"
+
+    system_prompt += f"\n【プロジェクトの合意・決定事項・検討状況DB（遵守必須）】\n{agreements_text}\n\n"
+
+    # 【追加】Agent AIの越権行為（勝手なDB更新）を禁止する
+    system_prompt += (
+        "⚠️ 【厳守事項】\n"
+        "上記の【決定事項DB】はシステム側で自動管理されます。\n"
+        "あなたの回答内に「決定事項DB」のブロックを自分で書いたり、勝手に「✅ 決定事項」と宣言したりしないでください。\n"
+        "あなたはあくまでUserに『提案・報告』を行う立場です。\n"
+    )
 
     messages = []
     if is_stateless_mode:
         hydrate_context = _build_hydrate_context_from_db(_conn, state["run_id"], config)
+        # [BL-103] facilitatorのエスカレーション名指しはchat_history末尾に追記されるだけで
+        # chat_history_windowを過ぎると跡形もなく消える。issue_logのescalated行を毎ターン
+        # DBから直接注入することで、その「発言が消えた後の穴」を埋める（recencyに関係ない pin）。
+        escalation_pin = _build_escalation_pin_text(_conn, state["run_id"])
+        if escalation_pin:
+            hydrate_context += f"\n\n【⚠️エスカレーション中の懸念（要対応、issue_log）】\n{escalation_pin}"
         system_prompt += f"\n【過去の会話を圧縮したシステム判断ログ】\n{hydrate_context}\n"
         messages.append({"role": "system", "content": system_prompt})
-        
+
         recent_history = state["chat_history"][-chat_history_window:]
         for msg in recent_history:
             messages.append(msg)
-            
+
         #messages.append({"role": "user", "content": user_input})
     else:
         messages.append({"role": "system", "content": system_prompt})
@@ -4635,7 +4747,9 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "フェーズ・全タスクを横断して、変数名やキーワード（例:「車両台数」「山間部」「通信不安定」）"
         "から確定値（値・理由・引用元・confidence）を検索できます。read_deliverable_fileは過去タスク"
         "の成果物全文（数値だけでなく、それがどんな前提・議論を経て確定したかという文脈）をtask_idや"
-        "キーワードで読めます。【最低限、iter=1で一度は、このタスクに関連しそうなキーワードで"
+        "キーワードで読めます。[BL-104] read_project_planでは全フェーズ・全タスクの詳細"
+        "（description・acceptance_criteria・depends_on・owns_variables）を確認できます。"
+        "【最低限、iter=1で一度は、このタスクに関連しそうなキーワードで"
         "read_verified_factを呼び、他タスクで既に確定・仮定された値が無いか確認してから作業を"
         "始めてください】。確認せずに自分で新しい数値を仮定すると、他タスクの確定値と矛盾する"
         "リスクがあります。思考の途中で「これは他タスクで既に扱われていたかもしれない」という"
@@ -4647,9 +4761,9 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "rejected/rejected_why）を書いてください。他ツールと同一応答内でまとめて呼んでも単独で"
         "呼んでも構いません。\n"
         "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
-        "write_agreement・escalate_premise_concern・thinkです。think以外のいずれかを呼ぶときは、"
-        "必ずその同じ応答の中にthink（summary必須）も一緒に含めてください。think無しでこれらの"
-        "ツールだけを呼ぶと、その応答のツール呼び出しは一切実行されず差し戻されます。\n"
+        "read_project_plan・write_agreement・escalate_premise_concern・thinkです。think以外の"
+        "いずれかを呼ぶときは、必ずその同じ応答の中にthink（summary必須）も一緒に含めてください。"
+        "think無しでこれらのツールだけを呼ぶと、その応答のツール呼び出しは一切実行されず差し戻されます。\n"
         f"\n[R4] {whiteboard_text}\n"
     )
 
@@ -4658,7 +4772,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     _CURRENT_TASK_ID = state.get("current_task_id", "")
     _reset_think_scratchpad()  # [BL-093]
     return query_AI(messages, client=client_agent, model=model_agent, label=f"Expert:{expert_name}",
-                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt)
+                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt)
 
 
 #def call_detector(goal: str, user_input: str, expert_output: str, decisions: list[Decision], current_phase: dict) -> dict:
@@ -4832,6 +4946,13 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
     # （台数・人数配置等）が現実的かというドメイン評価が後手・軽視されやすいため、まず前提・
     # 設計そのものの妥当性を検算とは無関係に確認する（ユーザー指摘、2026-07-23）。
     # この時点では数値監査パスはまだ実行していないため、その結果には言及しない。
+    # [BL-104] プロンプトキャッシュのヒット率向上のため、実行中いつでも内容が同一の固定指示文
+    # （判定基準・気づき欄/write_issue/think/ツール一覧の説明）を先頭付近にまとめ、ターンごとに
+    # 変わる動的な内容（Freeze状況・現在タスク・ホワイトボード・今回評価するやり取り本文）は
+    # 末尾側に配置する（call_expert/generate_user_utteranceと同じ原則）。「上記ホワイトボードの
+    # 本文から」という位置的参照を持つBL-076ブロックのみ、whiteboard_blockの直後という相対位置を
+    # 維持し並び替えの対象外とする。domain_role_instructionはtarget_role単位でしか変わらない
+    # （ターンごとには変わらない）ため、固定指示文グループの直後に配置する。
     domain_prompt = (
         f"あなたはプロジェクトにおける議論の「ドメイン妥当性レビュー」担当監査人です。\n"
         f"あなたの役割は数値の検算（計算が合っているか）ではありません。数値の機械的検算は"
@@ -4852,28 +4973,10 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"自体は、それだけでは矛盾ではありません。**「情報が不足していて確認できない」ことをmajorの"
         f"根拠にしてはいけません**。majorにする場合は、与えられた情報の範囲内で矛盾を具体的に指摘できる"
         f"ことが必須です。\n\n"
-        f"{_get_frozen_agreements_text(get_active_conn(), state['run_id'])}"
-        f"【BL-086: 🔒Freeze済み項目の扱い】上記に🔒が付いている項目があれば、それは人間の発注者が"
-        f"既に審議の上で承認した意図的な例外です。同じ論点をmajor/minorの根拠にしないでください"
-        f"（ただし別の新しい問題点はこれまで通り厳格に評価してください）。\n\n"
-        f"System Goal: {goal}\n"
-        f"{_get_goal_essence_text(get_active_conn(), state['run_id'])}\n"
-        f"[BL-087 Stage4] 上記【🎯 本質】に照らして、数値・条件設定自体は妥当でも本質から"
-        f"乖離していないか（手段の細部の帳尻合わせに終始し、本来達成すべきことを見失っていないか）"
-        f"も確認してください。乖離があればconstraint_issueをminor以上に引き上げる根拠にできます。\n\n"
-        f"【現在タスクのacceptance_criteria】\n{criteria_text}\n\n"
-        f"{whiteboard_block}"
-        f"{write_agreement_status_block}\n"
-        f"{deferred_notes_block}"
-        f"【今回評価するターンのやり取り】\n{history_text}\n\n"
         f"【BL-051軽量版: 気づき欄】constraint_issueの判定（none/minor/major）には至らないが、"
         f"思考の過程で気になった点・将来的なリスクの芽・引っかかった前提などがあれば、"
         f"'observations'に自由記述で書き残してください（無ければ空文字でよい）。"
         f"これは判定を左右するものではなく、後続の議論のために参考情報として引き継がれます。\n\n"
-        f"【BL-076: 指摘箇所の引用】constraint_issueがminor/majorの場合、上記ホワイトボードの本文から、"
-        f"指摘対象の箇所を一字一句そのまま（改変・要約せず）1〜2文だけ引用し'target_excerpt'に"
-        f"入れてください（ホワイトボードへの注釈挿入に機械的に使うため、正確な引用が必須です）。"
-        f"noneの場合や、ホワイトボードが存在せず引用できない場合は空文字にしてください。\n\n"
         f"[BL-096: write_issue/read_issuesで軽微な懸念を後続タスクへ引き継ぐ] 'observations'に書く"
         f"内容のうち、今回のターンだけでなく後続タスクでも参照されるべきと判断した懸念は、"
         f"write_issue(action_type=\"CREATE\", topic=\"<固定の識別文字列>\", severity=\"minor\", "
@@ -4885,6 +4988,24 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"think以外のいずれかを呼ぶときは、必ずその同じ応答の中にthink（summary必須）も一緒に"
         f"含めてください。think無しでこれらのツールだけを呼ぶと、その応答のツール呼び出しは"
         f"一切実行されず差し戻されます。\n\n"
+        f"{_get_frozen_agreements_text(get_active_conn(), state['run_id'])}"
+        f"【BL-086: 🔒Freeze済み項目の扱い】上記に🔒が付いている項目があれば、それは人間の発注者が"
+        f"既に審議の上で承認した意図的な例外です。同じ論点をmajor/minorの根拠にしないでください"
+        f"（ただし別の新しい問題点はこれまで通り厳格に評価してください）。\n\n"
+        f"System Goal: {goal}\n"
+        f"{_get_goal_essence_text(get_active_conn(), state['run_id'])}\n"
+        f"[BL-087 Stage4] 上記【🎯 本質】に照らして、数値・条件設定自体は妥当でも本質から"
+        f"乖離していないか（手段の細部の帳尻合わせに終始し、本来達成すべきことを見失っていないか）"
+        f"も確認してください。乖離があればconstraint_issueをminor以上に引き上げる根拠にできます。\n\n"
+        f"【現在タスクのacceptance_criteria】\n{criteria_text}\n\n"
+        f"{whiteboard_block}"
+        f"【BL-076: 指摘箇所の引用】constraint_issueがminor/majorの場合、上記ホワイトボードの本文から、"
+        f"指摘対象の箇所を一字一句そのまま（改変・要約せず）1〜2文だけ引用し'target_excerpt'に"
+        f"入れてください（ホワイトボードへの注釈挿入に機械的に使うため、正確な引用が必須です）。"
+        f"noneの場合や、ホワイトボードが存在せず引用できない場合は空文字にしてください。\n\n"
+        f"{write_agreement_status_block}\n"
+        f"{deferred_notes_block}"
+        f"【今回評価するターンのやり取り】\n{history_text}\n\n"
         f'Return ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用(無ければ空文字)", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
@@ -4918,6 +5039,14 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"none/minorとせず、関連する数値評価にもその点を反映してください。\n\n"
     )
 
+    # [BL-104] プロンプトキャッシュのヒット率向上のため、domain_promptと同じ原則で並び替える:
+    # 固定指示文（軸1/軸2の定義・役割別指示・検算ゲート・判定ブレ防止・気づき欄/BL-079/BL-094/
+    # BL-093/BL-096/ツール一覧の説明）を先頭、ゴール文（実行中はほぼ不変）をその次、タスク単位
+    # でしか変わらないacceptance_criteriaをその次、ターンごとに変わる動的な内容（ドメインレビュー
+    # 結果・python_repl記録・write_agreement結果・思考過程監査・決定事項DB・ホワイトボード・
+    # 申し送り事項・今回の対話本文）を末尾に配置する。「上記の」「上記DB」「上記ホワイトボードの
+    # 本文から」という位置的参照を持つthought_process_audit（BL-033連携）・BL-086・BL-062・
+    # BL-076の各ブロックのみ、参照先の直後という相対位置を維持し並び替えの対象外とする。
     prompt = (
         f"あなたはプロジェクトにおける議論の厳格で優秀な監査人です。\n\n"
         f"以下の2軸は**完全に独立した別の評価軸**です。混同しないでください。\n\n"
@@ -4941,7 +5070,6 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
 
         f"{role_specific_instruction}\n\n" # ★ここで切り替える
 
-        f"{domain_findings_block}"
         f"**追加の重要指示: 上限値（例:「上限1億円」「上限3,000万円」）を超えていない場合、"
         f"あるいは上限値に近い値であっても、それは矛盾とは見なさないでください。"
         f"「上限内の数値差」や「予算の上下関係」を正確に計算し、上限を超えていない場合はnoneまたはminorと判定してください。\n\n"
@@ -4949,32 +5077,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"【F-2.6 機械的検算ゲート（必須）】数値主張（合計・比率・閾値比較等）を含む場合、"
         f"必ず python_repl ツールで機械的に再計算し、一致を確認してからでなければ constraint_issue=\"major\" としないでください。"
         f"暗算での承認・却下判定は禁止します。\n\n"
-        f"{python_calls_block}\n"
-        f"{write_agreement_status_block}\n"
-        f"{thought_process_audit}\n"
-        f"System Goal: {goal}\n"
-        f"{_get_goal_essence_text(get_active_conn(), state['run_id'])}\n"
-        f"Recent Decisions（参考程度）: {recent_decitions}\n\n"
-        f"【プロジェクトの合意・決定事項・検討状況DB】\n{agreements_text}\n\n"
-        f"【BL-086: 🔒Freeze済み項目の扱い】上記DBで🔒アイコンが付いている項目は、既に人間の発注者"
-        f"（User）が審議の上で承認した意図的な例外です。同じ論点を理由に再度major判定やSUPERSEDEの"
-        f"対象にしないでください（unfreeze機構は存在せず、Freeze済みへのSUPERSEDE/UPDATEはツール"
-        f"呼び出し自体がエラーになります）。ただし、Freezeされていない別の新しい問題点はこれまで通り"
-        f"厳格に評価してください。🔒項目について致命的ではない懸念がある場合は、constraint_issueを"
-        f"上げず'observations'欄に留めてください。\n\n"
-        f"【BL-062: 既存Agreementの無効化】constraint_issue=\"major\"と判定し、その原因が上記DB内の"
-        f"特定のtopic（例：既にApprovedとして記録されている数値や決定）にある場合、commentに書くだけで"
-        f"終わらせず、write_agreementツールをaction_type=\"SUPERSEDE\", status=\"Rejected\", "
-        f"target_topic=\"<上記DBのtopic文字列そのまま>\", reason_why=\"<何が誤りでなぜ無効化するか>\" "
-        f"として呼び出し、DB上のその記録を実際に無効化してください。そうしないと、あなたが誤りと判定した"
-        f"内容が「承認済み」としてDBに残り続け、後続タスクや最終統合が誤って参照してしまいます。\n\n"
-        f"【BL-023: 現在タスクのacceptance_criteria充足チェック】\n"
-        f"以下は現在のタスクで検証されるべき独立した主張の一覧です（インデックス0始まり）。\n"
-        f"{criteria_text}\n"
-        f"今回のAgentの発言が、それぞれの項目に応えている（充足している）かをbool配列で判定してください。\n"
-        f"配列の長さ・順序は上記の一覧と対応させてください。\n\n"
-        f"{whiteboard_block}"
-        f"{deferred_notes_block}"
+
         f"【判定のブレ防止（3回多数決方式）】constraint_issueの判定（特にminorとmajorの境界）で"
         f"結論が変わったり迷ったりする場合、同じ論点を無限に再検討し続けないでください。"
         f"その論点について、独立した判定を意識的に3回だけ行い（1回目・2回目・3回目、それぞれ短く"
@@ -4986,16 +5089,11 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"各検算は2回程度で十分です。ツール呼び出しの回数には上限があり、新しい論点が無いまま"
         f"「念のため再確認」を重ねると、上限到達時に強制的に打ち切られたテキスト応答としてJSONを"
         f"一度に出力せざるを得なくなり、出力が途中で切れるリスクがあります。\n\n"
-        f"【今回評価するターンのやり取り】\n"
-        f"{history_text}\n"
+
         f"【BL-051軽量版: 気づき欄】constraint_issueの判定（none/minor/major）には至らないが、"
         f"思考の過程で気になった点・将来的なリスクの芽・引っかかった前提などがあれば、"
         f"'observations'に自由記述で書き残してください（無ければ空文字でよい）。"
         f"これは判定を左右するものではなく、後続の議論のために参考情報として引き継がれます。\n\n"
-        f"【BL-076: 指摘箇所の引用】constraint_issueがminor/majorの場合、上記ホワイトボードの本文から、"
-        f"指摘対象の箇所を一字一句そのまま（改変・要約せず）1〜2文だけ引用し'target_excerpt'に"
-        f"入れてください（ホワイトボードへの注釈挿入に機械的に使うため、正確な引用が必須です）。"
-        f"noneの場合や、ホワイトボードが存在せず引用できない場合は空文字にしてください。\n\n"
         f"【BL-079: 引用前に必ずverify_whiteboard_excerptで検証】target_excerptを確定する前に、"
         f"必ずverify_whiteboard_excerptツールでその引用が一意に一致するか確認してください。"
         f"ok=falseが返った場合は、そのままにせず、示された件数（完全一致/緩い一致）を参考に"
@@ -5031,6 +5129,44 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"think以外のいずれかを呼ぶときは、必ずその同じ応答の中にthink（summary必須）も一緒に"
         f"含めてください。think無しでこれらのツールだけを呼ぶと、その応答のツール呼び出しは"
         f"一切実行されず差し戻されます。\n\n"
+
+        f"System Goal: {goal}\n"
+        f"{_get_goal_essence_text(get_active_conn(), state['run_id'])}\n"
+
+        f"【BL-023: 現在タスクのacceptance_criteria充足チェック】\n"
+        f"以下は現在のタスクで検証されるべき独立した主張の一覧です（インデックス0始まり）。\n"
+        f"{criteria_text}\n"
+        f"今回のAgentの発言が、それぞれの項目に応えている（充足している）かをbool配列で判定してください。\n"
+        f"配列の長さ・順序は上記の一覧と対応させてください。\n\n"
+
+        f"{domain_findings_block}"
+        f"{python_calls_block}\n"
+        f"{write_agreement_status_block}\n"
+        f"{thought_process_audit}\n"
+        f"Recent Decisions（参考程度）: {recent_decitions}\n\n"
+        f"【プロジェクトの合意・決定事項・検討状況DB】\n{agreements_text}\n\n"
+        f"【BL-086: 🔒Freeze済み項目の扱い】上記DBで🔒アイコンが付いている項目は、既に人間の発注者"
+        f"（User）が審議の上で承認した意図的な例外です。同じ論点を理由に再度major判定やSUPERSEDEの"
+        f"対象にしないでください（unfreeze機構は存在せず、Freeze済みへのSUPERSEDE/UPDATEはツール"
+        f"呼び出し自体がエラーになります）。ただし、Freezeされていない別の新しい問題点はこれまで通り"
+        f"厳格に評価してください。🔒項目について致命的ではない懸念がある場合は、constraint_issueを"
+        f"上げず'observations'欄に留めてください。\n\n"
+        f"【BL-062: 既存Agreementの無効化】constraint_issue=\"major\"と判定し、その原因が上記DB内の"
+        f"特定のtopic（例：既にApprovedとして記録されている数値や決定）にある場合、commentに書くだけで"
+        f"終わらせず、write_agreementツールをaction_type=\"SUPERSEDE\", status=\"Rejected\", "
+        f"target_topic=\"<上記DBのtopic文字列そのまま>\", reason_why=\"<何が誤りでなぜ無効化するか>\" "
+        f"として呼び出し、DB上のその記録を実際に無効化してください。そうしないと、あなたが誤りと判定した"
+        f"内容が「承認済み」としてDBに残り続け、後続タスクや最終統合が誤って参照してしまいます。\n\n"
+
+        f"{whiteboard_block}"
+        f"【BL-076: 指摘箇所の引用】constraint_issueがminor/majorの場合、上記ホワイトボードの本文から、"
+        f"指摘対象の箇所を一字一句そのまま（改変・要約せず）1〜2文だけ引用し'target_excerpt'に"
+        f"入れてください（ホワイトボードへの注釈挿入に機械的に使うため、正確な引用が必須です）。"
+        f"noneの場合や、ホワイトボードが存在せず引用できない場合は空文字にしてください。\n\n"
+        f"{deferred_notes_block}"
+
+        f"【今回評価するターンのやり取り】\n"
+        f"{history_text}\n"
         f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由", "criteria_status": [true/false, ...], "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用（無ければ空文字）", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
@@ -5364,16 +5500,13 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goa
         for p in phases_info
     )
 
+    # [BL-104] プロンプトキャッシュのヒット率向上のため、固定指示文（役割説明・検算ゲート・
+    # BL-093/BL-094・ツール一覧・ゴール変容検知・JSON形式の指示）を先頭付近にまとめ、呼び出し
+    # ごとに変わる動的な内容（overrun詳細・各フェーズの配分）は末尾に配置する。位置的参照
+    # （「上記」「後述」）を持つブロックはこのプロンプトには存在しないため、全ブロックを
+    # 自由に並び替えている。
     prompt = f"""
     あなたはプロジェクト全体の意思決定者です。
-    リソース「{overrun['constraint']}」が、上限{overrun['cap']}に対し合計{overrun['claimed']}と、
-    {overrun['over_by']}超過しています。
-
-    ■ 絶対目標: {goal}
-    {goal_essence_text}
-    ■ 競合している各フェーズの現在の配分:
-    {phases_text}
-
     各フェーズの目標達成への重要度・必須度を評価し、超過分を解消するための
     再配分案を提示してください。次のいずれか、または組み合わせを検討してください:
     - 優先度の低いフェーズの成果を縮小・簡素化する
@@ -5396,8 +5529,8 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goa
     [BL-094: read_verified_fact/read_deliverable_fileで既存の配分・決定と同期する]
     read_verified_factは全フェーズ・全タスク横断で、変数名やキーワードから確定値（値・理由・
     引用元・confidence）を検索できます。read_deliverable_fileは過去タスクの成果物全文（その値が
-    どんな前提で確定したか）を読めます。【最低限、iter=1で一度は、このリソース（{overrun['constraint']}）
-    や関係するフェーズについてread_verified_factで確認し、既に確定している配分・前提が無いか
+    どんな前提で確定したか）を読めます。【最低限、iter=1で一度は、このリソースや関係するフェーズに
+    ついてread_verified_factで確認し、既に確定している配分・前提が無いか
     同期してから再配分案を検討してください】。確認せずに独自の前提で再配分すると、既存の
     確定事項と矛盾するリスクがあります。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
@@ -5410,6 +5543,15 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goa
     変更する必要があると判断した場合、requires_goal_constraint_change: true を
     含めて返答してください。単なるフェーズ間の配分見直し（total_capは維持）で
     あれば false としてください。
+
+    ■ 絶対目標: {goal}
+    {goal_essence_text}
+
+    リソース「{overrun['constraint']}」が、上限{overrun['cap']}に対し合計{overrun['claimed']}と、
+    {overrun['over_by']}超過しています。
+
+    ■ 競合している各フェーズの現在の配分:
+    {phases_text}
 
     Return ONLY JSON:
     {{
@@ -5498,17 +5640,24 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
         f"- {a['topic']}: {a.get('decision_what', '')[:80]}" for a in unresolved_critical
     ) or "(なし)"
     
+    # [BL-104] このプロンプトは「上記の矛盾・懸念が」「上記のいずれかに」「上記の直近の会話の
+    # 流れとタイムラインを」のように、直前の動的ブロック（unresolved_text/constraint_log_text/
+    # timeline_str/history_text）を直接参照する指示文が多段に連鎖しており、固定指示文と動的
+    # データを機械的に分離すると参照関係が壊れる。そのため他ノードのような全面的な並び替えは
+    # 行わず、完全に自己完結しているBL-093の説明のみ先頭の固定ブロックへ移動するに留める。
     prompt = f"""
     あなたはプロジェクトの厳格で優秀な監査人です
     ミッション: マクロなゴール監査、および「議論の収束・停滞」の厳格な判定】
-        
+
         ――― 🚨 終了監査指示 ―――
     現在の議論の状態を [completed / stagnant / continuing] から判定してください。
-    
+
     1. "completed" : ゴールで要求された成果物がすべて、要求された形式・粒度で完成し、議論が完結している場合。
     2. "stagnant"  : 堂々巡りをしていて具体的な成果物作成が進んでいない、または当初の目標から逸脱している場合。
     3. "continuing" : 上記のどちらでもなく、順調に作業が進行中の場合。
-    
+
+    【BL-093】必要であれば、thinkツールで検討過程を書き残しても構いません。
+
      ■ 未解決のまま残っている検討中の項目（🤔Proposedステータス）:
     {unresolved_text}
 
@@ -5558,8 +5707,6 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
        ⏳ 現在は **ラウンド{round_count}**（{reflection_interval}ラウンドごとに本監査を実施）です。
        ※「ターン」は内部のやり取り往復の途中で足踏みすることがあるため、ここでは代わりに
        「ラウンド」（発注者Userの発言サイクルの周回数）を進行状況の目安として用いています。
-
-        【BL-093】必要であれば、thinkツールで検討過程を書き残しても構いません。
 
         Return ONLY JSON in the exact format below:
         {{
@@ -5619,6 +5766,13 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
         if escalated_issues_text else ""
     )
 
+    # [BL-104] プロンプトキャッシュのヒット率向上のため、固定指示文（役割説明・BL-093の説明）を
+    # 先頭にまとめ、ゴール文（実行中はほぼ不変）をその次、ターンごとに変わる動的な内容
+    # （reflectionの判定理由・エスカレーション済み懸念・直近の会話）は末尾に配置する。
+    # 「※あなたが呼ばれた理由（下記）は」というreflection_blockへの前方参照、および
+    # escalated_issues_block内の「上記の『抽象的に視座を上げて促す』という一般方針」という
+    # 冒頭の役割説明パラグラフへの後方参照は、両方とも冒頭の固定指示文グループが動的ブロックより
+    # 前に来ることを要求しているだけであり、この並び替え後の順序で引き続き成立する。
     prompt = f"""
     あなたはAI同士の議論をサポートする優秀な「ファシリテーター」です。
     現在、AI同士の議論が目標(Goal)から脱線しそうになっているか、同じ論点で少し停滞しているようです。\n
@@ -5634,15 +5788,14 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     ※あなたが呼ばれた理由（下記）は必ず最優先の出発点として扱ってください。自分で独自に「膠着していない」等と再判定し、
     その理由を無視・軽視することは避けてください。
 
+    【BL-093】必要であれば、thinkツールで検討過程を書き残しても構いません。
+
     ■ プロジェクトの目標(Goal): {goal}
     {goal_essence_text}
     {reflection_block}
     {escalated_issues_block}
     ■ 直近の会話:
     {history_text}
-
-    【BL-093】必要であれば、thinkツールで検討過程を書き残しても構いません。
-
     """
     _reset_think_scratchpad()  # [BL-093]
     return query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Facilitator", tools=[THINK_TOOL])
@@ -5651,16 +5804,14 @@ def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "") ->
     """【SLM要約】
     Cross-checking of merged project artifacts against a defined goal to identify logical or numerical inconsistencies between tasks and phases.
     """
+    # [BL-104] プロンプトキャッシュのヒット率向上のため、固定指示文（役割説明・検算繰り返し
+    # 禁止・BL-093/BL-094・ツール一覧の説明）を先頭にまとめ、ゴール文（実行中はほぼ不変）を
+    # その次、呼び出しごとに変わる統合要件定義書本体は末尾に配置する。位置的参照（「上記」
+    # 「後述」）を持つブロックはこのプロンプトには存在しないため、全ブロックを自由に並び替えている。
     prompt = f"""
     あなたはプロジェクトの統合監査人（Integrator）です。
     各タスクで作成された個別の成果物を物理的に結合した以下の「統合要件定義書」を読み、
     フェーズ間やタスク間で論理的・数値的な矛盾が生じていないか横断チェックしてください。
-
-    ■ 絶対目標: {goal}
-    {goal_essence_text}
-
-    ■ 統合要件定義書:
-    {merged_text}
 
     【同じ検証・計算を繰り返さない（重要）】ツール呼び出しの回数には上限があります。同じ論点を
     python_replで繰り返し再確認しないでください。各検証項目は2回程度の計算・確認で十分です。
@@ -5688,6 +5839,12 @@ def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "") ->
     （summary必須）も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、その応答の
     ツール呼び出しは一切実行されず差し戻されます。
 
+    ■ 絶対目標: {goal}
+    {goal_essence_text}
+
+    ■ 統合要件定義書:
+    {merged_text}
+
     Return ONLY JSON:
     {{
         "contradictions": true/false,
@@ -5707,16 +5864,21 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "")
     """【SLM要約】
     Delegation of artifact validation to an AI QA reviewer, strictly enforcing adherence to defined goals against delivered documentation.
     """
+    # [BL-104] プロンプトキャッシュのヒット率向上のため、固定指示文（QA責任者としての各種
+    # チェック指示・検算ゲート・BL-093/BL-094・ツール一覧の説明）を先頭にまとめ、ゴール文
+    # （実行中はほぼ不変）をその次、呼び出しごとに変わる最終成果物本体は末尾に配置する。
+    # 位置的参照（「上記」「後述」）を持つブロックはこのプロンプトには存在しないため、
+    # 全ブロックを自由に並び替えている。
     prompt = f"""
     あなたは冷徹で優秀な「品質保証(QA)責任者」です。
     【🚨 最優先・最重要チェック：成果物の網羅性 🚨】
     まず最初に、【絶対目標(Goal)】の文章を一字一句読み直し、
     ユーザーが要求した「成果物・ドキュメントの種類」を全てリストアップしてください。
     （例：「仕様書」「テストケース」「マニュアル」「設計図」など、Goal文中に明記された名詞）
-    
+
     その上で、★最終成果物の内容を確認し、リストアップした成果物の**それぞれが、
     要求された形式・粒度で実際に存在するか**を個別に判定してください。
-    
+
     - 「項目リスト」「概要」「方針」だけが存在し、要求された成果物本体
       （例：具体的な入力値・期待値を伴う"テストケース"そのもの）が存在しない場合は、
       その成果物は「未提出」として扱い、passed: false としてください。
@@ -5750,20 +5912,13 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "")
     【🚨 数値目標の再検証チェック 🚨】
     成果物中に「対策により目標達成率を向上させる」という記述がある場合、その対策を織り込んだ後の
     更新後の数値が明記されていなければ、「対策の効果が未検証」とみなし、passed: false としてください。
-    
+
     特に、絶対目標が「いかなる場合でも」「必ず」「死守」等の例外を許さない表現である場合、
     確率的な達成率（例: 92%、95%等）の提示だけでは要件を満たしたとみなさず、残存リスクへの
     対応策が「すべてのケースをカバーする」設計になっているかを厳密に確認してください。
 
     【F-2.6 機械的検算ゲート（必須）】成果物中の数値的主張（予算・数量・比率等）について、
     承認（passed:true）前に python_repl ツールで再計算し、矛盾がないことを確認すること。
-
-    ■ 達成すべき【絶対目標(Goal)】:
-    {goal}
-    {goal_essence_text}
-
-    ■ ★最終成果物として登録されている内容（最重要・必ずこれを精査せよ）:
-    {deliverable_text}
 
     【同じ検証・計算を繰り返さない（重要）】ツール呼び出しの回数には上限があります。同じ論点を
     python_replで繰り返し再確認しないでください。各検証項目は2回程度の計算・確認で十分です。
@@ -5789,6 +5944,13 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "")
     write_agreement・thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の中にthink
     （summary必須）も一緒に含めてください。think無しでこれらのツールだけを呼ぶと、その応答の
     ツール呼び出しは一切実行されず差し戻されます。
+
+    ■ 達成すべき【絶対目標(Goal)】:
+    {goal}
+    {goal_essence_text}
+
+    ■ ★最終成果物として登録されている内容（最重要・必ずこれを精査せよ）:
+    {deliverable_text}
 
     Return ONLY JSON:
     {{
@@ -5827,7 +5989,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     Constructing the comprehensive prompt and context, including goals, history, and constraints, to generate a high-quality instruction or utterance for the AI user role.
     """
     # --- 1. Stateから必要な情報を展開 ---
-    
+
     user_goal = state["goal"]
     turn_count = state["turn_count"]
     max_turns = state["max_turns"]
@@ -5835,21 +5997,14 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     user_always_remembers = config["user_always_remember"]
 
     _conn = get_active_conn()
-    agreements_text = _build_agreements_context_from_db(_conn, state["run_id"])
 
-    # タイムラインの構
-    timeline = []
-    timeline_str = []
+    # [BL-104] プロンプトキャッシュのヒット率向上のため、内容が変わらない固定の指示文を
+    # 先頭付近にまとめ、ターンごとに変わる動的な内容（決定事項DB・直近の行動タイムライン・
+    # 現在タスク情報等）は末尾側に配置する（call_expertと同じ原則、詳細はBL104_basic_design.md）。
+    # ただし「後述の【現在のタスクで未充足の要求項目】」「上記の【この値は確定済みです】」等、
+    # 他ブロックへの位置的参照を持つ箇所は、参照先との相対位置を崩さないよう並び替えの対象外とする。
     system_prompt = ""
-    for i, d in enumerate(get_decisions_from_db(_conn, state["run_id"])):
-            why_short = (d["why"][:100] + "…") if len(d.get("why", "")) > 100 else d.get("why", "")
-            ts_val = d.get("timestamp", 0)
-            ts = datetime.datetime.fromtimestamp(ts_val).strftime("%H:%M:%S") if ts_val else "??:??:??"
-            timeline.append(f"└ [{ts}] [{d.get('who','?')}] No.{i+1}: {d.get('what','?')} | 理由: {why_short}")
-            timeline_str = "\n".join(timeline) if timeline else "(意思決定のログはありません)"
 
-    system_prompt += f"⏳ 全 {max_turns} ターン中、現在は **{state["turn_count"]} ターン目** です。\n"
-    
     if user_always_remembers or state["turn_count"] == 1:
         system_prompt = (f"""
             あなたは目標を達成するための優秀な【プロジェクトオーナー（発注者）】です。\n"
@@ -5858,10 +6013,6 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             👉 {user_goal}\n\
             \n
             {_get_goal_essence_text(_conn, state["run_id"])}\n
-            現在までの決定事項・検討状況DB】\n"
-            {agreements_text}\n\n"
-            【直近の各役割の行動、評価、その理由リスト】"\n
-            {timeline_str}"\n\n
             【厳守事項】\n"
             ・あなたは「指示を出す側」です。「承知いたしました」「お手伝いします」のようなアシスタント的発言は絶対に行わないでください。\n"
             ・相手に作業を要求し、出てきた提案を要点を簡潔にレビューしてフィードバックを与えてください。\n"
@@ -5880,25 +6031,8 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     else:
         system_prompt = f"あなたは目標を達成するためにエージェントAIをリードする[発注者]です。\n"
 
-
-    phases_json = json.dumps(state.get("phases", []), ensure_ascii=False, indent=2)
-
-    # BL-023: 現在タスクの範囲・依存確定値・充足状況を明示し、指示のスコープを限定する
-    _scope_ctx = _build_task_scope_context(state, _conn)
-    current_task_json = _scope_ctx["current_task_json"]
-    verified_facts_json = _scope_ctx["verified_facts_json"]
-    remaining_criteria_text = _scope_ctx["remaining_criteria_text"]
-
-    #Task Plannerが作成したフェーズとタスクを明示する
     system_prompt += (f"""
-        \n📊 [プロジェクト進行計画]
-        目標達成への道しるべとして、Task Plannerが作成したフェーズとタスクの一覧を以下に示します。\n
-        {phases_json}\n\n
-
-        あなたの役割は、上記の計画に従ってエージェントAIに**1度に1つずつ**タスクを指示し、成果物をレビューして着実に進捗させることです。\n
-        （※一気に複数のタスクを指示すると相手が混乱するため、絶対に避けてください）\n
-        \n
-         🔥 【発注者としての絶対的なスタンス（質について）】\n"
+        \n🔥 【発注者としての絶対的なスタンス（質について）】\n"
          あなたは妥協を許さないプロジェクトオーナーです。相手（Agent AI）が「制約が厳しい」
         「要件を満たせない」と泣き言を言ってきても、絶対に【絶対目標】のハードルを下げないでください。\n
         「制約緩和の検討」や「重要要件の放棄」を提案された場合は、それを却下し、
@@ -5927,31 +6061,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         ・freeze_agreement: エスカレーションとは無関係に、これ以上覆されるべきでないと判断した\n
         　確定事項（人間として最終決定した絶対的な数値等）を単独で永久ピン留めする際にも使えます\n
         　（Freezeは取り消せないため、真に恒久化すべき場合のみ使用）。\n
-
-        📏 【指示のスコープについて（厳守・質への非妥協性とは別軸、BL-023）】\n
-        1回の指示で要求してよい内容は、以下の「現在のタスク」の acceptance_criteria の範囲に厳密に限定してください。\n
-        範囲外の追加要求（他タスクの依存項目の前倒し要求、まだ指示していない後続タスクの内容の混入など）は、\n
-        たとえ関連性が高く見えても行わないでください。それは次のタスクの役目です。\n
-
-        【現在のタスク】\n
-        {current_task_json}\n
-
-        【この値は確定済みです。再導出を指示・要求しないでください】\n
-        {verified_facts_json}\n
-
-        【現在のタスクで未充足の要求項目（これ以外を新たに追加要求しないこと）】\n
-        {remaining_criteria_text}\n
-
-        [R4] {_scope_ctx["whiteboard_text"]}\n
-
-        {"📌 【BL-082: 他タスクからの申し送り事項（先送り）】" + chr(10) + _scope_ctx["deferred_notes_text"] if _scope_ctx["deferred_notes_text"] else ""}
     """)
-
-    # [BL-086] Expert/自分自身が提起した未解決エスカレーションがあれば、今回の発言で
-    # 必ずresolve_premise_concern（却下）かrevise_goal（承認・ゴール改定）で解決させる。
-    _open_escalations_text = _get_open_escalations_text(_conn, state["run_id"])
-    if _open_escalations_text:
-        system_prompt += f"\n{_open_escalations_text}\n"
 
     system_prompt += (
         "\n【検算とドメインレビューの役割分担】\n"
@@ -5981,6 +6091,69 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         "打ち切られたテキスト応答とせざるを得なくなります。必要な検算が終わったら、それ以上の"
         "確認は行わず、直ちに発言の記述に移ってください。\n"
     )
+
+    # ここから先は実行中に変化する動的な内容（プレフィックスキャッシュの都合上、末尾側に配置）。
+
+    _conn = get_active_conn()
+    agreements_text = _build_agreements_context_from_db(_conn, state["run_id"])
+
+    # [BL-103] 従来はget_decisions_from_dbの全件を毎ターン無制限に展開しており、Expert側の
+    # 窓付きhydrate_context（expert_history_windowでスライス）と非対称かつ長時間runで
+    # 際限なく肥大化するリスクがあった。Expertと同じ共通ヘルパーに統一し、issue_logの
+    # escalated行（recencyに関係ない pin）も併せて注入する。
+    timeline_str = _build_hydrate_context_from_db(_conn, state["run_id"], config)
+    escalation_pin = _build_escalation_pin_text(_conn, state["run_id"])
+    if escalation_pin:
+        timeline_str += f"\n\n【⚠️エスカレーション中の懸念（要対応、issue_log）】\n{escalation_pin}"
+
+    system_prompt += (f"""
+        \n現在までの決定事項・検討状況DB】\n"
+        {agreements_text}\n\n"
+        【直近の各役割の行動、評価、その理由リスト】"\n
+        {timeline_str}"\n\n
+    """)
+
+    phases_json = json.dumps(state.get("phases", []), ensure_ascii=False, indent=2)
+
+    # BL-023: 現在タスクの範囲・依存確定値・充足状況を明示し、指示のスコープを限定する
+    _scope_ctx = _build_task_scope_context(state, _conn)
+    current_task_json = _scope_ctx["current_task_json"]
+    verified_facts_json = _scope_ctx["verified_facts_json"]
+    remaining_criteria_text = _scope_ctx["remaining_criteria_text"]
+
+    #Task Plannerが作成したフェーズとタスクを明示する
+    system_prompt += (f"""
+        \n📊 [プロジェクト進行計画]
+        目標達成への道しるべとして、Task Plannerが作成したフェーズとタスクの一覧を以下に示します。\n
+        {phases_json}\n\n
+
+        あなたの役割は、上記の計画に従ってエージェントAIに**1度に1つずつ**タスクを指示し、成果物をレビューして着実に進捗させることです。\n
+        （※一気に複数のタスクを指示すると相手が混乱するため、絶対に避けてください）\n
+
+        📏 【指示のスコープについて（厳守・質への非妥協性とは別軸、BL-023）】\n
+        1回の指示で要求してよい内容は、以下の「現在のタスク」の acceptance_criteria の範囲に厳密に限定してください。\n
+        範囲外の追加要求（他タスクの依存項目の前倒し要求、まだ指示していない後続タスクの内容の混入など）は、\n
+        たとえ関連性が高く見えても行わないでください。それは次のタスクの役目です。\n
+
+        【現在のタスク】\n
+        {current_task_json}\n
+
+        【この値は確定済みです。再導出を指示・要求しないでください】\n
+        {verified_facts_json}\n
+
+        【現在のタスクで未充足の要求項目（これ以外を新たに追加要求しないこと）】\n
+        {remaining_criteria_text}\n
+
+        [R4] {_scope_ctx["whiteboard_text"]}\n
+
+        {"📌 【BL-082: 他タスクからの申し送り事項（先送り）】" + chr(10) + _scope_ctx["deferred_notes_text"] if _scope_ctx["deferred_notes_text"] else ""}
+    """)
+
+    # [BL-086] Expert/自分自身が提起した未解決エスカレーションがあれば、今回の発言で
+    # 必ずresolve_premise_concern（却下）かrevise_goal（承認・ゴール改定）で解決させる。
+    _open_escalations_text = _get_open_escalations_text(_conn, state["run_id"])
+    if _open_escalations_text:
+        system_prompt += f"\n{_open_escalations_text}\n"
 
     system_prompt += _build_detector_observations_block(state)
 
@@ -6191,6 +6364,11 @@ def generate_user_utterance_node(state: LineageState) -> LineageState:
     print(f"\n>>> 👤 User AIの発言:\n{user_input}")
     state["user_input"] = user_input
     state["chat_history"].append({"role": "user", "content": state["user_input"]})
+    # [BL-103] 従来User AIの発言はdecisions/hydrate要約チャネルに一切記録されておらず、
+    # Expertの発言（弱いながらも記録される）と非対称だった。ここで初めて記録する。
+    decision = make_decision(who="user", what=f"Expertへの発言（ラウンド{state['round_count']}）",
+                              why=get_last_think_summary() or user_input[:150])
+    db_append_decision(decision, get_active_conn(), state["run_id"])
     return state
 
 def make_decision(who: str, what: str, why: str | None, internal_thought_process: str | None = None) -> Decision:
@@ -6376,15 +6554,18 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     comment）で返す実行前ゲート。
     """
     phases_json = json.dumps(phases, ensure_ascii=False, indent=2)
+    # [BL-104] プロンプトキャッシュのヒット率向上のため、固定指示文（レビュー観点1-4・曖昧さと
+    # 捏造要求の混同注意・BL-092/BL-093/BL-094/BL-095・ツール一覧の説明）を先頭にまとめ、
+    # ゴール文（実行中はほぼ不変）をその次、呼び出しごとに変わる生成された計画本体
+    # （phases_json）は末尾に配置する。冒頭の「以下は…計画です」はphases_jsonへの前方参照
+    # だが、単に「この後どこかにphases_jsonが登場する」ことだけを要求しており、直後の隣接を
+    # 要求していないため、静的グループを先に置いてもこの前方参照は成立する。BL-092内の
+    # 「上記の通り」は同じ静的グループ内の曖昧さ混同注意ブロックを指しており、両ブロックの
+    # 相対順序を維持しているため引き続き成立する。
     prompt = f"""
     以下は、絶対目標を分解して生成された「フェーズ・タスク計画」です。実行を開始する前に、
     この計画自体の質をレビューしてください（個々のタスクの中身の是非ではなく、計画の構造
     そのものが後工程で無駄な手戻りを生まないかを見てください）。
-
-    ■ 絶対目標: {goal}
-    {goal_essence_text}
-    ■ 生成された計画:
-    {phases_json}
 
     以下の観点でレビューしてください（1つに偏らず、4つとも同等以上に重視すること。実際に
     後工程で最も高くつく手戻りは、数値の端数不一致よりも「タスクの欠落」や「順序矛盾」から
@@ -6470,6 +6651,11 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     diff_plan_draft_versions・write_agreement・thinkです。think以外のいずれかを呼ぶときは、
     必ずその同じ応答の中にthink（summary必須）も一緒に含めてください。think無しでこれらの
     ツールだけを呼ぶと、その応答のツール呼び出しは一切実行されず差し戻されます。
+
+    ■ 絶対目標: {goal}
+    {goal_essence_text}
+    ■ 生成された計画:
+    {phases_json}
 
     Return ONLY JSON: {{"risk": "low"/"medium"/"high", "constraint_issue": "none"/"major",
     "comment": "（majorの場合、task_plannerへの差し戻し指摘。具体的な修正指示にすること）",
@@ -6647,7 +6833,10 @@ Updates system state with the expert's output, decisions, and conversational his
     # 判定のためstateへ保存する（_LAST_WHITEBOARD_EDITはquery_AI呼び出しごとにリセットされるため）。
     state["expert_last_whiteboard_edit"] = get_last_whiteboard_edit()
     print(f"\n------ 完了 ------")
-    decision = make_decision(who=f"expert:{state['selected_expert']}", what="タスクを実行", why=(output or "")[:100])
+    # [BL-103] why=生テキスト先頭100文字の機械的truncationは劣化版要約だったため、
+    # BL-093で既に必須化されているthinkの最終decided/why（無ければsummary）に置き換える。
+    decision = make_decision(who=f"expert:{state['selected_expert']}", what="タスクを実行",
+                              why=get_last_think_summary() or (output or "")[:150])
     state["expert_output"] = output
     print(f"\n--- ✨ Agent AI ({state['selected_expert']}) の返答 ---")
     print(state["expert_output"])
