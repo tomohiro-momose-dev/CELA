@@ -1207,6 +1207,20 @@
 
 ---
 
+### D-082: task_plannerにread_plan_draftツールを配線し、差し戻し時に前回のホワイトボードを参照させる（BL-101）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-27 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（ドライラン中に「taskプランナーが差し戻された際に、前回自分が作ったフェーズ・タスク表のホワイトボードを見ておらず、丸ごと作り直している」と発見しドライランを停止。「フェーズ・タスク表ってホワイトボード化していましたよね？そのホワイトボードを参照、差分修正でいけませんか？」とパッチ方式を提案した後、「タスクプランナーのプロンプトにホワイトボードI/Oツールの明示と説明を追加」と実装範囲を指定） / Claude Sonnet 5（原因調査・実装） |
+| **決定理由** | コード調査の結果、`task_plan_reviewer_node`が差し戻し時に`state["phases"]=[]`で前回計画を完全消去し、`call_task_planner`は自由文の`reviewer_feedback`のみを受け取っていることが根本原因と判明。`plan_drafts`ホワイトボード（BL-082/BL-087 Stage2でtask_plan_reviewerの個別指摘が書き込まれる想定だった文書）が、再生成時に一切参照されていなかった。ユーザーは当初「前回計画をbaselineとして保持し、変更が必要な部分のみパッチとして出力させ機械的にマージする」方式（モデル遵守に依存しない、より確実な対策）を提案したが、その後のユーザー指示で今回のスコープは「ホワイトボードI/Oツールの明示と説明の追加」に絞り込まれた。機械的マージ方式は、まず本ツールの効果を実ドライランで確認してから必要に応じて発展させる方針としたため、今回は見送り。 |
+| 決定内容 | 新規`READ_PLAN_DRAFT_TOOL`/`_read_plan_draft_handler`/`get_latest_plan_draft_by_task_id`を追加。`get_latest_plan_draft_by_task_id`は既存の`get_latest_plan_draft`と異なりphase_id指定を要求しない（task_plannerは特定phaseに紐づく実行文脈を持たないため）。`call_task_planner`のtools=[...]に追加し、差し戻し時のプロンプトで「指摘のあったtask_idは必ずread_plan_draftで前回の記述とtask_plan_reviewerの個別指摘を確認し、その部分だけを修正する。指摘のないフェーズ・タスクは作り直さない」旨を明記した。あわせて、BL-095のwrite_agreement（entry_type="Decision"）がread_deliverable_file（entry_type="Deliverable"限定）で参照不能という副次的な不整合も発見したが、今回は対応範囲外とし別途Fix 2として残した。 |
+| 影響 | `cela_main.py`（新規関数3つ、`TOOL_DISPATCH`、`call_task_planner`のtools=[...]・プロンプト）。新規`tests/test_bl101_task_planner_plan_draft_tool.py`（8件）。実装過程で、新規プロンプト文中に既存テストが監視する文言（「前回の計画案への差し戻し」）を無条件ブロックにも重複記載してしまい、既存テスト`test_call_task_planner_without_feedback_omits_rejection_block`を破壊するミスを起こしたため、文言を修正して解消（`test_bl061...`のBL-096起因の別regressionも同じタイミングで発見・修正）。`python -m py_compile`合格、関連クラスタ218件Pass。実LLM再ドライランでの効果確認、および機械的マージ方式への発展要否の判断は次回待ち。 |
+| 関連 BL | [BL-101](back_log/issue_backlog.md#bl-101-task_plannerが差し戻し時に前回のフェーズタスク表ホワイトボードを参照せず全面再作成する) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
