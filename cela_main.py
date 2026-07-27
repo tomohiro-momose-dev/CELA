@@ -4666,7 +4666,15 @@ def call_detector(state: LineageState, target_role: str) -> dict:
     """【SLM要約】
     Determining the rigor of auditing criteria based on whether the input is a user instruction/review or an agent proposal, then using an LLM to assess both safety risks and constraint adherence in the conversation history.
     """
- 
+    # [BL-096] write_issue等の権限チェックはグローバルの_CURRENT_CALLER_ROLEに依存するため、
+    # 第1段（ドメイン妥当性レビュー）が実行される前にここで設定する必要がある。
+    # 従来はここが未設定のまま第1段が走り、直前ノード（例: expert）のroleが漏れて
+    # write_issue(CREATE)が誤って権限エラーになる実バグがあった（ドライラン2026-07-27/1551で検出）。
+    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID, _CURRENT_PHASE_ID
+    _CURRENT_CALLER_ROLE = "detector"
+    _CURRENT_TASK_ID = state.get("current_task_id", "")
+    _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")
+
     recent_decitions = json.dumps(get_decisions_from_db(get_active_conn(), state["run_id"])[-2:], ensure_ascii=False)
     # [BL-062] Detectorがmajor判定を出した際、対象のtopicをtarget_topicとしてSUPERSEDEできるよう、
     # 既存の【決定事項DB】（topic名・ID）を提示する。従来はDetectorに一切見えておらず、
@@ -5025,10 +5033,6 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"一切実行されず差し戻されます。\n\n"
         f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由", "criteria_status": [true/false, ...], "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用（無ければ空文字）", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
     )
-    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID, _CURRENT_PHASE_ID
-    _CURRENT_CALLER_ROLE = "detector"
-    _CURRENT_TASK_ID = state.get("current_task_id", "")
-    _CURRENT_PHASE_ID = _current_phase_id
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_auditor, model=model_auditor, label="Detector",
