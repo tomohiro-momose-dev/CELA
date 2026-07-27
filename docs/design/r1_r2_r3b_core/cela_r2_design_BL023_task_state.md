@@ -5,7 +5,7 @@
 > **前提**: R2（ツール呼び出し基盤・F-2.6検算ゲート）が実装済みであること。
 > **スコープ外**: Phase B（BL-005: reflection/facilitatorの復旧）、R4差分パッチ（`whiteboard_drafts`）、F-9/F-10.x（Phase 6以降）。
 > **最終更新**: 2026-07-20
-> **関連**: [BL-023](../issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、[BL-024](../issue_backlog.md#bl-024-current_phaseが初期化後フリーズしtask_id単位の状態追跡が存在しない)（新規）、[BL-018](../issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)、[BL-015](../issue_backlog.md)、[D-020](../decision_log.md#d-020-bl-023の対応をphase-atask_planneruser-aiのスコープ是正phase-c予算カスケードの仮説化から着手しphase-bbl-005-reflectionfacilitator復旧は後回しにする)、[decision_lineage.md 論点21〜24](../decision_lineage.md)
+> **関連**: [BL-023](../../back_log/issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、[BL-024](../../back_log/issue_backlog.md#bl-024-current_phaseが初期化後フリーズしtask_id単位の状態追跡が存在しない)（新規）、[BL-018](../../back_log/issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)、[BL-015](../../back_log/issue_backlog.md)、[D-020](../decision_log.md#d-020-bl-023の対応をphase-atask_planneruser-aiのスコープ是正phase-c予算カスケードの仮説化から着手しphase-bbl-005-reflectionfacilitator復旧は後回しにする)、[decision_lineage.md 論点21〜24](../decision_lineage.md)
 
 ---
 

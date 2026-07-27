@@ -1,7 +1,7 @@
 # Phase 1（R1: SQLite永続化基盤）ドライラン手順書
 
 > **作成日**: 2026-07-18
-> **対象BL**: [BL-002](../issue_backlog.md#bl-002-r1完了条件の実データabドライラン未実施)（本手順の主対象）、[BL-003](../issue_backlog.md#bl-003-recordreplayスタブの実llm応答による往復検証未実施)（本手順の7章で合わせて実施）
+> **対象BL**: [BL-002](../../back_log/issue_backlog.md#bl-002-r1完了条件の実データabドライラン未実施)（本手順の主対象）、[BL-003](../../back_log/issue_backlog.md#bl-003-recordreplayスタブの実llm応答による往復検証未実施)（本手順の7章で合わせて実施）
 > **参照**: [cela_r1_r2_r3b_design_v7.md §5, §5.1](cela_r1_r2_r3b_design_v7.md), [cela_r1_impl_Plan.md §7](cela_r1_impl_Plan.md)
 > **本書の位置づけ**: `AGENTS.md`のドキュメント規律に従い、本書には**手順・環境詳細のみ**を記載する。Pass/Fail結果サマリーは`../traceability.md`（T-*）へ、失敗・次の修正は`../issue_backlog.md`（BL-xxx）へ記録すること。本書自体には結果を書き込まない。
 
@@ -108,7 +108,7 @@ list版・SQLite版の両方でこの`config`を変更せずに使うこと。�
 
 ## 4. 実行手順（本体）
 
-**終了条件について（[D-001](../decision_log.md)準拠）**: `is_completed`または`halt`による自然終了が理想だが、`agreements`/`decisions`が十分な件数取れていれば、30ターン未到達でも意図的に打ち切ってよい。ただし打ち切る位置は**`app.invoke()`の外側**（画面に次の「🔷 [Turn N]」が出た直後）に限る。`app.invoke()`の内部（差し戻しループの最中など）で強制終了すると、そのターンのfixtureが半端な状態になり、Step 4の構造的一致確認が阻害される。加えて、`turn_count`は`app.invoke()`1回の間凍結される既存挙動（[BL-005](../issue_backlog.md)）があるため、「外側ターンが少ない＝会話が浅い」とは限らない点に注意すること。
+**終了条件について（[D-001](../decision_log.md)準拠）**: `is_completed`または`halt`による自然終了が理想だが、`agreements`/`decisions`が十分な件数取れていれば、30ターン未到達でも意図的に打ち切ってよい。ただし打ち切る位置は**`app.invoke()`の外側**（画面に次の「🔷 [Turn N]」が出た直後）に限る。`app.invoke()`の内部（差し戻しループの最中など）で強制終了すると、そのターンのfixtureが半端な状態になり、Step 4の構造的一致確認が阻害される。加えて、`turn_count`は`app.invoke()`1回の間凍結される既存挙動（[BL-005](../../back_log/issue_backlog.md)）があるため、「外側ターンが少ない＝会話が浅い」とは限らない点に注意すること。
 
 ### Step 1: list版ベースライン Recordモード実行
 
@@ -202,7 +202,7 @@ sqlite3 cela.db "SELECT count(*) FROM decisions  WHERE run_id='<killしたrun_id
 
 指標Dは本書の対象外。設計書§5.1の定義通り`pytest`による専用フィクスチャ（`tests/test_f26_detection.py`）で検証する方式であり、シナリオベースのドライランではない。
 
-**2026-07-19時点の状態**: `tests/test_f26_detection.py`は実装済み（[BL-012](../issue_backlog.md#bl-012-b51既知誤判定detectorの偽陽性の非退行テストが未定義)）。`DSEEK_V4_FLASH_USER_KEY`が未設定の環境では自動スキップする。実行コマンド:
+**2026-07-19時点の状態**: `tests/test_f26_detection.py`は実装済み（[BL-012](../../back_log/issue_backlog.md#bl-012-b51既知誤判定detectorの偽陽性の非退行テストが未定義)）。`DSEEK_V4_FLASH_USER_KEY`が未設定の環境では自動スキップする。実行コマンド:
 
 ```powershell
 $env:DSEEK_V4_FLASH_USER_KEY = "<APIキー>"
@@ -236,5 +236,5 @@ git branch -D phase1-dryrun-baseline
 |------|------|
 | 2026-07-18 | 初版作成（BL-002・BL-003対応） |
 | 2026-07-18 | 初版作成後にSQLite版の作業ツリー差分がコミット`2133989`として確定したため、0章・1.3節・Step 3の参照を「作業ツリー」からコミットハッシュ固定に修正。1.3節をhunk手動移植方式からgit diff/apply方式に変更（コミット済みになったことでhunk抽出が可能になったため） |
-| 2026-07-18 | 実データドライラン中に`turn_count`が`app.invoke()`内で凍結される既存挙動を発見（[BL-005](../issue_backlog.md)起票）。30ターン完走はBL-002の必須要件ではないことを[D-001](../decision_log.md)として決定し、3章・4章冒頭・Step 1・Step 2に終了条件（自然終了 or invoke外側での打ち切り）を反映 |
+| 2026-07-18 | 実データドライラン中に`turn_count`が`app.invoke()`内で凍結される既存挙動を発見（[BL-005](../../back_log/issue_backlog.md)起票）。30ターン完走はBL-002の必須要件ではないことを[D-001](../decision_log.md)として決定し、3章・4章冒頭・Step 1・Step 2に終了条件（自然終了 or invoke外側での打ち切り）を反映 |
 | 2026-07-19 | R2実装完了に伴い6章を更新。`tests/test_f26_detection.py`が実装済みであることと実行コマンドを追記。実LLM呼び出しを伴う実行自体はユーザー指示待ちのため未実施と明記 |

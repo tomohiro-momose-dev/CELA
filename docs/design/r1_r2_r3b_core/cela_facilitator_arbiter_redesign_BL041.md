@@ -1,7 +1,7 @@
 # facilitator / Resource Arbiter 再設計 設計ドラフト（BL-041統合）
 
 **ステータス:** ドラフト（未承認・未実装）
-**対象BL:** [BL-041](../issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)（一度確定した決定を後続タスクの発見から再検討させる自動メカニズムの不在）、[BL-017](../issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)（facilitatorの当初設計意図との乖離）、[BL-005](../issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)（reflection/facilitatorの周期発火が実質的に凍結）
+**対象BL:** [BL-041](../../back_log/issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)（一度確定した決定を後続タスクの発見から再検討させる自動メカニズムの不在）、[BL-017](../../back_log/issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)（facilitatorの当初設計意図との乖離）、[BL-005](../../back_log/issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)（reflection/facilitatorの周期発火が実質的に凍結）
 **関連決定:** [decision_lineage.md 論点42](../decision_lineage.md)
 **関連要件:** 要件定義書_v35.md F-9/F-10（Phase 6以降のフル版、本設計はそのMVP先行縮小実装）
 
@@ -15,7 +15,7 @@
 2. 初期制約は絶対、導出値はデフォルト暫定（`confidence="provisional"`）とし、後で変更の余地を残す
 3. 無限議論を避け「何をしないか」を含めたエスカレーションを行う機構 — **facilitatorの役目**
 
-うち2は既に実装済み（`cela_main.py`のExpertプロンプト・`WRITE_AGREEMENT_TOOL`スキーマ・`upsert_verified_fact`のデフォルト変更、2026-07-22）。本ドラフトは残る1・3、および同根の[BL-017](../issue_backlog.md)・[BL-005](../issue_backlog.md)・BL-041本体（`arbiter_node`が死んだコードパスである問題）をまとめて扱う。
+うち2は既に実装済み（`cela_main.py`のExpertプロンプト・`WRITE_AGREEMENT_TOOL`スキーマ・`upsert_verified_fact`のデフォルト変更、2026-07-22）。本ドラフトは残る1・3、および同根の[BL-017](../../back_log/issue_backlog.md)・[BL-005](../../back_log/issue_backlog.md)・BL-041本体（`arbiter_node`が死んだコードパスである問題）をまとめて扱う。
 
 **明示的にスコープ外とする事項（Phase 6以降・F-9/F-10フル版）:**
 - MCTS-Fork（多分岐並行世界探索、F-10.6）

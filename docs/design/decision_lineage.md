@@ -22,13 +22,13 @@
 - **ユーザー報告:** 別チャット（R1ドライラン）で既に、「指標A・B・Cの実測はF-2.6検算ゲート（R2）実装後でないと本質的評価が不可能」という結論に達しており、`decision_log.md` D-002・`issue_backlog.md` BL-002（open→blocked、依存をR2に変更）・`phase_gates.md`（P1-4をR1スコープの構造的一致に絞り、指標A・B・C実測はP2-2としてPhase 2へ引き継ぎ）へ既に反映済みと確認。
 - **決定:** Phase 1はR1スコープ（構造的一致）をもって完了扱いとする。**根拠:** 実データドライランで、検算ゲート欠如による差し戻し（numerical_allocatorの暗算的数値提案がdetectorに繰り返し却下される事象）が観測されており、検算ゲートなしで指標A・B・Cを測っても「ゲート欠如の影響」と「R1永続化基盤自体の効果」が混在し分離評価できないため。
 - **決定者:** t-momose（別チャットで既に決定、本セッションでは整合確認のみ）
-- **関連:** [D-002](decision_log.md#d-002-bl-002指標abcの実測比較はr2f-26検算ゲート実装後に実施する), [BL-002](issue_backlog.md#bl-002-r1完了条件の実データabドライラン未実施)
+- **関連:** [D-002](decision_log.md#d-002-bl-002指標abcの実測比較はr2f-26検算ゲート実装後に実施する), [BL-002](../back_log/issue_backlog.md#bl-002-r1完了条件の実データabドライラン未実施)
 
 ### 論点2: BL-001（Agreement TypedDictの`content`/`rationale`リネーム）の実施タイミング
 - **AI提起:** `issue_backlog.md`/impl_Plan §9が「実施判断はR2着手前」と定めているが、R2計画にこの判断が反映されていない点を指摘。
 - **ユーザー決定:** BL-001はBLの完了条件通り、R2の頭で実施する。
 - **決定者:** t-momose
-- **関連:** [D-003](decision_log.md#d-003-bl-001agreement-typeddictのcontentrationaleリネームはr2の頭で実施する), [BL-001](issue_backlog.md#bl-001-agreement-typeddictのcontentrationaleリネーム)
+- **関連:** [D-003](decision_log.md#d-003-bl-001agreement-typeddictのcontentrationaleリネームはr2の頭で実施する), [BL-001](../back_log/issue_backlog.md#bl-001-agreement-typeddictのcontentrationaleリネーム)
 
 ### 論点3: ツール呼び出しループと既存リトライ/バックオフの関係
 - **AI提起:** 新設するツール呼び出しループ（R2.3）を既存の`_query_AI_live`の`try/except`リトライ（`delays=[8,16,32,64,128]`）の外側に置くと、一時的なAPIエラーでツールループ全体がクラッシュしうる、という設計上の空白を指摘。
@@ -74,7 +74,7 @@
 - **ユーザー決定:** 「設計書にない部分の合意・変更等を関連ドキュメントも更新し、整合をとれ」という指示に基づき、design v7 §3.5.2 に query_AI 集約方針の ★v9 追記、§3.5.3 に random 除外・decimal/fractions 維持・危険呼び出し AST 検査・多層防御の ★v9 追記を実施。あわせて issue_backlog.md に BL-006〜BL-009 を新規起票し D-xxx と相互リンク、decision_log.md の更新履歴に反映済みを記録した。
 - **決定:** decision_lineage.md 自体は「過去エントリは編集しない」ルール（AGENTS.md §4準拠）により論点5・6・7 を書き換えず、本論点8として時系列追記する。論点5・6・7 の「追記予定」記述は、レビュー当時の未反映状態の歴史的記録としてそのまま残す。
 - **決定者:** t-momose（AIの指示に基づき実施、lineageの運用ルールを遵守）
-- **関連:** [D-006](decision_log.md#d-006-python-replサンドボックスはビルトイン呼び出しのast検査多層防御を追加する)、[D-007](decision_log.md#d-007-python-repl許可モジュールからrandomを除去しdecimalfractionsは理由付きで維持する)、[D-008](decision_log.md#d-008-r201ツール呼び出しループをquery_aiに集約する設計を承認)、[BL-006](issue_backlog.md)〜[BL-009](issue_backlog.md)、design v7 §3.5.2 / §3.5.3（★v9）、impl_Plan R2.0.1 / R2.2
+- **関連:** [D-006](decision_log.md#d-006-python-replサンドボックスはビルトイン呼び出しのast検査多層防御を追加する)、[D-007](decision_log.md#d-007-python-repl許可モジュールからrandomを除去しdecimalfractionsは理由付きで維持する)、[D-008](decision_log.md#d-008-r201ツール呼び出しループをquery_aiに集約する設計を承認)、[BL-006](../back_log/issue_backlog.md)〜[BL-009](../back_log/issue_backlog.md)、design v7 §3.5.2 / §3.5.3（★v9）、impl_Plan R2.0.1 / R2.2
 
 ---
 
@@ -86,14 +86,14 @@
 - **AI提起（同、追加指摘）:** 既存の非ツールパス（`cela_main.py:394-396`）が持つ`finish_reason == "length"`（出力打ち切り）検出が新設のツールループには欠落しており、`max_tokens`超過によるtool_call引数の途中切れが「壊れたJSON引数」として上記(a)の経路に混入し、真因（トークン予算不足）が隠蔽されると指摘。
 - **ユーザー決定:** 提案どおり修正する（(a)〜(c)を実装計画に反映）。
 - **決定者:** t-momose（別チャットClaudeの指摘・本セッションAIの対応案をいずれも採用）
-- **関連:** [D-009](decision_log.md#d-009-r2ツールループの例外処理を一時的api障害とロジックエラーに区別する)、[BL-010](issue_backlog.md)、impl_Plan R2.3
+- **関連:** [D-009](decision_log.md#d-009-r2ツールループの例外処理を一時的api障害とロジックエラーに区別する)、[BL-010](../back_log/issue_backlog.md)、impl_Plan R2.3
 
 ### 論点10: プロバイダ別Function Calling対応の網羅検証（見送り判断）
 
 - **AI提起（別チャットのClaude）:** 要件定義書v35 付録B.5.3が求める「プロバイダごとのFunction Calling対応事前確認」が計画に存在しないと指摘。`_query_AI_live`がOpenRouter経由で複数バックエンド（baidu/fp8, siliconflow/fp8, wandb/fp8, morph）へ強制ルーティングしており、各バックエンドのtool calling対応が未検証のため、R2.9の指標D（5/5検出）が特定プロバイダに偶然当たっただけの可能性がある、という懸念。AGENTS.mdルール2（外部API使用前のContext7確認）にも該当。
 - **ユーザー決定:** モデル・プロバイダ依存であり、現在のMVP的な実装では網羅的な確認は見送り、BL記載に留める。
 - **決定者:** t-momose
-- **関連:** [D-010](decision_log.md#d-010-プロバイダ別function-calling対応の網羅検証はmvp段階では見送りblに留める)、[BL-011](issue_backlog.md)
+- **関連:** [D-010](decision_log.md#d-010-プロバイダ別function-calling対応の網羅検証はmvp段階では見送りblに留める)、[BL-011](../back_log/issue_backlog.md)
 
 ### 論点11: B.5.1既知誤判定（Detectorの偽陽性）の非退行テストが未定義
 
@@ -102,7 +102,7 @@
 - **AI提示した対応方針:** `test_f26_detection.py`に、上限内の正当な数値差を仕込んだ成果物のテストケースを追加し、「`none`または`minor`と判定され`major`にならないこと」を検証する非退行テストを実装する。R2.9の完了条件表に指標Dと対になる基準として明記し、R2.10のテスト格納先にも追記する。
 - **ユーザー決定:** 提案どおり記載する。
 - **決定者:** t-momose（別チャットClaudeの指摘・本セッションAIの対応案をいずれも採用）
-- **関連:** [D-011](decision_log.md#d-011-b51既知誤判定detectorの偽陽性の非退行テストを指標dと対で追加する)、[BL-012](issue_backlog.md)、impl_Plan R2.6・R2.9・R2.10
+- **関連:** [D-011](decision_log.md#d-011-b51既知誤判定detectorの偽陽性の非退行テストを指標dと対で追加する)、[BL-012](../back_log/issue_backlog.md)、impl_Plan R2.6・R2.9・R2.10
 
 ### 論点12: `manage_adr`（Codebase Memory MCP）採用の是非
 
@@ -134,7 +134,7 @@
 - **AI合意:** この論点はF-2.6の核心（LLMの記憶・暗算を信用せず機械的に検算する）と直結しており、単発呼び出し方式では「前回の計算結果をモデルが自分のテキスト記憶から転記する」という、まさにF-2.6が排除しようとしていた種類のヒューマンエラー（コピーミス）に類する経路が残ってしまうという点で、ツール説明文での回避（案2）より優れると判断し合意。
 - **AI実装:** `_run_python_repl`のAST安全検査を`_check_repl_code_safety`として共通関数化。新規クラス`_PythonReplSession`（`subprocess.Popen`による遅延起動・stdin/stdoutのJSON行プロトコル・センチネル区切り・タイムアウト時のセッションリセットと明示的エラーメッセージ・`try/finally`によるプロセス確実終了）を追加し、`_query_AI_live`のツールループに接続。状態は1回のツールループ内でのみ保持し、ノード・リトライをまたがない設計とした。オフラインスモークテスト5パターン（状態保持・危険import拒否後もセッション継続・絵文字出力・タイムアウトリセット・フェイククライアント経由のE2E）ですべて確認、ゾンビプロセス残存なし。
 - **決定者:** t-momose（B・Cは提案通り、Aは自らの理由付けで実装方式を決定）
-- **関連:** [BL-014](issue_backlog.md)、[D-014](decision_log.md#d-014-max_tool_iterを5から10へ引き上げる暫定挙動を見て調整)、`cela_main.py` `_PythonReplSession`
+- **関連:** [BL-014](../back_log/issue_backlog.md)、[D-014](decision_log.md#d-014-max_tool_iterを5から10へ引き上げる暫定挙動を見て調整)、`cela_main.py` `_PythonReplSession`
 
 ---
 
@@ -147,7 +147,7 @@
 - **ユーザー追加提起:** 「情報の使いまわしはノード内に限定するといいかもしれません」。BL-014原因Aで採用した`_PythonReplSession`のスコープ設計（状態は1回の`_query_AI_live`呼び出し＝1ノードの間のみ保持し、ノード・リトライをまたいでは共有しない）と同じ考え方を、この新機能のスコープにも適用する案。
 - **現状:** まだ最終決定・実装方針の確定には至っていない。ユーザーはドライランを継続する意向で、本論点はBL-015として起票し設計を持ち越し。
 - **決定者:** 未定（設計相談継続中）
-- **関連:** [BL-015](issue_backlog.md#bl-015-資料由来の一次情報python_repl出力の機械的再利用llm記憶転記の削減)、[論点14](#論点14-本番ドライラン非収束クラッシュbl-014の原因診断とpython_replの対話型セッション化)（`_PythonReplSession`のスコープ設計の先例）
+- **関連:** [BL-015](../back_log/issue_backlog.md#bl-015-資料由来の一次情報python_repl出力の機械的再利用llm記憶転記の削減)、[論点14](#論点14-本番ドライラン非収束クラッシュbl-014の原因診断とpython_replの対話型セッション化)（`_PythonReplSession`のスコープ設計の先例）
 
 ---
 
@@ -161,7 +161,7 @@
 - **AI提案・整理:** BL-016（差し戻しループ沼／今回のクラッシュへの直接対応：iter数の意識づけ、Detector完了度判定の緩和）とBL-017（ファシリテーター／そもそも論構想：同じ根本原因への、より構造的な別解）は同根の問題への異なる解決レイヤーであり、BL-018（タスク間依存関係の構造化）はこれらとは独立した別軸の課題である、と整理して提示。いずれも設計が固まっていないため、まずBL起票のみ行い実装はしないことをユーザーと確認。
 - **現状:** 3件ともBLとして起票、設計・優先順位は未確定。
 - **決定者:** 未定（設計相談継続中、BL起票のみ確定）
-- **関連:** [BL-016](issue_backlog.md#bl-016-detectorの完全性判定の硬直性により探索的タスクでツールループが非収束クラッシュする)、[BL-017](issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)、[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)、`log/2026-07-19/1012/log_no_prompt.md`
+- **関連:** [BL-016](../back_log/issue_backlog.md#bl-016-detectorの完全性判定の硬直性により探索的タスクでツールループが非収束クラッシュする)、[BL-017](../back_log/issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)、[BL-018](../back_log/issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)、`log/2026-07-19/1012/log_no_prompt.md`
 
 ---
 
@@ -173,7 +173,7 @@
 - **ユーザー承認:** 「OK 実装お願いします」でAI提案通りの実装を承認。
 - **AI実装:** (1) `_query_AI_live`のツールループに、`remaining_iters = MAX_TOOL_ITER - iteration`が2以下になった時点で`[SYSTEM NOTICE]`メッセージを`loop_messages`へ注入する処理を追加。(2) `call_detector`のAgent評価分岐（L1427〜）と共通major定義（L1452〜）の両方に、明示的な申し送り付き部分回答をminor扱いとする例外規定を追加。オフラインスモークテスト（フェイククライアント、実LLM呼び出しなし）2件で、(a)常にtool_callsを返す最悪ケースでSYSTEM NOTICEがremaining_iters<=2の時点からのみ注入されること、(b)cap到達前に完了する通常ケースでは一度も注入されないこと、を確認。`py_compile`・`pytest --collect-only`で既存動作への影響がないことも確認。
 - **決定者:** t-momose（優先順位の決定とDetector緩和度の実装、いずれもAI提案を承認）
-- **関連:** [D-016](decision_log.md#d-016-bl-016探索的タスクでの10回ツール呼び出し非収束へ2点の対応を実施する)、[BL-016](issue_backlog.md#bl-016-detectorの完全性判定の硬直性により探索的タスクでツールループが非収束クラッシュする)、[BL-017](issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)、`cela_phase1_design_v7.md`（R3設計、`write_agreement_tool`のツール共存）
+- **関連:** [D-016](decision_log.md#d-016-bl-016探索的タスクでの10回ツール呼び出し非収束へ2点の対応を実施する)、[BL-016](../back_log/issue_backlog.md#bl-016-detectorの完全性判定の硬直性により探索的タスクでツールループが非収束クラッシュする)、[BL-017](../back_log/issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)、`cela_phase1_design_v7.md`（R3設計、`write_agreement_tool`のツール共存）
 
 ---
 
@@ -188,7 +188,7 @@
 - **決定者:** t-momose（調査方針の指示、実装内容はAI調査結果に基づき暗黙に承認・実行）
 - **ユーザー追加指摘:** 「思考モデルでなくても、`_query_AI_live`のレスポンス内に『ツールで計算する必要がある』的な発言が`content`側に入っているのではないか。それを表示すれば非思考モデルでも実質的にステップバイステップの思考になるはず」と追加指摘。
 - **AI再検証:** 実機で`reasoning`要求を外した状態でも再度確認したところ、現行モデル（`deepseek-v4-flash`）は常に`reasoning`フィールドへ思考を返し、`tool_calls`同梱時の`content`は常に`null`であることを確認（＝この指摘は現行モデルに対しては直接のギャップではなかった）。ただし、ツールループが`tool_calls`存在時の`content`を無条件に読み捨てる実装だったため、モデル・プロバイダが変わった場合の将来的な取りこぼしを防ぐ防御的コードとして追加する価値があると判断し、`content`が非空かつ`tool_calls`も存在する場合にログ出力する処理を追加した。
-- **関連:** [D-017](decision_log.md#d-017-openrouterのreasoningパラメータ形式を修正しツール付与ノードにも思考ログを追加する)、[BL-019](issue_backlog.md#bl-019-openrouterのreasoningパラメータが無効な形式で送られており一切発火していなかった)、[OpenRouter Reasoning Tokens公式ドキュメント](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)
+- **関連:** [D-017](decision_log.md#d-017-openrouterのreasoningパラメータ形式を修正しツール付与ノードにも思考ログを追加する)、[BL-019](../back_log/issue_backlog.md#bl-019-openrouterのreasoningパラメータが無効な形式で送られており一切発火していなかった)、[OpenRouter Reasoning Tokens公式ドキュメント](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)
 
 ---
 
@@ -204,7 +204,7 @@
 - **ユーザー明言（reflectionとFacilitatorの独立性）:** reflectionの周期発火はFacilitatorのトリガー設計と切り離し、差し戻し状況に関わらずそのまま発火すべきと明言。
 - **ユーザー方針:** BL-005の修正はR4（ホワイトボード化・スコープ制御の検討）と合わせて後日着手する。その際、コーディングエージェントの構造（本論点でのAI自身の説明）を参考にする。
 - **決定者:** t-momose（設計意図の想起・方針提示）、Claude Sonnet 5（自己構造の説明・統合整理を提起）
-- **関連:** [BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)、[BL-017](issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)、`cela_phase2_design_R4.md` §2.4、`log/2026-07-19/2056/log_no_prompt.md`
+- **関連:** [BL-005](../back_log/issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)、[BL-017](../back_log/issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)、`cela_phase2_design_R4.md` §2.4、`log/2026-07-19/2056/log_no_prompt.md`
 
 ---
 
@@ -217,7 +217,7 @@
 - **AI回答（独自性についての所感）:** 「対立的な二重防衛線ガバナンス」＋「MCTSによるゴール抽象度エスカレーション」＋「プロジェクト横断の経験のRAG的再利用」という3点の組み合わせは、AIの把握する範囲では類例を知らないと回答（ただし全世界の事例を網羅的に把握しているわけではないと留保）。
 - **AI整理・ドキュメント訂正:** BL-017を「F-10.6の新規発明」ではなく「F-10.6の、MVP範囲でコストを抑えた先行縮小実装」として再定義。完全なMCTS-Fork（並行世界線の別スレッド探索）やF-9のRAG的経験再利用はPhase 6以降に委譲し、BL-017は差し戻しループ検知とFacilitatorプロンプトのゴール抽象化対応のみに限定する方針をBL-017本文に追記。
 - **決定者:** t-momose（R4パッチ方式の決定、ビジョンの共有）、Claude Sonnet 5（既存仕様との重複発見、BL-017のスコープ再定義を提起）
-- **関連:** [D-018](decision_log.md#d-018-r4ホワイトボード編集方式はコーディングエージェント方式遅延取得機械的照合パッチを採用する)、[BL-017](issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)、要件定義書_v35.md F-9・F-10.2〜F-10.6・F-2.1拡張・`goal_shift_events`、`cela_roadmap_v25.md`（Phase 6以降の節）
+- **関連:** [D-018](decision_log.md#d-018-r4ホワイトボード編集方式はコーディングエージェント方式遅延取得機械的照合パッチを採用する)、[BL-017](../back_log/issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)、要件定義書_v35.md F-9・F-10.2〜F-10.6・F-2.1拡張・`goal_shift_events`、`cela_roadmap_v25.md`（Phase 6以降の節）
 
 ---
 
@@ -229,7 +229,7 @@
 - **AI整理:** 本Issue（BL-023）はBL-018（タスク**間**の依存関係の構造化）とは別軸の問題（タスク**単体**の分解粒度）であることを明確化し、混同しないよう起票した。
 - **ユーザー補足（背景の位置づけ）:** タスク分解の粗さに起因する「スコープが広すぎる」という感覚自体はCELAの構想以前から抱いていたものであり、今回ツール呼び出し（`python_repl`による機械的検算、F-2.6）を導入したことで、束ねられた複数の主張が検算の失敗として表面化し、問題が改めて顕在化したと補足。これは偶然の発見ではなく、以前から認識していた課題にてこ入れする良いタイミングだという位置づけを明言した。
 - **決定者:** t-momose（BL化と最優先対応の決定、および本件がCELA以前からの既知の課題であるという背景の明示）
-- **関連:** [BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、[BL-002](issue_backlog.md#bl-002-r1完了条件の実データabドライラン未実施)、[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)、`log/2026-07-19/2056/log_no_prompt.md`
+- **関連:** [BL-023](../back_log/issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、[BL-002](../back_log/issue_backlog.md#bl-002-r1完了条件の実データabドライラン未実施)、[BL-018](../back_log/issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)、`log/2026-07-19/2056/log_no_prompt.md`
 
 ---
 
@@ -242,7 +242,7 @@
 - **ユーザー追加提起（予算カスケードの弊害への警戒）:** 予算のサブ枠配分について、「あくまで枠であって、この予算では現場に無理をさせるだけ、しわ寄せを後に送っているだけの状態は避けたい」と明言。現実の（特に日本の）委託開発で「無理な予算枠を現場・委託先に押し付け、しわ寄せを後工程に送る」ことが横行している問題を引き合いに出し、同じ病理をCELAの設計で再現しないよう釘を刺した。
 - **AI整理・ドキュメント反映:** ユーザーの懸念を受け、予算サブ枠は「絶対制約ではなく仮説（hypothesis）」として扱うべきと整理。Expertが代替案を尽くした上で誠実に「このサブ枠は構造的に非現実的」と結論した場合は、Detectorの`major`（手抜き）による即時差し戻しではなく、`resource_arbiter`への構造化エスカレーションとして扱う経路が必要であり、現行のExpert system prompt（「制約緩和を提案しないでください」）は誠実なフィージビリティ判断と単なる思考停止を区別できていないため見直しが要る、とBL-023に追記した。あわせてBL-023の関連にBL-005を追加し、完了条件に上記3点セット（変数の一元所有・予算カスケードの仮説化とエスカレーション経路・reflection/facilitator復旧との並行対応）を反映した。
 - **決定者:** t-momose（設計対象の拡張への同意、依存関係・全体予算・現実PM手法という3つの追加観点の提起、予算カスケードの弊害への警戒の明示）、Claude Sonnet 5（真の増幅源の特定、WBS類推による3点セットの設計原則の提案、予算サブ枠の仮説化・エスカレーション経路の提案）
-- **関連:** [BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)、[BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)、`log/2026-07-19/2056/log_no_prompt.md:1517-1545`
+- **関連:** [BL-023](../back_log/issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、[BL-018](../back_log/issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)、[BL-005](../back_log/issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)、`log/2026-07-19/2056/log_no_prompt.md:1517-1545`
 
 ---
 
@@ -253,7 +253,7 @@
 - **AI分析（同意と根拠の整理）:** ユーザーの判断に同意。実ドライラン（`log/2026-07-19/2056`）のtask_1.2で直接観測された「検算の嵐」（3ラウンド以上の差し戻し、各ラウンドでExpert 5〜8回・Detector 3〜7回のpython_repl呼び出し）は、task_planner／User AIによる1タスクへの複数独立検証可能主張の束ね込みが直接原因であることがログで実証済みであり、Phase Aはこの確度の高い直接原因に対応する。一方、reflection/facilitatorの不在（BL-005）が現在の検算の嵐を悪化させているという説明は、論点22でAIが提示した構造的推論であり、ログで直接実証された事実ではない。したがって確度の高い直接原因（Phase A）と、ユーザーが強く懸念する将来リスク（Phase C、現場への無理な予算押し付けの防止）を優先し、確度の低い間接要因（Phase B）を非ブロッカーとして後回しにするのは合理的と回答。あわせて、Phase Aで追加する`depends_on`/`owns_variables`フィールドが、reflection/facilitatorが本来担うはずだった「共有変数の一貫性チェック」の一部を構造的に代替するため、Phase B先送りの悪影響は限定的である点も補足した。
 - **AI提案（実装順序）:** Phase A（影響範囲が小さく、ログで確度の高い原因に対応）を先行実装し、動作確認後にPhase C（予算カスケード、新規機構で影響範囲が大きい）に着手する順序を提案。
 - **決定者:** t-momose（Phase A・C優先、Phase B後回しの決定）
-- **関連:** [D-020](decision_log.md#d-020-bl-023の対応をphase-atask_planneruser-aiのスコープ是正phase-c予算カスケードの仮説化から着手しphase-bbl-005-reflectionfacilitator復旧は後回しにする)、[BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、[BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)
+- **関連:** [D-020](decision_log.md#d-020-bl-023の対応をphase-atask_planneruser-aiのスコープ是正phase-c予算カスケードの仮説化から着手しphase-bbl-005-reflectionfacilitator復旧は後回しにする)、[BL-023](../back_log/issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、[BL-005](../back_log/issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)
 
 ---
 
@@ -264,7 +264,7 @@
 - **ユーザー決定:** 「設計書に含めましょう。分解すのもよいのですが、結局目指すところは一緒なので」と、issue_backlog相当・phase_gate相当・traceability相当・確定値共有ストアのすべてを個別BLに分割せず、BL-023の統合設計として1つの設計書にまとめる方針を決定。
 - **AI対応:** `docs/design/phase2/cela_phase2_design_BL023_task_state.md`を新規作成し、`Task`型・`Phase`/`Agreement`型拡張・`LineageState`拡張（`current_task_id`/`verified_facts`/`task_criteria_status`）・DBスキーマ変更・`decision_extractor`拡張・acceptance_criteria充足チェック・Agreementの`Deferred`ステータス・共有変数ストア・`generate_user_utterance`/Expert system promptの改修・予算カスケードを1つの設計書として統合。BL-024を新規起票し、D-021として`decision_extractor_node`を唯一の書き手とする決定を記録。
 - **決定者:** t-momose（統合設計として1つにまとめる決定）、Claude Sonnet 5（対応表の整理、`decision_extractor_node`を唯一の書き手とする設計の提案）
-- **関連:** [D-021](decision_log.md#d-021-bl-023の設計を本プロジェクト自身の統治構造に対応する情報構造としてlineagestateに統合するdecision_extractor_nodeを状態遷移の唯一の書き手とする)、[BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、[BL-024](issue_backlog.md#bl-024-current_phaseが初期化後フリーズしtask_id単位の状態追跡が存在しない)、`docs/design/phase2/cela_phase2_design_BL023_task_state.md`
+- **関連:** [D-021](decision_log.md#d-021-bl-023の設計を本プロジェクト自身の統治構造に対応する情報構造としてlineagestateに統合するdecision_extractor_nodeを状態遷移の唯一の書き手とする)、[BL-023](../back_log/issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、[BL-024](../back_log/issue_backlog.md#bl-024-current_phaseが初期化後フリーズしtask_id単位の状態追跡が存在しない)、`docs/design/phase2/cela_phase2_design_BL023_task_state.md`
 
 ---
 
@@ -276,7 +276,7 @@
 - **ユーザー決定:** 「とりあえず、出力が日本語（最低限英語で）出ていれば良しとします。おそらく内部思考言語の強制は無理ですし、やるべきではないです」と、`reasoning`フィールドの言語強制は行わない方針を決定。
 - **AI対応:** D-022として決定を記録し、BL-020にスコープ明確化の注記（「出力content」のみが対象、`reasoning`は対象外）を追記。
 - **決定者:** t-momose（reasoning言語強制をスコープ外とする決定）
-- **関連:** [D-022](decision_log.md#d-022-reasoning内部思考フィールドの言語強制はスコープ外とするbl-020は最終出力contentのみを対象とする)、[BL-020](issue_backlog.md#bl-020-中国語系モデル経由でまれに中国語英語出力になる問題)、[BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、`log/2026-07-20/1204/log_no_prompt.md`
+- **関連:** [D-022](decision_log.md#d-022-reasoning内部思考フィールドの言語強制はスコープ外とするbl-020は最終出力contentのみを対象とする)、[BL-020](../back_log/issue_backlog.md#bl-020-中国語系モデル経由でまれに中国語英語出力になる問題)、[BL-023](../back_log/issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、`log/2026-07-20/1204/log_no_prompt.md`
 
 ---
 
@@ -289,7 +289,7 @@
 - **ユーザー決定:** 「①②とも起票してください。そのうえでエキスパート側にもBL-23のガードレールを注入し、最終的に②も実装」と、BL化した上で両方を実装する方針を決定。
 - **AI対応:** BL-025を新規起票し、D-023として①②両方の実装決定を記録。
 - **決定者:** t-momose（①②両方の起票・実装の決定）、Claude Sonnet 5（根本原因の切り分け、コンテキスト再送信という構造的原因の特定、ユーザー観察の技術的整理）
-- **関連:** [D-023](decision_log.md#d-023-expertのタスク境界逸脱に対し①スコープガードレール注入と②ツールループのコンテキスト軽量化の両方を実装する)、[BL-025](issue_backlog.md#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする)、[BL-023](issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、`log/2026-07-20/1204/log_no_prompt.md:2290-2428`
+- **関連:** [D-023](decision_log.md#d-023-expertのタスク境界逸脱に対し①スコープガードレール注入と②ツールループのコンテキスト軽量化の両方を実装する)、[BL-025](../back_log/issue_backlog.md#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする)、[BL-023](../back_log/issue_backlog.md#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)、`log/2026-07-20/1204/log_no_prompt.md:2290-2428`
 
 ---
 
@@ -300,7 +300,7 @@
 - **ユーザー決定:** 「なぜ、エキスパート名をあらかじめ決めて配列にしたか忘れてしまいました。v10以前に情報を構造化していなかったツケですね。といっても、現状謎の足かせになり得ているので、自由記述にし、フォールバックは仕込む。エキスパートごとのノード構造は必要が生じたらそうする（まだこれで一通り動くというMVPもできてないので）」と、固定配列の撤廃・自由記述化・軽量フォールバックの実装、および専門家ごとの個別ノード構造は時期尚早として見送る方針を決定。
 - **AI対応:** `call_orchestrator`のプロンプトから固定16種配列を削除し自由記述の専門家肩書きを生成させる形に変更。`valid_experts`検証を撤廃し、空・空白のみの場合に「プロジェクト全般アドバイザー」へフォールバックする軽量ガードに置き換え。フェイククライアントによるオフラインスモークテスト3件（自由記述の通過、空文字時のフォールバック、不正JSON時のフォールバック）で確認。BL-026を新規起票・`done`化し、D-024として決定を記録。
 - **決定者:** t-momose（固定配列撤廃・自由記述化・個別ノード構造の見送りの決定）、Claude Sonnet 5（現状確認とアーキテクチャ上の無用性の指摘）
-- **関連:** [D-024](decision_log.md#d-024-orchestratorの専門家選択を固定16種配列から自由記述に変更する)、[BL-026](issue_backlog.md#bl-026-専門家名の固定配列valid_expertsを撤廃しorchestratorの自由記述に変更)、`log/2026-07-20/1204/log_no_prompt.md:937-957`
+- **関連:** [D-024](decision_log.md#d-024-orchestratorの専門家選択を固定16種配列から自由記述に変更する)、[BL-026](../back_log/issue_backlog.md#bl-026-専門家名の固定配列valid_expertsを撤廃しorchestratorの自由記述に変更)、`log/2026-07-20/1204/log_no_prompt.md:937-957`
 
 ---
 
@@ -311,7 +311,7 @@
 - **ユーザー決定:** 「１．２お願いします」（提案した(A)`__main__`ガード内への移動、および1455・1458の削除の両方を承認）。
 - **AI対応:** `sys.stdout = MultiLogger()`を`if __name__ == "__main__":`ブロック内（`TARGET_GOAL`定義の直前）へ移動。`import cela_main`のみでは`log/`配下に新規ディレクトリが作られないことを`os.listdir`差分で確認、`python -m py_compile`で回帰なしを確認。誤生成された`log/2026-07-20/1455`・`1458`を削除。BL-027を新規起票・`done`化し、D-025として決定を記録。
 - **決定者:** t-momose（修正方針・削除の承認）、Claude Sonnet 5（原因特定と修正案の提示）
-- **関連:** [D-025](decision_log.md#d-025-multiloggerの起動を__main__ガード内に限定する)、[BL-027](issue_backlog.md#bl-027-cela_mainpyのロガーがimport時点で無条件起動し本番log配下にテスト実行の痕跡が混入する)
+- **関連:** [D-025](decision_log.md#d-025-multiloggerの起動を__main__ガード内に限定する)、[BL-027](../back_log/issue_backlog.md#bl-027-cela_mainpyのロガーがimport時点で無条件起動し本番log配下にテスト実行の痕跡が混入する)
 
 ---
 
@@ -321,7 +321,7 @@
 - **ユーザー決定:** 「tool コール上限は15回にあげましょう。今の時点ではクラッシュさせないのが先決です」と、検証コストそのものの削減（Phase C予算カスケード、R4差分パッチ等）より先に、まずクラッシュ耐性の確保を優先する方針を決定。
 - **AI対応:** `_query_AI_live`内の`MAX_TOOL_ITER`を10から15に変更（AGENTS.md §7の定数変更に関する事前承認要件は本ユーザー指示により充足）。`python -m py_compile`で回帰なしを確認。BL-028を新規起票・`done`化し、D-026として決定を記録。あわせて、この変更はソースコードに対するものであり、変更時点で実行中だった1421のドライランプロセス（モジュールをメモリにロード済み）には反映されず、次回起動分から有効になる旨をユーザーに明示。
 - **決定者:** t-momose（上限引き上げ・優先順位の決定）、Claude Sonnet 5（ニアミスの発見・報告、実装時の適用範囲の明示）
-- **関連:** [D-026](decision_log.md#d-026-max_tool_iterを10から15へ引き上げる)、[BL-028](issue_backlog.md#bl-028-max_tool_iterを1015に引き上げクラッシュ回避を優先)、`log/2026-07-20/1421/log_no_prompt.md`
+- **関連:** [D-026](decision_log.md#d-026-max_tool_iterを10から15へ引き上げる)、[BL-028](../back_log/issue_backlog.md#bl-028-max_tool_iterを1015に引き上げクラッシュ回避を優先)、`log/2026-07-20/1421/log_no_prompt.md`
 
 ---
 
@@ -332,7 +332,7 @@
 - **ユーザー決定:** 「OKですAは実装、BはBL起票」。プロンプトへの目的明記（A）は即座に実装し、独立フィールド化（B）はdecision_extractorの将来縮小設計と合わせて検討するbacklogとして起票する方針を決定。
 - **AI対応:** `call_decision_extractor`のexpert向け`role_instruction`に「BL-029: owned_variable_valuesはcontentと目的が異なります」ブロックを追加し、`owned_variable_values`は依存タスク参照用の簡潔な要約であり全文コピー禁止であることを明記。`python -m py_compile`で回帰なしを確認。BL-029を新規起票・`done`化、BL-030を新規起票・`open`のまま（decision_extractorの将来縮小設計待ち）とし、D-027として決定を記録。
 - **決定者:** t-momose（A実装・B起票の判断、`content`要約禁止の設計思想とdecision_extractorの将来像の共有）、Claude Sonnet 5（原因分析と2案の提示、実装）
-- **関連:** [D-027](decision_log.md#d-027-owned_variable_valuesはcontentと目的が異なることをプロンプトで明記する)、[BL-029](issue_backlog.md#bl-029-owned_variable_valuesにcontentの全文がそのまま混入する事故を修正)、[BL-030](issue_backlog.md#bl-030-owned_variable_valuesを依存関係参照専用の要約レポートとして独立フィールド化する拡張案)
+- **関連:** [D-027](decision_log.md#d-027-owned_variable_valuesはcontentと目的が異なることをプロンプトで明記する)、[BL-029](../back_log/issue_backlog.md#bl-029-owned_variable_valuesにcontentの全文がそのまま混入する事故を修正)、[BL-030](../back_log/issue_backlog.md#bl-030-owned_variable_valuesを依存関係参照専用の要約レポートとして独立フィールド化する拡張案)
 
 ---
 
@@ -341,9 +341,9 @@
 - **ユーザー観察:** `log/2026-07-20/1421`のtask_3_1レビューで、User AIがtask_2_3の個別コスト（初年度110万円）とtask_3_1の初期費用計上（85万円）の差異を「経常費用の除外」として正しく整理していたことに着目し、「この挙動はたまたまではなく、システムとして必然か？」と問うた。
 - **AI分析:** `chat_history`の積み上げ方（`generate_user_utterance_node`/`expert_node`で`{user: 指示}`→`{assistant: 回答}`の交互ペア、`cela_main.py:2492`/`2594`）と`config["chat_history_window"]`（デフォルト4 = 直近2サイクル分、`cela_main.py:2402`/`3581`）を確認。task_3_1の`depends_on`はtask_planner出力上`["task_2_1"]`のみでtask_2_2・task_2_3を含まず、task_2_3の`owns_variables`（`reservation_methods`）が`verified_facts`に保存した値もチャネル比率のみでコスト内訳は含まれていないことを確認。したがって今回の照合は、BL-023 Phase Aの構造化された確定値参照ではなく、task_2_3がtask_3_1の直前タスクだったために`chat_history_window`内に生の全文がたまたま残っていたことによる、と結論づけた。あわせて、task_planner側の`depends_on`宣言がExpertの実際の情報利用範囲（task_2_2のオペレーター数、task_2_3の端末・電話コスト）より狭く、依存関係グラフ自体が実態を過少申告している点も指摘した。
 - **ユーザー決定:** 「記録してください」と、この発見をドキュメントに残すよう指示。
-- **AI対応:** 既存の[BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)（タスク間依存関係の構造化不足）に、本発見を実ドライランの具体的な証拠として追記。BL-018はもともと`open`（構想段階）のため、新規D-xxx（決定）は起こさず、発見事実の記録として本論点を追加した。
+- **AI対応:** 既存の[BL-018](../back_log/issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)（タスク間依存関係の構造化不足）に、本発見を実ドライランの具体的な証拠として追記。BL-018はもともと`open`（構想段階）のため、新規D-xxx（決定）は起こさず、発見事実の記録として本論点を追加した。
 - **決定者:** t-momose（記録の指示）、Claude Sonnet 5（メカニズムの特定と分析）
-- **関連:** [BL-018](issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)、`log/2026-07-20/1421/log_no_prompt.md`（task_3_1レビュー箇所）
+- **関連:** [BL-018](../back_log/issue_backlog.md#bl-018-task_planner由来のタスク間依存関係が状態に構造化されておらず横断的な影響判断ができない)、`log/2026-07-20/1421/log_no_prompt.md`（task_3_1レビュー箇所）
 
 ---
 
@@ -354,7 +354,7 @@
 - **ユーザー所感・決定:** 「なるほど、キャッシュヒットを上げる人るのハックですね。BL化してください」とBL化を指示。あわせて「v4-flashは優秀な分類の格安モデル（sonnet-4.xくらいには匹敵？）ですが、要するに、エージェントアーキテクチャを洗練させていくと、そこそこの性能の格安モデルでも十分動き、成果が出せると感じました。」と、本プロジェクト全体の設計方針（エージェントアーキテクチャの洗練により低コストモデルでも高い成果を引き出す）に関する所感を述べた。
 - **AI対応:** BL-031を新規起票・`open`のまま（MVP完成後のコスト最適化枠）とし、D-028として決定を記録。現時点でコード変更は行っていない。
 - **決定者:** t-momose（BL化の指示、コスト最適化の優先度判断、アーキテクチャ設計方針の所感）、Claude Sonnet 5（原因分析の提示）
-- **関連:** [D-028](decision_log.md#d-028-プレフィックスキャッシュヒット率改善はmvp完成後のコスト最適化枠として据え置く)、[BL-031](issue_backlog.md#bl-031-プロンプトのプレフィックスキャッシュヒット率を上げる構造整理コスト最適化)
+- **関連:** [D-028](decision_log.md#d-028-プレフィックスキャッシュヒット率改善はmvp完成後のコスト最適化枠として据え置く)、[BL-031](../back_log/issue_backlog.md#bl-031-プロンプトのプレフィックスキャッシュヒット率を上げる構造整理コスト最適化)
 
 ---
 
@@ -367,7 +367,7 @@
 - **ユーザー決定:** 「分かりました。BLを発行してください」と、ガード付き設計での起票を承認。
 - **AI対応:** BL-032を新規起票（`open`、設計確定・実装承認済み、実装は別ターン）、D-029として決定を記録。
 - **決定者:** t-momose（機械化のリスク指摘、ガード付き設計の承認）、Claude Sonnet 5（原因分析、当初案の提示、ユーザー指摘を受けたガード付き設計への改訂）
-- **関連:** [D-029](decision_log.md#d-029-同一task_idの兄弟decisionへの承認カスケードをdetector判定でガードして実装する)、[BL-032](issue_backlog.md#bl-032-deliverable承認時に同一task_idの兄弟decisionが永久にproposedのまま取り残される)
+- **関連:** [D-029](decision_log.md#d-029-同一task_idの兄弟decisionへの承認カスケードをdetector判定でガードして実装する)、[BL-032](../back_log/issue_backlog.md#bl-032-deliverable承認時に同一task_idの兄弟decisionが永久にproposedのまま取り残される)
 
 ---
 
@@ -380,7 +380,7 @@
 - **ユーザー決定・追加提案:** 「対策は両方やりましょう。その上で、AIが呼んだ直前の一連のpythonスクリプトを保存できませんか？detector自体の計算が間違わないと言い切れないので、detectorではまず自分で検算、その後直前のAIのスクリプトを見て、あるいは実行して整合する事を確認」と、両対策の実装承認に加え、python_repl実行記録そのものを保存し、Detectorが独立検算後にExpertの実行記録と突き合わせる設計を追加提案。
 - **AI対応:** `_query_AI_live`にpython_repl実行記録（code/result）の蓄積とモジュールレベルバッファ（`_LAST_PYTHON_CALLS`/`get_last_python_calls()`）を実装。`expert_node`が`state["expert_last_python_calls"]`へ保存。`call_detector`のプロンプトにExpertの実行記録（または未使用警告）を注入し、「まず自分で独立検算し、その後この記録と突き合わせる」よう指示。`detector_node`にExpert/Detector双方が未使用の場合のみ`constraint_issue=major`を強制する複合失敗ガードを実装。`python -m py_compile`合格、フェイククライアントによるオフラインスモークテスト4件（記録保存・空リスト記録・複合失敗ガード発火・独立検算時の非発火）すべてPass。BL-033を新規起票・`done`化、D-030として決定を記録。
 - **決定者:** t-momose（無限ループリスクの指摘、2段構え対策の承認、スクリプト保存・突き合わせ設計の追加提案）、Claude Sonnet 5（原因分析、2段構え設計の提示、実装）
-- **関連:** [D-030](decision_log.md#d-030-expertの検算未実施を検出しdetectorへ提示しつつ複合失敗のみ強制差し戻しする)、[BL-033](issue_backlog.md#bl-033-expertがpython_repl未使用のまま検算完了と虚偽申告できるf-26監査フラグに強制力がない)
+- **関連:** [D-030](decision_log.md#d-030-expertの検算未実施を検出しdetectorへ提示しつつ複合失敗のみ強制差し戻しする)、[BL-033](../back_log/issue_backlog.md#bl-033-expertがpython_repl未使用のまま検算完了と虚偽申告できるf-26監査フラグに強制力がない)
 
 ---
 
@@ -391,7 +391,7 @@
 - **ユーザー決定:** 対応方針として「現状維持＋BL起票のみ」「今すぐ設計変更（Approved確定時にのみファイル保存）」「現状維持（記録もしない）」の3案を提示したところ、「BL記載するが、ホワイトボード(mdファイル)差分読み書きになるので、その時点で解決の見込みと認識している」と、記録に留め、将来のR4（ホワイトボード化・md差分読み書き方式、D-018）で構造的に解消される見込みであるという判断を示した。
 - **AI対応:** BL-034を新規起票（`open`、記録のみ・実装見送り）、D-031として決定を記録。BL-018（`whiteboard_drafts`/R4）と相互参照。
 - **決定者:** t-momose（挙動の発見、対応方針の決定＝記録のみでR4に委ねる判断）、Claude Sonnet 5（コード上の原因分析、実害の切り分け、対応案の提示）
-- **関連:** [D-031](decision_log.md#d-031-deliverableの物理ファイル保存を承認前提にする設計変更はr4のホワイトボード化まで見送る)、[BL-034](issue_backlog.md#bl-034-deliverableのファイル保存がユーザー承認前に無条件で発生する)
+- **関連:** [D-031](decision_log.md#d-031-deliverableの物理ファイル保存を承認前提にする設計変更はr4のホワイトボード化まで見送る)、[BL-034](../back_log/issue_backlog.md#bl-034-deliverableのファイル保存がユーザー承認前に無条件で発生する)
 
 ---
 
@@ -403,7 +403,7 @@
 - **ユーザー決定:** 対応方針として「様子見＋BL記載のみ」「即応パッチ（`_build_task_scope_context`修正）」「ドライラン中断・再起動」の3案を提示したところ、「BL記載するが、これも将来的にツールでファイルI/OとdbI/Oを追加したときに、その時必要な情報をとれるようにする。db I/Oは設計要件になかった気がするが、なければ追加」と、即応パッチではなく将来のエージェント自律読み取りツール（ファイル/DB双方）に統合して解決する方針を決定し、DB読み取りツールが要件定義書に存在しない場合は新規追加するよう指示した。
 - **AI対応:** 要件定義書_v35.mdを確認し、F-3.1〜F-3.7が自律的DB「書き込み」ツールのみを規定しており、DB/ファイルの「読み取り」ツールが存在しないことを確認。F-3.8「自律的DB/ファイル読み取り（Tool Calling）の内包」を新規追加（v35.1）し、`_build_task_scope_context`のクロスフェーズ参照バグをBL-035として起票、D-032として決定を記録。即応パッチは実施せず、F-3.8実装時にまとめて解消する方針とした。
 - **決定者:** t-momose（誤計算ログの共有、無限ループ懸念の提起、将来ツールへの統合方針とDB読み取り要件の追加指示）、Claude Sonnet 5（検算による裏付け、コード上の原因特定、要件定義書のギャップ確認とF-3.8の起草）
-- **関連:** [D-032](decision_log.md#d-032-フェーズ横断の確定値成果物アクセスはエージェント自律の読み取りツールf-38を新規追加して解決する)、[BL-035](issue_backlog.md#bl-035-_build_task_scope_contextがフェーズ横断のdepends_on参照を解決できない)
+- **関連:** [D-032](decision_log.md#d-032-フェーズ横断の確定値成果物アクセスはエージェント自律の読み取りツールf-38を新規追加して解決する)、[BL-035](../back_log/issue_backlog.md#bl-035-_build_task_scope_contextがフェーズ横断のdepends_on参照を解決できない)
 
 ---
 
@@ -415,7 +415,7 @@
 - **ユーザー決定:** 「BL表記はしてよいですが、各種の情報にアクセスできないのが根本原因ですので、phase6の挙動はある意味予想された結果です。なので、参考程度にとどめて、最終的に必要な情報にアクセスできた時にどうなるかで判断が必要です。」と、既知原因から論理的に予想される結果を独立した緊急課題として扱わず、F-3.8実装後の再評価が必要という判断を示した。
 - **AI対応:** BL-036を新規起票（`open`、参考記録のみ）、D-033として決定を記録。F-3.8実装・同一構成での再ドライラン実施を完了条件とし、現時点での追加修正は行わない。
 - **決定者:** t-momose（既知原因からの予想された結果という位置づけの判断、参考記録化の決定）、Claude Sonnet 5（全成果物のレビューと数値ドリフトの検算・特定、BL-035との同一原因性の指摘）
-- **関連:** [D-033](decision_log.md#d-033-最終計画書の数値ドリフトはbl-035の既知原因による予想された結果として参考記録に留める)、[BL-036](issue_backlog.md#bl-036-最終計画書の財務需要数値が統合パスのたびに再ドリフトするbl-035f-38の射程がコスト計算にも及ぶ実例)
+- **関連:** [D-033](decision_log.md#d-033-最終計画書の数値ドリフトはbl-035の既知原因による予想された結果として参考記録に留める)、[BL-036](../back_log/issue_backlog.md#bl-036-最終計画書の財務需要数値が統合パスのたびに再ドリフトするbl-035f-38の射程がコスト計算にも及ぶ実例)
 
 ---
 
@@ -427,7 +427,7 @@
 - **ユーザー決定:** 「まずBL起票のみ（推奨）」を選択。プロンプトの個別強化やさらなる深掘りは行わず、記録に留める方針を決定。
 - **AI対応:** BL-037を新規起票（`open`、記録のみ）、D-034として決定を記録。将来のF-3.1〜F-3.7（自律的書き込みツールへの移行、`decision_extractor_node`の縮小）着手時に理由記載の強制粒度をあわせて再設計する方針とした。
 - **決定者:** t-momose（理由記載の薄さの指摘、対応範囲をBL記載のみに絞る決定）、Claude Sonnet 5（ログからの実例収集・原因の2分類・BL-034〜036との異同整理）
-- **関連:** [D-034](decision_log.md#d-034-decisionagreementの理由記載の薄さはbl起票のみに留めf-3系統合時に再設計する)、[BL-037](issue_backlog.md#bl-037-decisionagreementのreason_whyが薄くdetector自身も後から数値の根拠を辿れない)
+- **関連:** [D-034](decision_log.md#d-034-decisionagreementの理由記載の薄さはbl起票のみに留めf-3系統合時に再設計する)、[BL-037](../back_log/issue_backlog.md#bl-037-decisionagreementのreason_whyが薄くdetector自身も後から数値の根拠を辿れない)
 
 ---
 
@@ -443,7 +443,7 @@
 - **ユーザー決定:** 「ドキュメント類、追記してください」との指示。
 - **AI対応:** 要件定義書_v35.mdにF-8.4（時間減衰検索・決定/否決ターンの自動セイリエンス固定・時系列復元読み）とF-3.9（構造化された事実・理由・引用元セット、暫定/確定の区別を含む）を新規追加（v35.2）。D-035として決定を記録し、BL-036/BL-037に本設計方針への参照を追記。
 - **決定者:** t-momose（NPU-Context-Saverの実装経験に基づく3つの設計提案、暫定値の正当性という設計思想の提起）、Claude Sonnet 5（提案の要件定義書への位置づけ整理、F-8.3/F-3.8との関係整理）
-- **関連:** [D-035](decision_log.md#d-035-bl-036bl-037の解決方針としてnpu-context-saver由来の時間減衰検索構造化ファクトストアをf-84f-39として要件化する)、[BL-036](issue_backlog.md#bl-036-最終計画書の財務需要数値が統合パスのたびに再ドリフトするbl-035f-38の射程がコスト計算にも及ぶ実例)、[BL-037](issue_backlog.md#bl-037-decisionagreementのreason_whyが薄くdetector自身も後から数値の根拠を辿れない)
+- **関連:** [D-035](decision_log.md#d-035-bl-036bl-037の解決方針としてnpu-context-saver由来の時間減衰検索構造化ファクトストアをf-84f-39として要件化する)、[BL-036](../back_log/issue_backlog.md#bl-036-最終計画書の財務需要数値が統合パスのたびに再ドリフトするbl-035f-38の射程がコスト計算にも及ぶ実例)、[BL-037](../back_log/issue_backlog.md#bl-037-decisionagreementのreason_whyが薄くdetector自身も後から数値の根拠を辿れない)
 
 ---
 
@@ -456,7 +456,7 @@
 - **ユーザー承認:** 提案内容（R2クローズ・R3a/R3b再編・R4前提更新）を承認、加えて`cela_phase2_design_R4.md`（phase2の設計書）も合わせて更新するよう指示。
 - **AI対応（実装）:** D-036として決定を記録。`cela_roadmap_v25.md`（全体マイルストーン図・R2完了注記・R3のR3a/R3b分割・R4前提）、`phase_gates.md`（P2-2クローズ・Phase 3節新設・サインオフ表）、`cela_phase2_design_R4.md`（冒頭前提注記の追記）、`STATUS.md`を更新。
 - **決定者:** t-momose（指標C実測のROI懸念の提起、R2クローズ・R3再編・phase2設計書更新の承認）、Claude Sonnet 5（交絡要因の根本原因分析、R3a/R3b再編案の提示）
-- **関連:** [D-036](decision_log.md#d-036-r2をd-002同様の扱いでクローズしr3をr3a自律的読み取りf-38f-39r3b自律的書き込み旧来のr3に再編する)、[BL-035](issue_backlog.md#bl-035-_build_task_scope_contextがフェーズ横断のdepends_on参照を解決できない)、[BL-036](issue_backlog.md#bl-036-最終計画書の財務需要数値が統合パスのたびに再ドリフトするbl-035f-38の射程がコスト計算にも及ぶ実例)、[BL-037](issue_backlog.md#bl-037-decisionagreementのreason_whyが薄くdetector自身も後から数値の根拠を辿れない)
+- **関連:** [D-036](decision_log.md#d-036-r2をd-002同様の扱いでクローズしr3をr3a自律的読み取りf-38f-39r3b自律的書き込み旧来のr3に再編する)、[BL-035](../back_log/issue_backlog.md#bl-035-_build_task_scope_contextがフェーズ横断のdepends_on参照を解決できない)、[BL-036](../back_log/issue_backlog.md#bl-036-最終計画書の財務需要数値が統合パスのたびに再ドリフトするbl-035f-38の射程がコスト計算にも及ぶ実例)、[BL-037](../back_log/issue_backlog.md#bl-037-decisionagreementのreason_whyが薄くdetector自身も後から数値の根拠を辿れない)
 
 ---
 
@@ -485,7 +485,7 @@
   - 提案1（すり合わせタスクを最初に置く／上書き機構）は、facilitator再設計と合わせて検討する将来課題としてBL-041に記録。
 - **設計ドラフト作成（2026-07-22）:** 上記方針に基づき`cela_facilitator_arbiter_redesign_BL041.md`を作成。エスカレーション行動を「代替案切替（Substitute）」「スコープ縮小（Descope）」「強制決定（Force Decision）」の3段階として設計したところ、ユーザーから「スコープ縮小」という語の指す対象（プロジェクトの要求仕様を削る、の意）とtask_1.1のスコープの狭さ（分析視座の話）が紛らわしいと指摘があり、両者は別概念（前者はコスト調整、後者はタスク粒度）であることをAIが整理し確認・合意。続けてユーザーが「Descopeは妥当な手段。それでもダメならそもそも論に昇華させたい」と提案し、上位3段階が全て手詰まりの場合に発火する**第4段階（そもそも論への昇華）**を追加。ただしこれは要件定義書F-10.6（MCTS-Fork、多分岐並行世界探索）のフル実装ではなく、「対立する前提を検出・構造化して人間にSOSを出す」検出・エスカレーション部分のみをMVPとして先行実装し、並行探索・自動フォーク自体はPhase 6以降に据え置く方針とした。
 - **決定者:** t-momose（根本原因の再診断、3つの解決方向性の提示、facilitatorの本来の役目とトリガー調整方針の指摘、「スコープ」の語義確認、そもそも論への昇華という第4段階の提案）、Claude Sonnet 5（F-3.9との対応関係の特定、実装範囲の切り分け提案、Substitute/Descope/Force Decisionの3段階設計、「スコープ」の語義の切り分け説明、そもそも論段階のF-10.6との関係整理）
-- **関連:** [BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)、[BL-017](issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)（facilitator再設計との統合）、[BL-040](issue_backlog.md#bl-040-read_deliverable_fileがfile_path直接指定に依存し実質的に発見不能だった問題)（同時に対応したファイル命名の`_Vn`バージョニング＋`old/`退避も本セッションで実装）、[cela_facilitator_arbiter_redesign_BL041.md](r1_r2_r3b_core/cela_facilitator_arbiter_redesign_BL041.md)（設計ドラフト本体）
+- **関連:** [BL-041](../back_log/issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)、[BL-017](../back_log/issue_backlog.md#bl-017-差し戻しループ沼からの脱出機構ファシリテーターそもそも論への立ち返り)（facilitator再設計との統合）、[BL-040](../back_log/issue_backlog.md#bl-040-read_deliverable_fileがfile_path直接指定に依存し実質的に発見不能だった問題)（同時に対応したファイル命名の`_Vn`バージョニング＋`old/`退避も本セッションで実装）、[cela_facilitator_arbiter_redesign_BL041.md](r1_r2_r3b_core/cela_facilitator_arbiter_redesign_BL041.md)（設計ドラフト本体）
 
 ---
 
@@ -498,7 +498,7 @@
 - **実装:** `cela_main.py`に`get_latest_whiteboard`/`apply_whiteboard_patch`/`rollback_whiteboard`/`_apply_text_edits`を新設。`WRITE_AGREEMENT_TOOL`に`edits`パラメータ（`old_text`/`new_text`/`replace_all`の配列）を追加し、`_write_agreement_impl`/`_commit_agreement_from_tool`のDeliverable経路をwhiteboard_drafts方式に全面移行。`call_expert`（フル版・軽量版）・`generate_user_utterance`・`call_detector`のプロンプトに現在タスクの最新ホワイトボード内容を注入。`integrator_node`・`read_deliverable_file`ツールに`WHITEBOARD:`ポインタの解決を追加。Detectorのmajor判定時のロールバック（F-7.3）を`expert_node`の差し戻し処理に配線。BL-034/BL-040のファイルベース版管理（`save_deliverable_to_file`/`_archive_old_deliverable_file`）は削除せず、`integrator_node`が生成する1回限りの最終統合文書専用として残した。
 - **テスト:** 既存の`tests/test_r3_smoke.py`のうちDeliverableファイル保存を前提としていた3件（R3b-T12・T13、BL-040バージョニングテスト）をWHITEBOARD方式の挙動に更新。新規`tests/test_r4_smoke.py`（14件）を追加。オフラインスモークテスト計64件がすべてPass。
 - **決定者:** t-momose（R4優先着手の提案とその理由、「卒業」の範囲訂正、差分変更の実装方式についての逆質問による誘導）、Claude Sonnet 5（Integrator役割継続の指摘、マージ方式の未定義部分の発見、Claude Code Editツール方式の提案・実装）
-- **関連:** [BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)（本Issueより優先着手）、[cela_r4_design.md](r4/cela_r4_design.md)、[cela_r4_impl_Plan.md](r4/cela_r4_impl_Plan.md)
+- **関連:** [BL-041](../back_log/issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)（本Issueより優先着手）、[cela_r4_design.md](r4/cela_r4_design.md)、[cela_r4_impl_Plan.md](r4/cela_r4_impl_Plan.md)
 
 ---
 
@@ -515,7 +515,7 @@
   2. 二重防御として、`decision_extractor_node`のフォールバック経路に`WHITEBOARD:`ポインタの保護分岐を追加（`FILE_PATH:`と同じ扱いで、フォールバック経路からのプレーンテキスト上書きを常に禁止）。ガードが将来再び機能しなかった場合でも実データ破損には至らないようにする、という設計判断（AI提起）。
   3. `tests/test_r4_smoke.py`に、実際の`StateGraph(cela_main.LineageState)`を`app.invoke()`経由で検証する回帰テストと、WHITEBOARD保護の回帰テストを追加。オフラインスモークテスト計66件が全通過。
 - **決定者:** t-momose（実データ確認の指示、offlineテストでの切り分け指示、修正実施の許可）、Claude Sonnet 5（DB上の実害確認、LangGraphの挙動の実証的検証、根本原因の特定、修正案の提示・実装）
-- **関連:** [BL-038](issue_backlog.md#bl-038-write_agreement成功後もdecision_extractor_nodeのagreement抽出がスキップされず同一トピックでdecisionとdeliverableの二重書き込みが発生する)、[D-038](decision_log.md#d-038-bl-038の根本原因をlanggraphの未宣言typeddictキー消失と特定しlineagestateへのフィールド追加とdecision_extractorフォールバックのwhiteboard保護で対応する)
+- **関連:** [BL-038](../back_log/issue_backlog.md#bl-038-write_agreement成功後もdecision_extractor_nodeのagreement抽出がスキップされず同一トピックでdecisionとdeliverableの二重書き込みが発生する)、[D-038](decision_log.md#d-038-bl-038の根本原因をlanggraphの未宣言typeddictキー消失と特定しlineagestateへのフィールド追加とdecision_extractorフォールバックのwhiteboard保護で対応する)
 
 ---
 
@@ -528,7 +528,7 @@
 - **ラウンド定義の確認:** ユーザーが「ラウンドの定義はtask_plannerから始まり、次のgenerate_user_utteranceまで行ったら1ラウンド、またgenerate_user_utteranceまできたら2ラウンド、という認識でよい？」と確認を求め、AIが「task_planner→最初のgenerate_user_utterance＝ラウンド1の開始（完了ではない）、再度generate_user_utteranceに到達＝ラウンド1完了/ラウンド2開始」という定義で合意。この定義は後の論点46（round_count実装）でそのまま踏襲された。
 - **副次的な発見:** グラフのentry_pointが`task_planner`固定であるため、再開は「止めたノードそのものから」ではなく「そのラウンドの頭から」になることが判明。`task_planner_node`の既存ガード（`if state["turn_count"]==1:`のみ）だと、ターン1途中（既にphases確定済み）での再開時に計画を無条件で再生成してしまう副作用があることをAIが発見し、`turn_count==1 and not state.get("phases")`への修正を追加実装した。
 - **決定者:** t-momose（BL-005に基づく設計上の疑問の提起、ターン境界方式の実質的な却下、再設計方針の承認）、Claude Sonnet 5（当初案の提示・誤りの訂正・`app.stream()`への再設計・`task_planner_node`冪等性ガードの発見と実装）
-- **関連:** [BL-044](issue_backlog.md#bl-044-ドライランの一時停止再開機能ctrlccheckpointjson--resume)、[BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)、[D-039](decision_log.md#d-039-ドライランの一時停止再開をappstreamによるノード単位チェックポイントで実装するターン境界方式は不採用)
+- **関連:** [BL-044](../back_log/issue_backlog.md#bl-044-ドライランの一時停止再開機能ctrlccheckpointjson--resume)、[BL-005](../back_log/issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)、[D-039](decision_log.md#d-039-ドライランの一時停止再開をappstreamによるノード単位チェックポイントで実装するターン境界方式は不採用)
 
 ---
 
@@ -540,7 +540,7 @@
 - **境界（区切り）の設計:** ユーザーが「ターンカウントの概念が崩れているので、現状のグラフ構造でどこが区切りかを決める必要がある。維持停止機構を作った時のようなラウンドカウントにしますか？ユーザー発言が区切り？」と確認。AIは、論点45で既に合意済みの「ラウンド」定義（`generate_user_utterance`への再入場＝1ラウンド完了）をそのまま使うことを提案し、既存の`turn_count`（複数箇所で使用中、意味も破損済み）には触れず、新規`round_count`を追加して`reflection_interval`判定のみをこちらに切り替える最小スコープ案を提示。ユーザーが承認（「良いです。とりかかってください」）。
 - **実装:** `LineageState`に`round_count: int`を追加、`generate_user_utterance_node`への再入場のたびにインクリメント、`route_after_expert_decision`のreflection発火判定を`round_count`ベースに変更。`call_reflection`のプロンプトに、`cela_r5_design_v2.md` §1.3の趣旨（計算根拠のない数値のでっち上げ、都合の悪い制約からの逃避、Detector自身の無根拠な追認）を反映した「でっちあげ監査」ブロックを追加。ただし同節が前提とする`internal_thought_process`（reasoning content）の全経路キャプチャは別途大きめの変更となるため、今回は既存の`chat_history`/決定タイムラインのみを材料にした軽量版とし、フル版（F-2.1本体）は別途判断とすることをAIが明示。
 - **決定者:** t-momose（背景共有、Web検索案との比較判断、ラウンド区切りの確認・承認）、Claude Sonnet 5（reflection復旧の推奨とその理由の提示、round_countの最小スコープ実装案の提示・実装）
-- **関連:** [BL-005](issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)、[BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)、[decision_lineage.md 論点45](decision_lineage.md#論点45-ドライラン一時停止再開機能の設計-ターン境界方式からノード単位方式への転換d-039)、[D-040](decision_log.md#d-040-reflectionfacilitatorの周期発火をturn_countではなく新設のround_countgenerate_user_utterance_node再入場カウントで判定するよう変更する)、`docs/design/r5/cela_r5_design_v2.md` §1.3
+- **関連:** [BL-005](../back_log/issue_backlog.md#bl-005-turn_countがappinvoke内で凍結され外側ターン表示上限が実態と乖離)、[BL-041](../back_log/issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)、[decision_lineage.md 論点45](decision_lineage.md#論点45-ドライラン一時停止再開機能の設計-ターン境界方式からノード単位方式への転換d-039)、[D-040](decision_log.md#d-040-reflectionfacilitatorの周期発火をturn_countではなく新設のround_countgenerate_user_utterance_node再入場カウントで判定するよう変更する)、`docs/design/r5/cela_r5_design_v2.md` §1.3
 
 ---
 
@@ -552,7 +552,7 @@
 - **実装:** (1) `call_detector`をDetector内2段構成（既存の数値検算パス＋新設の独立したドメイン妥当性レビューパス、ツールなし・数値監査結果を提示し再検算不要と明示）に変更し、両者のうちより重篤な`constraint_issue`を採用。(2) `generate_user_utterance`（User AI）のF-2.6指示を「Detectorが既に検算済みで信頼してよい、よほど疑わしい場合のみ自分でも検算」に変更。(3) `call_expert`にF-2.6検算指示の直後、独立した「ドメイン妥当性チェック」の自問を追加（Expertは数値を自ら導出する立場のため検算自体は省略しない）。
 - **オフラインスモークテストでの過検知発見・修正:** `tests/test_f26_detection.py::test_detector_no_false_positive_within_cap`（3試行とも上限内でnone/minor想定）を実行したところ、ドメイン妥当性レビューパスが「人員数・勤務時間の詳細が不明」を理由に1/3の確率でmajorを誤って出力する過検知が発生。「情報不足を理由にmajorにしない、与えられた情報の範囲内で具体的に矛盾を指摘できる場合のみmajor」という基準をプロンプトに明記して再テストし、再現しないことを確認した。
 - **決定者:** t-momose（現象の発見・Detector限定案からUser AI/Expertを含む全体方針への拡張・役割分担の具体的指示）、Claude Sonnet 5（根本原因分析・実装案の提示・実装・過検知の発見と修正）
-- **関連:** [BL-049](issue_backlog.md#bl-049-f-26検算ゲートによる注意力の偏りを是正する-数値検算とドメイン妥当性レビューの分離)、[D-041](decision_log.md#d-041-f-26検算ゲートによる注意力の偏りを是正するためdetectoruser-aiexpertの数値検算とドメイン妥当性レビューを分離する)、[論点46](decision_lineage.md#論点46-でっちあげ検出のためreflectionfacilitatorを実際に発火させる-round_countによるbl-005迂回d-040)
+- **関連:** [BL-049](../back_log/issue_backlog.md#bl-049-f-26検算ゲートによる注意力の偏りを是正する-数値検算とドメイン妥当性レビューの分離)、[D-041](decision_log.md#d-041-f-26検算ゲートによる注意力の偏りを是正するためdetectoruser-aiexpertの数値検算とドメイン妥当性レビューを分離する)、[論点46](decision_lineage.md#論点46-でっちあげ検出のためreflectionfacilitatorを実際に発火させる-round_countによるbl-005迂回d-040)
 
 ---
 
@@ -564,7 +564,7 @@
 - **AIの優先度提案:** issue_blリスト（Detector拡張）はスコープが最も閉じており着手しやすいこと、decision_extractorの役割転換はBL-037（reason_why記載品質）・BL-043（Function Calling化）と自然に統合できること、フェーズ終了ゲートはBL-041（facilitator/Arbiter再設計）と同格の大きめの構造変更であり設計ドラフトを先に書くべきこと、ホワイトボードへのID埋め込みはBL-047（`depends_on`数値ID検証）のパターンがそのまま転用できBL-050・BL-051とセットで設計するのが筋が良いことを提示。
 - **ユーザー判断:** 「まずBL化してください」との指示により、3提案は実装せずBL-050（decision_extractor役割転換＋変遷履歴可視化）・BL-051（issue_blリスト＋フェーズ終了ゲート）・BL-052（ホワイトボードへのインラインID埋め込み）として新規起票するのみに留めた。
 - **決定者:** t-momose（現象の指摘・3提案・BL化の指示）、Claude Sonnet 5（原因の精緻化・優先度提案・BL起票）
-- **関連:** [BL-050](issue_backlog.md#bl-050-decision_extractorの役割転換抽出役理由監査役決定事項の変遷履歴の可視化)、[BL-051](issue_backlog.md#bl-051-detectorの気づきをissue_blリストとして蓄積しフェーズ終了条件とする)、[BL-052](issue_backlog.md#bl-052-ホワイトボード本文に決定理由dbへのインラインid参照を埋め込む)、[論点47](decision_lineage.md#論点47-f-26検算ゲートによる注意力の偏り-数値が合っているかへの集中が非数値的な重大懸念を覆い隠すd-041)
+- **関連:** [BL-050](../back_log/issue_backlog.md#bl-050-decision_extractorの役割転換抽出役理由監査役決定事項の変遷履歴の可視化)、[BL-051](../back_log/issue_backlog.md#bl-051-detectorの気づきをissue_blリストとして蓄積しフェーズ終了条件とする)、[BL-052](../back_log/issue_backlog.md#bl-052-ホワイトボード本文に決定理由dbへのインラインid参照を埋め込む)、[論点47](decision_lineage.md#論点47-f-26検算ゲートによる注意力の偏り-数値が合っているかへの集中が非数値的な重大懸念を覆い隠すd-041)
 
 ---
 
@@ -573,7 +573,7 @@
 - **発端:** ユーザーが「detectorの監査パスですが、まずはじめにドメイン監査を行ってください。検算の前にそもそも前提の数値や設計に指摘がないかを確かめる」と指摘。論点47（BL-049）で実装した2段構成は「数値検算パス→ドメイン妥当性レビューパス」の順で、後段のドメイン監査プロンプトは「数値監査は既に完了済みで信頼してよい」と明示していた。この順序自体が、検算結果に評価者の注意を引きずられさせ、前提・設計そのもの（車両台数・人数配置等）が現実的かというドメイン評価を軽視させる可能性があるという指摘。
 - **AIの対応:** `call_detector`内の2つのLLM呼び出しの実行順序を入れ替え、ドメイン監査プロンプトを第1段へ変更。ドメイン監査プロンプトから「数値監査は既に完了済み」という言及を除去し（この時点ではまだ実行されていないため）、代わりに「前提・設計自体に無理がないかをまず確認する」役割を明記。第2段の数値検算プロンプトには、先行するドメイン監査の結果（`domain_constraint_issue`/`domain_comment`）を`domain_findings_block`として提示し、それを踏まえた検算をするよう指示を追加した。統合ロジック（より重篤な判定を採用）自体は変更なし。
 - **決定者:** t-momose（実行順序の逆転指示とその理由）、Claude Sonnet 5（プロンプト再構成・実装）
-- **関連:** [BL-054](issue_backlog.md#bl-054-detectorの2段監査パスの実行順序をドメイン監査数値検算に変更)、[論点47](decision_lineage.md#論点47-f-26検算ゲートによる注意力の偏り-数値が合っているかへの集中が非数値的な重大懸念を覆い隠すd-041)
+- **関連:** [BL-054](../back_log/issue_backlog.md#bl-054-detectorの2段監査パスの実行順序をドメイン監査数値検算に変更)、[論点47](decision_lineage.md#論点47-f-26検算ゲートによる注意力の偏り-数値が合っているかへの集中が非数値的な重大懸念を覆い隠すd-041)
 
 ---
 
@@ -583,7 +583,7 @@
 - **AIの実装方針:** 本格版の設計（永続化先・フェーズゲートの実装位置）には一切手を付けず、`call_detector`の両監査パス（数値・ドメイン）の返却JSONに`observations`（自由記述、`constraint_issue`の判定とは独立・判定を左右しない）を追加。`LineageState`に`detector_observations_log`を新設し、既存の`constraint_issue_log`（minor/majorの回のみ蓄積）とは異なり、`none`判定の回でも`observations`が非空であれば蓄積するようにした。新規ヘルパー`_build_detector_observations_block`を設け、`call_expert`・`generate_user_utterance`の両プロンプトに直近3件を「参考情報（判定を左右するものではない）」として毎ターン提示するよう配線した。従来の`constraint_issue_log`表示は`constraint_issue=="major"`の差し戻し時のみだったのに対し、この気づき欄は差し戻しの有無に関わらず常時提示される点が新規性。
 - **ユーザーによる位置づけの明確化:** 実装完了後、ユーザーが「自由記述欄はとりあえずの対処で、issue_bl化路線はもとのまま維持して」と明言。AIが当初issue_backlog.mdの状態を`partial`（軽量版実装済み扱い）と記載していたのを、ユーザーの意図（`observations`欄は本来の方針を代替・縮小するものではなく、気づきの消失を当面緩和するだけの暫定のつなぎ）に合わせて`open`へ差し戻し、本文にもその位置づけを明記した。
 - **決定者:** t-momose（軽量版という範囲指定の指示、および実装後にその位置づけを「暫定のつなぎ・本来の方針は維持」と明確化）、Claude Sonnet 5（既存ログ機構との対比を踏まえた実装設計、ユーザーの明確化を受けたissue_backlog.mdの状態表記修正）
-- **関連:** [BL-051](issue_backlog.md#bl-051-detectorの気づきをissue_blリストとして蓄積しフェーズ終了条件とする)、[論点48](decision_lineage.md#論点48-決定理由の追跡性detectorの気づきの活用不足ホワイトボードへのid埋め込みbl-050052起票)、[論点49](decision_lineage.md#論点49-detector2段監査パスの実行順序-ドメイン監査を数値検算より先に行うbl-054)
+- **関連:** [BL-051](../back_log/issue_backlog.md#bl-051-detectorの気づきをissue_blリストとして蓄積しフェーズ終了条件とする)、[論点48](decision_lineage.md#論点48-決定理由の追跡性detectorの気づきの活用不足ホワイトボードへのid埋め込みbl-050052起票)、[論点49](decision_lineage.md#論点49-detector2段監査パスの実行順序-ドメイン監査を数値検算より先に行うbl-054)
 
 ---
 
@@ -595,7 +595,7 @@
 - **ユーザーの指示（一般化):** 「もう少し一般化して何が制約で何が見直し可能な条件かを見極めながら思考せよという趣旨を、ユーザーとエキスパートのノードのプロンプトに加えてください」と、車両単価という個別事例に限定せず一般化した指示として実装するよう指示。
 - **実装:** `call_expert`の既存「制約が厳しい場合こそ抜本的な代替案を」ブロックの直後、`generate_user_utterance`の既存「制約緩和の要求は却下せよ」ブロックの直後に、それぞれ「真の制約」と「見直し可能な条件」を都度見極め、後者であれば前提自体を疑ってよい（ただし真の制約の緩和・放棄は不可）という趣旨の一般化した指示ブロックを追加。
 - **決定者:** t-momose（現象の指摘、一時停止運用への懸念共有、一般化した実装指示）、Claude Sonnet 5（一時停止の安全性の技術的な回答、制約/条件混同の原因分析、プロンプト設計・実装）
-- **関連:** [BL-055](issue_backlog.md#bl-055-真の制約と見直し可能な条件を区別して思考する指示をuser-aiexpertに追加)、[論点49](decision_lineage.md#論点49-detector2段監査パスの実行順序-ドメイン監査を数値検算より先に行うbl-054)、[論点50](decision_lineage.md#論点50-bl-051issue_blリストの軽量版-フェーズゲートは見送りdetectorの気づき欄追加のみ実装)
+- **関連:** [BL-055](../back_log/issue_backlog.md#bl-055-真の制約と見直し可能な条件を区別して思考する指示をuser-aiexpertに追加)、[論点49](decision_lineage.md#論点49-detector2段監査パスの実行順序-ドメイン監査を数値検算より先に行うbl-054)、[論点50](decision_lineage.md#論点50-bl-051issue_blリストの軽量版-フェーズゲートは見送りdetectorの気づき欄追加のみ実装)
 
 ---
 
@@ -606,7 +606,7 @@
 - **選択肢の整理と決定:** AIから3つの選択肢（① round_countに置き換える、② ターン数表示自体を削除する、③ 差し戻しの扱いを含めた「やり取り数」の正式な定義を今回はBL化のみに留め別途大きめに設計し直す）を提示し、AskUserQuestionで確認。ユーザーは①（round_countへの置き換え）を選択。「やり取り数を定量評価のためにカウントする」という別の関心（BL-023の指標C計測と関連）は、この場では実装せず今回のスコープ外として据え置いた。
 - **実装:** `call_reflection`のプロンプト内表示を`round_count`＋`reflection_interval`との対応関係の説明に置き換え、「ターン」は内部の往復で足踏みしうるため代わりに「ラウンド」を進行状況の目安に使っている旨を明記。使われなくなった`max_turns`のローカル変数取得を削除。
 - **決定者:** t-momose（現象の発見と複数選択肢の提示、①の選択）、Claude Sonnet 5（根本原因の特定・選択肢の整理・実装）
-- **関連:** [BL-056](issue_backlog.md#bl-056-reflectionプロンプト内の表示を凍結したturn_countからround_countへ統一)、[論点46](decision_lineage.md#論点46-でっちあげ検出のためreflectionfacilitatorを実際に発火させる-round_countによるbl-005迂回d-040)、[論点51](decision_lineage.md#論点51-真の制約と見直し可能な条件の区別をuser-aiexpertに教えるbl-055)
+- **関連:** [BL-056](../back_log/issue_backlog.md#bl-056-reflectionプロンプト内の表示を凍結したturn_countからround_countへ統一)、[論点46](decision_lineage.md#論点46-でっちあげ検出のためreflectionfacilitatorを実際に発火させる-round_countによるbl-005迂回d-040)、[論点51](decision_lineage.md#論点51-真の制約と見直し可能な条件の区別をuser-aiexpertに教えるbl-055)
 
 ---
 
@@ -616,7 +616,7 @@
 - **AIの分析:** BL-016で導入済みの「残り2回」通知機構（`_query_AI_live`の`remaining_iters <= 2`）を確認し、このケースでは通知が発火した時点（iter=13,14）から実際に必要な長文の最終回答（複数代替案の比較・成果物の書き出しを含む）を書き切るには猶予が足りなかったと特定。ユーザーの提案通り、しきい値を1往復分前倒しすることで解決可能と判断。
 - **実装:** しきい値を`remaining_iters <= 2`から`<= 3`に変更。あわせて、残り1回時点の通知文言を単なる推奨（「〜してください」）から、より強い断定的な指示（「これ以上ツールを呼ばず、次の応答で必ずテキストのみの最終回答を出力してください。中断すると非収束エラーになり、この応答自体が失われます」）に強化した。
 - **決定者:** t-momose（現象の報告と改善方向の直接提案）、Claude Sonnet 5（既存BL-016機構の特定・しきい値と文言の調整・実装）
-- **関連:** [BL-057](issue_backlog.md#bl-057-ツールループ残り回数通知のしきい値を前倒しbl-016の追加調整)、[BL-016](issue_backlog.md#bl-016-detectorの完全性判定の硬直性により探索的タスクでツールループが非収束クラッシュする)
+- **関連:** [BL-057](../back_log/issue_backlog.md#bl-057-ツールループ残り回数通知のしきい値を前倒しbl-016の追加調整)、[BL-016](../back_log/issue_backlog.md#bl-016-detectorの完全性判定の硬直性により探索的タスクでツールループが非収束クラッシュする)
 
 ---
 
@@ -628,7 +628,7 @@
 - **ユーザーの決定:** 個別追加ではなく「まとめて追加」を選択。
 - **実装:** `_ALLOWED_IMPORTS`に5モジュールを追加。手動検証（`_check_repl_code_safety`・`_run_python_repl`双方で`import itertools`が動作すること）で確認。
 - **決定者:** t-momose（現象の発見と一般化した提案、まとめて追加の選択）、Claude Sonnet 5（安全基準の提示・候補選定・実装・動作確認）
-- **関連:** [BL-058](issue_backlog.md#bl-058-python_replの許可モジュールにitertools等の純粋計算ユーティリティを追加)、D-007（同種の承認済み前例）
+- **関連:** [BL-058](../back_log/issue_backlog.md#bl-058-python_replの許可モジュールにitertools等の純粋計算ユーティリティを追加)、D-007（同種の承認済み前例）
 
 ---
 
@@ -638,7 +638,7 @@
 - **AIの分析:** トレースバックを読み、BL-022（OpenRouter経由の壊れたレスポンスで`response.json()`が生の`json.JSONDecodeError`を送出し、絞り込んだ例外タプル`(APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError)`に含まれず素通りしていた事例）と全く同型の問題と特定。streaming応答の受信中にプロバイダ側が接続を切ると、httpx/httpcore層の生例外（`httpx.RemoteProtocolError`）がopenai SDKのラップより手前で発生し、同じ例外タプルに含まれていなかったことが原因。
 - **実装:** `import httpx`を追加し、`_query_AI_live`の例外タプルに`httpx.RemoteProtocolError`を追加してリトライ対象に含めた。D-009の「一時的なAPI/接続障害はリトライ、ロジックエラーは即座に伝播」という意図に照らし、これは明確に前者に該当するとBL-022と同じ判断基準で処理。
 - **決定者:** t-momose（クラッシュの発見・トレースバックの共有）、Claude Sonnet 5（BL-022との同型性の特定・修正）
-- **関連:** [BL-059](issue_backlog.md#bl-059-streaming受信中のhttpxremoteprotocolerrorが未捕捉でプロセスクラッシュする)、[BL-022](issue_backlog.md#bl-022-openrouterの壊れたレスポンスによる生jsonjsondecodeerrorがd-009の絞り込んだexceptを素通りしクラッシュ)
+- **関連:** [BL-059](../back_log/issue_backlog.md#bl-059-streaming受信中のhttpxremoteprotocolerrorが未捕捉でプロセスクラッシュする)、[BL-022](../back_log/issue_backlog.md#bl-022-openrouterの壊れたレスポンスによる生jsonjsondecodeerrorがd-009の絞り込んだexceptを素通りしクラッシュ)
 
 ---
 
@@ -649,7 +649,7 @@
 - **AIの分析:** 通知はあくまでプロンプト上の依頼であり、モデルがそれに従うかはモデル任せである以上、原理的に「モデルが従わない限りいつでも同じ形でクラッシュしうる」という限界がBL-016/BL-057の設計に内在していた。
 - **実装:** ツールループの最終iteration（`iteration == MAX_TOOL_ITER`）のAPI呼び出しのみ、`tools`パラメータ自体を外す（構造的にツール呼び出し不可能にする）方式に変更。これにより、モデルの協調に依存せず、必ずテキスト最終応答が返ることを保証した。
 - **決定者:** t-momose（クラッシュの報告とログ確認依頼）、Claude Sonnet 5（原因特定・BL-016/BL-057の限界の指摘・構造的解決策の実装）
-- **関連:** [BL-060](issue_backlog.md#bl-060-ツールループ最終iterationでのツール呼び出しによる非収束クラッシュ)、[BL-016](issue_backlog.md#bl-016-detectorの完全性判定の硬直性により探索的タスクでツールループが非収束クラッシュする)、[論点53](decision_lineage.md#論点53-ツールループ残り回数通知のしきい値前倒しbl-057bl-016の再調整)
+- **関連:** [BL-060](../back_log/issue_backlog.md#bl-060-ツールループ最終iterationでのツール呼び出しによる非収束クラッシュ)、[BL-016](../back_log/issue_backlog.md#bl-016-detectorの完全性判定の硬直性により探索的タスクでツールループが非収束クラッシュする)、[論点53](decision_lineage.md#論点53-ツールループ残り回数通知のしきい値前倒しbl-057bl-016の再調整)
 
 ---
 
@@ -667,7 +667,7 @@
   - BL-056（reflectionプロンプト内のround_count表示）: ログ中の`[reflection]`決定エントリは`--resume`で引き継がれた過去セッションの履歴表示であり、修正後の新規セッション内で実際に発火した生のreflectionプロンプト（`送信プロンプト [Reflection ...]`）はまだ観測できていない。
 - **副次的な発見（BL-041との接続）:** reflectionの検出精度が上がったことで、「ゴール逸脱を正しく検出できても、その後の対応がDetectorのmajorと同じ再プロンプトに留まり、真のエスカレーション（Userに前提変更の判断を仰ぐ）にはつながっていない」というBL-041提案3の未実装ギャップが、以前より明確に可視化された。
 - **決定者:** t-momose（棚卸しの依頼）、Claude Sonnet 5（ログ横断調査・確認済み/未確認の切り分け・issue_backlog.mdへの反映）
-- **関連:** [BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)、[BL-048](issue_backlog.md#bl-048-reflectionfacilitatorの周期発火を新設round_countで復旧するturn_count本体は未修正)、[BL-049](issue_backlog.md#bl-049-f-26検算ゲートによる注意力の偏りを是正する-数値検算とドメイン妥当性レビューの分離)、[BL-056](issue_backlog.md#bl-056-reflectionプロンプト内の表示を凍結したturn_countからround_countへ統一)、[BL-058](issue_backlog.md#bl-058-python_replの許可モジュールにitertools等の純粋計算ユーティリティを追加)、[BL-059](issue_backlog.md#bl-059-streaming受信中のhttpxremoteprotocolerrorが未捕捉でプロセスクラッシュする)、[BL-060](issue_backlog.md#bl-060-ツールループ最終iterationでのツール呼び出しによる非収束クラッシュ)
+- **関連:** [BL-041](../back_log/issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)、[BL-048](../back_log/issue_backlog.md#bl-048-reflectionfacilitatorの周期発火を新設round_countで復旧するturn_count本体は未修正)、[BL-049](../back_log/issue_backlog.md#bl-049-f-26検算ゲートによる注意力の偏りを是正する-数値検算とドメイン妥当性レビューの分離)、[BL-056](../back_log/issue_backlog.md#bl-056-reflectionプロンプト内の表示を凍結したturn_countからround_countへ統一)、[BL-058](../back_log/issue_backlog.md#bl-058-python_replの許可モジュールにitertools等の純粋計算ユーティリティを追加)、[BL-059](../back_log/issue_backlog.md#bl-059-streaming受信中のhttpxremoteprotocolerrorが未捕捉でプロセスクラッシュする)、[BL-060](../back_log/issue_backlog.md#bl-060-ツールループ最終iterationでのツール呼び出しによる非収束クラッシュ)
 
 ---
 
@@ -680,7 +680,7 @@
 - **実装内容:** `resource_claims`のスキーマを平坦な`{名前: 数値}`から`{名前: {phase_id, value, total_cap}}`へ具体化（D-042、Plan承認をもってAGENTS.md§7の事前承認とした）。新規`_aggregate_global_constraints`ヘルパーを`arbiter_node`冒頭に配線し、agreements DBから毎回動的に`global_constraints`を再集約するようにした（BL-041）。`_build_agreements_context`に直前Superseded版の差分表示（内容・当時の理由）と、現行行自身のreason_why表示を追加し、`WRITE_AGREEMENT_TOOL.reason_why`・decision_extractor抽出プロンプトにUPDATE時の変更理由明記を要求する文言を追加した（BL-050）。新規`tests/test_bl041_bl050.py`（8件）を含めオフラインスモークテスト計78件Pass。
 - **未解決のまま残した点:** BL-041の残り（4段階エスカレーションメニュー・facilitator再設計・BL-005根本修正）、BL-050完了条件3（decision_extractorの役割転換、BL-043と合わせて実施）は今回のスコープ外として明示的に据え置いた。実ドライランでの効果確認（arbiterの実発火、reason_why記載品質の向上）も次回待ち。
 - **決定者:** t-momose（BL-041/050の優先度判断・Plan承認）、Claude Sonnet 5（R5との依存関係の特定・MVPスコープの提案・実装）
-- **関連:** [BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)、[BL-050](issue_backlog.md#bl-050-decision_extractorの役割転換抽出役理由監査役決定事項の変遷履歴の可視化)、[D-042](decision_log.md#d-042-resource_claimsのスキーマを平坦な名前-数値から入れ子構造名前-phase_id-value-total_capへ具体化する)、[cela_facilitator_arbiter_redesign_BL041.md](r1_r2_r3b_core/cela_facilitator_arbiter_redesign_BL041.md)
+- **関連:** [BL-041](../back_log/issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)、[BL-050](../back_log/issue_backlog.md#bl-050-decision_extractorの役割転換抽出役理由監査役決定事項の変遷履歴の可視化)、[D-042](decision_log.md#d-042-resource_claimsのスキーマを平坦な名前-数値から入れ子構造名前-phase_id-value-total_capへ具体化する)、[cela_facilitator_arbiter_redesign_BL041.md](r1_r2_r3b_core/cela_facilitator_arbiter_redesign_BL041.md)
 
 ---
 
@@ -691,7 +691,7 @@
 - **ユーザー判断:** 「このバグは今直してください」と即時修正を指示。
 - **実装:** `LineageState`に`last_reflection_note`を新設し`reflection_node`が保存、`call_facilitator`のシグネチャを`(goal, chat_history, decisions)`から`(goal, chat_history, reflection_note="")`へ変更（未使用だった`decisions`引数を実際に使う`reflection_note`に置き換え）、プロンプトに「あなたが呼ばれた理由」ブロックを追加し最優先の出発点として扱うよう明記。`facilitator_node`の呼び出しも修正。新規`tests/test_bl061_facilitator_reflection_note.py`（4件）を含めオフラインスモークテスト計82件Pass。
 - **決定者:** t-momose（現象の報告・即時修正の指示）、Claude Sonnet 5（ログ調査・根本原因特定・実装）
-- **関連:** [BL-061](issue_backlog.md#bl-061-facilitatorがreflectionの判定理由を一切受け取れず独立に時に食い違う状況判断をしていた)、[D-043](decision_log.md#d-043-facilitatorへreflectionの判定理由noteを明示的に受け渡す未使用のdecisions引数を置き換える)、[BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)
+- **関連:** [BL-061](../back_log/issue_backlog.md#bl-061-facilitatorがreflectionの判定理由を一切受け取れず独立に時に食い違う状況判断をしていた)、[D-043](decision_log.md#d-043-facilitatorへreflectionの判定理由noteを明示的に受け渡す未使用のdecisions引数を置き換える)、[BL-041](../back_log/issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)
 
 ---
 
@@ -705,7 +705,7 @@
   - §3（F-8.3 Freeze）: v2が前提としていた`assemble_hydrate_context`という関数名・生SQLクエリが現行実装（`_build_agreements_context`、Python側リストフィルタ）と乖離していたため、実際の関数・実装方式に合わせてFreeze反映方法（`is_frozen`によるソートキー追加）を書き直した。あわせてBL-050のSuperseded差分表示機能とFreezeの相互作用（Frozen項目がSUPERSEDEされた場合の扱い）を未決事項として追加。
   - §4（GoalShiftEvent）: BL-041 MVP実装（D-042）により`arbiter_node`が実際に発火するようになったこと、`resource_claims`の新スキーマ（D-042の入れ子構造）を前提に書き直すべきことを追記。残る未確定事項は`requires_goal_constraint_change`フィールド追加と`goal_shift_events`テーブル本体の新規実装のみに絞り込まれたことを明記。BL-041ドラフトの「そもそも論への昇華」（stage 4）とGoalShiftEventの概念的重複にも注意喚起を追加。
 - **決定者:** t-momose（同期の依頼）、Claude Sonnet 5（各節の差分特定・追記方針の判断）
-- **関連:** [cela_r5_design_v2.md](r5/cela_r5_design_v2.md)、[BL-041](issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)、[BL-050](issue_backlog.md#bl-050-decision_extractorの役割転換抽出役理由監査役決定事項の変遷履歴の可視化)、[BL-061](issue_backlog.md#bl-061-facilitatorがreflectionの判定理由を一切受け取れず独立に時に食い違う状況判断をしていた)
+- **関連:** [cela_r5_design_v2.md](r5/cela_r5_design_v2.md)、[BL-041](../back_log/issue_backlog.md#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)、[BL-050](../back_log/issue_backlog.md#bl-050-decision_extractorの役割転換抽出役理由監査役決定事項の変遷履歴の可視化)、[BL-061](../back_log/issue_backlog.md#bl-061-facilitatorがreflectionの判定理由を一切受け取れず独立に時に食い違う状況判断をしていた)
 
 ---
 
@@ -716,7 +716,7 @@
 - **ユーザー判断:** この課題はFreeze固有ではなくwrite_agreement権限モデル全体に及ぶより根深い課題のため、今回のR5実装プランとは切り離し、ドキュメントのみで新規BL（BL-062）として起票するに留める方針を選択（「別BLとして起票のみ（推奨）」を選択）。あわせてF-8.3 Freezeの権限は、既存の`ALLOWED_STATUS_BY_ROLE`で最も広い権限を持つ`user`ロールのみに限定する方針を選択（「user + reviewer」ではなく「userロールのみ」を選択）。decision_extractor役割転換についても「今回は含めない（推奨）」を選択し、F-3.7のコア機能（思考ログの強制記録）はdecision_extractorの役割を変えなくても実装可能という整理のまま進めることとした。
 - **実装計画の確定:** 上記の切り分けを反映した実装計画を`docs/design/r5/cela_r5_impl_Plan.md`として保存（AGENTS.md §4-7準拠）。
 - **決定者:** t-momose（3つの切り分け判断すべて）、Claude Sonnet 5（監査ガバナンス欠落の発見・調査、選択肢の整理・提示）
-- **関連:** [BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)、[cela_r5_impl_Plan.md](r5/cela_r5_impl_Plan.md)、[BL-034](issue_backlog.md#bl-034-deliverableのファイル保存がユーザー承認前に無条件で発生する)
+- **関連:** [BL-062](../back_log/issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)、[cela_r5_impl_Plan.md](r5/cela_r5_impl_Plan.md)、[BL-034](../back_log/issue_backlog.md#bl-034-deliverableのファイル保存がユーザー承認前に無条件で発生する)
 
 ---
 
@@ -731,7 +731,7 @@
 - **実装中の細部判断:** `_query_AI_live`内で同名変数`_LAST_REASONING_TEXT`に対し`global`文を2箇所で重複宣言するとPythonの`SyntaxError`（"assigned to before global declaration"）になることが判明し、2つ目の`global`宣言から該当変数名を除去して修正（純粋な実装上のバグ、設計判断ではない）。
 - **決定者:** t-momose（実装開始の指示）、Claude Sonnet 5（実装・テスト・ドキュメント更新）
 - **検証:** 新規`tests/test_r5_thought_log_freeze_goalshift.py`（14件）を含め、オフラインスモークテスト計96件Pass。`python -m py_compile`合格。`python scripts/check_docs_consistency.py`合格。
-- **関連:** [BL-063](issue_backlog.md#bl-063-r5実装f-21拡張f-37f-83-freezegoalshiftevent)、[D-044](decision_log.md#d-044-f-83-freeze機能の権限をuserロールのみに限定し独立した専用ツールとして実装する)、[cela_r5_impl_Plan.md](r5/cela_r5_impl_Plan.md)
+- **関連:** [BL-063](../back_log/issue_backlog.md#bl-063-r5実装f-21拡張f-37f-83-freezegoalshiftevent)、[D-044](decision_log.md#d-044-f-83-freeze機能の権限をuserロールのみに限定し独立した専用ツールとして実装する)、[cela_r5_impl_Plan.md](r5/cela_r5_impl_Plan.md)
 
 ---
 
@@ -744,7 +744,7 @@
 - **Hydrate構想の想起（BL-068/BL-069）:** `current_task_summary`が「どこからも読まれない」と分かったことを受け、ユーザーが「これは`docs/refs`のHydrate 3段グラデーション構想（直近Nターン生ログ＋それ以降を定期要約）に由来する設計で、消費側が未実装のまま放置されている」と補足し、BL-068として起票。さらにユーザーは「木を見て森を見ず」対策として、L1（タスク内）〜L4（フェーズ超え）というズームアウト思考フレームワークを提案。AIがsequential-thinkingで検討した結果、L3/L4相当のデータ（`resource_claims`/`global_constraints`）は既に存在するが後追いの監査としてのみ機能しており、Expert自身が決定前に能動的にズームアウトする経路が空白だと整理した。調査の結果`call_expert`は既に全フェーズ・全タスクの`phases_json`を注入済みだが、BL-025のスコープガードレールがそれを能動的に使うことを事実上禁止していると判明。ユーザーは正式なL1-L4段階分けは不要とし、「次フェーズのタスクが今の決定の前提を覆しうると気づく」程度の軽量な指示で十分と後日補足し、BL-069として起票した。
 - **決定者:** t-momose（各フィールドの削除/表示配線の判断、BL分類方針、L1-L4提案とその後の簡略化補足）、Claude Sonnet 5（棚卸し調査・sequential-thinkingによる設計整理・実装）
 - **検証:** オフラインスモークテスト計96件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。
-- **関連:** [BL-064](issue_backlog.md#bl-064-合意決定メタデータ3軸区分turnevidencereason_missingrisk_flagが書き込まれるのみで監査ロジック表示のどこからも消費されていない)、[BL-065](issue_backlog.md#bl-065-r5で新設したdb永続化情報internal_thought_processgoal_shift_eventsの消費表示経路が未設計)、[BL-066](issue_backlog.md#bl-066-whiteboard_draftsの編集履歴author_roleedit_summaryがバージョン管理はされるが差分執筆者情報として一切表示されない)、[BL-067](issue_backlog.md#bl-067-未使用のsqlテーブルchat_historycurrent_goalの整理)、[BL-068](issue_backlog.md#bl-068-hydrateスタイルのコンテキスト階層化直近nターン生ログそれ以降の定期要約が設計のみで未実装のまま放置されている)、[BL-069](issue_backlog.md#bl-069-expertが決定前にフェーズタスク表全体を見渡して他フェーズとの資源競合に気づけるよう軽量な指示を追加する)
+- **関連:** [BL-064](../back_log/issue_backlog.md#bl-064-合意決定メタデータ3軸区分turnevidencereason_missingrisk_flagが書き込まれるのみで監査ロジック表示のどこからも消費されていない)、[BL-065](../back_log/issue_backlog.md#bl-065-r5で新設したdb永続化情報internal_thought_processgoal_shift_eventsの消費表示経路が未設計)、[BL-066](../back_log/issue_backlog.md#bl-066-whiteboard_draftsの編集履歴author_roleedit_summaryがバージョン管理はされるが差分執筆者情報として一切表示されない)、[BL-067](../back_log/issue_backlog.md#bl-067-未使用のsqlテーブルchat_historycurrent_goalの整理)、[BL-068](../back_log/issue_backlog.md#bl-068-hydrateスタイルのコンテキスト階層化直近nターン生ログそれ以降の定期要約が設計のみで未実装のまま放置されている)、[BL-069](../back_log/issue_backlog.md#bl-069-expertが決定前にフェーズタスク表全体を見渡して他フェーズとの資源競合に気づけるよう軽量な指示を追加する)
 
 ---
 
@@ -756,7 +756,7 @@
 - **実装内容:** `call_detector`に`_build_agreements_context_from_db`によるagreements DBビューを新規注入し、`constraint_issue="major"`時にwrite_agreementを`action_type="SUPERSEDE"`, `status="Rejected"`, `target_topic=<DBのtopic文字列>`で呼び出すよう明示的に指示する一文を追加。`generate_user_utterance_node`の2箇所の`query_AI`呼び出しから`FREEZE_AGREEMENT_TOOL`を除去し、Freezeを呼び出し不能にした（`freeze_agreement()`本体・`is_frozen`ガード・🔒表示ロジックは削除せず温存、再開時はtools配線を戻すのみ）。
 - **決定者:** t-momose（Freeze休止・BL-062優先の判断、実装範囲をDetector限定に絞る判断）、Claude Sonnet 5（技術調査による①案不要の発見、スコープ分離の提案）
 - **検証:** 新規`tests/test_bl062_detector_supersede.py`（4件）を含め、オフラインスモークテスト計100件Pass。`python -m py_compile`合格。
-- **関連:** [D-044](decision_log.md#d-044-f-83-freeze機能の権限をuserロールのみに限定し独立した専用ツールとして実装する)（`superseded`）、[D-045](decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する)、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)、[BL-070](issue_backlog.md#bl-070-supersede運用指示をreviewerarbiterintegratorにも拡張するかの検討)
+- **関連:** [D-044](decision_log.md#d-044-f-83-freeze機能の権限をuserロールのみに限定し独立した専用ツールとして実装する)（`superseded`）、[D-045](decision_log.md#d-045-f-83-freeze機能を一時休止しbl-062をdetector限定で先に解消する)、[BL-062](../back_log/issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)、[BL-070](../back_log/issue_backlog.md#bl-070-supersede運用指示をreviewerarbiterintegratorにも拡張するかの検討)
 
 ---
 
@@ -768,7 +768,7 @@
 - **実装内容:** 新設`_resolve_directive_for_task(conn, run_id, task_id, phase_id, resolved_by)`が、対応するtask_idの`entry_type="Directive"`かつ`status="Proposed"`の最新agreementを`Superseded`化した上で`status="Approved"`の新レコードとして追記する。新設`RESOLVING_DELIVERABLE_STATUSES = {"Approved", "Approved_with_Conditions", "Implicitly_Accepted"}`のいずれかにDeliverableが遷移した場合のみ発火するようガードし、Deliverableの状態遷移が起こりうる両経路（`decision_extractor_node`のUPDATE分岐、`_commit_agreement_from_tool`）から呼び出した。
 - **決定者:** t-momose（対症療法ではなく根本解決②の選択）、Claude Sonnet 5（原因調査・両案の提示・実装）
 - **検証:** 新規`tests/test_bl073_directive_auto_resolve.py`（4件）を含め、オフラインスモークテスト計107件Pass。`python -m py_compile`合格、`check_docs_consistency.py`合格。実LLM再ドライランでの効果確認（未解決リストからApproved済みDirectiveが消えること）は次回待ち。
-- **関連:** [D-046](decision_log.md#d-046-directiveの永久proposed残留は対症療法ではなく根本解決自動approved遷移を採用する)、[BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)
+- **関連:** [D-046](decision_log.md#d-046-directiveの永久proposed残留は対症療法ではなく根本解決自動approved遷移を採用する)、[BL-073](../back_log/issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)
 
 ---
 
@@ -779,7 +779,7 @@
 - **設計方針の議論:** ユーザーが「本来は一つのトピックに対して更新してほしい。topic文字列の連続性が保証されない限りこれをシステム的に解決するにはどうすべきか」と質問。AIは、`entry_type`によって同一性の単位が異なる（`Decision`はtopicで区別すべきだが、`Deliverable`・`Directive`はこのアーキテクチャ上1タスクにつき1つであり、本来`task_id`が同一性の単位であるべき）という分析を提示し、BL-073の`_resolve_directive_for_task`（task_id基準の解決）と同じ発想を`Deliverable`側にも一貫適用する方針（`_resolve_prior_deliverable_for_task`新設案）を提案した。
 - **決定者:** t-momose（BL化の指示、`task_id`ベース識別への方針転換の承認）、Claude Sonnet 5（原因の実地調査・誤診断の自己訂正・設計方針の提案）
 - **状態:** BL-074として起票（`open`）。設計方針は決定済みだが実装は次回。
-- **関連:** [BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)、[BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)
+- **関連:** [BL-074](../back_log/issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)、[BL-073](../back_log/issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)
 
 ---
 
@@ -792,7 +792,7 @@
 - **実装内容:** `rollback_whiteboard`関数を削除し`expert_node`からの呼び出しも削除（ホワイトボード最新内容を保持したまま次ターンへ引き継ぐ）。`call_expert`のmajor差し戻しプロンプトを、全文書き直しを誘発する文言から、`edits`による部分修正・影響範囲確認を指示する文言に置き換えた。副次的に、system_promptへ追記されるがmessagesに一切反映されない死んだコード重複ブロックも発見・削除した。
 - **決定者:** t-momose（F-7.3撤廃・部分修正方式への転換の判断、理想ワークフローの提示）、Claude Sonnet 5（原因調査・実装、副次的な死んだコードの発見）
 - **検証:** 新規`tests/test_bl075_no_whiteboard_rollback.py`（4件）、既存`test_r4_smoke.py`のF-7.3専用テスト2件を削除。オフラインスモークテスト計109件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。実LLM再ドライランでの効果確認（同種のバージョン退行が再発しないこと）は次回待ち。
-- **関連:** [D-047](decision_log.md#d-047-f-73ホワイトボードロールバックを撤廃し部分修正誘導プロンプトへ置き換える)、[BL-075](issue_backlog.md#bl-075-f-73ホワイトボードロールバックが1つ前は健全という前提に反し修正済み問題を無警告で再導入する)
+- **関連:** [D-047](decision_log.md#d-047-f-73ホワイトボードロールバックを撤廃し部分修正誘導プロンプトへ置き換える)、[BL-075](../back_log/issue_backlog.md#bl-075-f-73ホワイトボードロールバックが1つ前は健全という前提に反し修正済み問題を無警告で再導入する)
 
 ---
 
@@ -805,7 +805,7 @@
 - **実装内容（BL-076）:** `call_detector`の両パスに`target_excerpt`をJSON出力へ追加。新設`_annotate_whiteboard_with_detector_comment`が一意一致時のみ注釈を挿入。`detector_node`からExpertの成果物へのmajor判定時のみ呼び出し、`call_expert`のプロンプトに「注釈行ごとold_textに含めて書き換えれば注釈も自然に消える」という運用方法を明記した。
 - **決定者:** t-momose（ハイブリッド形式の採用決定、BL-077化の指示）、Claude Sonnet 5（技術設計・フォーマット案の提示・実装）
 - **検証:** 新規`tests/test_bl076_whiteboard_detector_annotation.py`（4件）。オフラインスモークテスト計113件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。実LLM再ドライランでの効果確認は次回待ち。
-- **関連:** [D-048](decision_log.md#d-048-detectorのmajor指摘をホワイトボード本文にも永続的な注釈として埋め込む)、[BL-076](issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)、[BL-077](issue_backlog.md#bl-077-agentsmdのまずmemorystatusbacklogを確認してから動く設計思想をcela自身のai群に適用する設計検討未着手)
+- **関連:** [D-048](decision_log.md#d-048-detectorのmajor指摘をホワイトボード本文にも永続的な注釈として埋め込む)、[BL-076](../back_log/issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)、[BL-077](../back_log/issue_backlog.md#bl-077-agentsmdのまずmemorystatusbacklogを確認してから動く設計思想をcela自身のai群に適用する設計検討未着手)
 
 ---
 
@@ -817,7 +817,7 @@
 - **実装内容:** `call_orchestrator`のプロンプトに、選定理由とは別に「このタスクに実際に着手する専門家AIが具体的にどんな観点で検討すべきか・特に見落としやすい落とし穴は何か」を1〜3点、タスク固有の実行可能な指示として出力させる`focus_guidance`を追加。`orchestrator_node`が`state["expert_focus_guidance"]`へ保存（`LineageState`へフィールド追加）、`call_expert`のフル版system_prompt・軽量版light_system_prompt（BL-025②）の両方に注入した。
 - **決定者:** t-momose（提案・実装指示）、Claude Sonnet 5（実現可能性の調査・技術設計・実装）
 - **検証:** 新規`tests/test_bl078_orchestrator_focus_guidance.py`（4件）。オフラインスモークテスト計117件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。実LLM再ドライランでの効果確認（`focus_guidance`がタスクごとに具体的な内容で出力され、Expertの検討の質に寄与すること）は次回待ち。
-- **関連:** [D-049](decision_log.md#d-049-orchestratorの専門家選定時の考察をfocus_guidanceとしてexpertへ注入する)、[BL-078](issue_backlog.md#bl-078-orchestratorの専門家選定時の考察をfocus_guidanceとしてexpertへ注入する)
+- **関連:** [D-049](decision_log.md#d-049-orchestratorの専門家選定時の考察をfocus_guidanceとしてexpertへ注入する)、[BL-078](../back_log/issue_backlog.md#bl-078-orchestratorの専門家選定時の考察をfocus_guidanceとしてexpertへ注入する)
 
 ---
 
@@ -831,7 +831,7 @@
 - **実装内容:** `_annotate_whiteboard_with_detector_comment`の戻り値を`bool`から`tuple[bool, str]`へ変更し、`detector_node`が失敗時にも理由付きでログ出力するよう変更。新設`_normalize_for_loose_match`（改行・空白・Markdown太字記法・全角半角を吸収し、元の文字列位置へのindex_mapを保持）で正規化後の緩い一致にフォールバックする処理を追加。
 - **決定者:** t-momose（1216ログ調査の依頼、BL-074への統合判断、対策範囲の絞り込み、BL-079分離の承認）、Claude Sonnet 5（フォレンジック調査による発見、Claude Code方式との比較分析、技術設計・実装）
 - **検証:** 新規`tests/test_bl074_annotation_loose_match_fallback.py`（5件）、既存`tests/test_bl076_whiteboard_detector_annotation.py`をタプル戻り値に合わせて更新。オフラインスモークテスト計122件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。実LLM再ドライランでの効果確認は次回待ち。
-- **関連:** [D-050](decision_log.md#d-050-ホワイトボード注釈のtarget_excerpt一致失敗をbl-074へ統合しログ出力正規化フォールバックで対応するリトライ構造はbl-079へ分離)、[BL-074](issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)、[BL-076](issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)、[BL-079](issue_backlog.md#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる)
+- **関連:** [D-050](decision_log.md#d-050-ホワイトボード注釈のtarget_excerpt一致失敗をbl-074へ統合しログ出力正規化フォールバックで対応するリトライ構造はbl-079へ分離)、[BL-074](../back_log/issue_backlog.md#bl-074-deliverableのtopic文字列に連続性が保証されずsupersede漏れの亡霊proposed行がdbに複数残存するbl-076のtarget_excerpt完全一致の脆さを統合)、[BL-076](../back_log/issue_backlog.md#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)、[BL-079](../back_log/issue_backlog.md#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる)
 
 ---
 
@@ -843,7 +843,7 @@
 - **実装内容:** `entry_type=="Deliverable"`かつ`action_type in ("CREATE", "SUPERSEDE")`かつ`len(decision_what) > 200`（CREATE/UPDATE全文置換パスと同一閾値）の場合、CREATEと同様に`apply_whiteboard_patch`で新版を保存するよう修正。SUPERSEDE分岐からの早期`return None`を削除し、CREATE/UPDATE共通のホワイトボード保存・agreements行INSERT処理へ合流させた。BL-062のDetectorによる無効化用途（短い却下理由のみのSUPERSEDE）は同じ200文字閾値により後方互換を維持することを確認した。
 - **決定者:** t-momose（1319ログ調査の依頼、修正・BL起票の即決）、Claude Sonnet 5（フォレンジック調査による発見、技術設計・実装）
 - **検証:** 新規`tests/test_bl080_supersede_deliverable_whiteboard_writeback.py`（3件、長文SUPERSEDEのホワイトボード書き込み確認・短文SUPERSEDEの後方互換確認・早期return削除のソース確認）。オフラインスモークテスト計125件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。実LLM再ドライランでの効果確認は次回待ち。
-- **関連:** [D-051](decision_log.md#d-051-write_agreementのsupersedeがdeliverableの全文更新を破棄していた問題の修正)、[BL-080](issue_backlog.md#bl-080-write_agreementのsupersedeがdeliverableの全文更新を破棄し実質何もしないツール呼び出しになっていた)、[BL-075](issue_backlog.md#bl-075-f-73ホワイトボードロールバックが1つ前は健全という前提に反し修正済み問題を無警告で再導入する)、[BL-062](issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)
+- **関連:** [D-051](decision_log.md#d-051-write_agreementのsupersedeがdeliverableの全文更新を破棄していた問題の修正)、[BL-080](../back_log/issue_backlog.md#bl-080-write_agreementのsupersedeがdeliverableの全文更新を破棄し実質何もしないツール呼び出しになっていた)、[BL-075](../back_log/issue_backlog.md#bl-075-f-73ホワイトボードロールバックが1つ前は健全という前提に反し修正済み問題を無警告で再導入する)、[BL-062](../back_log/issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)
 
 ---
 
@@ -854,7 +854,7 @@
 - **実装内容:** `_normalize_for_loose_match`を「まずNFKC正規化 → 正規化後の文字が空白かどうかを判定してスキップ」という順序に変更し、全角/半角スペースを対称に扱うよう修正。テーブル区切り記号（`|`）もスキップ対象に追加。新設`_find_loose_match_spans(content, old_text)`が正規化後の一致箇所を元の文字列上の(開始, 終了)スパンとして返す。`_apply_text_edits`は完全一致失敗時にこの緩い一致へフォールバックし、それでも一意に定まらない場合のみ理由付きでエラーを返すよう変更した。
 - **決定者:** t-momose（再調査の依頼）、Claude Sonnet 5（フォレンジック調査による発見、技術設計・実装）
 - **検証:** 新規`tests/test_bl081_edits_loose_match_fallback.py`（5件、1319ログ実例の再現・正規化後も曖昧な場合の失敗維持・完全一致優先の回帰・全角半角対称性の回帰・位置逆写像確認）。オフラインスモークテスト計130件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。実LLM再ドライランでの効果確認は次回待ち。
-- **関連:** [D-052](decision_log.md#d-052-write_agreementのeditsold_textnew_textにも正規化した緩い一致フォールバックを適用する)、[BL-081](issue_backlog.md#bl-081-write_agreementのeditsold_textnew_textがmarkdownテーブル行頭の全角スペースパイプ記号の有無で完全一致に失敗しやすかった)、[BL-080](issue_backlog.md#bl-080-write_agreementのsupersedeがdeliverableの全文更新を破棄し実質何もしないツール呼び出しになっていた)
+- **関連:** [D-052](decision_log.md#d-052-write_agreementのeditsold_textnew_textにも正規化した緩い一致フォールバックを適用する)、[BL-081](../back_log/issue_backlog.md#bl-081-write_agreementのeditsold_textnew_textがmarkdownテーブル行頭の全角スペースパイプ記号の有無で完全一致に失敗しやすかった)、[BL-080](../back_log/issue_backlog.md#bl-080-write_agreementのsupersedeがdeliverableの全文更新を破棄し実質何もしないツール呼び出しになっていた)
 
 ---
 
@@ -871,7 +871,7 @@
   - 見出し文字列の検索・追記位置の判定について、タスクの`description`や申し送りテキスト自体がLLM生成の自由文であるため、単純な`str.find`や「次の見出しまで探す」ロジックでは偶然の部分一致・境界誤認のリスクがあると指摘され、行アンカー付き正規表現＋見出し直後への固定挿入方式へ変更（BL-074/076/081で対応してきた「LLMの自由文に対する脆いパターンマッチング」という同じ問題クラスを、事前に設計段階で回避した）。
 - **決定者:** t-momose（発見・提案・実装指示・実装範囲の判断）、Claude Sonnet 5（フォレンジック調査、2段階設計プロセスの実施、技術設計・実装）
 - **検証:** 新規`tests/test_bl082_plan_drafts_deferred_notes.py`（11件、ラウンドトリップ・遅延生成・複数追記の蓄積・対象未解決時のフェイルクローズ・description内の偶然一致排除・3箇所すべての配線確認をinspect.getsourceで機械的に検証）。オフラインスモークテスト計141件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。加えて、`decision_extractor_node`にDeferred抽出をモック注入し、対象タスクの`plan_drafts`へ実際に申し送りが書き込まれ`_get_deferred_notes_text`で読み戻せることをエンドツーエンドで手動確認した。実LLM再ドライランでの効果確認は次回待ち。
-- **関連:** [D-053](decision_log.md#d-053-task_plannerの計画をplan_draftsとして永続化し先送り事項をタスク間で申し送る)、[BL-082](issue_backlog.md#bl-082-task_plannerの計画をホワイトボード化し先送り事項をタスク間で永続的に申し送りできるようにする)、[BL-073](issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)
+- **関連:** [D-053](decision_log.md#d-053-task_plannerの計画をplan_draftsとして永続化し先送り事項をタスク間で申し送る)、[BL-082](../back_log/issue_backlog.md#bl-082-task_plannerの計画をホワイトボード化し先送り事項をタスク間で永続的に申し送りできるようにする)、[BL-073](../back_log/issue_backlog.md#bl-073-entry_typedirectiveのagreementが対応タスク完了後もstatusproposedのまま永久残留する)
 
 ---
 
