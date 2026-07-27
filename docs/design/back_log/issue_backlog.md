@@ -132,6 +132,7 @@
 | BL-098 | 低 | `cela_main.py`（ファイル分割：永続化層/ツール層/プロンプト・ノード層/UI・ログ層） | ユーザーが別AIに`cela_main.py`本体を独立レビューさせた指摘（続報）。`cela_main.py`が7300行超で、ロギング・DBスキーマ・python_repl・Record/Replay・各種ツール定義・LangGraphノード実装・プロンプト本文までを単一ファイルで抱えており「巨大な一枚岩」状態。プロトタイプとしては成立しているが、商用の長期運用を見据えると責務分離（少なくとも永続化層／ツール層／プロンプト・ノード層／UI・ログ層の4分割）が保守性のために望ましいとの指摘。設計未着手（`open`、MVP機能追加より優先度は低く、機能面が一段落してから着手する方針）。 | P3 |
 | BL-099 | 中 | `cela_main.py`（モジュールレベルグローバル`_CURRENT_RUN_ID`/`_CURRENT_CALLER_ROLE`/`_CURRENT_TASK_ID`等、`get_max_tokens`の`label.lower()`部分一致制御、`think`必須化の実効性がモデル遵守に依存する構造） | 同じ別AIレビューの指摘。(1) `_CURRENT_RUN_ID`等（`cela_main.py:1061`付近）のようなモジュールレベル変数に状態管理をかなり依存しており、規模が上がると再現性・追跡性が落ちやすい。(2) `get_max_tokens`（`cela_main.py:318`）が`label.lower()`の部分一致（`MAX_TOKENS_BY_ROLE`のキーワード）でmax tokenを切り替える「ゆるい制御」になっている。(3) BL-093の`think`必須化は`_query_AI_live`側で機械的強制済みだが、最終的には「この応答に`think`が入っていること」を前提にフローが回っており、tool-call層でのより網羅的な機械的バリデーションの余地がまだ残る、との指摘。設計未着手（`open`、(1)(2)はBL-098の層分離と合わせて検討、(3)は既存のBL-093機械的強制の延長として個別に検討可能）。 | P2 |
 | BL-100 | 高 | `cela_main.py`（`ESCALATE_PREMISE_CONCERN_TOOL`/`_escalate_premise_concern_tool_impl`、R5 GoalShiftEvent周辺、新設予定のBL-096 issue_logとの統合） | 同じ別AIレビューの続報。エージェントが前提（例:「移動手段はバスである」）を疑い、代替案（例:「オンデマンドタクシー補助」）を提案する際、単に提案するだけでなく「問題設定を変更した理由」を構造化して系譜として残すべきとの指摘。具体的には(1)疑った前提、(2)疑った理由、(3)代替仮説、(4)期待される利点、(5)この提案を採用するために追加で必要な情報、の5項目セット。現状の`escalate_premise_concern`（R5/BL-086、goal本文の前提を疑い改訂を提起する既存ツール）や新設予定のBL-096 `write_issue`は、懸念の「有無」と「内容の自由記述」は記録するが、上記5項目のような構造化された代替仮説・採用条件までは持たない。BL-096（issue管理DB）の基本設計と統合して検討する価値が高い（採用条件＝BL-096の`resolution_note`相当、代替仮説＝新規フィールド）。設計未着手（`open`、BL-096の基本設計の中で構造化フィールドとして統合するか、`escalate_premise_concern`側の拡張とするかを検討）。 | P1 |
+| BL-101 | 高 | `cela_main.py`（新設`READ_PLAN_DRAFT_TOOL`/`_read_plan_draft_handler`/`get_latest_plan_draft_by_task_id`、`call_task_planner`への配線） | 実ドライラン`log/2026-07-27/1438`でユーザーが発見。task_plan_reviewerに差し戻されたtask_plannerが、前回自分が作成した「フェーズ・タスク表」ホワイトボード（`plan_drafts`、BL-082/BL-087 Stage2）を一切参照せず、ゴール文と差し戻し指摘の要約テキストだけを頼りに毎回全フェーズ・全タスクを一から作り直している実例を確認。`task_plan_reviewer_node`が`state["phases"] = []`で前回計画を完全消去し、`call_task_planner`は`reviewer_feedback`（自由文）のみを受け取り、`plan_drafts`に書き込まれているはずのtask_plan_reviewerの個別指摘（`_append_reviewer_comment_to_plan`）も一切プロンプトに渡っていなかったことが原因。加えて副次的に、BL-095でtask_plannerがwrite_agreement（`entry_type="Decision"`, `topic="task_planner_phase_design"`）で記録した判断根拠を、task_plan_reviewerが`read_deliverable_file(task_id="task_planner_phase_design")`で読もうとしても`entry_type="Deliverable"`限定の逆引きのため常に`not_found`になる不整合も発見（ログ2414-2415/4169-4170行目）。まず単純な対策として、task_planner自身が能動的に`plan_drafts`の最新版（task_plan_reviewerの個別指摘込み）を確認できる読み取り専用ツール`read_plan_draft`を新設し、差し戻し時のプロンプトで「指摘のあったtask_idは必ずこのツールで前回の記述を確認してから、その部分だけを修正する」よう指示した（`entry_type="Deliverable"`限定の問題は未対応、別途Fix 2として検討）。より確実な対策として、`state["phases"]`を消去せず前回計画をbaselineとして保持し、task_plannerには変更が必要な部分のみをパッチとして出力させ、Python側で機械的にマージする方式（ユーザー提案）も検討したが、まず`read_plan_draft`ツールでの効果を実ドライランで確認してから判断する方針とした。新規`tests/test_bl101_task_planner_plan_draft_tool.py`（8件）、`python -m py_compile`合格、関連クラスタ218件Pass。 | P0 |
 
 ---
 
@@ -3211,6 +3212,27 @@ Detectorには特に「Agentの数値がゴール文の直接記載か、AI自�
 3. `resolve_premise_concern`（現行の却下専用ツール）と、この5項目セットの「採用」判断（`revise_goal`との関係）の整理。
 
 **完了条件:** 未定（設計後に記載）。
+
+---
+
+### BL-101: task_plannerが差し戻し時に前回の「フェーズ・タスク表」ホワイトボードを参照せず全面再作成する
+
+**経緯:** ユーザーによる実ドライラン（`log/2026-07-27/1438`）のリアルタイム観測。task_plan_reviewerに差し戻された後のtask_plannerの再分解を見ると、前回自分が作成したフェーズ・タスク表（`plan_drafts`ホワイトボード、BL-082/BL-087 Stage2）を一切参照せず、ゴール文と差し戻し指摘の要約テキストだけを頼りに、指摘されていない部分も含め毎回全フェーズ・全タスクを一から作り直している様子が確認された。
+
+**根本原因（コード調査で特定）:**
+1. `task_plan_reviewer_node`（差し戻し時）が`state["phases"] = []`で前回計画を即座に完全消去する。
+2. `call_task_planner`は`reviewer_feedback`（自由文の指摘サマリー）と`goal`のみを受け取り、前回のフェーズ・タスクJSON構造そのものも、`plan_drafts`に書き込まれているはずのtask_plan_reviewerの個別指摘（`_append_reviewer_comment_to_plan`、BL-087 Stage2）も、一切プロンプトに渡っていなかった。
+
+**副次的に発見した不整合:** BL-095でtask_plannerが`write_agreement(entry_type="Decision", topic="task_planner_phase_design")`として記録した判断根拠を、task_plan_reviewerが`read_deliverable_file(task_id="task_planner_phase_design")`で読もうとしているが、`read_deliverable_file`の逆引き（`_resolve_deliverable_pointer`）は`entry_type="Deliverable"`限定のため、Decision型の記録は原理的に永遠に`not_found`になる（ログ2414-2415/4169-4170行目で実際に確認）。BL-095の「task_plan_reviewerがtask_plannerの判断根拠を参照できる」という設計意図が実際には機能していなかった。
+
+**対応（第一弾、`done`）:** task_planner自身が能動的に`plan_drafts`の最新版（task_plan_reviewerの個別指摘込み）を確認できる読み取り専用ツール`read_plan_draft`（`get_latest_plan_draft_by_task_id`のラッパー）を新設し、`call_task_planner`の差し戻し時プロンプトで「指摘のあったtask_idは必ずこのツールで前回の記述を確認し、その部分だけを修正する。指摘のないフェーズ・タスクは作り直さない」旨を明記した。
+
+**検討したが今回は見送った、より確実な対策（ユーザー提案）:** `state["phases"]`を消去せず前回計画をbaselineとして保持し、task_plannerには変更が必要な部分のみをパッチとして出力させ、Python側で機械的にマージする方式（プロンプト指示ではなく機械的に「指摘されていない部分は不変」を保証する）。プロンプト指示による現在の対応がモデル遵守に依存する弱さを残すことは認識しているが、まず`read_plan_draft`ツールの効果を次回ドライランで確認してから、必要であれば機械的マージ方式へ発展させる方針とした。BL-095の`entry_type="Deliverable"`限定問題（Fix 2）も未対応のまま残っている。
+
+**完了条件:**
+- 新規`tests/test_bl101_task_planner_plan_draft_tool.py`（8件）: `get_latest_plan_draft_by_task_id`（phase_id不問での検索・最新版取得・not_found）、`_read_plan_draft_handler`（正常系・not_found・task_id必須エラー）、`TOOL_DISPATCH`配線、`call_task_planner`が`READ_PLAN_DRAFT_TOOL`を`tools=[...]`に渡しプロンプトにBL-101オリエンテーションを含むことを検証。
+- `python -m py_compile cela_main.py`合格、関連クラスタ218件Pass（実装中に副作用で見つかった`test_bl087...`の文言重複バグも修正済み）。
+- 実LLM再ドライランでの効果確認（差し戻し後、task_plannerが実際に指摘されたtask_idのみを修正し、無関係な部分を書き換えなくなるか）は次回待ち。Fix 2（`read_deliverable_file`のDecision型非対応）とパッチ/機械的マージ方式は別途検討。
 
 ---
 
