@@ -3116,12 +3116,13 @@ Detectorには特に「Agentの数値がゴール文の直接記載か、AI自�
 
 いずれも「監査系ノードが見つけた軽微な懸念を、忘れずに後で拾い上げて追跡する」ための正式な永続層が存在しないことが根本原因であり、ユーザーは両者を1つの「issue管理DB」に統合する方針を示した。
 
-**基本設計確定（`open`、実装未着手）。** Plan modeで設計を確定（詳細は[BL096_basic_design.md](BL-096/BL096_basic_design.md)）：
-1. スキーマ: 新規`issue_log`テーブル（`topic`/`raised_by`/`severity`/`status`/`occurrence_count`等）。
-2. 再浮上トリガー: ユーザー選択により**累積回数しきい値**方式を採用（時限方式は不採用）。同一topicで再度`CREATE`されると`occurrence_count`が加算され、2回に達した時点で機械的に`severity="major"`・`status="escalated"`へ昇格（モデル判断に依存しない）。
+**基本設計v2確定（`open`、実装未着手）。** Plan modeでv1を設計後、ユーザー指摘＋別AIレビューを受けv2へ改訂（詳細は[BL096_basic_design.md](BL-096/BL096_basic_design.md)、改訂理由は[D-079](../decision_log.md#d-079-bl-096設計をv2に改訂read経由の再発カウント追加severitymajorstatusescalated不変条件topictask_idキー変更)）：
+1. スキーマ: 新規`issue_log`テーブル（`topic`/`raised_by`/`severity`/`status`/`occurrence_count`/`last_seen_task_id`等）。重複検知キーは`topic`単独ではなく`(topic, task_id)`（BL-053/BL-084の教訓を反映）。
+2. 再浮上トリガー: **累積回数しきい値**方式（時限方式は不採用）を、`write_issue(CREATE)`再呼び出し経由に加え、**`read_issues`が既存issueを別task_idの文脈で再発見した場合も同様にカウントする**二重トリガーに拡張。理由：AIが「既に登録済みだから」とCREATEを見送っても再発シグナルが失われないようにするため（ユーザー指摘）。`occurrence_count>=2`で機械的に`severity="major"`へ昇格し、**`severity="major"`の行は常に`status="escalated"`を伴う不変条件**（初回CREATE時のmajor指定でも同様、別AIレビュー指摘Bで発見された「初回major起票がreflectionに届かない」欠陥を修正）。
 3. 既存の`agreements`/`verified_facts`との役割分担: 本DBは「まだ解決していない懸念の追跡」に特化し、確定事項の記録は引き続き`agreements`/`verified_facts`が担う。
-4. ノード配線: ユーザー指示により、MVPは**Detector・User AI（`generate_user_utterance`）の2ノードに限定**（`CREATE`は両方、`RESOLVE`はUser AIのみ）。理由は(a)User AIがExpertへ出す訂正指示自体の忘却リスクをissue化する価値、(b)issueをクローズする役目はUser AI（ユーザー側の代理）という認識。Reviewer/Arbiter/Integratorへの拡張は将来課題として据え置き。
+4. ノード配線: ユーザー指示により、MVPは**Detector・User AI（`generate_user_utterance`）の2ノードに限定**（`CREATE`は両方、`RESOLVE`はUser AIのみ）。理由は(a)User AIがExpertへ出す訂正指示自体の忘却リスクをissue化する価値、(b)issueをクローズする役目はUser AI（ユーザー側の代理）という認識。Reviewer/Arbiter/Integratorへの拡張は将来課題として据え置き。Detectorが`write_issue`を呼ばなかった場合の機械的バックアップ書き込み（`raised_by="detector_auto"`）も追加。
 5. reflectionへのエスカレーション到達は、モデルのツール呼び出しに依存せずPython側の直接DB問い合わせで保証する設計とした（BL-099の「モデル遵守依存」問題をこの経路では発生させない）。
+6. 読み取りツールは`read_issues`（v1の`read_open_issues`から改名、「openのものしか見えない」という誤解を避けるため）。デフォルトで解決済み（resolution_note込み）も検索結果に含め、無条件の全件取得は明示的な`list_all`スイッチに分離。`topic`に加え`description`列もLIKE検索対象。`description`は2000文字上限のトランケーション規則あり。
 
 **完了条件:** 未定（実装後に記載）。
 
