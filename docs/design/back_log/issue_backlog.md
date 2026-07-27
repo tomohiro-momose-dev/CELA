@@ -3046,6 +3046,8 @@ BL-087 Fix Aは「reviewerが絶対値の確定を無理強いすると、task_p
 
 **同じ`log/2026-07-26/1713`の再検証による追記修正3:** ツール説明文の修正後も再度失敗を確認。ユーザーが「先ほど私が書いたように各ノードのプロンプトに各ツールはthinkとともに使用せよと明示してください」と指摘した通り、ツールスキーマの`description`だけでは不十分で、各ノードの**プロンプト本文**にも、そのノードが実際に使えるツール名を名指しした指示が必要と判明。対策として、tools付与済みの全ノード（`call_task_planner`/`call_expert`/`call_detector`数値監査パス/`call_resource_arbiter`/`call_integrator`/`call_reviewer`/`generate_user_utterance`/`call_goal_essence_analyst`/`call_task_plan_reviewer`）のプロンプト本文中、既存のBL-093 think指示の直後に、「あなたが使えるツールは○○・○○・thinkです。think以外のいずれかを呼ぶときは、必ずその同じ応答の中にthink（summary必須）も一緒に含めてください」という、そのノード固有のツール名を列挙した一文を追記した（think以外にツールを持たない`call_orchestrator`/`call_detector`ドメイン妥当性パス/`call_decision_extractor`/`call_reflection`/`call_facilitator`の5関数は、think単独呼び出し以外の選択肢がなくこの種の混同が起こり得ないため対象外）。
 
+**`log/2026-07-27/1911`のレビューによる追記修正4:** 追記修正1〜3の対策後も、think未添付による差し戻しが1本のドライランログ内で12回発生していることをユーザーと確認。文面が「含めてください」「差し戻されます」という丁寧な依頼調のままであり、モデルが他ツール自身の説明文・プロンプト本文を読む際に「絶対厳守」と認識しにくいのではないかとユーザーが指摘。ユーザー提案「thinkツールと同時に呼ぶことを厳守しろ！くらいの強い言葉で書く」を受け、think以外の全ツールスキーマ説明文（14箇所）を"[BL-093] MANDATORY: you MUST also call `think`..."という命令形＋大文字強調に、tools付与済み各ノードのプロンプト本文（10箇所）を「think以外のいずれかを呼ぶ場合は、必ず同じ応答内でthink（summary必須）を同時に呼ぶことを厳守しろ！」という語調に強化した（指示内容自体は変更せず、強制力の伝わり方のみを強化）。関連クラスタ261件Pass、`python -m py_compile`合格。実LLM再ドライランでの差し戻し頻度の実際の減少確認は次回待ち。
+
 **完了条件:**
 
 - 新規`tests/test_bl093_think_tool_scratchpad.py`（42件）: ツール登録確認、reasoningへの機械的iter番号付与、複数回呼び出しでの累積、todo/issuesのopen/closed必須・変更時のみ更新（sticky）、notesの追記専用（上書きされない）、リセット、`MAX_TOOL_ITER=20`、ループ本体への`_CURRENT_TOOL_LOOP_ITERATION`/`"iteration"`付与、全10関数＋Detector両パスへの配線・プロンプト文言の存在確認（パラメータ化テスト）、旧`tools=None`4関数が`tools=[THINK_TOOL]`へ切り替わったことの確認、think以外の全10ツールの説明文にリマインダーが含まれることの確認（パラメータ化テスト）、tools付与済み9関数のプロンプト本文がそれぞれ自身の利用可能ツール名を名指ししていることの確認（パラメータ化テスト）。
