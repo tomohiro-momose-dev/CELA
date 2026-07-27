@@ -1179,6 +1179,20 @@
 
 ---
 
+### D-080: BL-096設計をv3に改訂（重複検知キーをtopic単独に差し戻し、reflection/facilitatorへの機械的接続とエスカレーション解除通知を追加）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-27 |
+| 状態 | `decided`（設計確定、実装未着手） |
+| 決定者 | t-momose（「call_reflectionでは、issue経由ではほぼ自分が何か考えるわけではなく、機械的にfacilitatorに橋渡しする役目という理解でよいか」の確認、facilitatorへのルーティングを機械的強制にする指示、「issue解決後にエスカレーション直前の状態に戻す」復帰通知の必要性を提起） / Claude Sonnet 5（設計改訂・矛盾の発見） |
+| **決定理由** | (1) D-079（v2）は別AIレビュー指摘Aを採用し重複検知キーを`(topic, task_id)`にしたが、対話の中で設計者自身（Claude）がこれとREAD経由の再発カウント（同じくD-079で追加）との矛盾に気づいた：BL-096は「タスクをまたいで再発する懸念」の追跡が本質的な目的なのに、`task_id`を識別キーに含めると別タスクでの再発が別行として扱われ、原理的にエスカレーションしなくなる。BL-084のDeliverable識別パターン（`phase_id`/`task_id`で識別）は「1つのタスクに帰属する成果物」に妥当な設計だが、「タスク横断で再発する懸念」という性質の異なるBL-096にそのまま転用すべきではないと判断し、`topic`単独キーに差し戻した。(2) READ経由の再発カウントを無条件にすると、広いキーワード検索が偶然ヒットしただけで誤ってカウントされるリスクがあるため、「`topic_keyword`と`task_id`が両方明示されている」場合のみに限定し、精度を上げた。(3) ユーザーからの確認「call_reflectionはissue経由ではほとんど考えず機械的にfacilitatorへ橋渡しするだけか」に対し、既存コード（`call_reflection`のプロンプトに既にある「未解決が残っていればcompletedにしてはいけない」という指示、`route_after_reflection`のルーティングロジック）を実際に読んで確認した結果、この理解は正しく、かつBL-051が当初求めていた「issueリストをフェーズ終了条件とする」は既存のreflection/facilitator機構がそのまま使えることが判明した。ユーザーの追加指示により、discussion_statusの上書きをプロンプト指示ではなく機械的強制にすることを決定。(4) ユーザーから「issue解決後にエスカレーション直前の状態に戻すべきでは、userも次に何をすべきか迷うのでは」との指摘。調査の結果`current_task_id`等の作業状態はreflection/facilitatorに一切書き換えられず保持されることを確認したが、facilitatorが開く「広い問い直しモード」からAI自身が自力で抜け出す明示的な合図が無い、という指摘は妥当と判断し、エスカレーション解除の一度きりの復帰通知機構を追加することにした。 |
+| 決定内容 | (1) 重複検知キーを`topic`単独に差し戻す（`task_id`/`phase_id`はメタデータのみ）。(2) READ経由の再発カウント条件を「`topic_keyword`と`task_id`が両方指定され、ヒット行が`open`/`escalated`で`last_seen_task_id`と異なる」の4条件に厳格化。(3) `reflection_node`で、`issue_log`に`status='escalated'`の行が1件でもあれば、モデルの`discussion_status`判定を無視し機械的に`"stagnant"`へ上書きする（既存の`route_after_reflection`のルーティングはそのまま使う）。`facilitator_node`にも同じ直接DB問い合わせでescalated issueの構造化情報（topic/description/occurrence_count）を渡し、`call_facilitator`のプロンプトに「この具体的懸念の解消を最優先事項として提示する」専用指示ブロックを追加する。(4) `LineageState`に`escalation_active`/`escalation_just_resolved_notice_pending`を追加し、escalated件数が0件に戻った瞬間を検知して、次のExpert/User AI呼び出し時に一度だけ「エスカレーションは解消された、通常のタスク遂行に戻ってよい」という復帰通知を注入する。 |
+| 影響 | `docs/design/back_log/BL-096/BL096_basic_design.md`をv3に全面改訂。`cela_main.py`への実装はまだ着手していない（次に着手）。 |
+| 関連 BL | [BL-096](back_log/issue_backlog.md#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
