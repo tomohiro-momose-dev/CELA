@@ -1265,6 +1265,19 @@
 
 ## 未決定（pending）
 
+### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `pending` |
+| 論点 | `run_ai_vs_ai_loop`の自前JSON checkpoint（`_save_checkpoint`/`_load_checkpoint`、`--resume <path>`）は、`--resume`時に必ずグラフのentry_point（`goal_essence`）から全体を再走行する。`goal_essence`/`task_planner`/`task_plan_reviewer`は`_done`フラグでスキップされるが、`generate_user_utterance_node`には再入場ガードが無く、無条件にuser発言をchat_historyへ追記するため、前回の一時停止がUser発言追記直後・Expert応答前だった場合、resume時にuser発言が二重に積まれる（`role連続を検出`警告、`log/2026-07-27/2044`で確認）。ユーザーから「本来はLangGraphのcheckpointerを使えば真の一時停止が利くのでは」との指摘があり、Context7で現行のLangGraph公式ドキュメント（`/websites/langchain_oss_python_langgraph`）を確認したところ、`compile(checkpointer=...)` + `thread_id`ベースの再開はentry_pointからの全体再走行ではなく中断ノードの続きから再開することを確認した。ただしノード単位のcheckpointは、ノード内部（Expert/Detectorの`_query_AI_live`ツールループ）の途中でのCtrl+Cには対応できず、そのノードは最初から再実行される。公式ドキュメントにも"Do not create new records before an `interrupt` call. Re-running the node upon resume will create duplicate records, leading to data inconsistencies."と明記されており、これがユーザーの懸念（「ツールで登録しようとしたら既にDBにあった、という混乱」）の根本原因。真に解消するには`@task`デコレータでノード内部の個々の呼び出しを個別checkpoint対象にする必要がある。 |
+| 候補 | A. Tier 0のみ（`generate_user_utterance_node`等への再入場ガード追加）で最小限の対症療法に留める / B. Tier 1（LangGraph本来の`checkpointer`+`thread_id`ベースの再開へ移行し自前JSON checkpoint/`--resume <path>` CLIを置き換え）まで実施 / C. Tier 1に加えTier 2（`_query_AI_live`のツールループ内の各呼び出しを`@task`化）まで実施し、ノード内部途中の再開にも対応 |
+| **決定理由** | **（決定時に必須、まだ未決定）** |
+| 決定内容 | **（未記入）** |
+| 関連 BL | [BL-105](back_log/issue_backlog.md#bl-105-checkpointresume機構がentry_pointから全体再走行するため未応答のuser発言が二重に積まれるlanggraph本来のcheckpointertask未導入という設計ギャップ) |
+
+---
+
 ### D-00N: （題名）
 
 | 項目 | 内容 |
