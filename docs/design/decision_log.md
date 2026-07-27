@@ -1165,6 +1165,20 @@
 
 ---
 
+### D-079: BL-096設計をv2に改訂（READ経由の再発カウント追加、severity=major⇒status=escalated不変条件、(topic,task_id)キー変更）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-27 |
+| 状態 | `decided`（設計確定、実装未着手） |
+| 決定者 | t-momose（「AIがissueを登録しようとして既にissueがある事がわかり、ならば登録しないでよいかと登録を見送る判断をしてしまわないか？」という累積回数しきい値方式への懸念を提起。`read_open_issues`のデフォルトで解決済みも見せる仕様、`get_open_issues_from_db`の改名も指示） / 別AI（`BL096_design_review.md`、B/A/D/C/G の5項目を指摘）／ Claude Sonnet 5（設計改訂） |
+| **決定理由** | (1) D-078のv1設計は、再発カウント（`occurrence_count`）の増加を`write_issue(CREATE)`の再呼び出しのみに依存させていた。しかしユーザーが指摘した通り、AIが`read_issues`で既存issueの存在を確認した際「重複登録は避けるべき」と合理的に判断してCREATEを見送る可能性が高く、そうなるとエスカレーションに必要な再発シグナル自体が失われる。これはBL-099が指摘する「モデル遵守への依存」を再浮上の入口に持ち込んでしまう設計上の欠陥であり、修正が必要と判断した。(2) READ側のデフォルトを「未解決のみ」から「解決済みも含む」へ変更したのはユーザー指摘（「同じ懸念を抱いた時に解決済みが見えないと新たにissueを再登録する恐れがある」）。全件の無条件表示は別途`list_all`スイッチに分離し、通常の重複確認とissue整理・棚卸しの用途を区別した。(3) `read_open_issues`/`get_open_issues_from_db`という名前は「openのものしか見えない」という誤解を招くため、実際の挙動（解決済みも返す）に合わせて`read_issues`/`get_issues_from_db`に改名（ユーザー指摘）。(4) 別AIレビューの指摘Bは設計上の実バグ（初回`severity="major"`で起票された行が`occurrence_count=1`のまま`status='open'`に留まり、reflection側の`status='escalated'`限定クエリで拾われない）であり、実装前に必ず修正すべきと判断し採用。指摘A（重複検知キーの脆さ）・D（モデルが`write_issue`を呼ばないリスクへの機械的バックアップ）・C（description無制限肥大）・G（description列もLIKE検索対象に）も、BL-053/BL-084/BL-093の既存パターンと整合する妥当な指摘のため採用した。 |
+| 決定内容 | (1) 再発カウントのトリガーをCREATE経由・READ経由の2系統にする。`read_issues`のフィルタ検索が既存のopen/escalated行にヒットし、かつヒット行の新規列`last_seen_task_id`が今回の呼び出し元`task_id`と異なる場合、`occurrence_count`を機械的にインクリメントし`last_seen_task_id`を更新する（同一task_id内での繰り返し読み取りによる二重計上は`last_seen_task_id`比較で防止）。CREATE経由・READ経由は共通ヘルパー`_bump_issue_occurrence`に統合する。(2) `read_open_issues`→`read_issues`、`get_open_issues_from_db`→`get_issues_from_db`に改名。パラメータから`include_resolved`を廃止し、フィルタ指定時はstatus不問で返す仕様に変更、新規`list_all`（bool）で無条件全件取得を分離。(3) 重複検知キーを`topic`単独から`(topic, task_id)`の2列に変更（`idx_issue_run_topic_task`インデックス）。(4) 不変条件「`severity='major'`の行は必ず`status='escalated'`」を、初回CREATE時の明示指定・閾値到達による自動昇格の両方で強制する。(5) `description`は2000文字上限のトランケーション規則を追加し、`topic`に加え`description`列もLIKE検索対象にする。(6) `detector_node`に、モデルが`write_issue`を呼ばなかった場合の機械的バックアップ書き込み（`raised_by="detector_auto"`、task単位でtopicを束ねる粗い集約）を追加する。 |
+| 影響 | `docs/design/back_log/BL-096/BL096_basic_design.md`をv2に全面改訂。`cela_main.py`への実装はまだ着手していない（次回実装時にこのv2設計に従う）。 |
+| 関連 BL | [BL-096](back_log/issue_backlog.md#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
