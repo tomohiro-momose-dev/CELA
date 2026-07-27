@@ -1221,6 +1221,20 @@
 
 ---
 
+### D-083: Detectorのドメイン妥当性レビューパスにBL-096/既存監査ツール群を配線する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-27 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（「detectorのドメインレビュワーにはthinkツールしかありません。'read_verified_fact', 'read_deliverable_file', 'write_agreement', 'verify_whiteboard_excerpt', 'write_issue', 'read_issues'は渡してもよい気がします」と指摘） / Claude Sonnet 5（実装） |
+| **決定理由** | `call_detector`は「ドメイン妥当性レビュー」（前提・設計自体の現実性を見る第1段）と「数値監査（検算）」（第2段）の2パスから成るが、数値監査パス側は`read_verified_fact`/`read_deliverable_file`/`write_agreement`/`verify_whiteboard_excerpt`/`write_issue`/`read_issues`をすべて持つ一方、ドメイン妥当性レビューパスは`tools=[THINK_TOOL]`のみだった。前提・設計の現実性を評価する上でも、既存の確定値・出典を確認する（`read_verified_fact`/`read_deliverable_file`）、指摘引用を検証する（`verify_whiteboard_excerpt`）、決定を記録する（`write_agreement`）、軽微な懸念を後続タスクへ引き継ぐ（`write_issue`/`read_issues`、BL-096）能力に本質的な違いはなく、片方のパスだけツールアクセスが欠けている理由がない。 |
+| 決定内容 | ドメイン妥当性レビューパス（`label="Detector (Domain Review)"`）の`tools=[...]`に`READ_VERIFIED_FACT_TOOL`・`READ_DELIVERABLE_FILE_TOOL`・`WRITE_AGREEMENT_TOOL`・`VERIFY_WHITEBOARD_EXCERPT_TOOL`・`WRITE_ISSUE_TOOL`・`READ_ISSUES_TOOL`を追加（`THINK_TOOL`は既存のまま維持）。あわせてプロンプトに、BL-096の`write_issue`/`read_issues`利用手順と、利用可能ツール一覧＋BL-093のthink併用必須ルールの明記を追加（数値監査パスの既存文言に準拠）。 |
+| 影響 | `cela_main.py`（`call_detector`のドメイン妥当性レビューパスの`tools=[...]`・プロンプト）。既存`tests/test_bl093_think_tool_scratchpad.py::test_call_detector_domain_review_pass_also_wires_think_tool`が、ツールリスト増加によりTHINK_TOOLの検出ウィンドウ（label出現位置+200文字）を超えてしまい失敗したため、ウィンドウを+400文字に拡張して修正（挙動変更ではなく、ツール追加に伴う正当なテスト更新）。関連クラスタ109件Pass。 |
+| 関連 BL | [BL-096](back_log/issue_backlog.md#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設) |
+
+---
+
 ## 未決定（pending）
 
 ### D-00N: （題名）
