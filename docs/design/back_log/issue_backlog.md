@@ -3349,7 +3349,7 @@ Detectorには特に「Agentの数値がゴール文の直接記載か、AI自�
 
 **対応:** `_query_AI_live`内に切り替えフラグ`_USE_STICKY_SESSION_ROUTING`（[cela_main.py:2456](../../../cela_main.py#L2456)付近）を新設。`True`の場合は`provider.order`を送らず、`extra_body["session_id"] = f"{_CURRENT_RUN_ID}-{label_lower}"`（run_id＋ノード種別で安定したID）を渡してsticky routingを有効化。`False`に戻せば元の`provider.order`固定（novita/parasail限定・fallback禁止）に即座に復元できる。
 
-**完了条件:** `python -m py_compile cela_main.py`合格、`tests/test_bl093_think_tool_scratchpad.py`/`tests/test_bl093_d074_auto_reasoning_enforcement.py`/`tests/test_r3_smoke.py`/`tests/test_bl104_project_plan_toc_and_prompt_reorder.py`計135件Pass。実LLM再ドライランでの速度・キャッシュヒット率への効果確認はユーザーが実施予定（速度低下が許容範囲かも含めて実測待ち）。
+**完了条件:** `python -m py_compile cela_main.py`合格、`tests/test_bl093_think_tool_scratchpad.py`/`tests/test_bl093_d074_auto_reasoning_enforcement.py`/`tests/test_r3_smoke.py`/`tests/test_bl104_project_plan_toc_and_prompt_reorder.py`計135件Pass。実LLM再ドライランでユーザーが「確かにキャッシュヒットは改善しました」と効果を確認済み（2026-07-27）。速度面の悪化報告なし。
 
 ---
 
