@@ -93,7 +93,7 @@ def check_decision_reasons(problems: list[str]) -> None:
 
 
 def check_bl_table_vs_sections(problems: list[str]) -> None:
-    path = DOCS_DIR / "issue_backlog.md"
+    path = DOCS_DIR / "back_log" / "issue_backlog.md"
     text = path.read_text(encoding="utf-8")
     table_ids = set(BL_TABLE_ROW_RE.findall(text))
     section_ids = set(BL_HEADING_RE.findall(text))

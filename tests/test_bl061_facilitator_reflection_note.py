@@ -47,6 +47,10 @@ def test_bl061_reflection_node_stores_note_in_state(monkeypatch):
     })
     monkeypatch.setattr(cela_main, "db_append_decision", lambda *a, **k: None)
     monkeypatch.setattr(cela_main, "get_active_conn", lambda: None)
+    # [BL-096] reflection_nodeはescalated issueの有無を確認するため_get_escalated_issuesを
+    # 呼ぶようになった。このテストはDB接続なしでreflection_nodeの状態遷移ロジックのみを
+    # 検証する目的のため、DBアクセスをモックで無効化する。
+    monkeypatch.setattr(cela_main, "_get_escalated_issues", lambda conn, run_id: [])
     # reflection_nodeはグローバルconfig（if __name__=="__main__"ブロック内でのみ設定される）
     # を参照するため、モジュールとして直接呼び出すテストではここで用意してやる必要がある。
     monkeypatch.setattr(cela_main, "config", {}, raising=False)

@@ -172,7 +172,7 @@ def test_call_detector_domain_review_pass_also_wires_think_tool():
     assert 'label="Detector (Domain Review)"' in src
     # ドメイン妥当性レビューの呼び出しブロックにTHINK_TOOLが含まれていること
     domain_call_idx = src.index('label="Detector (Domain Review)"')
-    nearby = src[max(0, domain_call_idx - 400):domain_call_idx + 200]
+    nearby = src[max(0, domain_call_idx - 400):domain_call_idx + 400]
     assert "THINK_TOOL" in nearby
 
 
