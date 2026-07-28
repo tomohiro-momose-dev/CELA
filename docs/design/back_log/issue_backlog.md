@@ -3495,6 +3495,8 @@ Exploreエージェントによる調査の生ログは`docs/design/back_log/BL-
 
 **完了条件:** ユーザーとの相談の上、対応方針を確定し実装した後、`python -m py_compile`合格・既存テストPass・重複箇所が実際に削減されたことをgrep等で確認する。
 
+Exploreエージェントによる調査の生ログは`docs/design/back_log/BL-115/BL115_investigation.md`に保存。
+
 ---
 
 ### BL-116: プロンプトへのバス交通シナリオ特化例の埋め込み、および冗長な指示文・ゴミ文字混入
