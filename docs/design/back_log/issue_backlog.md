@@ -145,6 +145,9 @@
 | BL-111 | 高 | `cela_main.py`（`_query_AI_live`の自動reasoningダイジェスト構築部） | BL-108/BL-110適用後もキャッシュヒットが改善しないため、ユーザーが`_query_AI_live`のコードをGeminiに提示し第三者レビューを依頼。Geminiの指摘: BL-108は「全iter分を1メッセージに再結合→古いdigest削除→末尾に付け直す」方式だったため、新規tool呼び出しメッセージが必ずdigestの手前に追加され、次のリクエストではdigestの旧位置に別のメッセージが来ることになり、そこから後ろ全体が毎iterプレフィックス不一致になっていた。プレフィックスキャッシュの絶対条件「一度追加したメッセージは二度と変更・削除・移動しない」を満たせていなかったと判明。実際にコードをトレースし、iter2向け・iter3向けリクエストを比較して指摘の正しさを確認。**実装完了（`done`）**: 全iter分の再結合をやめ、iterationごとの生reasoningを独立した新規systemメッセージとして末尾に追記するだけ（真のappend-only）に変更。`auto_reasoning_history`/`auto_reasoning_digest_message`は不要になり削除。新規`test_bl111_consecutive_requests_are_a_strict_prefix_of_each_other`で「iterNのリクエストがiterN+1のリクエストの厳密な先頭部分になっている」というプレフィックスキャッシュの必須条件そのものを回帰テスト化。関連クラスタ131件Pass、`python -m py_compile`合格。実LLM再ドライランでの効果確認は次回待ち。 | P1 |
 | BL-112 | 中 | `cela_main.py`（User AI/`call_facilitator`相当のissue登録ロジック、および`Detector`とUser AIの`write_issue`呼び出し箇所） | `log/2026-07-28/1420`のドライランレビュー中に発見。Detectorがtask_1_1の成果物レビューで3件のissueを作成済み（`task_1_1_折り返し時間3分`、`task_1_1_実効輸送力の矛盾`、ほか）にもかかわらず、User AIが後続の承認ステップで同一の懸念点を`task_2_2_折り返し時間の現実性`・`task_2_2_実効輸送力と車両定員の矛盾`等、別のtopic名で重複登録していた。ログ上、User AIは思考ログで「Let me read the current issues first to see what's already logged」と述べていたが、実際には`read_issues`を呼ばずにそのまま`write_issue`（CREATE）を3件連続実行しており、直前の`read_issues(list_all=true)`呼び出しはtask_1_1着手前（まだissueが0件の時点）のものだった。「確認する」という意図と実際のツール呼び出しが乖離しており、後続タスクが2つのtopicを別問題として扱うと同一論点への対応が分断されるリスクがある。**状態**: `open`（コード修正は未着手、まず記録のみ）。 | P3 |
 | BL-113 | 高 | `cela_main.py`（THINK_TOOLスキーマの`description`・`summary`パラメータの`description`） | BL-112起票の流れでユーザーからプロンプト全体の整理相談を受け、3体のExploreエージェントで全ノードのプロンプト構成・ツールschema重複・ドメイン特化表現を並行調査。BL-110で他14ツールのスキーマ`description`は`"[BL-110] Optionally call \`think\`...it is no longer required..."`へ正しく書き換えたが、**THINK_TOOL自身のスキーマだけ書き換え漏れ**になっており、撤廃したはずの`"MANDATORY RULE (enforced mechanically, not a suggestion): EVERY SINGLE response...MUST include a think call...NONE of that response's tool calls...will be executed"`という文言がそのまま残っていた（実装と矛盾する誤情報）。加えて`summary`パラメータの説明にも、BL-108/BL-111で撤廃済みの旧window方式（`raw reasoning window`、`ages out`）を前提にした表現が残っていた。ユーザーはAskUserQuestionで、他の3件（`call_orchestrator`の静的/動的順序バグ、バス特化表現の一般化、重複ボイラープレート統合）はスコープ外とし、この書き換え漏れ修正のみを最優先で対応する方針を選択。**実装完了（`done`）**: `description`をBL-110と同トーンの「thinkは任意、生reasoningはthink呼び出しの有無に関わらずネイティブに自動蓄積される（BL-108/BL-111）」という実態に即した説明に書き換え、`summary`パラメータの説明からも旧window前提の表現を削除。`"required": ["action", "summary"]`は変更なし。THINK_TOOLのdescription文字列を直接assertするテストが無いことを確認済み。`python -m py_compile`合格、`tests/test_bl093_d074_auto_reasoning_enforcement.py`/`tests/test_bl093_think_tool_scratchpad.py`/`tests/test_r3_smoke.py`計97件Pass。実LLM再ドライランでの効果確認は次回待ち。 | P1 |
+| BL-114 | 中 | `cela_main.py`（`call_orchestrator`のプロンプト構築部、4406-4427行目付近） | プロンプト整理のための3体のExploreエージェント調査（BL-113と同じ調査、カテゴリA: システム/ユーザープロンプトの使い分け）で発見。他の大半のノード（`call_task_planner`/`call_detector`/`call_resource_arbiter`/`call_reflection`/`call_facilitator`/`call_integrator`/`call_reviewer`/`generate_user_utterance`/`call_task_plan_reviewer`）はBL-104のコメントで「静的な指示文を先頭、動的なコンテキスト（goal/DB/履歴）を末尾」というプレフィックスキャッシュ最適化方針を明記し、実際にその順序で実装されている。しかし`call_orchestrator`だけは、コメント（4406行目）で同じ方針を謳っているにもかかわらず、実装では動的な`goal_context`が先頭（4412行目）に置かれ、静的な役割説明（4414-4427行目）がその後に続くという**逆順**になっている。コメントと実装が矛盾しており、`call_orchestrator`呼び出し時のプレフィックスキャッシュ効果が他ノードより低くなっている可能性がある。**状態**: `open`（コード修正は未着手、記録のみ）。 | P2 |
+| BL-115 | 低 | `cela_main.py`（各ノードプロンプト内のボイラープレート説明文、`call_decision_extractor`の未使用`prompt_old`ブロック） | 同調査（カテゴリB: ツールschemaとプロンプト本文の重複）で発見。BL-113で修正したTHINK_TOOLスキーマ以外にも、ノードプロンプト側に以下の重複ボイラープレートが分散している: (1)「think任意呼び出し」説明が10ノード（各ツールschemaの説明と実質重複）、(2)「read_verified_fact/read_deliverable_fileによるフェーズ間同期」説明が8箇所、(3)「同じ検証・計算を繰り返さない（2回程度で十分）」注意書きが6箇所、(4)「python_replで検算・暗算禁止」注意書きが約8箇所、(5)「BL-093: thinkツールで検討過程を残せる」という価値説明の段落が10箇所、いずれもほぼ同一文言。加えて`call_decision_extractor`（5232行目）には、実際には`query_AI`へ渡されず使われていない**デッドコードブロック`prompt_old`**（5344-5403行目、約60行）が存在し、実際に使われる`common_rules`とほぼ同内容を重複保持している。`call_expert`は同一関数内で`system_prompt`と`light_system_prompt`が同じ規則を2重に持ち、`call_detector`も1回の呼び出しで2つの大きいプロンプトが同じ注意書きを重複して持つ。**状態**: `open`（対応方針: 共通ヘルパー関数化・定数文字列の一元管理・デッドコード削除等が考えられるが、実装は次回スコープ確定後）。 | P3 |
+| BL-116 | 低 | `cela_main.py`（`call_task_plan_reviewer`/`call_task_planner`/`call_orchestrator`/`call_expert`/`call_detector`/`call_decision_extractor`/`generate_user_utterance`のプロンプト文字列） | 同調査（カテゴリC: ドメイン特化表現・冗長性）で発見。CELAのノードプロンプトは本来ドメイン非依存であるべきだが、現在のバス交通シナリオでのドライラン実績から生まれた具体例が複数箇所に埋め込まれている。最も深刻なのは`call_task_plan_reviewer`（6558-6567行目）で、過去の実インシデントを「山間部2km≒ルート全体13.33km」「山間部12km＝ルート全体の15%」「総ルート長80km」という**具体的な数値付きの体験談**としてそのまま汎用レビュー基準に埋め込んでおり、今後どんな目標のドライランでもルート長・パーセンテージ的な推論へ誘導しかねない。他にも`call_task_planner`（車両台数・初期費用の内訳を例に使った分解ルール）、`call_orchestrator`（専門家タイトル例が「地域公共交通の需要予測専門家」等に限定）、`call_expert`/`call_detector`/`generate_user_utterance`（労働基準法・シフト・安全規制等の交通シナリオ前提のチェック項目）、`call_decision_extractor`（「車両は3台体制とする」という決定事例）に同様のドメイン特化例が見られる。加えて、`call_task_planner`（約130行/5,500字）や`call_task_plan_reviewer`（約100行/5,000字、うち上記の実例に約10行）等での冗長な指示文、`generate_user_utterance`内のf-string由来の`\n"`ゴミ文字混入（5986-6004、6085-6090行目付近）も見つかっている。**状態**: `open`（対応方針: 具体例を抽象化した汎用例に置き換える、体験談ベースの説明を一般化されたルールに要約する等が考えられるが、実装は次回スコープ確定後）。 | P3 |
 
 ---
 
@@ -3450,6 +3453,72 @@ Detectorには特に「Agentの数値がゴール文の直接記載か、AI自�
 **対応:** THINK_TOOLの`description`（[cela_main.py:958-967](../../../cela_main.py#L958-L967)）から、BL-093のMANDATORY強制文言と旧window方式の説明を削除し、他14ツールと同じトーンで「thinkは任意（呼べばsummary等が記録される）」「生reasoningはthink呼び出しの有無に関わらずネイティブに自動蓄積される（BL-108/BL-111）」という実態に即した説明へ書き換えた。あわせて`summary`パラメータの説明文（[cela_main.py:982-987](../../../cela_main.py#L982-L987)付近）からも「ages out of the raw reasoning window」という旧window前提の表現を削除した。`"required": ["action", "summary"]`（thinkコール自体のパラメータ必須指定）は変更していない。
 
 **完了条件:** `python -m py_compile cela_main.py`合格。`tests/test_bl093_d074_auto_reasoning_enforcement.py`・`tests/test_bl093_think_tool_scratchpad.py`にTHINK_TOOLのdescription文字列を直接assertするテストが無いことをgrepで確認済み（該当なし）。`tests/test_bl093_d074_auto_reasoning_enforcement.py`/`tests/test_bl093_think_tool_scratchpad.py`/`tests/test_r3_smoke.py`計97件Pass。実LLM再ドライランでの効果確認は次回待ち。
+
+---
+
+### BL-114: `call_orchestrator`の静的/動的順序が、コード自身のBL-104コメントと矛盾している
+
+**状態:** `open`
+
+**経緯:** BL-113と同じプロンプト整理調査（カテゴリA: システム/ユーザープロンプトの使い分け）のExploreエージェントが発見。他の大半のノード（`call_task_planner`/`call_detector`/`call_resource_arbiter`/`call_reflection`/`call_facilitator`/`call_integrator`/`call_reviewer`/`generate_user_utterance`/`call_task_plan_reviewer`）は、BL-104のコメントで「静的な指示文を先頭、動的なコンテキスト（goal/DB/履歴）を末尾に置く」というプレフィックスキャッシュ最適化方針を明記し、実装もその順序に沿っている。しかし`call_orchestrator`（[cela_main.py:4381](../../../cela_main.py#L4381)以降）だけは、同じ方針をコメント（4406行目）で謳っているにもかかわらず、実装では動的な`goal_context`が先頭（4412行目）に置かれ、静的な役割説明（4414-4427行目）がその後に続くという逆順になっている。
+
+**影響:** `goal_context`はゴールやタスクが変わるたびに変化しうる動的内容のため、それを先頭に置くと、後続の静的テキストを含めた全体が毎回異なるプレフィックスになり、プレフィックスキャッシュの効果を他ノードより損なっている可能性がある。実測（cache hit率への影響）は未確認。
+
+**対応（未着手）:** `goal_context`の構築位置を静的な役割説明の後ろへ移動し、他ノードと同じ静的先頭/動的末尾の順序に揃える。
+
+**完了条件:** 実装後`python -m py_compile cela_main.py`合格、既存テストPass。実LLM再ドライランでのcall_orchestrator呼び出し時のキャッシュヒット率変化を確認できれば尚良い（必須ではない）。
+
+---
+
+### BL-115: ノードプロンプト間の重複ボイラープレート、および`call_decision_extractor`の未使用デッドコード（`prompt_old`）
+
+**状態:** `open`
+
+**経緯:** BL-113と同じ調査（カテゴリB: ツールschemaとプロンプト本文の重複）のExploreエージェントが発見。BL-113で修正したTHINK_TOOLスキーマ以外にも、複数ノードのプロンプト文字列に以下のような重複ボイラープレートが分散している：
+
+1. 「think任意呼び出し」説明（各ツールschemaの`description`と実質重複）— 10ノードに分散
+2. 「read_verified_fact/read_deliverable_fileによるフェーズ間同期」説明 — 8箇所
+3. 「同じ検証・計算を繰り返さない（2回程度で十分）」注意書き — 6箇所（微妙に異なる言い回しの変種2種を含む）
+4. 「python_replで検算・暗算禁止」注意書き — 約8箇所
+5. 「BL-093: thinkツールで検討過程を残せる」という価値説明の段落 — 10箇所（THINK_TOOL自身の説明と重複）
+
+加えて、`call_decision_extractor`（[cela_main.py:5232](../../../cela_main.py#L5232)）には、実際には`query_AI`へ渡されず使われていない**デッドコードブロック`prompt_old`**（5344-5403行目、約60行）が存在し、実際に使われる`common_rules`とほぼ同内容を重複保持している。`call_expert`は同一関数内で`system_prompt`と`light_system_prompt`が同じ規則を2重に持ち、`call_detector`も1回の呼び出しで`domain_prompt`と`prompt`という2つの大きいプロンプトが同じ注意書きを重複して持つ。
+
+**影響:** 文言修正時（BL-110のような方針変更）に修正漏れが起きやすい（実際にBL-113がその一例）。プロンプト全体のサイズも不必要に肥大化している。
+
+**対応（未着手・要検討）:** 想定される対策candidate：
+1. 共通の注意書き文字列を定数（モジュールレベルの文字列変数）として一元管理し、各ノードから参照する形にする。
+2. `call_decision_extractor`の未使用`prompt_old`ブロックを削除する。
+3. `call_expert`の`system_prompt`/`light_system_prompt`、`call_detector`の`domain_prompt`/`prompt`について、共通部分をヘルパー関数に切り出す。
+
+**完了条件:** ユーザーとの相談の上、対応方針を確定し実装した後、`python -m py_compile`合格・既存テストPass・重複箇所が実際に削減されたことをgrep等で確認する。
+
+---
+
+### BL-116: プロンプトへのバス交通シナリオ特化例の埋め込み、および冗長な指示文・ゴミ文字混入
+
+**状態:** `open`
+
+**経緯:** BL-113と同じ調査（カテゴリC: ドメイン特化表現・冗長性）のExploreエージェントが発見。CELAのノードプロンプトは本来ドメイン非依存であるべきだが、現在のバス交通シナリオでのドライラン実績から生まれた具体例が複数箇所に埋め込まれている。
+
+最も深刻なのは`call_task_plan_reviewer`（[cela_main.py:6558-6567](../../../cela_main.py#L6558-L6567)）で、過去の実インシデントを「山間部2km≒ルート全体13.33km」「山間部12km＝ルート全体の15%」「総ルート長80km」という具体的な数値付きの体験談としてそのまま汎用レビュー基準に埋め込んでおり、今後どんな目標のドライランでもルート長・パーセンテージ的な推論へ誘導しかねない。他にも以下のドメイン特化例が見られる：
+
+- `call_task_planner`（4227-4234、4251-4258行目）: 車両台数・初期費用の内訳を例に使った分解ルール
+- `call_orchestrator`（4416行目）: 専門家タイトル例が「地域公共交通の需要予測専門家」「自動運転車両の安全基準アナリスト」に限定
+- `call_expert`（4504-4505、4734行目）: 高齢者の移動手段・車両サイズを例にした前提説明
+- `call_detector`（4883-4884、4891-4894、4948-4950行目）: 労働基準法上のシフト・休憩要件、車両台数・人数配置等を例にしたドメイン妥当性チェック項目
+- `call_decision_extractor`（5366、5409行目、および未使用の`prompt_old`側にも重複）: 「車両は3台体制とする」という決定事例
+- `generate_user_utterance`（6049-6050、6053行目）: `call_expert`/`call_detector`と同様の労働基準法・シフト系チェック項目
+
+冗長性・その他の問題として：
+- `call_task_planner`のプロンプト本体が約130行/5,500字、`call_task_plan_reviewer`が約100行/5,000字（うち上記の実例埋め込みだけで約10行）と肥大化している。
+- `generate_user_utterance`にf-string由来の`\n"`ゴミ文字が複数箇所（5986-6004、6085-6090行目付近）混入しており、LLMへ意味のないノイズ文字として送られている。
+
+**影響:** ドメイン非依存であるべきフレームワークが、特定シナリオの語彙・数値例に暗黙に誘導される可能性がある。将来別ドメインの目標でドライランする際、この誘導が悪影響を及ぼすかは未検証。
+
+**対応（未着手・要検討）:** 具体例を抽象化した汎用例（例: 「変数名」「関係者役割」等の一般名詞）に置き換える、体験談ベースの説明を一般化されたルール（例: 「実測値の端数と概算値が食い違う場合は、その差の原因を明記する」）に要約する、f-string由来のゴミ文字を除去する、といった対応が考えられる。
+
+**完了条件:** ユーザーとの相談の上、対応方針を確定し実装した後、`python -m py_compile`合格・既存テストPass。可能であれば、バス以外の別ドメインのゴールで簡易ドライランを行い、汎用例への置き換え後もモデルの理解度・出力品質が落ちていないことを確認する。
 
 ---
 
