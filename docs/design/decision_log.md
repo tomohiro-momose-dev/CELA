@@ -1333,6 +1333,20 @@
 
 ---
 
+### D-092: BL-108の「全iter分を1メッセージに再結合し末尾へ付け直す」方式を、真の単調増加（append-only）へ再修正する（BL-111）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-28 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（BL-108/BL-110適用後もキャッシュヒットが改善しないため`_query_AI_live`のコードをGeminiに提示し第三者レビューを依頼、その調査結果と修正コード案をそのまま共有し「検討してください」と実装判断を委ねた） / Claude Sonnet 5（Geminiの指摘内容をコード上で実際にトレースして検証し、正しいと判断した上で実装。あわせてユーザーがIDEで直接編集していた`_USE_STICKY_SESSION_ROUTING`等のチューニング箇所を尊重し変更しなかった） |
+| **決定理由** | Gemini（Google）へ`_query_AI_live`全文を提示した第三者レビューにより、BL-108の実装が「新規のtool呼び出しメッセージ→古いdigestを削除→全iter分を再結合した新digestを末尾に付け直す」という手順を毎iter行っており、これによりiterNのリクエストでdigestが占めていた位置（＝末尾）に、iterN+1のリクエストでは新規tool呼び出しメッセージが来ることになり、そこから後ろ全体（新digest含む、本来最もキャッシュさせたかった蓄積履歴部分）が毎iterプレフィックス不一致になる、という指摘を受けた。プレフィックスキャッシュが機能する絶対条件は「一度追加したメッセージは二度と変更・削除・移動しない」ことであり、BL-108は「常に末尾に置く」ことはできていたが「一度置いたら動かさない」ことができていなかった。実際にiter2向けリクエスト`[system, user, assistant1, tool1, digest_1]`とiter3向けリクエスト`[system, user, assistant1, tool1, assistant2, tool2, digest_2]`をコード上でトレースし、共通する厳密なプレフィックスが先頭4メッセージまでしかないことを確認し、Gemini指摘が正しいと判断した。 |
+| 決定内容 | 全iter分を1つのdigestメッセージに再結合するのをやめ、「そのiterationの生reasoningだけ」を独立した新規systemメッセージとして末尾に追記し、以後は一切変更・削除・移動しない方式（真のappend-only）に変更する（`_query_AI_live`、`cela_main.py`）。`auto_reasoning_history`/`auto_reasoning_digest_message`の変数・追跡ロジックは不要になるため削除する。 |
+| 影響 | `cela_main.py`（`_query_AI_live`の自動reasoningダイジェスト構築部）。`tests/test_bl093_d074_auto_reasoning_enforcement.py`の`test_auto_reasoning_digest_content_captured_via_create_kwargs`を新構造に合わせて修正し、新規`test_bl111_consecutive_requests_are_a_strict_prefix_of_each_other`で「iterNへのリクエストがiterN+1へのリクエストの厳密な先頭部分になっている」というプレフィックスキャッシュの必須条件そのものを直接検証する回帰テストを追加した（BL-108時点でこのテストが存在すれば即座に発覚したはずのバグであり、今後の再発防止として機能する）。`tests/test_bl093_think_tool_scratchpad.py`の`test_bl109_reasoning_effort_level_preserved_for_reverted_nodes`も、ユーザーがIDEで`reasoning_effort_level`のラベル分岐・値を直接手動チューニング中だったため、固定文字列一致ではなく構造的な検証（`orchestrator`/`facilitator`が`elif tools is not None`フォールバックより前で明示的にマッチしていること）に変更し、ユーザーの変更内容自体には一切手を加えなかった。`python -m py_compile`合格、関連クラスタ131件Pass、フルオフラインスイート実行中。実LLM再ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-111](back_log/issue_backlog.md#bl-111-bl-108の全iter分を1メッセージに再結合し末尾へ付け直す方式が新規tool呼び出しメッセージの追加によりdigestの相対位置が毎iterずれる同型の不具合を残しており真の単調増加append-onlyへ再修正)、[BL-108](back_log/issue_backlog.md#bl-108-自動reasoningダイジェストの直近n-iterは生それより古いのは要約窓方式が要約への切り替わり自体で毎iter不安定になっていたため要約を廃止し単純な累積方式へ全面置換)、[BL-106](back_log/issue_backlog.md#bl-106-_query_ai_liveの自動reasoningダイジェストがtool呼び出し履歴より手前index-1に居座り毎iterプレフィックスキャッシュを破壊していた)、BL-093 |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
