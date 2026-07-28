@@ -3524,6 +3524,8 @@ Exploreエージェントによる調査の生ログは`docs/design/back_log/BL-
 
 **完了条件:** ユーザーとの相談の上、対応方針を確定し実装した後、`python -m py_compile`合格・既存テストPass。可能であれば、バス以外の別ドメインのゴールで簡易ドライランを行い、汎用例への置き換え後もモデルの理解度・出力品質が落ちていないことを確認する。
 
+Exploreエージェントによる調査の生ログは`docs/design/back_log/BL-116/BL116_investigation.md`に保存。
+
 ---
 
 | 日付 | 内容 |
