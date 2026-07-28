@@ -1347,7 +1347,7 @@
 
 ---
 
-### D-093: THINK_TOOLスキーマの`description`に残っていたBL-093時代のMANDATORY強制文言・旧window方式の説明を、実装（BL-108/BL-110/BL-111）の実態に合わせて書き換える（BL-112）
+### D-093: THINK_TOOLスキーマの`description`に残っていたBL-093時代のMANDATORY強制文言・旧window方式の説明を、実装（BL-108/BL-110/BL-111）の実態に合わせて書き換える（BL-113）
 
 | 項目 | 内容 |
 |------|------|
