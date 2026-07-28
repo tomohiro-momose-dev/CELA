@@ -3468,6 +3468,8 @@ Detectorには特に「Agentの数値がゴール文の直接記載か、AI自�
 
 **完了条件:** 実装後`python -m py_compile cela_main.py`合格、既存テストPass。実LLM再ドライランでのcall_orchestrator呼び出し時のキャッシュヒット率変化を確認できれば尚良い（必須ではない）。
 
+Exploreエージェントによる調査の生ログは`docs/design/back_log/BL-114/BL114_investigation.md`に保存。
+
 ---
 
 ### BL-115: ノードプロンプト間の重複ボイラープレート、および`call_decision_extractor`の未使用デッドコード（`prompt_old`）
