@@ -148,6 +148,7 @@
 | BL-114 | 中 | `cela_main.py`（`call_orchestrator`のプロンプト構築部、4406-4427行目付近） | プロンプト整理のための3体のExploreエージェント調査（BL-113と同じ調査、カテゴリA: システム/ユーザープロンプトの使い分け）で発見。他の大半のノード（`call_task_planner`/`call_detector`/`call_resource_arbiter`/`call_reflection`/`call_facilitator`/`call_integrator`/`call_reviewer`/`generate_user_utterance`/`call_task_plan_reviewer`）はBL-104のコメントで「静的な指示文を先頭、動的なコンテキスト（goal/DB/履歴）を末尾」というプレフィックスキャッシュ最適化方針を明記し、実際にその順序で実装されている。しかし`call_orchestrator`だけは、コメント（4406行目）で同じ方針を謳っているにもかかわらず、実装では動的な`goal_context`が先頭（4412行目）に置かれ、静的な役割説明（4414-4427行目）がその後に続くという**逆順**になっている。コメントと実装が矛盾しており、`call_orchestrator`呼び出し時のプレフィックスキャッシュ効果が他ノードより低くなっている可能性がある。**状態**: `open`（コード修正は未着手、記録のみ）。 | P2 |
 | BL-115 | 低 | `cela_main.py`（各ノードプロンプト内のボイラープレート説明文、`call_decision_extractor`の未使用`prompt_old`ブロック） | 同調査（カテゴリB: ツールschemaとプロンプト本文の重複）で発見。BL-113で修正したTHINK_TOOLスキーマ以外にも、ノードプロンプト側に以下の重複ボイラープレートが分散している: (1)「think任意呼び出し」説明が10ノード（各ツールschemaの説明と実質重複）、(2)「read_verified_fact/read_deliverable_fileによるフェーズ間同期」説明が8箇所、(3)「同じ検証・計算を繰り返さない（2回程度で十分）」注意書きが6箇所、(4)「python_replで検算・暗算禁止」注意書きが約8箇所、(5)「BL-093: thinkツールで検討過程を残せる」という価値説明の段落が10箇所、いずれもほぼ同一文言。加えて`call_decision_extractor`（5232行目）には、実際には`query_AI`へ渡されず使われていない**デッドコードブロック`prompt_old`**（5344-5403行目、約60行）が存在し、実際に使われる`common_rules`とほぼ同内容を重複保持している。`call_expert`は同一関数内で`system_prompt`と`light_system_prompt`が同じ規則を2重に持ち、`call_detector`も1回の呼び出しで2つの大きいプロンプトが同じ注意書きを重複して持つ。**状態**: `open`（対応方針: 共通ヘルパー関数化・定数文字列の一元管理・デッドコード削除等が考えられるが、実装は次回スコープ確定後）。 | P3 |
 | BL-116 | 低 | `cela_main.py`（`call_task_plan_reviewer`/`call_task_planner`/`call_orchestrator`/`call_expert`/`call_detector`/`call_decision_extractor`/`generate_user_utterance`のプロンプト文字列） | 同調査（カテゴリC: ドメイン特化表現・冗長性）で発見。CELAのノードプロンプトは本来ドメイン非依存であるべきだが、現在のバス交通シナリオでのドライラン実績から生まれた具体例が複数箇所に埋め込まれている。最も深刻なのは`call_task_plan_reviewer`（6558-6567行目）で、過去の実インシデントを「山間部2km≒ルート全体13.33km」「山間部12km＝ルート全体の15%」「総ルート長80km」という**具体的な数値付きの体験談**としてそのまま汎用レビュー基準に埋め込んでおり、今後どんな目標のドライランでもルート長・パーセンテージ的な推論へ誘導しかねない。他にも`call_task_planner`（車両台数・初期費用の内訳を例に使った分解ルール）、`call_orchestrator`（専門家タイトル例が「地域公共交通の需要予測専門家」等に限定）、`call_expert`/`call_detector`/`generate_user_utterance`（労働基準法・シフト・安全規制等の交通シナリオ前提のチェック項目）、`call_decision_extractor`（「車両は3台体制とする」という決定事例）に同様のドメイン特化例が見られる。加えて、`call_task_planner`（約130行/5,500字）や`call_task_plan_reviewer`（約100行/5,000字、うち上記の実例に約10行）等での冗長な指示文、`generate_user_utterance`内のf-string由来の`\n"`ゴミ文字混入（5986-6004、6085-6090行目付近）も見つかっている。**状態**: `open`（対応方針: 具体例を抽象化した汎用例に置き換える、体験談ベースの説明を一般化されたルールに要約する等が考えられるが、実装は次回スコープ確定後）。 | P3 |
+| BL-117 | 低 | `cela_main.py`（全13ノードのプロンプト文字列。特にGoal Essence Analyst/Task Planner/Task Plan Reviewer/Orchestrator/Expert/Detector/Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer/User AIの各ノード） | ユーザーがGeminiに依頼して作成した「各ノードに適したドメイン非依存の思考フレームワーク」提案表（例: Task Planner=WBS+MECE、Expert=ReAct+仮説検証サイクル、Detector=悪魔の代弁者+ファクトチェック等）の評価を依頼された。BL-116（バス特化例の一般化）の受け皿になりうる提案のため、各ノードの実装（docstring・実際のプロンプト本文）と突き合わせて検証した。結果、13ノード中9ノード（Task Planner/Task Plan Reviewer/Orchestrator/Expert/Detector/Decision Extractor/Reflection/Integrator/Reviewer）は提案フレームワークが実装と高い整合性を持ち採用可（◎）と判定。残り4ノード（Goal Essence Analyst/Resource Arbiter/Facilitator/User AI）は部分的に妥当だがギャップがある（△）と判定: Goal Essence Analystは「本質の言語化」観点はデザイン思考+5 Whysと合うが「大まかな実現可能性チェック（python_repl概算）」という観点1が提案に含まれていない。Resource Arbiterのトレードオフ分析は良い一致だがMoSCoW（Must/Should/Could/Won't）は現状未実装で導入するなら実質的な出力形式変更が必要。Facilitatorのリフレーミングは良い一致だがORIDモデルは現状未実装の具体的4段階質問技法で導入するなら実質的な設計が必要。User AIはOODAループという軍事由来サイクル名を書くだけでは効果が薄い懸念があり「発注者統制思考」の方が実務的に効きそう。全体所感として、フレームワーク名を書くだけの「ラベル貼り」に終わらせず具体的な手順・チェックリストまで落とし込む必要があること、BL-116で問題視した冗長性と衝突しないよう1ノードにつき主軸1つ+補助1つ程度に抑えるべきことを付記。ユーザーがAskUserQuestionで「評価のみで一旦区切り、実装は別途スコープを決めてから着手する」を選択。**状態**: `open`（評価のみ完了、コード変更は未着手。△評価の4ノードやBL-116との統合方針は次回スコープ確定時に相談）。 | P3 |
 
 ---
 
@@ -3525,6 +3526,34 @@ Exploreエージェントによる調査の生ログは`docs/design/back_log/BL-
 **完了条件:** ユーザーとの相談の上、対応方針を確定し実装した後、`python -m py_compile`合格・既存テストPass。可能であれば、バス以外の別ドメインのゴールで簡易ドライランを行い、汎用例への置き換え後もモデルの理解度・出力品質が落ちていないことを確認する。
 
 Exploreエージェントによる調査の生ログは`docs/design/back_log/BL-116/BL116_investigation.md`に保存。
+
+---
+
+### BL-117: 各ノードへのドメイン非依存な思考フレームワーク導入（Gemini提案の評価）
+
+**状態:** `open`
+
+**経緯:** ユーザーがGeminiに依頼して作成した「各ノードに適したドメイン非依存の思考フレームワーク」提案表を持ち込み、評価を依頼した。提案表は各ノード（Goal Essence Analyst/Task Planner/Task Plan Reviewer/Orchestrator/Expert/Detector/Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer/User AI）に対し、「推奨思考フレームワーク」（例: WBS+MECE、ReAct+仮説検証サイクル、悪魔の代弁者+ファクトチェック等）とその選定目的を提示するもの。BL-116（バス交通シナリオ特化例の一般化）で見つかった「具体例に頼った説明」を、名前の付いた抽象的な思考の型に置き換えることで解決しうるアプローチであり、BL-116と自然に接続する。
+
+`cela_main.py`の各ノードの実装（docstring・実際のプロンプト本文）と突き合わせて検証した結果:
+
+- **◎（実装とよく整合しそのまま採用可、9ノード）**: Task Planner（WBS+MECE、4183-4184行目のフェーズ/タスク/依存/owns_variables分解と一致）、Task Plan Reviewer（プレモータム分析+ボトルネック分析、6518-6539行目の4観点実行前ゲートと一致）、Orchestrator（コンピテンシー評価+コンテキスト・アサインメント、4375-4377行目の専門家選定と一致）、Expert（ReAct+仮説検証サイクル、python_replとの短サイクル実行・F-2.6検算ゲートと一致）、Detector（悪魔の代弁者+ファクトチェック、4760-4762行目の2段監査と一致）、Decision Extractor（DST+情報構造化、5228-5230行目のCREATE/UPDATE判定と一致）、Reflection（メタ認知+鳥瞰思考、5566-5567行目のcompleted/stagnant/continuing判定と一致）、Integrator（システム思考+クロス・インスペクション、5775-5777行目のタスク間・フェーズ間矛盾検知と一致）、Reviewer QA（ゼロベース思考+適合性評価、5834-5836行目のゴール適合検品と一致）。
+- **△（部分的に妥当だがギャップあり、4ノード）**:
+  1. Goal Essence Analyst（デザイン思考+5 Whys）: 「本質の言語化」観点には合うが、実装（6358-6384行目）は「大まかな実現可能性チェック（python_replでの概算・オーダー感把握）」という観点1が提案に含まれていない。
+  2. Resource Arbiter（トレードオフ分析+MoSCoW）: トレードオフ分析は良い一致。MoSCoW（Must/Should/Could/Won't）は現状未実装（今は「縮小/多く配分」の二択的指示のみ）で、導入するなら実質的な出力形式・判断軸の変更が必要。
+  3. Facilitator（リフレーミング+ORIDモデル）: リフレーミングは良い一致。ORID（Objective/Reflective/Interpretive/Decisional）は現状未実装の具体的な4段階質問技法で、導入するなら実質的なプロンプト設計が必要。
+  4. User AI（OODAループ+発注者統制思考）: 観察→評価→承認/却下/軌道修正という流れ自体は合っているが、「OODA」という軍事由来サイクル名を書くだけでは効果が薄い懸念があり、「発注者統制思考」の方が実務的に効きそう。
+
+**全体所感（実装時に踏まえるべき懸念）:**
+1. フレームワーク名（「WBS」「ReAct」等）を書くだけの「ラベル貼り」は効果が薄く、各フレームワークが「具体的にどう考えるか」の手順・チェックリストまで落とし込む必要がある。
+2. BL-116で「冗長な指示文」を問題視したばかりのため、1ノードにつき主軸フレームワーク1つ+補助1つ程度に抑え、説明も簡潔にすべき。
+3. △評価の4ノードは他の◎評価ノードより実装の手間がかかる（名前を採用するだけでなく実質的な構造変更が伴うため）。
+
+**対応:** 評価のみ実施。ユーザーがAskUserQuestionで「評価のみで一旦区切り、実装は別途スコープを決めてから着手する」を選択したため、コード変更は行っていない。
+
+**完了条件:** 次回、実装スコープ（BL-116との統合可否、△評価4ノードの設計詳細）が確定した時点で、別途実装・テスト・ドキュメント更新を行う。
+
+Geminiの提案表全文・評価根拠は`docs/design/back_log/BL-117/BL117_investigation.md`に保存。
 
 ---
 
