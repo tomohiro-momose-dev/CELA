@@ -3366,7 +3366,7 @@ Detectorには特に「Agentの数値がゴール文の直接記載か、AI自�
 
 **対応:** `_AUTO_REASONING_VERBATIM_ITERS`の窓管理と`_THINK_REASONING_LOG`からのsummary逆引きロジックを廃止し、`auto_reasoning_history`に蓄積した全iterationの生reasoningを要約せずそのまま`[iter Nの思考(全文)]`として末尾追記し続ける方式に全面置換（[cela_main.py:2788-2798](../../../cela_main.py#L2788-L2798)付近）。BL-106のdigest末尾配置ロジック自体は変更なし。
 
-**完了条件:** `python -m py_compile cela_main.py`合格。既存テスト`test_auto_reasoning_digest_uses_verbatim_for_recent_and_summary_for_older`を`test_auto_reasoning_digest_accumulates_without_summarizing`に改名し窓方式の検証を削除、`test_auto_reasoning_digest_content_captured_via_create_kwargs`をiter1も生reasoningのまま含まれることを確認するアサーションに変更。`tests/test_bl093_think_tool_scratchpad.py`/`tests/test_bl093_d074_auto_reasoning_enforcement.py`/`tests/test_r3_smoke.py`/`tests/test_bl104_project_plan_toc_and_prompt_reorder.py`計135件Pass、フルオフラインスイートも実行中。実LLM再ドライランでの効果確認はユーザー実施予定。プロンプトの絶対サイズが大きくなるトレードオフ（MAX_TOOL_ITER=20まで伸びた場合の総量増加）はユーザー承認済みで許容。
+**完了条件:** `python -m py_compile cela_main.py`合格。既存テスト`test_auto_reasoning_digest_uses_verbatim_for_recent_and_summary_for_older`を`test_auto_reasoning_digest_accumulates_without_summarizing`に改名し窓方式の検証を削除、`test_auto_reasoning_digest_content_captured_via_create_kwargs`をiter1も生reasoningのまま含まれることを確認するアサーションに変更。`tests/test_bl093_think_tool_scratchpad.py`/`tests/test_bl093_d074_auto_reasoning_enforcement.py`/`tests/test_r3_smoke.py`/`tests/test_bl104_project_plan_toc_and_prompt_reorder.py`計135件Pass、フルオフラインスイート（425 passed, 1件は再実行で再現しない一過性の失敗）も完了。実LLM再ドライランでユーザーが「30分平均で45%くらいに回復」と効果を確認済み（2026-07-28）。ただし、キャッシュ割引率（約1/10）とサイズ増加（約3倍）を踏まえた机上試算では、45%というヒット率は損益分岐点（約74%）に届いておらず、$コスト面では旧方式より高くつく可能性がある旨をユーザーに提示済み。実際の$コストはOpenRouter Activityダッシュボードでの実測が必要、現時点では未確認。
 
 ---
 
