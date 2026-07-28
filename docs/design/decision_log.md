@@ -1319,6 +1319,20 @@
 
 ---
 
+### D-091: `_query_AI_live`のthink機械的強制（差し戻し）を撤廃し、thinkは任意呼び出しへ緩和する（BL-110）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-28 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（BL-109の議論を受けて「であるならば、自由なthinkの使用も意味がないですね。というか、今はコンテキストを丸ごと引き継いでいるので、think自体も意味がないか」と機械的強制そのものの必要性を問い直し、私の説明（BL-108のdigestで既に解決済み）を受けて「thikは残して、他ツールとの強制は外してください」と実装範囲を明確に指示） / Claude Sonnet 5（`_query_AI_live`の`delta.reasoning`蓄積がthink呼び出しの有無に無関係であることをコードで確認し提示、強制ロジックの削除と関連プロンプト文言の全面修正を実装） |
+| **決定理由** | BL-093/D-074が`think`ツールを導入した理由は「OpenRouter配下の多くのプロバイダはreasoningトークンをターンをまたいで自動的に引き継がない」ためだったが、`_query_AI_live`（`cela_main.py`）を確認したところ、ネイティブのreasoning（`delta.reasoning`）はthink呼び出しの有無に一切関係なく毎iter無条件で`reasoning_parts_all`へ蓄積されており、BL-108によりこれが要約されずそのままdigestとして次のiterへ引き継がれることが判明した。つまりBL-093/D-074が本来解決しようとした問題は、think呼び出しの有無に関わらず既にBL-108の仕組みで解決済みであり、`think`固有に残る価値は「decided/why/rejected/rejected_whyの構造化」のみで、当初の「さもなくば思考が消える」という強い理由づけに比べ根拠が弱い。一方、機械的強制（差し戻し）自体は、このセッション中に何度も測定した「think未添付差し戻し」（12回、3回、21回...）という実コスト（往復回数・トークン消費）を生み続けていた。ユーザーは`think`ツール自体の価値（decided/why等の構造化）は否定せず、強制（他ツールとのペアリング必須化）のみを問題視し撤廃を指示した。 |
+| 決定内容 | `_query_AI_live`のツールループ内（`cela_main.py`）から、`think`(summary付き)の有無をチェックして違反時にツール呼び出し全体を差し戻す分岐を削除し、`msg.tool_calls`を無条件でdispatchするBL-093以前と同型の構造に戻す。`think`ツール自体・`TOOL_DISPATCH["think"]`・`_think_handler`・BL-108のreasoning自動蓄積（digest）ロジックはすべて維持し、モデルが任意に`think`を呼べば従来通り記録される。あわせて、もう存在しない強制を前提にした案内文を全面修正する：英語ツールスキーマ側の`"[BL-093] MANDATORY: you MUST also call \`think\`..."`（14ツール、byte-identical）を`"[BL-110] Optionally call \`think\`...it is no longer required..."`へ、日本語プロンプト側の「〜を同時に呼ぶことを厳守しろ！think無しでこれらのツールだけを呼ぶと、その応答のツール呼び出しは一切実行されず、丸ごと無駄になります。」（10ノード）を「〜を呼んで検討過程を書き残しても構いません。」へ、それぞれ置換する。 |
+| 影響 | `cela_main.py`（`_query_AI_live`のツール呼び出しdispatchロジック、think関連の英語ツールスキーマ14箇所・日本語プロンプト10箇所）。`tests/test_bl093_d074_auto_reasoning_enforcement.py`の`test_tool_call_without_think_is_rejected_and_not_executed`/`test_standalone_think_without_summary_is_also_rejected`を、差し戻されず実行されることを検証する`test_bl110_tool_call_without_think_now_executes_normally`/`test_bl110_standalone_think_without_summary_still_executes`に置換し、モジュールdocstringもBL-108/BL-110の経緯を反映するよう更新。`python -m py_compile`合格、`tests/test_bl093_think_tool_scratchpad.py`/`tests/test_bl093_d074_auto_reasoning_enforcement.py`/`tests/test_bl104_project_plan_toc_and_prompt_reorder.py`/`tests/test_r3_smoke.py`計130件Pass、フルオフラインスイート実行中。実LLM再ドライランでの効果確認（think差し戻し起因の往復削減・レイテンシ/コスト低減）は次回待ち。 |
+| 関連 BL | [BL-110](back_log/issue_backlog.md#bl-110-_query_ai_liveのthink機械的強制差し戻しを撤廃しthinkは任意呼び出しへ緩和する)、[BL-109](back_log/issue_backlog.md#bl-109-複数ツールを組み合わせて検討する必要のない単発判定抽出4ノードorchestratordecision-extractorreflectionfacilitatorからthink_toolを外しtoolsnoneの単一応答パスへ差し戻す)、[BL-108](back_log/issue_backlog.md#bl-108-自動reasoningダイジェストの直近n-iterは生それより古いのは要約窓方式が要約への切り替わり自体で毎iter不安定になっていたため要約を廃止し単純な累積方式へ全面置換)、BL-093 |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
