@@ -143,6 +143,7 @@
 | BL-109 | 中 | `cela_main.py`（`call_orchestrator`/`call_decision_extractor`/`call_reflection`/`call_facilitator`のtools引数、`_query_AI_live`のreasoning_effort_level判定） | ユーザーがログを見て「Decision Extractorってthinkしかツールを持っていない？」と質問。調査の結果、この4ノードはいずれもDB読み書き不要な単発判定・抽出タスクで、`think`ツールの本来の存在理由（複数iterをまたぐreasoning引き継ぎ）が適用されないと判明。ユーザーへ「メモ帳は要らないのでは」と回答したところ「なるほど、ではthinkしかツールがないノードは抜きましょう」と全4ノードの差し戻しを指示された。**実装完了（`done`）**: 4ノードとも`tools=[THINK_TOOL]`を削除しtools=Noneへ差し戻し、案内文も削除。副次的に、`orchestrator`/`facilitator`は`reasoning_effort_level`を`elif tools is not None`経由でしか得ていなかったため、tools=None化のサイレントな副作用でreasoningが無効化される罠を発見・修正（両ラベルを明示条件へ追加）。`_reset_think_scratchpad()`はBL-103のノード境界マーカーとして機能維持のため削除せず。関連テスト更新、`python -m py_compile`合格、関連クラスタ145件Pass。実LLM再ドライランでの効果確認は次回待ち。 | P2 |
 | BL-110 | 中 | `cela_main.py`（`_query_AI_live`のthink機械的強制ロジック、think関連の英語ツールスキーマ14箇所・日本語プロンプト10箇所の案内文） | BL-109の議論を受け、ユーザーが「であるならば、自由なthinkの使用も意味がないですね。今はコンテキストを丸ごと引き継いでいるので、think自体も意味がないか」とBL-093/D-074の機械的強制そのものを問い直した。調査の結果、ネイティブのreasoning（delta.reasoning）はthink呼び出しの有無に関わらず毎iter無条件で蓄積されており、BL-108によりそのままdigestとして引き継がれるため、think機械的強制が本来解決していた問題（reasoning消失）は既に別経路で解決済みと判明。ユーザーが「thinkは残して、他ツールとの強制は外してください」と指示。**実装完了（`done`）**: `_query_AI_live`から差し戻し分岐を削除しBL-093以前と同型の無条件dispatch構造に戻した（thinkツール自体・TOOL_DISPATCH・digestロジックは維持）。あわせて、もう存在しない強制を前提にした案内文を英語14箇所・日本語10箇所とも全面修正。関連テスト2件を実行される前提へ置換、モジュールdocstring更新。`python -m py_compile`合格、関連クラスタ130件Pass。実LLM再ドライランでの効果確認（think差し戻し起因の往復削減）は次回待ち。 | P2 |
 | BL-111 | 高 | `cela_main.py`（`_query_AI_live`の自動reasoningダイジェスト構築部） | BL-108/BL-110適用後もキャッシュヒットが改善しないため、ユーザーが`_query_AI_live`のコードをGeminiに提示し第三者レビューを依頼。Geminiの指摘: BL-108は「全iter分を1メッセージに再結合→古いdigest削除→末尾に付け直す」方式だったため、新規tool呼び出しメッセージが必ずdigestの手前に追加され、次のリクエストではdigestの旧位置に別のメッセージが来ることになり、そこから後ろ全体が毎iterプレフィックス不一致になっていた。プレフィックスキャッシュの絶対条件「一度追加したメッセージは二度と変更・削除・移動しない」を満たせていなかったと判明。実際にコードをトレースし、iter2向け・iter3向けリクエストを比較して指摘の正しさを確認。**実装完了（`done`）**: 全iter分の再結合をやめ、iterationごとの生reasoningを独立した新規systemメッセージとして末尾に追記するだけ（真のappend-only）に変更。`auto_reasoning_history`/`auto_reasoning_digest_message`は不要になり削除。新規`test_bl111_consecutive_requests_are_a_strict_prefix_of_each_other`で「iterNのリクエストがiterN+1のリクエストの厳密な先頭部分になっている」というプレフィックスキャッシュの必須条件そのものを回帰テスト化。関連クラスタ131件Pass、`python -m py_compile`合格。実LLM再ドライランでの効果確認は次回待ち。 | P1 |
+| BL-112 | 中 | `cela_main.py`（User AI/`call_facilitator`相当のissue登録ロジック、および`Detector`とUser AIの`write_issue`呼び出し箇所） | `log/2026-07-28/1420`のドライランレビュー中に発見。Detectorがtask_1_1の成果物レビューで3件のissueを作成済み（`task_1_1_折り返し時間3分`、`task_1_1_実効輸送力の矛盾`、ほか）にもかかわらず、User AIが後続の承認ステップで同一の懸念点を`task_2_2_折り返し時間の現実性`・`task_2_2_実効輸送力と車両定員の矛盾`等、別のtopic名で重複登録していた。ログ上、User AIは思考ログで「Let me read the current issues first to see what's already logged」と述べていたが、実際には`read_issues`を呼ばずにそのまま`write_issue`（CREATE）を3件連続実行しており、直前の`read_issues(list_all=true)`呼び出しはtask_1_1着手前（まだissueが0件の時点）のものだった。「確認する」という意図と実際のツール呼び出しが乖離しており、後続タスクが2つのtopicを別問題として扱うと同一論点への対応が分断されるリスクがある。**状態**: `open`（コード修正は未着手、まず記録のみ）。 | P3 |
 
 ---
 
@@ -3415,6 +3416,23 @@ Detectorには特に「Agentの数値がゴール文の直接記載か、AI自�
 **対応:** 全iter分を1つのdigestメッセージに再結合するのをやめ、「そのiterationの生reasoningだけ」を独立した新規systemメッセージとして末尾に追記し、以後は一切変更・削除・移動しない方式（真のappend-only）に変更（[cela_main.py:2571-2582](../../../cela_main.py#L2571-L2582)のコメント、[cela_main.py:2755-2762](../../../cela_main.py#L2755-L2762)付近の実装）。`auto_reasoning_history`/`auto_reasoning_digest_message`の変数・追跡ロジックは不要になったため削除。
 
 **完了条件:** `python -m py_compile cela_main.py`合格。`tests/test_bl093_d074_auto_reasoning_enforcement.py`の`test_auto_reasoning_digest_content_captured_via_create_kwargs`を新構造（iterごとに独立したsystemメッセージ）に合わせて修正。新規`test_bl111_consecutive_requests_are_a_strict_prefix_of_each_other`を追加し、「iterNへのリクエストがiterN+1へのリクエストの厳密な先頭部分になっている」というプレフィックスキャッシュの必須条件そのものを直接検証する回帰テスト化した（BL-108時点ではこのテストが書かれていれば即座に発覚したはずのバグ、今後の再発防止）。`tests/test_bl093_think_tool_scratchpad.py`の`test_bl109_reasoning_effort_level_preserved_for_reverted_nodes`も、ユーザーがIDEで直接`reasoning_effort_level`のラベル分岐・値をチューニング中だったため固定文字列一致ではなく構造的な検証に変更。関連クラスタ131件Pass、フルオフラインスイート実行中。実LLM再ドライランでの効果確認は次回待ち。
+
+---
+
+### BL-112: Detectorが起票済みのissueをUser AIが未確認のまま別topic名で重複登録する（`read_issues`の「呼ぶつもり」と実際の呼び出しが乖離）
+
+**状態:** `open`
+
+**経緯:** `log/2026-07-28/1420`（BL-108〜111適用後の初回フレッシュドライラン）のレビュー中にユーザーの依頼で発見。task_1_1の成果物レビューで、Detectorが先に4件のissueを`write_issue`（CREATE）で登録済みだった（`task_1_1_運行時間の矛盾`、`task_1_1_折り返し時間3分`、`task_1_1_実効輸送力の矛盾`、`detector_observation_no_task`）。その後、User AI（`call_facilitator`相当）が成果物を承認する際、自身の思考ログで「Let me read the current issues first to see what's already logged.」と述べたにもかかわらず、実際には`read_issues`を呼ばずにそのまま`write_issue`（CREATE）を3件連続実行し、`task_2_2_折り返し時間の現実性`・`task_2_2_実効輸送力と車両定員の矛盾`・`task_2_2_リース残価率の楽観性`という別topic名で、Detectorが既に登録済みの懸念のうち2件（折り返し時間・実効輸送力）を実質的に重複登録した。User AIが直前に呼んだ`read_issues(list_all=true)`はtask_1_1着手前（まだissueが0件でnot_foundが正常だった時点）のものであり、Detectorの4件が登録された後には一度も`read_issues`を呼んでいない。
+
+**影響:** 同一の実質的懸念が異なるtopic名・異なる`raised_by`（`detector` / `user_ai`相当）で二重に存在するため、後続タスクや別のAgentが`read_issues`で検索する際に一方しか見つけられずもう一方を見落とすリスク、またはissue件数が水増しされ全体像の把握コストが増えるリスクがある。ログ上でAIが明示的に行き詰まった形跡（無限ループ・繰り返し失敗）ではなく、「確認する」と述べた意図がツール呼び出しに反映されなかった見落とし。
+
+**対応（未着手・要検討）:** 想定される対策candidate（実装は次回ユーザー承認後）:
+1. 承認・issue登録系のノードのプロンプトに、「issueを新規作成する前に必ず`read_issues`で当該task_idの既存issueを確認し、既存issueと同一の懸念であれば新規作成せず`resolve_issue`等で参照する」ことを明示する。
+2. `write_issue`のCREATE時に、同一`task_id`内で類似トピック（キーワード一致等）の既存issueがあれば警告を返す簡易重複検出をDB側に追加する。
+3. 様子見: 次回以降のドライランでも同じ重複パターンが再発するか確認してから対応方針を決める。
+
+**完了条件:** ユーザーとの相談の上、上記いずれかの対応方針を確定し実装した後、次回ドライランで同一懸念の重複issue登録が発生しないことを確認する。現時点ではコード変更なし、記録のみ。
 
 ---
 
