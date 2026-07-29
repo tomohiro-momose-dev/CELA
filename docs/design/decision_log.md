@@ -1389,6 +1389,20 @@
 
 ---
 
+### D-096: `_query_AI_live`のツールループ進捗を、APIエラーリトライ（`for attempt`）をまたいで保持し、同一iteration番号から再開する（BL-122）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-29 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（BL-120〜129を自ら調査しBL-122として「Nemotron使用時にリトライ発生回数がDeepSeek比で明らかに増えている」ことを記録した上で、BL-126/130/131の基本設計を保存しようとした直前に「その前に、APIエラー時にiterが無条件で巻き戻されるのを直しましょう。これはもったいなすぎる」と優先順位の変更を指示） / Claude Sonnet 5（`_query_AI_live`の実コードを確認し、`loop_messages`等の初期化位置が根本原因であることを特定、最小差分の修正方針を設計し実装） |
+| **決定理由** | `_query_AI_live`（`cela_main.py`）のツール呼び出しループは、一時的なAPIエラー（BL-009/BL-046/BL-059/BL-072/BL-083で追加されてきた例外群）発生時、外側の`for attempt in range(len(delays)+1):`リトライループの`try`ブロック先頭から丸ごとやり直される。この`try`ブロック内に`loop_messages`（会話履歴）と`tool_calls_used`/`python_calls_log`/`reasoning_parts_all`（蓄積変数）の初期化が含まれていたため、リトライのたびにそれまでの全iterationの進捗が丸ごと破棄され、`iteration`カウンタも1から再スタートしていた。NVIDIA Nemotron 3 Ultra使用時にAPIエラー頻度がDeepSeek比で明らかに増加したこと（BL-122）により、この既知の粗さ（BL-009で「許容済み」、BL-046で「見送り」と据え置かれてきた）による実害（進んだiterationの手戻り、トークン・時間の浪費）が顕在化した。 |
+| 決定内容 | `loop_messages`/`tool_calls_used`/`python_calls_log`/`reasoning_parts_all`の初期化、および新規`iteration_start`変数を外側の`for attempt`リトライループの外（関数冒頭）へ移動し、リトライをまたいで保持する。`for iteration in range(1, MAX_TOOL_ITER+1):`を`for iteration in range(iteration_start, MAX_TOOL_ITER+1):`に変更し、ループ本体の先頭で`iteration_start = iteration`を都度更新することで、APIエラー時に同じiteration番号から再開する（1から再スタートしない、既に成功したiterationも重複実行しない）。tools無し単発呼び出し経路（cross-iteration状態を持たない）は変更しない。`repl_session`の生成場所（各attemptで作り直す）はBL-014の設計意図（ノード・リトライをまたいだpython_repl状態の非共有）を尊重し変更しない。 |
+| 影響 | `cela_main.py`（`_query_AI_live`、cela_main.py:2396付近）。副次的に、従来は1回のAPIエラーでiteration=1から際限なく再開でき実質`MAX_TOOL_ITER=20`の上限を超過できてしまっていたが、本修正により真の意味で20回の上限が機能するようになった（`MAX_TOOL_ITER`の値自体は変更なし、仕様の厳格化）。`tests/test_bl093_d074_auto_reasoning_enforcement.py`に新規`test_bl122_api_error_mid_loop_resumes_same_iteration_without_discarding_progress`を追加し、フェイククライアントでiteration 2の途中に`httpx.TimeoutException`を模擬、リトライ後にiteration 1の進捗（think要約等）が保持されiteration 2から再開されることを検証。`python -m py_compile`合格、関連クラスタ98件Pass。実LLM再ドライランでの効果確認（Nemotron使用時のリトライ実害減少）は次回待ち。 |
+| 関連 BL | [BL-122](back_log/issue_backlog.md#bl-122-apiエラー時のツールループ全体巻き戻しリトライbl-009bl-046がモデル変更nemotron後に発生頻度が明らかに増加し実害が拡大している)、BL-009、BL-046 |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
