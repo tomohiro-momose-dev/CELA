@@ -3628,13 +3628,18 @@ Geminiの提案表全文・評価根拠は`docs/design/back_log/BL-117/BL117_inv
 
 ### BL-122: APIエラー時のツールループ全体巻き戻しリトライ（BL-009/BL-046）が、モデル変更（Nemotron）後に発生頻度が明らかに増加し実害が拡大している
 
-**状態:** `open`（設計変更要、記録のみ）
+**状態:** `done`
 
-**経緯:** `log/2026-07-28/1420`・`2257`・`2026-07-29/0751`のいずれでも、APIエラー（レート制限・タイムアウト・不完全なレスポンス）発生時に「ツールループを最初からやり直します」というBL-009/BL-046の既知の粗いリトライ粒度（`loop_messages`/`python_calls_log`を破棄しiter=1へ巻き戻る）が高頻度で発生していることを再確認した。特にNVIDIA Nemotron 3 Ultra（free）を使用したドライランではリトライ発生回数がDeepSeek使用時より明らかに増えており（1420ログだけで6箇所以上）、モデル変更によってこの既知の設計上の粗さが顕在化しやすくなることが裏付けられた。
+**経緯:** `log/2026-07-28/1420`・`2257`・`2026-07-29/0751`のいずれでも、APIエラー（レート制限・タイムアウト・不完全なレスポンス）発生時に「ツールループを最初からやり直します」というBL-009/BL-046の既知の粗いリトライ粒度（`loop_messages`/`python_calls_log`を破棄しiter=1へ巻き戻る）が高頻度で発生していることを再確認した。特にNVIDIA Nemotron 3 Ultra（free）を使用したドライランではリトライ発生回数がDeepSeek使用時より明らかに増えており（1420ログだけで6箇所以上）、モデル変更によってこの既知の設計上の粗さが顕在化しやすくなることが裏付けられた。ユーザーが「もったいなすぎる」と即時修正を指示。
 
-**対応（未着手）:** ユーザー提案：エラーで打ち切られた際、iter=1からではなく直前のコンテキスト状態（`loop_messages`等）を保持したまま該当API呼び出しのみ再試行する設計に変更する。BL-046時点では「より大きめの変更のため見送り」と判断されていたが、モデル変更後の実害増加を踏まえ優先度を再評価する必要がある。
+**対応:** `_query_AI_live`（[cela_main.py:2396](../../../cela_main.py#L2396)）の以下を修正:
+1. `loop_messages`/`tool_calls_used`/`python_calls_log`/`reasoning_parts_all`の初期化、および新規`iteration_start`変数を、外側の`for attempt in range(len(delays)+1):`リトライループの**外**（関数冒頭）へ移動。tools無し単発呼び出し経路（cross-iteration状態を持たないため無変更）はそのまま。
+2. `for iteration in range(1, MAX_TOOL_ITER+1):`を`for iteration in range(iteration_start, MAX_TOOL_ITER+1):`に変更し、ループ本体の先頭で`iteration_start = iteration`を都度更新。これにより、APIエラーで外側の`for attempt`がリトライされても、同じiteration番号から再開する（1から再スタートしない、既に成功したiterationも重複実行しない）。
+3. `repl_session`の生成場所（各attemptで作り直す）はBL-014の設計意図（ノード・リトライをまたいだpython_repl状態の非共有）を尊重し変更していない。
 
-**完了条件:** 設計方針をユーザーと相談の上確定し実装、`python -m py_compile`合格・既存テストPass・実LLM再ドライランでリトライ時のコンテキスト保持を確認する。
+**副次的な効果:** 従来は1回のAPIエラーでiteration=1から際限なく再開できてしまい、実質的に`MAX_TOOL_ITER=20`の上限を超えてツール呼び出しを重ねられていた（意図しない予算超過）。本修正により、リトライしても消費済みのiteration数は失われなくなり、真の意味で「20回まで」の上限が機能するようになった（`MAX_TOOL_ITER`の値自体は変更なし）。
+
+**完了条件:** `python -m py_compile cela_main.py`合格。`tests/test_bl093_d074_auto_reasoning_enforcement.py`に新規`test_bl122_api_error_mid_loop_resumes_same_iteration_without_discarding_progress`を追加し、フェイククライアントでiteration 2の途中にAPIエラー（`httpx.TimeoutException`）を模擬、リトライ後にiteration 1の進捗（think要約等）が保持されたままiteration 2から再開されることを検証（`create()`呼び出し回数が期待通り4回になることも確認）。関連クラスタ98件Pass。実LLM再ドライランでの効果確認（Nemotron使用時のリトライ実害減少）は次回待ち。
 
 ---
 
