@@ -1,10 +1,10 @@
 # BL-126/BL-130/BL-131 基本設計: 前提再交渉ワークフロー・Expert相談チャネル・task_id検証
 
-**関連:** [BL-126](../issue_backlog.md#bl-126-bl-086の前提エスカレーションはexpertのリアクティブな経路に限定されておりfacilitatoruser-aiがゴール制約自体を能動的に問い直すプロアクティブな創造的議論モードが未設計), [BL-130](../issue_backlog.md#bl-130-expertが成果物を出さずにuser-aiへ質問相談できる双方向チャネルが未設計現状はuserexpertへの一方向指示のみ), [BL-131](../issue_backlog.md#bl-131-task_plannerの正式なフェーズタスク計画に存在しないtask_idtask_1_1_review等でwrite_agreementwhiteboardが作成されてしまう構造的リスク)、[BL126_review.md](BL126_review.md)（別AIによる設計レビュー）、decision_lineage.md 論点76・78・79・81・82・83・84
+**関連:** [BL-126](../issue_backlog.md#bl-126-bl-086の前提エスカレーションはexpertのリアクティブな経路に限定されておりfacilitatoruser-aiがゴール制約自体を能動的に問い直すプロアクティブな創造的議論モードが未設計), [BL-130](../issue_backlog.md#bl-130-expertが成果物を出さずにuser-aiへ質問相談できる双方向チャネルが未設計現状はuserexpertへの一方向指示のみ), [BL-131](../issue_backlog.md#bl-131-task_plannerの正式なフェーズタスク計画に存在しないtask_idtask_1_1_review等でwrite_agreementwhiteboardが作成されてしまう構造的リスク)、[BL126_review.md](BL126_review.md)（別AIによる設計レビュー）、decision_lineage.md 論点76・78・79・81〜87
 
-**状態:** v3設計に対し**BL-131（§2.5・§2.6）・BL-130（§2・§3・§13.2）は実装完了（`done`）**。BL-126（Essence Dialogue等）は設計のみで実装は未着手。
+**状態:** 本設計書の対象範囲（BL-126・BL-130・BL-131）は**全て実装完了（`done`）**。BL-120（Reflection JSONパース失敗フォールバック）も前提修正として実装済み（D-101）。
 
-**改訂履歴:** v1（初版保存）→ v2（別AIレビュー`BL126_review.md`の指摘17件を反映。設計上のバグ2件を修正、抜け5件を補完、気づき7件を反映、確認事項3件に確定回答。あわせてBL-131の実装設計（task_id/phase_id実在チェック・target_topic必須化）とTOOL_DISPATCHのstate受け渡し設計を新規追加）→ v3（§13「モード切替とプロンプト設計」を新規追加。各ノードのモード切替方式を`call_detector`の既存`target_role`分岐パターンに揃える設計を確定）→ **BL-131実装完了**（§2.5・§2.6の設計通り実装、D-098・D-099参照）→ **BL-130実装完了**（`ask_user_question`ツール新設、`detector_node`軽量パス、`route_after_expert_detector`バイパス、`generate_user_utterance`モード文面切替を実装、D-100参照。BL-126は引き続き設計のみ）
+**改訂履歴:** v1（初版保存）→ v2（別AIレビュー`BL126_review.md`の指摘17件を反映。設計上のバグ2件を修正、抜け5件を補完、気づき7件を反映、確認事項3件に確定回答。あわせてBL-131の実装設計（task_id/phase_id実在チェック・target_topic必須化）とTOOL_DISPATCHのstate受け渡し設計を新規追加）→ v3（§13「モード切替とプロンプト設計」を新規追加。各ノードのモード切替方式を`call_detector`の既存`target_role`分岐パターンに揃える設計を確定）→ **BL-131実装完了**（§2.5・§2.6の設計通り実装、D-098・D-099参照）→ **BL-130実装完了**（`ask_user_question`ツール新設、`detector_node`軽量パス、`route_after_expert_detector`バイパス、`generate_user_utterance`モード文面切替を実装、D-100参照）→ **BL-120修正**（`call_reflection`に層2リトライを適用、D-101）→ **BL-126 Stage A・B実装完了**（`goal_drafts`バージョニング、Detector `review_mode="goal_change"`、D-102）→ **BL-126 Stage C実装完了**（Task Plannerのラン途中再構成・supersede機構、D-103）→ **BL-126 Stage D実装完了**（Facilitatorのツールループ化・`EssenceProposal`・Essence Dialogueループ・Reflection迎合監査、D-104。実装時に`route_after_facilitator`の既存ルーティングに関する本設計書の記述誤り——実際は2分岐のみで4分岐ではなかった——を発見し、実際のグラフ構造に基づき設計を修正した上で実装）
 
 ## Context
 
