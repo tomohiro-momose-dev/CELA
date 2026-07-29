@@ -1459,6 +1459,62 @@
 
 ---
 
+### D-101: `call_reflection`に層2リトライ（BL-089パターン）を適用し、単発のJSONパース失敗が即座に`stagnant`判定へ直結する事故を修正する（BL-120）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-30 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（「最後まで進めて」と依頼、BL126_basic_design.md §8の推奨順序でBL-126 Stage D着手前にBL-120修正が前提と位置づけ） / Claude Sonnet 5 |
+| **決定理由** | `log/2026-07-28/1420`で、`call_reflection`のJSONパース失敗フォールバック（`stagnant`固定）が5回連続で発火し、正常進行中の議論を繰り返し強制巻き戻す実害が確認されていた（BL-120、記録のみで放置）。原因はBL-089で他ノード（task_plan_reviewer/task_planner/goal_essence_analyst）に既に適用済みの層2リトライ（`_query_and_parse_with_retry`、D-005）が`call_reflection`にだけ適用されておらず、単発のquery_AI+_safe_json_parseのままだったこと。真因が特定できたため、BL-126 Stage D（迎合監査基準の追加）の前提として先に修正した。 |
+| 決定内容 | `call_reflection`の単発`query_AI`+`_safe_json_parse`呼び出しを`_query_and_parse_with_retry`でラップ。リトライを使い切った場合のみ、従来通り`stagnant`へフェイルクローズする（安全側の判定方針自体、フォールバック値は変更しない——真の修正点は「1回の一時的なパース崩れだけで即座にそこへ落ちなくなったこと」）。 |
+| 影響 | `cela_main.py`（`call_reflection`）。新規テスト2件（`tests/test_bl089_json_fence_and_failclosed_review.py`に追加）。`python -m py_compile`合格。 |
+| 関連 BL | [BL-120](back_log/issue_backlog.md#bl-120-call_reflectionのjsonパース失敗フォールバックがstagnant即断となっており正常進行中の議論を繰り返し強制巻き戻ししていた) |
+
+---
+
+### D-102: BL-126 Stage A（`goal_drafts`バージョニング）・Stage B（Detector `review_mode="goal_change"`）を実装する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-30 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（「最後まで進めて」と依頼） / Claude Sonnet 5（BL126_basic_design.md §4・§5・§8の推奨順序に基づき実装） |
+| **決定理由** | BL-126の本質対話（Essence Dialogue）ワークフロー実装の基盤として、(1) ゴール文の全文履歴を版管理する仕組み、(2) ゴール改定そのものを専用の判断基準で監査する仕組みが必要だが、いずれも既存の反応的`revise_goal`経路（BL-086）にまだ適用されておらず、Stage D（対話モード）着手前にこの2つを既存経路で先行検証しておく方針とした（design.md §8実装順序）。 |
+| 決定内容 | **Stage A**: `goal_drafts`テーブル・`apply_goal_patch`/`get_latest_goal_draft`を新設（whiteboard_drafts/plan_draftsと同型のappend-onlyバージョニング、run_id単独キー）。`_revise_goal_tool_impl`が改定成功時に`apply_goal_patch`を呼ぶよう配線。**Stage B**: `call_detector`に`review_mode: Literal["task_output","goal_change"]`（デフォルト"task_output"）を追加し、`domain_role_instruction`の算出ブロックのみを§5の4判断基準（旧文が追記として保持されているか／理由づけの相応性／スコープ逸脱の有無／数値的最適性は評価しない）へ差し替える直交した軸とする。`generate_user_utterance_node`が`revise_goal`成功時に`goal_revision_pending_review`をセットし、次の`detector_node`がこれを消費して`review_mode="goal_change"`を使う（既存の`route_after_user_detector`等のルーティングロジックは無変更）。 |
+| 影響 | `cela_main.py`（`goal_drafts`スキーマ、`apply_goal_patch`/`get_latest_goal_draft`、`_revise_goal_tool_impl`、`call_detector`、`LineageState`、`generate_user_utterance_node`、`detector_node`）。新規テスト2件（`tests/test_bl086_escalation_freeze_goal_revision.py`に追加）・新規`tests/test_bl126_stage_b_goal_change_review_mode.py`（6件）。`python -m py_compile`合格。 |
+| 関連 BL | [BL-126](back_log/issue_backlog.md#bl-126-bl-086の前提エスカレーションはexpertのリアクティブな経路に限定されておりfacilitatoruser-aiがゴール制約自体を能動的に問い直すプロアクティブな創造的議論モードが未設計)、D-101 |
+
+---
+
+### D-103: BL-126 Stage C（Task Plannerのラン途中再構成・supersede機構）を実装する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-30 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（「最後まで進めて」と依頼） / Claude Sonnet 5 |
+| **決定理由** | 従来の`task_planner_node`は`turn_count==1 and not phases`のみで発火し、ラン途中で計画全体を見直す経路が存在しなかった。BL-126の本質対話が収束した後、計画を実際に反映させる受け皿が必要（design.md §6・§8実装順序）。 |
+| 決定内容 | ガードを`(turn_count==1 and not phases) or state.get("plan_revision_reason")`へ緩和し、消費は「後」ではなくガード判定直後（先頭）で行う（チェックポイント再開時の多重発火防止）。`call_task_planner`に`existing_phases`/`revision_reason`引数を追加し、無関係な既存タスクに触れず影響を受けるタスクのみ見直すよう指示する固定ブロックを注入。新しい計画に含まれなくなった既存task_idは削除ではなく`state["phases_superseded"]`へ記録し、`write_agreement(entry_type="Directive", action_type="SUPERSEDE", status="Proposed")`で監査証跡を残す（task_plannerロールはProposedのみ許可のため、他ロールのSUPERSEDEとはstatusが異なる）。再構成後は`plan_review_done=False`にリセットし、既存のtask_plan_reviewer_nodeを再度通す。`task_plan_reviewer_node`がラン途中の再構成をmajor判定で差し戻す場合は、既存の`plan_reviewer_retry_count`上限ロジックをそのまま再利用しつつ、`plan_revision_reason`を再セットして新設ガード経由で再発火させる（`turn_count==1`ガードに依存する既存の`phases=[]`だけでは、ラン途中では再発火しないため）。 |
+| 影響 | `cela_main.py`（`task_planner_node`、`call_task_planner`、`task_plan_reviewer_node`、`LineageState`）。新規`tests/test_bl126_stage_c_task_planner_reconfiguration.py`（7件）。`python -m py_compile`合格。 |
+| 関連 BL | [BL-126](back_log/issue_backlog.md#bl-126-bl-086の前提エスカレーションはexpertのリアクティブな経路に限定されておりfacilitatoruser-aiがゴール制約自体を能動的に問い直すプロアクティブな創造的議論モードが未設計)、D-102 |
+
+---
+
+### D-104: BL-126 Stage D（Facilitatorのツールループ化・`EssenceProposal`・Essence Dialogueループ・Reflection迎合監査）を実装する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-30 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（「最後まで進めて」と依頼） / Claude Sonnet 5（設計調査の過程で、design.mdが前提としていた`route_after_facilitator`の既存ルーティング（4分岐）が実際のコードでは2分岐（halt/end_turn）のみだったという記述の食い違いを発見し、実際のグラフ構造——`run_ai_vs_ai_loop`が`app.stream()`を外側`while`ループで繰り返し呼び出し、各呼び出しがentry_pointから再入場する構造（goal_essence/task_planner/task_plan_reviewerの冪等ガードにより実質generate_user_utteranceまで素通りする）——に基づいて実装方針を再設計した） |
+| **決定理由** | BL-126の核心である「Facilitator↔User AIの本質対話」を実現するには、Facilitatorが単発の助言役ではなく能動的にツールを使い、User AIとの往復を経て収束できる必要がある。design.mdの前提記述（既存ルーティングの分岐数）に事実誤認があったため、実装着手前にコードを直接確認し、正しい前提（外側whileループが「1ターン」の単位であり、次のfacilitator/generate_user_utterance遷移は次の外側ループ呼び出しで自然に発生する）に基づいて設計をやり直した。これにより、当初懸念していた「core turn loopの大規模な書き換え」ではなく、既存ノードは変更せず`generate_user_utterance`の出力エッジ1本を条件分岐化するだけで安全に実現できることが判明した。 |
+| 決定内容 | (1) `write_agreement`に`entry_type="EssenceProposal"`を追加（新規ツールは起こさず既存のagreements/権限枠組みを再利用、facilitatorロールはProposedのみ許可）。(2) `escalate_premise_concern`の許可ロールに`facilitator`を追加。(3) `call_facilitator`をTHINK_TOOL/ESCALATE_PREMISE_CONCERN_TOOL/WRITE_AGREEMENT_TOOLを持つツールループへ変更（BL-109からの意図的な差し戻し、本関数のみ対象外化）。essence_dialogue_active時は専用の対話継続プロンプトへ切り替える（§13.2）。(4) `_LAST_ESSENCE_PROPOSAL`/`get_last_essence_proposal()`を`_LAST_GOAL_REVISION`と同型のブリッジとして新設。(5) `LineageState`に`essence_dialogue_active`/`essence_dialogue_round`/`essence_dialogue_max_rounds`（5）/`essence_dialogue_topic`/`last_essence_proposal`を追加。(6) `facilitator_node`が、EssenceProposal新規提起で対話を開始し、Userの承認（`last_essence_proposal`がstate経由で橋渡しされ、topic一致かつstatus="Approved"）で収束して`plan_revision_reason`をセット（Stage Cへ接続）、または上限ラウンド到達でタイムアウトして通常フローへ復帰する。対話中は`facilitation_count`を消費しない（§3.2）。(7) `generate_user_utterance_node`がUser AIのターン直後に`last_essence_proposal`をstateへ橋渡し。(8) `generate_user_utterance`に`essence_dialogue_active`時の専用プロンプト（elif連鎖で`expert_pending_question`と排他）を追加。(9) グラフの`generate_user_utterance`→`user_detector`固定エッジを条件分岐化し、`essence_dialogue_active`時は`user_detector`を経由せず`facilitator`へ直接戻す（既存の通常監査フローには一切影響しない）。(10) `call_reflection`に迎合（collusion）監査基準（転換の"回数"ではなく"重大さに見合った理由づけの有無"を問う、D-094の判断基準路線）を追加。 |
+| 影響 | `cela_main.py`（`write_agreement`関連3箇所、`escalate_premise_concern`、`call_facilitator`、`facilitator_node`、`generate_user_utterance_node`、`generate_user_utterance`、`build_graph`のエッジ定義、`call_reflection`、`LineageState`、初期state）。既存回帰テスト3件を新規約に更新（BL-109のcall_facilitator除外含む）。新規`tests/test_bl126_stage_d_essence_dialogue.py`（16件）。`python -m py_compile`合格、関連クラスタ512件Pass。実LLM再ドライランでの本質対話フローの実動作確認は次回待ち。 |
+| 関連 BL | [BL-126](back_log/issue_backlog.md#bl-126-bl-086の前提エスカレーションはexpertのリアクティブな経路に限定されておりfacilitatoruser-aiがゴール制約自体を能動的に問い直すプロアクティブな創造的議論モードが未設計)、D-103 |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
