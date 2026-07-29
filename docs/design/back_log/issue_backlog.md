@@ -3684,7 +3684,15 @@ Geminiの提案表全文・評価根拠は`docs/design/back_log/BL-117/BL117_inv
 
 ### BL-126: BL-086の前提エスカレーションはExpertのリアクティブな経路に限定されており、Facilitator＋User AIがゴール・制約自体を能動的に問い直すプロアクティブな創造的議論モードが未設計
 
-**状態:** `open`（基本設計完了、実装は未着手）
+**状態:** `done`（Stage A〜D全て実装完了、D-1xx参照）
+
+**実装内容（done、Stage A〜D）:**
+1. **Stage A（goal_drafts versioning）**: `goal_drafts`テーブル・`apply_goal_patch`/`get_latest_goal_draft`を新設（whiteboard_drafts/plan_draftsと同型）。既存の反応的`revise_goal`経路（BL-086）にも先行適用し動作確認。
+2. **Stage B（Detector目標変更レビューモード）**: `call_detector`に`review_mode: Literal["task_output","goal_change"]`を追加。`revise_goal`成功直後に`goal_revision_pending_review`をセットし、次の`user_detector`が§5の4判断基準（旧文が追記として保持されているか／理由づけの相応性／スコープ逸脱の有無／数値的最適性は評価しない）で監査する。既存の反応的経路にも適用。
+3. **Stage C（Task Plannerのラン途中再構成）**: `task_planner_node`のガードを`(turn_count==1 and not phases) or state.get("plan_revision_reason")`へ緩和。新しい計画に含まれなくなった既存task_idは削除ではなく`phases_superseded`へ記録し`write_agreement(entry_type="Directive", action_type="SUPERSEDE")`で監査証跡を残す。再構成後もtask_plan_reviewer_nodeをスキップせず通す（既存の差し戻し上限ロジックを再利用）。
+4. **Stage D（Facilitatorのツールループ化＋Essence Dialogueループ＋Reflection迎合監査）**: `write_agreement`に`entry_type="EssenceProposal"`を追加（facilitatorはProposedのみ許可）。`call_facilitator`をTHINK_TOOL/ESCALATE_PREMISE_CONCERN_TOOL/WRITE_AGREEMENT_TOOLを持つツールループへ変更（BL-109からの意図的な差し戻し）。`facilitator_node`がEssenceProposalの提起で`essence_dialogue_active`を開始し、`generate_user_utterance`直後のルーティングを条件分岐化（対話中は`user_detector`を経由せず`facilitator`へ直接戻る）。Userの承認（EssenceProposal UPDATE/Approved）で収束し`plan_revision_reason`をセットしてStage Cへ接続、または上限5ラウンドでタイムアウトして通常フローへ復帰。`call_reflection`に迎合（collusion）監査基準（転換の回数ではなく重大さに見合った理由づけの有無）を追加。
+
+**検証:** 新規テスト4ファイル（`test_bl126_stage_b_goal_change_review_mode.py`6件、`test_bl126_stage_c_task_planner_reconfiguration.py`7件、`test_bl126_stage_d_essence_dialogue.py`16件、BL-131時に追加済みの基盤含む）+ 既存回帰テスト修正。`python -m py_compile`合格、関連クラスタ512件Pass。実LLM再ドライランでの本質対話フロー・ラン途中再構成の実動作確認は次回待ち。
 
 **基本設計:** [BL126_basic_design.md](BL-126/BL126_basic_design.md)（`LineageState`追加フィールド、新規/変更ツール、グラフルーティング変更、`goal_drafts`テーブル、Detectorの目標変更レビューモード、Task Plannerのラン途中再構成、Reflectionの迎合監査基準、実装順序をBL-130/BL-131とあわせて一体設計）。
 
