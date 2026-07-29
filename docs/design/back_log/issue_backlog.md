@@ -3605,13 +3605,13 @@ Geminiの提案表全文・評価根拠は`docs/design/back_log/BL-117/BL117_inv
 
 ### BL-120: `call_reflection`のJSONパース失敗フォールバックが`stagnant`即断となっており、正常進行中の議論を繰り返し強制巻き戻ししていた
 
-**状態:** `open`（記録のみ、実装は次回スコープ確定後）
+**状態:** `done`（D-1xx参照、BL-126 Stage D着手前提として実装）
 
 **経緯:** `log/2026-07-28/1420`（NVIDIA Nemotron 3 Ultra使用ドライラン）で発見。`call_reflection`の出力JSONパースに失敗すると`fallback={"still_aligned": False, "discussion_status": "stagnant", "note": "Parse error."}`（cela_main.py:5707）を返す設計だが、これが単なる安全側フォールバックではなく実際に繰り返し発火し、正常に進行中の議論を強制的に巻き戻す事故として実測された。同一の`[reflection] - why: 【判定: ゴール・ドリフト（目標逸脱）を検出】 Parse error.`が34545/38310/40590/42238/43578行目の計5回、ほぼ同一のFacilitator論点提示・Expertの同一task_2_2再分析を伴って出現しており、「20%需要平準化が現実的上限」という同一の結論表が29397〜38673行目に渡り反復生成される主因になっていた。
 
-**対応（未着手）:** パース失敗時の生レスポンスを保存し原因を切り分ける、またはパース失敗時は`stagnant`即断ではなく前回の`discussion_status`を維持する、のいずれかへの変更を検討する。
+**実装内容（done）:** 真因は「単発のquery_AI+_safe_json_parseで層2リトライ（BL-089、D-005）を持たなかったこと」——1回の一時的なパース崩れが即座にstagnant判定へ直結していた。`call_reflection`を`_query_and_parse_with_retry`でラップし、他ノード（task_plan_reviewer/task_planner/goal_essence_analyst）と同型の層2リトライを適用。真にリトライを使い切った場合のみ、従来通り`stagnant`へフェイルクローズする（安全側の判定方針自体は変更しない）。
 
-**完了条件:** 対応方針を確定し実装した後、`python -m py_compile`合格・既存テストPass・実LLM再ドライランでパース失敗時に議論が不必要に巻き戻されないことを確認する。
+**検証:** 新規テスト2件（`tests/test_bl089_json_fence_and_failclosed_review.py`に追加）。`python -m py_compile`合格。
 
 ---
 
