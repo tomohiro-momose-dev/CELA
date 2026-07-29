@@ -1403,6 +1403,20 @@
 
 ---
 
+### D-097: `detector_node`の全決定履歴再出力バグ（BL-132）を修正し、`--resume`直後にhalt済みcheckpointを検知して停止する防御を追加する（BL-121調査）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-29 |
+| 状態 | `decided`（一部実装完了、BL-121本体は`open`のまま） |
+| 決定者 | t-momose（「BL-122付近のP1のバグをつぶしましょう」と、BL-122に隣接する未着手P1の解消を指示） / Claude Sonnet 5（BL-121を対象に選定し、ログ精査・コード調査から根本原因の切り分けを実施、独立したBL-132を発見し先に修正） |
+| **決定理由** | BL-121（`facilitation_count>3`によるhalt設定が3回記録されたのに外側ループが停止しない）を再現調査するため`log/2026-07-29/0751`の`log_no_prompt.md`全17265行を精査した結果、単一継続プロセスであること、`facilitation_count`のリセット箇所がコード中に存在しないこと、それにもかかわらずrun終了時点のcheckpointが`facilitation_count=2`と観測された3回のhaltと数値的に矛盾することを確認した。調査の過程で、`detector_node`（`cela_main.py:6972`）が呼び出しのたびに`get_decisions_from_db(...)[1:]`で全決定履歴を丸ごと再取得・再出力するバグ（変数名「this_turn」に反しrun全体を毎回再表示）を発見し、これがBL-121で観測された「同じhalt決定が複数回見える」現象の少なくとも一因、かつBL-128（同一検算コメント反復）の主因である可能性が高いと判断した。この再出力バグを解消しない限り、次回ドライランのログでも「本当に何回haltが発生したか」を正確に判別できないため、BL-121本体の根本原因確定より先にBL-132を修正すべきと判断した。あわせて、D-086で既に指摘されていた「`--resume`は必ずgoal_essenceから全体を再走行する」という設計上の性質を踏まえ、`--resume`直後に`state.get("halt")`を一切チェックせず外側whileループへ入っていた実装上の欠落（BL-121仮説(b)）を独立した安全策として修正した。 |
+| 決定内容 | (1) `detector_node`末尾の全履歴再取得・再出力（`get_decisions_from_db(...)[1:]`）を廃止し、この呼び出し自体が直前に作成した`decision`1件のみを出力するよう変更（BL-132、`done`）。(2) `run_ai_vs_ai_loop`の`--resume`処理直後に、読み込んだcheckpointが既に`halt=True`だった場合は即座に処理を停止するチェックを追加（BL-121仮説(b)への対症、`done`）。(3) BL-121本体（3回に見えるhalt発生の正体）は、上記(1)適用後の次回ドライランで決定ログの重複表示が解消された状態を確認してから再判定することとし、`open`のまま維持する。BL-122（同一ターン内のツールループ巻き戻し）が本事象の原因である可能性（仮説(a)）は、コード経路が独立していることを確認済みで、否定的と判断した。 |
+| 影響 | `cela_main.py`（`detector_node`、`run_ai_vs_ai_loop`の`--resume`分岐）。`python -m py_compile`合格、関連クラスタ（`test_bl093_d074_auto_reasoning_enforcement.py`/`test_bl093_think_tool_scratchpad.py`/`test_r3_smoke.py`/`test_bl104_project_plan_toc_and_prompt_reorder.py`）132件Pass。実LLM再ドライランでのログ肥大化解消・BL-121原因切り分けの効果確認は次回待ち。 |
+| 関連 BL | [BL-121](back_log/issue_backlog.md#bl-121-facilitation_count3review_count3によるhaltが3回セットされたにもかかわらず外側ループが一度も停止せず会話が継続していた)、[BL-132](back_log/issue_backlog.md#bl-132-detector_nodeが呼び出しのたびに全決定履歴を再取得再出力しておりログ肥大化とbl-121の原因切り分けを妨げていた)、BL-128、D-086 |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
