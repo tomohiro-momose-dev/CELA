@@ -1417,6 +1417,34 @@
 
 ---
 
+### D-098: TOOL_DISPATCHの全ハンドラをstate受け渡し可能な`(args, state)`形式へ統一する（BL-131前提）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-30 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（BL-131のtask_id検証実装のために「TOOL_DISPATCHのstate受け渡しのみにします」とスコープを絞った上で「BL-131の前に片づけたほうがいいですか？」と着手順序を確認） / Claude Sonnet 5（`_write_agreement_impl`のtask_id検証には`state["phases"]`参照が必須であり、先にTOOL_DISPATCHを直さないと既存の`_CURRENT_PHASES`グローバルを一時拡張してすぐ剥がす二度手間になると説明し着手順序を提案） |
+| **決定理由** | `TOOL_DISPATCH`（R2実装時に導入）はツール名→ハンドラの辞書だがハンドラは`args`のみを受け取り、`run_id`/`task_id`/`caller_role`等の実行時コンテキストは呼び出し元ノードが都度設定するモジュールレベルglobal（`_CURRENT_RUN_ID`等）経由でしか渡せなかった（BL-099で既に指摘済みの技術的負債）。BL-131の`task_id`実在チェックには`state["phases"]`が必要だが、対応するグローバル`_CURRENT_PHASES`は`call_expert`1箇所でしか設定されておらず、他ノードでも正しく動くようにするには同じ負債パターンをさらに拡張することになる。ユーザーとの設計議論の結果、この機会にグローバルを増やす代わりに`state`を明示的に受け渡す方式へ切り替えることで合意した。 |
+| 決定内容 | `_query_AI_live`/`query_AI`/`_query_and_parse_with_retry`に`state: dict \| None = None`パラメータを追加し、ツール実行箇所を`handler(args, state)`に変更。`TOOL_DISPATCH`の全15エントリを`(args, state=None)`の2引数ラムダへ統一し、`state`未指定（`None`）の場合は既存の`_CURRENT_*`グローバルへフォールバックすることで後方互換を維持。`write_agreement`/`freeze_agreement`/`escalate_premise_concern`/`resolve_premise_concern`/`revise_goal`/`write_issue`は`state`経由で`run_id`/`task_id`/`phase_id`を優先的に取得するヘルパー（`_run_id_from`等）を新設。既にstateを持つノード（`call_expert`/`generate_user_utterance`/`call_detector`）は`state=state`を追加するのみ、従来stateを受け取っていなかった6関数（`call_resource_arbiter`/`call_integrator`/`call_task_planner`/`call_reviewer`/`call_goal_essence_analyst`/`call_task_plan_reviewer`）には新規`state`パラメータを追加し呼び出し元ノードから伝播させた。`_CURRENT_RUN_ID`/`_CURRENT_TASK_ID`/`_CURRENT_PHASES`グローバル自体は残す（完全撤去はBL-099の別スコープ）が、以後の新規参照は`state`経由を優先する。 |
+| 影響 | `cela_main.py`（`_query_AI_live`/`query_AI`/`_query_and_parse_with_retry`のシグネチャ、`TOOL_DISPATCH`全体、6ノード関数のシグネチャ、呼び出し元ノードでの引数追加、計約20箇所）。既存テスト40件が`TOOL_DISPATCH`の各エントリを`args`1個だけで呼ぶ旧呼び出し規約に依存しており失敗したため`state=None`デフォルトを追加し解消、さらにTOOL_DISPATCH実装詳細（think handlerとの同一性、`handler(args)`という呼び出し文字列）に依存していた回帰テスト2件を新しい規約に合わせて更新。`python -m py_compile`合格、関連クラスタ166件Pass。 |
+| 関連 BL | [BL-131](back_log/issue_backlog.md#bl-131-task_plannerの正式なフェーズタスク計画に存在しないtask_idtask_1_1_review等でwrite_agreementwhiteboardが作成されてしまう構造的リスク)、BL-099 |
+
+---
+
+### D-099: `write_agreement`にtask_id/phase_id実在チェックと`target_topic`必須化を実装し、`get_latest_whiteboard`/`get_latest_plan_draft`をtask_id単独検索へ統一する（BL-131）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-30 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（「"/compact"後にBL126-131を実装」と依頼、実装順序についてもBL-131を最初にする方針を確認済み） / Claude Sonnet 5（設計（BL126_basic_design.md §2.5）に基づき実装、`_find_task_by_id`/`_find_phase_id_for_task`という既存ヘルパーを再利用） |
+| **決定理由** | `log/2026-07-29/1322`・`1708`の両ドライランで、`task_1_1_review`という**task_plannerの正式計画に存在しないtask_id**でExpertが本格的な成果物を作成し続ける事故が繰り返し観測された。`_write_agreement_impl`は`depends_on`のID存在チェックは持つが、`task_id`/`phase_id`が`state["phases"]`に実在するかは一切検証しておらず、これが直接原因だった。あわせて`get_latest_whiteboard`が`(phase_id, task_id)`の組でしか検索していなかったため、誤ったphase_id指定時に既存版が「該当なし」と誤判定されバージョンが1から再スタートする事故（1708ログのtask_1_1_review V9で観測）も、根本原因の一部として特定された。`plan_drafts`側に既に存在する`get_latest_plan_draft_by_task_id`（task_idはrun_id内で一意という命名規約を前提にphase_idを問わず検索する設計）という前例に倣い、拒否ではなく検索方法自体を修正する方針を採用した。 |
+| 決定内容 | (1) `_write_agreement_impl`に`entry_type in ("Directive","Deliverable")`の場合の`task_id`実在チェックを追加（`_find_task_by_id(phases, tid)`で検索し、見つからず`pending_task_ids`にも無ければ拒否。`entry_type="Decision"`は対象外）。(2) `LineageState`に新規フィールド`pending_task_ids: list[str]`（初期値`[]`）を追加——BL-126のFacilitator対話が正式採用前に仮登録する許可リストとして先行追加。(3) `get_latest_whiteboard`/`get_latest_plan_draft`のWHERE句からphase_idを除きtask_id単独検索へ変更、phase_id食い違いは警告ログのみに留める。(4) `entry_type != "Deliverable"`のUPDATE/SUPERSEDEで`target_topic`省略時に`topic`へ暗黙フォールバックしていたのを必須パラメータ化。 |
+| 影響 | `cela_main.py`（`_write_agreement_impl`、`get_latest_whiteboard`、`get_latest_plan_draft`、`LineageState`、初期state生成箇所）。新規`tests/test_bl131_write_agreement_task_id_validation.py`（9件）、既存`tests/test_r3_smoke.py`の3件を`pending_task_ids`経由で許可する形に更新。`python -m py_compile`合格、関連クラスタ166件Pass。実LLM再ドライランでの`task_1_1_review`型事故の再発防止確認は次回待ち。BL-130・BL-126（Essence Dialogue等）の実装は次回以降。 |
+| 関連 BL | [BL-131](back_log/issue_backlog.md#bl-131-task_plannerの正式なフェーズタスク計画に存在しないtask_idtask_1_1_review等でwrite_agreementwhiteboardが作成されてしまう構造的リスク)、D-098 |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
