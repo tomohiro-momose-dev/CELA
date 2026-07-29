@@ -1445,6 +1445,20 @@
 
 ---
 
+### D-100: Expertが成果物を出さずにUser AIへ質問できる`ask_user_question`ツールを新設し、相談ターンではDetector/Decision Extractorの監査・抽出をスキップする（BL-130）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-30 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（「次の実装開始」と依頼、BL126_basic_design.md §8の推奨実装順序でBL-131の次に位置づけ） / Claude Sonnet 5（設計（同design.md §2・§3・§13.2）に基づき実装） |
+| **決定理由** | 従来はUser AI→Expertへの一方向指示のみで、Expertが要求の曖昧さ等で本当に前進できない場合でも、質問する手段がなく見切り発車で成果物を作らざるを得なかった。`log/2026-07-29/1322`の1件（Facilitatorが提起した前提矛盾のエスカレーション自体は既存のescalate_premise_concernで対応可能だが、それとは別に「単純な情報不足・方向性確認」のための軽量な相談経路が欠けていた）を踏まえ設計されたBL-130を実装。相談ターンは成果物のレビューではないため、既存のDetector（数値監査）・Decision Extractor（合意抽出）をそのまま適用すると意味のない監査コストと誤判定リスクを生むため、専用のモード分岐でスキップする方針とした。 |
+| 決定内容 | (1) 新規ツール`ASK_USER_QUESTION_TOOL`/`_ask_user_question_tool_impl`（expertロールのみ許可、`question_text`/`blocking_reason`必須）を追加し、`_LAST_ASK_USER_QUESTION`という`_LAST_GOAL_REVISION`と同型のブリッジ変数・`get_last_ask_user_question()`を新設、`query_AI`の既存リセット処理に合流させた。`call_expert`のツールリスト・`light_system_prompt`・固定プロンプト文言に追加。(2) `LineageState`に`expert_consultation_mode: bool`/`expert_pending_question: str`を追加。`expert_node`が`get_last_ask_user_question()`の結果でこの2フィールドをセット/リセットする（呼ばれなかった場合は明示的にFalse/""へリセットし、前ターンからの残留を防ぐ）。(3) `detector_node`に軽量パス分岐を追加：`target_role=="assistant"`かつ`expert_consultation_mode`の場合、`call_detector`のLLM呼び出し自体をスキップし`constraint_issue="none"`を返す（BL-033の検算フェイルクローズもこの軽量パスには適用しない）。(4) `route_after_expert_detector`に新分岐を追加し、`expert_consultation_mode`時は`expert_decision_extractor`を経由せず直接`generate_user_utterance`へ渡す（Decision Extractorが「何も抽出しない」ことを、呼び出し自体のスキップという形で実現）。(5) `generate_user_utterance`（§13.2のモード切替設計）に、`expert_pending_question`検出時の固定プロンプト文言（「成果物ではなく質問への回答」であることの明示）を追加。(6) `generate_user_utterance_node`がUser AIの回答生成直後に両フラグを消費・リセットする。 |
+| 影響 | `cela_main.py`（新規ツール定義・ハンドラ・TOOL_DISPATCH・`LineageState`・初期state・`call_expert`・`expert_node`・`detector_node`・`route_after_expert_detector`とそのグラフエッジマッピング・`generate_user_utterance`・`generate_user_utterance_node`）。新規`tests/test_bl130_ask_user_question.py`（15件）。`python -m py_compile`合格、関連クラスタ256件Pass。実LLM再ドライランでの相談チャネルの実動作確認は次回待ち。BL-126（Essence Dialogue等）の実装は次回以降。 |
+| 関連 BL | [BL-130](back_log/issue_backlog.md#bl-130-expertが成果物を出さずにuser-aiへ質問相談できる双方向チャネルが未設計現状はuserexpertへの一方向指示のみ)、D-098、D-099 |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
