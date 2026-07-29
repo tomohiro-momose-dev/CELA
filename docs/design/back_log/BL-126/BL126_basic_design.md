@@ -229,6 +229,30 @@ stateDiagram-v2
 
 **§12.2 BL-096（issue_log）との統合の余地**: `issue_log`（BL-096、未解決のまま後続へ引き継ぐ軽微な指摘の管理）と本設計のEssence Dialogueは、どちらも「未解決のまま後続に引き継ぐ情報」という性質を共有する。Essence Dialogueで出た議論のうち、正式な目標改定には至らなかったが記録価値のある論点（例: §1.4の「Facilitatorが提案したtask_idが正式採用されなかった」）は、新規の専用フィールドを増やさず既存の`issue_log`（`severity="minor"`, `topic`にessence_dialogueであることを示す接頭辞）へ書き込む形で統合することを推奨する。専用の新規テーブル化は本設計のスコープでは行わない。
 
+## 13. モード切替とプロンプト設計（v3で新規追加）
+
+各ノードが複数モード（通常/本質対話/Expert相談/目標変更レビュー/ラン途中再構成）を切り替える際のプロンプト設計は、`call_detector`が既に実践している`target_role`分岐パターン（4901行目付近の`domain_role_instruction`）を一般化して踏襲する。
+
+### 13.1 設計原則
+
+1. **モードごとの文面は事前に書いた固定文字列の分岐であり、LLMに動的合成させない**（判断基準・トーンをコードで作り込む、D-094の「判断基準と罠」路線）。
+2. **配置場所**: BL-104のプレフィックスキャッシュ最適化方針に従い、完全静的な冒頭部（役割説明等）と毎ターン変わる末尾（chat_history・ホワイトボード本文等）の**中間**に置く。モード自体は数ラウンドに1回しか切り替わらない「準静的」な情報であり、同じモードが続く間はここもキャッシュのヒット対象になる（`domain_role_instruction`が「target_role単位でしか変わらないため固定指示文グループの直後に配置する」としているのと同じ理由）。
+3. **切替のトリガーは1つの明確なフラグ（またはenum引数）の読み取りのみ**とし、複数フラグの組み合わせ判定は避ける。
+
+### 13.2 各ノードへの適用
+
+| ノード | 既存/新規モード | 切替トリガー | 実装方法 |
+|---|---|---|---|
+| `call_detector` | `task_output`（既存）/ `goal_change`（新規、§5） | 新規引数`review_mode: Literal["task_output","goal_change"]` | `domain_role_instruction`と同じ位置に`if review_mode=="goal_change": goal_change_instruction else: (既存のtarget_role分岐)`を追加。§5の判断基準4項目をこのブロックに入れる。 |
+| `call_facilitator` | 通常（stagnant/drift契機の単発）/ Essence Dialogue（往復中、§3.1） | `state.get("essence_dialogue_active")` | 通常時は既存の`prompt`文面をそのまま使う。Essence Dialogue中は「これは対話の続きです。前回の論点への応答を踏まえ、さらに問い直すか、`EssenceProposal`として確定を提案するか判断してください」という別の固定文面に差し替える。`reflection_block`（既存の「呼ばれた理由」）はEssence Dialogue中は既に対話中で自明なため省略する。 |
+| `generate_user_utterance` | 通常（成果物レビュー）/ Essence Dialogue応答 / Expert相談応答（§3, BL-130） | `state.get("essence_dialogue_active")` / `state.get("expert_pending_question")` | 3モードは排他（§13.3参照）。`if/elif/else`で固定文面3種を切り替える。Expert相談応答モードでは「これは成果物ではなく質問への回答です。write_agreementやタスク進行判断は不要、質問にだけ答えてください」という明示的な注意を入れる——Detector側が軽量パスになることの裏返しとして、User AI側にも「今回は監査対象の成果物ではない」ことを明示しないと、Userが誤って`write_agreement`を呼んでしまうリスクがある。 |
+| `call_expert` | 通常のみ（新規モード分岐は作らない） | — | `ASK_USER_QUESTION_TOOL`は常時ツールリストに追加するだけ（呼ぶかどうかはExpert自身の判断であり、プロンプト側でモードを切り替える必要はない）。ただし相談への回答を受け取った直後の1ターンだけ、「あなたの質問『{expert_pending_question}』への回答: {回答内容}。これを踏まえてタスクを継続してください」という**動的な**（毎回内容が違う）ブロックを末尾に追記する——これは「モード切替」ではなく通常のコンテキスト注入であり、§13.1の「固定文字列の分岐」ルールの対象外。 |
+| `call_task_planner` | 初回計画/ ラン途中再構成（§6） | `state.get("plan_revision_reason")` | 既存の初回計画プロンプトはそのまま。再構成時は「既存計画は`existing_phases`の通り。`revision_reason`に基づき、影響を受けるタスクのみをsupersede/追加し、無関係な既存タスクには一切触れないこと」という固定の追加指示ブロックを冒頭指示グループの直後に挿入する。 |
+
+### 13.3 モードの排他性
+
+`essence_dialogue_active`・`expert_pending_question`・`review_mode="goal_change"`・`plan_revision_reason`は**同時に複数立たないことを前提とする**（§1.2の「escalation_active中はessence_dialogue開始を抑制」と同じ考え方）。複数同時発生しうる経路が実装時に見つかった場合、各ノードの分岐は`if`の連鎖ではなく優先順位付きの`elif`にして、必ずどれか1つのモードのプロンプトだけが選ばれるようにする（2つのモード文面を混ぜて注入すると、`domain_role_instruction`のような単純な二値分岐が持つ利点＝キャッシュ安定性と可読性が失われるため）。
+
 ## 検証方法
 
 - 各Stageごとに`python -m py_compile cela_main.py`、既存オフラインスモークテスト（`test_r3_smoke.py`等）Pass。
