@@ -3767,16 +3767,19 @@ Geminiの提案表全文・評価根拠は`docs/design/back_log/BL-117/BL117_inv
 
 ### BL-131: task_plannerの正式なフェーズ・タスク計画に存在しないtask_id（`task_1_1_review`等）でwrite_agreement/whiteboardが作成されてしまう構造的リスク
 
-**状態:** `open`（基本設計完了、実装は未着手）
+**状態:** `done`（実装完了）
 
-**基本設計:** [BL126_basic_design.md](BL-126/BL126_basic_design.md)（BL-126/BL-130と一体設計。実装順序§8で「最小・独立のため最初に着手」と位置づけ、BL-126が後で使う`pending_task_ids`許可リスト機構を最初から組み込む設計としている）。`log/2026-07-29/1708`で同じ`task_1_1_review`が11バージョンまで積み上がる形で再現しており、早期実装の必要性が裏付けられている。
+**基本設計:** [BL126_basic_design.md](BL-126/BL126_basic_design.md) §2.5・§2.6（BL-126/BL-130と一体設計）。
 
-**経緯:** `log/2026-07-29/1322`レビューで発見。Facilitatorが「制約見直し要求書・現実的ピボット案」の作成を`task_1_1_review`という新設タスクとして提案し、Expertがこれをそのまま実行して244行・6バージョンにわたる成果物を作成した。しかし`task_1_1_review`はtask_planner側の正式なフェーズ・タスク計画（`state["phases"]`）には一度も登録されておらず、`write_agreement`/ホワイトボード作成時にtask_idが実在の計画と照合されずに任意の文字列で成果物が作れてしまうことが判明した。これにより:
-- `current_task_id`が空文字列になるなど、正規のタスク進行状態から外れる
-- `task_criteria_status`やphase_gatesなど既存の進捗管理の仕組みがこの成果物を認識できない
-- 後続でtask_plannerが計画を見直す際、この作業がどう扱われるか（正式タスクとして後付け登録されるのか、無視されるのか）が不明確
+**経緯:** `log/2026-07-29/1322`レビューで発見。Facilitatorが「制約見直し要求書・現実的ピボット案」の作成を`task_1_1_review`という新設タスクとして提案し、Expertがこれをそのまま実行して244行・6バージョンにわたる成果物を作成した。しかし`task_1_1_review`はtask_planner側の正式なフェーズ・タスク計画（`state["phases"]`）には一度も登録されておらず、`write_agreement`/ホワイトボード作成時にtask_idが実在の計画と照合されずに任意の文字列で成果物が作れてしまうことが判明した。`log/2026-07-29/1708`では同じ`task_1_1_review`が11バージョンまで積み上がる形で再現し、早期実装の必要性が裏付けられた。
 
-**対応（未着手）:** BL-126で設計する「本質対話→合意→task_planner再構成→正式タスク化」というフローが整備されれば、正規の手順を経ない`task_1_1_review`のような即興タスクの発生を防げる可能性が高い。それとは別に、`write_agreement`側でtask_idを`state["phases"]`の実在タスクと照合し、未登録のtask_idでの新規作成を拒否または警告する、という独立した安全策も検討の余地がある。
+**実装内容（`done`）:**
+1. **前提: TOOL_DISPATCHのstate受け渡し化**（`cela_main.py:2177`付近）。ツールハンドラは従来`args`のみを受け取り`_CURRENT_RUN_ID`/`_CURRENT_TASK_ID`/`_CURRENT_PHASES`等のモジュールレベルglobal経由でしか実行時コンテキストを得られなかった（R2実装時からの技術的負債、BL-099）。`_query_AI_live`/`query_AI`/`_query_and_parse_with_retry`に`state`パラメータを追加し、ツール実行箇所を`handler(args, state)`に変更。`TOOL_DISPATCH`の全15エントリを`(args, state=None)`の2引数ラムダへ統一（`state`未指定時は既存globalへフォールバックし後方互換を維持）。`call_expert`/`generate_user_utterance`/`call_detector`（既にstateを持つノード）は`state=state`を追加するのみ、`call_resource_arbiter`/`call_integrator`/`call_task_planner`/`call_reviewer`/`call_goal_essence_analyst`/`call_task_plan_reviewer`（従来stateを受け取っていなかった6関数）には新規`state`パラメータを追加し、呼び出し元ノードから伝播させた。
+2. **task_id/phase_id実在チェック**: `_write_agreement_impl`に、`entry_type in ("Directive","Deliverable")`の場合`task_id`が`state["phases"]`（`_find_task_by_id`で検索）に実在するか、実在しなければ`state["pending_task_ids"]`（新規`LineageState`フィールド、BL-126のFacilitator対話が正式採用前に仮登録する許可リスト用に先行追加）に含まれるかを検証するチェックを追加。いずれにも該当しなければエラーで拒否する。`entry_type="Decision"`は対象外（タスクに紐づかない全体決定もあるため）。
+3. **`get_latest_whiteboard`/`get_latest_plan_draft`のtask_id単独検索化**: 従来`(phase_id, task_id)`の組でしか検索しておらず、誤ったphase_id指定で既存版が「該当なし」と誤判定されバージョンが1から再スタートする事故（1708ログのtask_1_1_review V9で観測）の直接原因だった。`plan_drafts`側に既存の`get_latest_plan_draft_by_task_id`（task_idはrun_id内で一意という命名規約を前提に検索）と同じ方式へ統一し、`phase_id`は食い違い検知の警告用途にのみ残した。
+4. **`target_topic`必須化**: `entry_type != "Deliverable"`のUPDATE/SUPERSEDEで`target_topic`省略時に`topic`（今回の新しい値）へ暗黙フォールバックしていた（実質的な空振り更新になるバグ）のを、必須パラメータとして拒否するよう変更。
+
+**検証:** 新規`tests/test_bl131_write_agreement_task_id_validation.py`（9件、task_id実在チェック・Decision除外・pending_task_ids許可・phase_id誤指定でのバージョン継続・target_topic必須化を検証）。既存の`tests/test_r3_smoke.py`のうち3件（BL-131導入前は任意のtask_idで成果物作成できていたテスト）を`pending_task_ids`経由で許可する形に更新。`tests/test_bl093_think_tool_scratchpad.py`/`tests/test_r3_smoke.py`のTOOL_DISPATCH内部実装依存の回帰テスト2件を新しい呼び出し規約（`handler(args, state)`）に合わせて更新。`python -m py_compile`合格、関連クラスタ166件Pass。実LLM再ドライランでの`task_1_1_review`型事故の再発防止確認は次回待ち。
 
 **完了条件:** BL-126の設計確定と合わせて対応方針を決定し、実装後にtask_planner未登録のtask_idでの成果物作成が防止されることを確認する。
 
