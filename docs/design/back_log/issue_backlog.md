@@ -3749,7 +3749,7 @@ Geminiの提案表全文・評価根拠は`docs/design/back_log/BL-117/BL117_inv
 
 ### BL-130: Expertが成果物を出さずにUser AIへ質問・相談できる双方向チャネルが未設計（現状はUser→Expertへの一方向指示のみ）
 
-**状態:** `open`（基本設計完了、実装は未着手）
+**状態:** `done`（実装完了、D-100参照）
 
 **基本設計:** [BL126_basic_design.md](BL-126/BL126_basic_design.md)（BL-126/BL-131と一体設計。§2に`ask_user_question`ツール仕様、§3に`expert_consultation_mode`時のDetector/Decision Extractorスキップ・ルーティング変更を記載）。
 
@@ -3759,9 +3759,15 @@ Geminiの提案表全文・評価根拠は`docs/design/back_log/BL-117/BL117_inv
 - `round_count`は現状`generate_user_utterance_node`（cela_main.py:6322）でのみ加算されており、Detector/Reflection/Facilitatorは含まれない。したがって「質問ラウンド」を導入しても新しいカウンターは不要で、Expertが「これは質問である」と明示できる手段（新ツール、または既存`write_agreement`へのフラグ追加）を用意すれば、既存のround_count・グラフルーティングの枠組みでそのまま扱える。
 - 焦点は「質問ラウンドの時、Detectorはどう振る舞うべきか」（成果物監査と同じ厳格さでレビューするか、もっと軽く流すか）という較正（BL-126の課題と共通）。
 
-**対応（未着手）:** BL-126の「本質対話モード」の設計と合わせて検討する。具体的な質問専用の仕組み（ツール新設か既存ツールの拡張か）、Detectorのレビュー粒度の較正方針が必要。
+**実装内容（done）:**
+1. 新規`ASK_USER_QUESTION_TOOL`/`_ask_user_question_tool_impl`（expertロールのみ許可、`question_text`/`blocking_reason`必須）を追加し、`call_expert`のツールリスト・プロンプト文言（固定版・`light_system_prompt`版の両方）へ反映。
+2. `_LAST_ASK_USER_QUESTION`／`get_last_ask_user_question()`（`_LAST_GOAL_REVISION`と同型のブリッジ）を新設し、`query_AI`の既存リセット処理に合流。
+3. `LineageState`に`expert_consultation_mode`/`expert_pending_question`を追加。`expert_node`がツール呼び出しの有無に応じてセット/明示的にリセット。
+4. `detector_node`に軽量パス分岐（`target_role=="assistant"`かつ`expert_consultation_mode`の場合、`call_detector`のLLM呼び出し自体をスキップし`constraint_issue="none"`固定）。
+5. `route_after_expert_detector`に新分岐（`expert_consultation_mode`時は`expert_decision_extractor`を経由せず`generate_user_utterance`へ直行）。グラフの宣言済みエッジにも追加。
+6. `generate_user_utterance`（§13.2のモード切替設計）に質問提示の固定文面を追加、`generate_user_utterance_node`が回答生成直後にフラグを消費・リセット。
 
-**完了条件:** BL-126の設計と合わせて方針を確定し、実装計画（Plan Mode）を立てる。
+**検証:** 新規`tests/test_bl130_ask_user_question.py`（15件、ツール権限・必須項目・dispatch経由呼び出し・`expert_node`のフラグ設定/リセット・`detector_node`の軽量パス/通常経路の両方・グラフエッジ存在・プロンプト文言注入を検証）。`python -m py_compile`合格、関連クラスタ256件Pass。実LLM再ドライランでの相談チャネルの実動作確認は次回待ち。
 
 ---
 
