@@ -3650,13 +3650,15 @@ Geminiの提案表全文・評価根拠は`docs/design/back_log/BL-117/BL117_inv
 
 ### BL-125: `_resolve_task_transition`はissue_logの未解決状態を参照しておらず、フェーズ単位の足止めは実装されていない（全体停止の安全弁のみ）
 
-**状態:** `open`（設計要、記録のみ）
+**状態:** `done`
 
-**経緯:** ユーザー質問「issue未解決であればフェーズを超えられない仕組みは実装済みか」を受けて確認。`_resolve_task_transition`（cela_main.py:6964-7000）はphase/task遷移の唯一の書き込み口だが、`phase_id`/`task_id`がtask_planner確定済みリストに実在するかのみをチェックしており、issue_logのopen/escalated状態は一切参照していない。現状存在するのは「特定フェーズだけ待たせる」スコープを絞った足止めではなく、「escalated issueが1件でもあれば議論全体を`stagnant`扱いにし、最終的に全体をhaltさせる」（BL-096）という粗い全体停止の安全弁のみ。
+**経緯:** ユーザー質問「issue未解決であればフェーズを超えられない仕組みは実装済みか」を受けて確認した時点では、`_resolve_task_transition`（BL-024の唯一の書き手）はphase/task遷移の唯一の書き込み口でありながら、`phase_id`/`task_id`がtask_planner確定済みリストに実在するかのみをチェックし、issue_logのopen/escalated状態は一切参照していなかった。存在したのは「特定フェーズだけ待たせる」スコープを絞った足止めではなく、「escalated issueが1件でもあれば議論全体を`stagnant`扱いにし、最終的に全体をhaltさせる」（BL-096）という粗い全体停止の安全弁のみだった。
 
-**対応（未着手）:** フェーズ単位でissueの未解決状態を参照し、当該フェーズ・依存フェーズのみを止める（他の独立フェーズは進行可能にする）仕組みの検討余地がある。
+その後、BL-134（Expertが24時間365日前提を無根拠に確定値化し、Detectorがmajorエスカレーションしたのに未解決のままtask_1_1→task_1_2の遷移が起きてしまった実インシデント）の分析から、このギャップが実害を伴うことが確認され、実装に着手した。
 
-**完了条件:** 設計方針をユーザーと相談の上確定し、別途実装計画を立てる。
+**対応（実施済み）:** `_get_blocking_issues_for_transition(conn, run_id, departing_task_id)`を新設し、`status='escalated' AND severity='major' AND last_seen_task_id=<離脱task> AND defer_to_task_id IS NULL/''`のissue_log行を問い合わせる。`_resolve_task_transition`の`next_task_id`適用直前でこれを呼び、該当issueがあれば`canonical_task_id`への書き込みを拒否して直前の`current_task_id`を維持し（既存の「存在しないtask_id」拒否と同じフェイルクローズパターン）、ブロックしたtopic一覧を`state["task_transition_blocked_issue_topics"]`へ記録する。次のUser AIターンで`_build_task_transition_blocked_notice`（`_build_escalation_resume_notice`と同型のone-shot注入パターン）がこれを消費し「なぜ遷移がブロックされたか、RESOLVEかDEFERのどちらかを呼んでから再度移行を指示してほしい」旨を明示する。BL-135のDEFER（`defer_to_task_id`設定済み）で明示的に先送りされたissueはブロック対象から除外し、「今すぐ解決」「明示的に将来のtaskへ先送り」のどちらかが済んでいれば遷移を許可する。
+
+**完了条件:** `python -m py_compile`合格・`tests/test_bl135_issue_visibility_and_transition_gate.py`（BL-134実インシデント再現テスト含む）・関連クラスタ・フルオフラインスイート542件Pass済み。
 
 ---
 
