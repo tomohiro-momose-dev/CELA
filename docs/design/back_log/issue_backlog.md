@@ -3839,7 +3839,7 @@ Detectorの内部思考ログ（python_repl検算過程）にも「12h/dayなら
 **影響:** F-2.6/BL-033が本来防ごうとしている「根拠のない前提を確定値として扱う」パターンが、監査（Detector/User AI）で検知・記録はされたのに是正フロー（issue解決・前提の再確認）に接続されず、そのまま後続タスクへすり抜けかけた実例。severity=majorでescalatedされたissueが、実際にはタスク進行を一切ブロックしていない（BL-125が指摘した「issueの未解決状態がフェーズ/タスク遷移を止めない」という既知のギャップと同根）。
 
 **対応（実施済み・未着手）:**
-1. **実施済み（BL-125/BL-135、本セッション）**: severity="major"でstatus="escalated"のissueが未解決・未先送りのまま該当タスクの次タスクへの進行を許してしまう現状のギャップに対応した。`_resolve_task_transition`に`_get_blocking_issues_for_transition`によるゲートを追加し、離脱しようとしているtaskに紐づく未解決issueがあれば遷移をブロックする（BL-135のDEFERで明示的に先送り済みのものは許容）。あわせて、issue_logのstatus='open'（minor）行も毎ターン可視化し（従来はescalated行のみ）、escalated行についてもBL-086同様「今回の発言内で必ずRESOLVEかDEFERを呼んでください」という強制文言を追加した（詳細はBL-135参照）。
+1. **実施済み（BL-125/BL-136、本セッション）**: severity="major"でstatus="escalated"のissueが未解決・未先送りのまま該当タスクの次タスクへの進行を許してしまう現状のギャップに対応した。`_resolve_task_transition`に`_get_blocking_issues_for_transition`によるゲートを追加し、離脱しようとしているtaskに紐づく未解決issueがあれば遷移をブロックする（BL-136のDEFERで明示的に先送り済みのものは許容）。あわせて、issue_logのstatus='open'（minor）行も毎ターン可視化し（従来はescalated行のみ）、escalated行についてもBL-086同様「今回の発言内で必ずRESOLVEかDEFERを呼んでください」という強制文言を追加した（詳細はBL-136参照）。
 2. **未着手・要検討**: Expertが「最低N名常駐」のような部分的な要件を、運行時間外にまで拡大解釈して確定値化する際、その拡大解釈の根拠をゴール文中の記述に明示的に求める指示をプロンプトに追加する（D-094の「判断基準と罠」路線。「常駐」の対象時間をゴール文の運行時間帯と機械的に照合させる等）。
 3. **未着手・要検討**: Detector自身が疑義に気づきながら`observations`扱いに留め`constraint_issue`をmajor化する根拠に反映しなかった点（前提の疑義とconstraint_issue判定の紐付けが弱い）についても、判定ロジック側の見直しの余地がないか確認する。
 
