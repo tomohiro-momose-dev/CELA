@@ -167,6 +167,7 @@
 | BL-133 | 高 | `cela_main.py`（`call_detector`のドメイン妥当性レビュー第1段、`_query_and_parse_with_retry`／`_safe_json_parse`） | `tests/test_f26_detection.py::test_detector_no_false_positive_within_cap`（B.5.1非退行、D-011）が2026-07-30に3/3全試行で`major`となり失敗（1回目は2026-07-28に単発flakyとして観測、当時は「モデル判定のばらつき」と判断していた）。今回、テスト出力の`comment`フィールドを実際に確認したところ、**モデルが誤った判定を下したのではなく**、`comment='(ドメイン妥当性レビューのJSON解析失敗のためフェイルクローズしました)'`——すなわち第1段（ドメイン妥当性レビュー）が層2リトライ（`_query_and_parse_with_retry`、`max_retries=2`＝計3試行）を使い切ってJSONを一切パースできず、D-005の設計通りフェイルクローズ（major）していたことが判明した。これはBL-012/D-011が想定していた「モデルの誤判定」とは別種の失敗モードであり、2026-07-28の1回目もおそらく同一の парース失敗だった可能性が高い（当時は`comment`を確認せず「ばらつき」と誤って結論づけていた）。フェイルクローズ自体（D-005の安全側原則）は変更すべきではないが、**なぜ層2リトライ3試行が全て失敗したのか**（モデルがJSONを一切出力しなかったのか、ツールループがMAX_TOOL_ITERまで消費され最終テキストが空だったのか、単なるAPI側の一時的不調か）が未診断のまま。**対応（今回実施）**: `_query_and_parse_with_retry`のパース失敗時ログに生レスポンス冒頭300字のプレビューを追加し（従来は失敗した事実のみで内容不明だった）、次回の再現時に原因を機械的に切り分けられるようにした（`python -m py_compile`合格、`tests/test_bl089_json_fence_and_failclosed_review.py`10件Pass、ロジック変更なしのため既存挙動に影響なし）。**状態**: `open`（診断ログ追加のみ完了。次回この非退行テストが再びmajorになった際、追加したプレビューログから真因を特定し、必要ならプロンプト調整・リトライ回数見直し等の恒久対応を行う）。 |
 | BL-134 | 高 | `cela_main.py`（`call_expert`のExpertプロンプト、issue_logのエスカレーション解決フロー、`generate_user_utterance`のUser AI承認ロジック） | `log/2026-07-30/1236`（BL-126以降初のドライラン）レビューでユーザーが発見。ゴール文は遠隔監視オペレーターについて「最低2名常駐」としか要求しておらず、運行時間帯（8:00〜20:00の12時間、`operating_hours_start`/`operating_hours_end`として制約テーブルにも明記済み、20:00〜翌8:00は「運行外」と明言）を超えて24時間365日の監視が必要だとは一切書いていない。にもかかわらずExpertは「常時2名常駐」を無根拠に「24時間365日」体制と解釈し、`remote_operator_min_count_legal`（法的最低要員数10〜11名）を`confidence="confirmed"`として確定させ、年間人件費6,188〜9,281万円という「致命的な予算超過」の結論の土台に使っていた。Detector自身がこの疑義を実際に検知していた（issue `detector_observation_no_task`, severity=`major`, status=`escalated`: 「『常時2名常駐』を24h365日で試算（10名必要）しているが、運行時間は8-20時の12hのみ。『常駐』の解釈が曖昧で、実態に合ったシフト設計なら要員半減の可能性。」）にもかかわらず、このissueは`resolved_by`/`resolved_at`が空のまま未解決で、User AIはtask_1_1を承認しtask_1_2へ進行させてしまっていた。F-2.6/BL-033が防ごうとしている「根拠不明な前提を確定値として扱う」パターンが、監査（Detector）で検知はされたのに是正フロー（issue解決・再検討）に乗らずすり抜けかけた実例。**状態**: `partially done`（候補(b)はBL-125/BL-136として実装完了。候補(a)(c)は`open`のまま）。対応候補: (a) Expertが運行時間外の要件を確定値として一般化・拡大解釈する際に、その拡大解釈の根拠をゴール文中に明示的に求める指示をプロンプトに追加する（D-094の「判断基準と罠」路線、`open`）。(b) severity=majorでescalatedされたissueが未解決のまま該当タスクが完了・次タスクへ進行することを防ぐゲート（issue_logの`status`とtask遷移の連動）を検討する→**BL-125として実装完了**。(c) Detectorが疑義に気づきながらconstraint_issue判定に反映しない点の見直し（`open`）。 | P1 |
 | BL-135 | 低 | `cela_main.py`（`ASK_USER_QUESTION_TOOL`のパラメータ定義、`generate_user_utterance`のBL-130相談応答モード分岐） | ユーザー依頼によるBL-086/BL-130新規ツール群のプロンプト・オリエンテーション品質レビューで発見。`ASK_USER_QUESTION_TOOL`は`blocking_reason`（なぜ現在のタスクを前進できないブロッキング理由か）を`required`パラメータとしてExpertに書かせているが、`generate_user_utterance`のBL-130相談応答モード文面は`state["expert_pending_question"]`（`question_text`のみ）しか埋め込んでおらず、`expert_pending_question`と対になる`expert_blocking_reason`相当のstate値・埋め込みが存在しない。結果として、User AIは「本当にブロッキングな質問か、単なる確認のためだけの質問か」を判断する材料（Expert自身が書いたはずのblocking_reason）を見せられないまま質問文だけに回答することになる。なお現時点（`log/2026-07-30`系列の複数ドライラン）で`ask_user_question`自体が実際に呼ばれた例はまだ確認できておらず、実害はまだ観測されていない。**状態**: `open`（記録のみ、実害未確認・優先度低）。**対応（未着手）**: `_ask_user_question_tool_impl`が返す辞書に`blocking_reason`を含め（既にargsから取得済み）、`expert_node`が`state["expert_blocking_reason"]`等へ反映、`generate_user_utterance`の該当elif節でquestion_textと併記表示する。 | P3 |
+| BL-136 | 高 | `cela_main.py`（`write_issue`/`_write_issue_impl`のDEFER拡張、`_get_open_issues`/`_build_open_issue_pin_text`、`_get_forced_escalated_issues_text`、`_resolve_task_transition`／`_get_blocking_issues_for_transition`） | ユーザー指摘「issueが活発に使われなくなった、たまたまか？」を受けて調査。`log/2026-07-30/1236`の実DBでissue_logを確認したところ7件中0件が`resolved`で、原因は(1)`status='escalated'`行のみ毎ターン自動表示されopen（minor）行は不可視、(2)BL-086の前提エスカレーション（`_get_open_escalations_text`、「今回の発言内で必ず解決してください」）と異なりissue_logのRESOLVE指示に強制力がない、という2点の非対称性と判明。あわせてBL-134の実インシデントを再検証し、24h/365d問題の一部（遠隔監視オペレーターのシフト）が依然`confirmed`のまま未是正であること、および「Detectorがmajor判定した」という当初の説明が不正確で、実際は`raised_by='detector_auto'`の汎用バケツ行が再発回数（occurrence_count>=2）により機械的にescalated化したものと、`raised_by='user'`が最初からmajor指定でCREATEしたものの2種が混在していたことも判明（後者はD-079/D-080の意図通りの機械的昇格設計であることをユーザーに確認済み）。**実装完了（`done`）**: (A) `_get_open_issues`/`_build_open_issue_pin_text`を新設し、status='open'行も`call_expert`/`generate_user_utterance`へ毎ターン参考情報として可視化。(B) `write_issue`に`action_type="DEFER"`を追加（userロールのみ許可、`defer_to_task_id`必須・実在チェック付き、BL-082の`_append_deferred_note_to_plan`を再利用して対象taskの計画文書へも申し送り、`issue_log`に`defer_to_task_id`列を新設）。(C) `_get_forced_escalated_issues_text`を新設し、BL-086と同型の「今回の発言内で必ずRESOLVEかDEFERを呼んでください」という強制文言を`generate_user_utterance`へ注入（既存の受動的pinとは別に追加、DEFER済みのものは対象外）。(D) BL-125として`_get_blocking_issues_for_transition`と`_resolve_task_transition`のゲートを実装（詳細はBL-125参照）。新規テスト`tests/test_bl136_issue_visibility_and_transition_gate.py`（28件、BL-134実インシデント再現含む）含め関連クラスタ・フルオフラインスイート542件Pass。 | P1 |
 
 ---
 
@@ -3860,6 +3861,30 @@ Detectorの内部思考ログ（python_repl検算過程）にも「12h/dayなら
 **対応（未着手）:** `_ask_user_question_tool_impl`の戻り値に`blocking_reason`を含める（argsからは既に取得済み）、`expert_node`が`state["expert_blocking_reason"]`等へ反映、`generate_user_utterance`の該当elif節でquestion_textと併記表示する。優先度は低（実害未確認のため）。
 
 **完了条件:** 上記対応を実装後、`python -m py_compile`合格・既存テストPass。可能であれば`ask_user_question`が実際に呼ばれるドライランで、User AIの応答プロンプトにblocking_reasonが表示されていることを確認する。
+
+---
+
+### BL-136: issue_logが「起票されるが解決されない」状態だった（可視性・強制力の非対称性）
+
+**状態:** `done`
+
+**経緯:** ユーザー指摘「前まではissueが活発に使われていたのに今回はあまり活用されていない。たまたまか？」を受けて調査した。`log/2026-07-30/1236`の実行時DB（`cela.db`）を`run_id`で集計したところ、issue_logに7件のissueが起票されていたが（severity=major/status=escalated 3件、severity=minor/status=open 4件）、`resolved_by`/`resolved_at`が埋まった行は**0件**だった。timestampはturn 1〜3にわたって断続的に発生しており、序盤に集中していたわけではない。
+
+コードを確認したところ、2点の設計上の非対称性が原因と判明した:
+1. **可視性の非対称**: `_build_escalation_pin_text`は`status='escalated'`行のみを毎ターン`call_expert`/`generate_user_utterance`へ自動注入していたが、`status='open'`（minor）行は`read_issues`を能動的に呼ばない限り一切見えなかった。
+2. **強制力の非対称**: BL-086の前提エスカレーション（`escalate_premise_concern`）には`_get_open_escalations_text`が「判断を先送りせず、今回の発言内で必ず解決してください」という明示的な強制文言＋具体的なツール名を伴って毎ターン注入されるのに対し、issue_logのRESOLVE指示は「解消していれば明示的にクローズしてください」という条件付き・任意の文面に留まり、強制力がなかった。
+
+BL-134の実インシデントを再検証する過程で、当初「Detectorがmajorエスカレーションした」としていた説明が不正確だったことも判明した（`raised_by='detector_auto'`の汎用バケツ行がoccurrence_count>=2の再発回数により機械的にescalated化したものと、`raised_by='user'`が最初からmajor指定でCREATEしたものの2種が混在していた）。この機械的昇格自体はD-079/D-080の意図通りの設計（「同じtopicが繰り返し検出される＝未解決のまま何度も見つかっている」ことを昇格条件とする）であるとユーザーに確認した。
+
+**対応（実施済み）:**
+- **(A) minor（open）issueの可視化**: `_get_open_issues`/`_build_open_issue_pin_text`を新設し、`call_expert`・`generate_user_utterance`双方へ`status='open'`行も参考情報として（強制色のない`ℹ️`ラベルで）毎ターン注入する。
+- **(B) issue_logへのDEFER操作追加**: `write_issue`に`action_type="DEFER"`を追加（userロールのみ許可）。`defer_to_task_id`（必須、実在task_idチェック付き）・`defer_reason`（必須）を指定すると、issue_logの`status`は変更せず`defer_to_task_id`列（新設）のみ更新し、既存の`_append_deferred_note_to_plan`（BL-082）をそのまま再利用して対象taskの計画文書へも申し送りを追記する。BL-082の「申し送り」（Directive/status=Deferred）と全く同じ思想を流用し、「今すぐ解決」と「明示的に将来のtaskへ先送り」の二択をUser AIに与えることで、強制解決一辺倒による無期限ブロックを避けた。
+- **(C) 強制解決文言の追加**: `_get_forced_escalated_issues_text`を新設し、`status='escalated'`かつ`defer_to_task_id`未設定の行について、BL-086の`_get_open_escalations_text`と同型の「write_issue(RESOLVE)で解決するか、write_issue(DEFER)で対応予定のtaskを明示してください。理由なく放置することはできません」という強制文言を`generate_user_utterance`へ注入する（既存の受動的pinとは別立て。RESOLVE/DEFERを呼べるのはuserロールのみのため、Expertへは注入しない）。
+- **(D) BL-125（タスク遷移ゲート）**: 上記(A)(B)(C)と合わせて実装。詳細はBL-125参照。
+
+**影響:** F-2.6/BL-033/BL-134が指摘した「監査で検知はされたのに是正フローに乗らずすり抜ける」問題の根本原因（issue_logの可視性・強制力不足）に対応した。今後のドライランで実際にRESOLVE/DEFERの呼び出し率が改善するかは、次回以降の実行ログで検証が必要。
+
+**完了条件:** `python -m py_compile`合格。新規テスト`tests/test_bl136_issue_visibility_and_transition_gate.py`（28件）・既存クラスタ（BL-096/082/086）・フルオフラインスイート（`pytest tests/ -q --ignore=tests/test_f26_detection.py`）542件Pass済み。可能であれば同一シナリオで再ドライランを行い、issueのRESOLVE/DEFER呼び出し率が改善することを確認する。
 
 ---
 
