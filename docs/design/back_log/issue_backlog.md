@@ -3827,19 +3827,21 @@ D-005のフェイルクローズ原則自体（安全側は差し戻し）は正
 
 この24時間前提の人件費が単独で年間維持費上限3,000万円を超過することが「CONF-02: 致命的」な矛盾として`constraint_issue="major"`判定の根拠にもなっていた。もし運行時間帯（12時間/日）のみを前提にすれば、必要人時は17,520人時/年→8,760人時/年へ半減し、必要人数もおよそ半減する可能性が高い。
 
-**Detector自身がこの疑義を実際に検知していた**（issue `detector_observation_no_task`、`severity="major"`、`status="escalated"`のobservationsに含まれる一文）:
+**この疑義は`issue_log`に記録されていた**（issue `detector_observation_no_task`、`severity="major"`、`status="escalated"`のobservationsに含まれる一文）:
 > 「遠隔監視オペレーター『常時2名常駐』を24h365日で試算（10名必要）しているが、運行時間は8-20時の12hのみ。『常駐』の解釈が曖昧で、実態に合ったシフト設計なら要員半減の可能性。」
 
 Detectorの内部思考ログ（python_repl検算過程）にも「12h/dayなら8,760人時/年→6名で足りるのでは、大きな差」という同旨の検討が残っている。つまりシステムは一度この矛盾に気づいていた。
 
-**しかし**、このissueは`resolved_by`/`resolved_at`が空のまま未解決（open/escalated）で放置され、その後もUser AIはtask_1_1を承認し、task_1_2（M/M/cキューイング解析）へと進行させてしまった。24時間前提の`confirmed`値は訂正されないまま次工程に引き継がれている。
+**訂正（本セッション後半で判明）**: 上記のissue行は`raised_by='detector_auto'`（`detector_node`の機械的バックアップ書き込み、observations長≥30字なら`constraint_issue`の値に関わらず常に`severity='minor'`で起票）で、`occurrence_count=11`という再発回数によって機械的にmajor/escalatedへ昇格したもの（D-079/D-080の「同じtopicが繰り返し検出される＝未解決のまま何度も見つかっている」ことを昇格条件とする設計は意図通り）。24h/365dの一文は、その汎用バケツdescription（10件超の気づきをまとめて溜め込んだもの）の中の1項目に過ぎない。一方、`task_1_2_remote_operator_legal_vs_requirement_gap`（`raised_by='user'`、`occurrence_count=1`で最初からseverity='major'指定）は、User AI自身がこの懸念をmajorと判断して一発でCREATEしたもの（chat_history_window/expert_history_windowを過ぎると消えてしまう指摘を書き残すためのissue_logの意図通りの用法）。いずれにせよ、「Detectorのconstraint_issue=major判定（差し戻し）とissue_logへの書き込みは別経路で自動連動していない」ことが判明した。
 
-**影響:** F-2.6/BL-033が本来防ごうとしている「根拠のない前提を確定値として扱う」パターンが、監査（Detector）で検知はされたのに是正フロー（issue解決・前提の再確認）に接続されず、そのまま後続タスクへすり抜けかけた実例。severity=majorでescalatedされたissueが、実際にはタスク進行を一切ブロックしていない（BL-125が指摘した「issueの未解決状態がフェーズ/タスク遷移を止めない」という既知のギャップと同根）。
+**しかし**、これらのissueは`resolved_by`/`resolved_at`が空のまま未解決（open/escalated）で放置され、その後もUser AIはtask_1_1を承認し、task_1_2（M/M/cキューイング解析）へと進行させてしまった。24時間前提の`confirmed`値は訂正されないまま次工程に引き継がれている。
 
-**対応（未着手・要検討）:** 想定される対応候補:
-1. Expertが「最低N名常駐」のような部分的な要件を、運行時間外にまで拡大解釈して確定値化する際、その拡大解釈の根拠をゴール文中の記述に明示的に求める指示をプロンプトに追加する（D-094の「判断基準と罠」路線。「常駐」の対象時間をゴール文の運行時間帯と機械的に照合させる等）。
-2. severity="major"でstatus="escalated"のissueが未解決のまま、該当タスクの完了・次タスクへの進行を許してしまう現状のギャップに対応する（issue_logの`status`とtask/phase遷移の連動。BL-125「issue未解決時のフェーズ超え制限」との統合を検討）。
-3. Detector自身が疑義に気づきながら`observations`扱いに留め`constraint_issue`をmajor化する根拠に反映しなかった点（前提の疑義とconstraint_issue判定の紐付けが弱い）についても、判定ロジック側の見直しの余地がないか確認する。
+**影響:** F-2.6/BL-033が本来防ごうとしている「根拠のない前提を確定値として扱う」パターンが、監査（Detector/User AI）で検知・記録はされたのに是正フロー（issue解決・前提の再確認）に接続されず、そのまま後続タスクへすり抜けかけた実例。severity=majorでescalatedされたissueが、実際にはタスク進行を一切ブロックしていない（BL-125が指摘した「issueの未解決状態がフェーズ/タスク遷移を止めない」という既知のギャップと同根）。
+
+**対応（実施済み・未着手）:**
+1. **実施済み（BL-125/BL-135、本セッション）**: severity="major"でstatus="escalated"のissueが未解決・未先送りのまま該当タスクの次タスクへの進行を許してしまう現状のギャップに対応した。`_resolve_task_transition`に`_get_blocking_issues_for_transition`によるゲートを追加し、離脱しようとしているtaskに紐づく未解決issueがあれば遷移をブロックする（BL-135のDEFERで明示的に先送り済みのものは許容）。あわせて、issue_logのstatus='open'（minor）行も毎ターン可視化し（従来はescalated行のみ）、escalated行についてもBL-086同様「今回の発言内で必ずRESOLVEかDEFERを呼んでください」という強制文言を追加した（詳細はBL-135参照）。
+2. **未着手・要検討**: Expertが「最低N名常駐」のような部分的な要件を、運行時間外にまで拡大解釈して確定値化する際、その拡大解釈の根拠をゴール文中の記述に明示的に求める指示をプロンプトに追加する（D-094の「判断基準と罠」路線。「常駐」の対象時間をゴール文の運行時間帯と機械的に照合させる等）。
+3. **未着手・要検討**: Detector自身が疑義に気づきながら`observations`扱いに留め`constraint_issue`をmajor化する根拠に反映しなかった点（前提の疑義とconstraint_issue判定の紐付けが弱い）についても、判定ロジック側の見直しの余地がないか確認する。
 
 **完了条件:** ユーザーとの相談の上、対応方針を確定し実装した後、`python -m py_compile`合格・既存テストPass。可能であれば同一シナリオで再ドライランを行い、24時間前提が是正されるか、または少なくとも該当issueが解決されるまでtask進行がブロックされることを確認する。
 
