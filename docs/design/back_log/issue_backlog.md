@@ -168,6 +168,7 @@
 | BL-134 | 高 | `cela_main.py`（`call_expert`のExpertプロンプト、issue_logのエスカレーション解決フロー、`generate_user_utterance`のUser AI承認ロジック） | `log/2026-07-30/1236`（BL-126以降初のドライラン）レビューでユーザーが発見。ゴール文は遠隔監視オペレーターについて「最低2名常駐」としか要求しておらず、運行時間帯（8:00〜20:00の12時間、`operating_hours_start`/`operating_hours_end`として制約テーブルにも明記済み、20:00〜翌8:00は「運行外」と明言）を超えて24時間365日の監視が必要だとは一切書いていない。にもかかわらずExpertは「常時2名常駐」を無根拠に「24時間365日」体制と解釈し、`remote_operator_min_count_legal`（法的最低要員数10〜11名）を`confidence="confirmed"`として確定させ、年間人件費6,188〜9,281万円という「致命的な予算超過」の結論の土台に使っていた。Detector自身がこの疑義を実際に検知していた（issue `detector_observation_no_task`, severity=`major`, status=`escalated`: 「『常時2名常駐』を24h365日で試算（10名必要）しているが、運行時間は8-20時の12hのみ。『常駐』の解釈が曖昧で、実態に合ったシフト設計なら要員半減の可能性。」）にもかかわらず、このissueは`resolved_by`/`resolved_at`が空のまま未解決で、User AIはtask_1_1を承認しtask_1_2へ進行させてしまっていた。F-2.6/BL-033が防ごうとしている「根拠不明な前提を確定値として扱う」パターンが、監査（Detector）で検知はされたのに是正フロー（issue解決・再検討）に乗らずすり抜けかけた実例。**状態**: `partially done`（候補(b)はBL-125/BL-136として実装完了。候補(a)(c)は`open`のまま）。対応候補: (a) Expertが運行時間外の要件を確定値として一般化・拡大解釈する際に、その拡大解釈の根拠をゴール文中に明示的に求める指示をプロンプトに追加する（D-094の「判断基準と罠」路線、`open`）。(b) severity=majorでescalatedされたissueが未解決のまま該当タスクが完了・次タスクへ進行することを防ぐゲート（issue_logの`status`とtask遷移の連動）を検討する→**BL-125として実装完了**。(c) Detectorが疑義に気づきながらconstraint_issue判定に反映しない点の見直し（`open`）。 | P1 |
 | BL-135 | 低 | `cela_main.py`（`ASK_USER_QUESTION_TOOL`のパラメータ定義、`generate_user_utterance`のBL-130相談応答モード分岐） | ユーザー依頼によるBL-086/BL-130新規ツール群のプロンプト・オリエンテーション品質レビューで発見。`ASK_USER_QUESTION_TOOL`は`blocking_reason`（なぜ現在のタスクを前進できないブロッキング理由か）を`required`パラメータとしてExpertに書かせているが、`generate_user_utterance`のBL-130相談応答モード文面は`state["expert_pending_question"]`（`question_text`のみ）しか埋め込んでおらず、`expert_pending_question`と対になる`expert_blocking_reason`相当のstate値・埋め込みが存在しない。結果として、User AIは「本当にブロッキングな質問か、単なる確認のためだけの質問か」を判断する材料（Expert自身が書いたはずのblocking_reason）を見せられないまま質問文だけに回答することになる。なお現時点（`log/2026-07-30`系列の複数ドライラン）で`ask_user_question`自体が実際に呼ばれた例はまだ確認できておらず、実害はまだ観測されていない。**状態**: `open`（記録のみ、実害未確認・優先度低）。**対応（未着手）**: `_ask_user_question_tool_impl`が返す辞書に`blocking_reason`を含め（既にargsから取得済み）、`expert_node`が`state["expert_blocking_reason"]`等へ反映、`generate_user_utterance`の該当elif節でquestion_textと併記表示する。 | P3 |
 | BL-136 | 高 | `cela_main.py`（`write_issue`/`_write_issue_impl`のDEFER拡張、`_get_open_issues`/`_build_open_issue_pin_text`、`_get_forced_escalated_issues_text`、`_resolve_task_transition`／`_get_blocking_issues_for_transition`） | ユーザー指摘「issueが活発に使われなくなった、たまたまか？」を受けて調査。`log/2026-07-30/1236`の実DBでissue_logを確認したところ7件中0件が`resolved`で、原因は(1)`status='escalated'`行のみ毎ターン自動表示されopen（minor）行は不可視、(2)BL-086の前提エスカレーション（`_get_open_escalations_text`、「今回の発言内で必ず解決してください」）と異なりissue_logのRESOLVE指示に強制力がない、という2点の非対称性と判明。あわせてBL-134の実インシデントを再検証し、24h/365d問題の一部（遠隔監視オペレーターのシフト）が依然`confirmed`のまま未是正であること、および「Detectorがmajor判定した」という当初の説明が不正確で、実際は`raised_by='detector_auto'`の汎用バケツ行が再発回数（occurrence_count>=2）により機械的にescalated化したものと、`raised_by='user'`が最初からmajor指定でCREATEしたものの2種が混在していたことも判明（後者はD-079/D-080の意図通りの機械的昇格設計であることをユーザーに確認済み）。**実装完了（`done`）**: (A) `_get_open_issues`/`_build_open_issue_pin_text`を新設し、status='open'行も`call_expert`/`generate_user_utterance`へ毎ターン参考情報として可視化。(B) `write_issue`に`action_type="DEFER"`を追加（userロールのみ許可、`defer_to_task_id`必須・実在チェック付き、BL-082の`_append_deferred_note_to_plan`を再利用して対象taskの計画文書へも申し送り、`issue_log`に`defer_to_task_id`列を新設）。(C) `_get_forced_escalated_issues_text`を新設し、BL-086と同型の「今回の発言内で必ずRESOLVEかDEFERを呼んでください」という強制文言を`generate_user_utterance`へ注入（既存の受動的pinとは別に追加、DEFER済みのものは対象外）。(D) BL-125として`_get_blocking_issues_for_transition`と`_resolve_task_transition`のゲートを実装（詳細はBL-125参照）。新規テスト`tests/test_bl136_issue_visibility_and_transition_gate.py`（28件、BL-134実インシデント再現含む）含め関連クラスタ・フルオフラインスイート542件Pass。 | P1 |
+| BL-137 | 高 | `cela_main.py`（`_apply_text_edits`、`_revise_goal_tool_impl`/`write_agreement`双方の共通経路） | 実際のドライラン実行中に`AttributeError: 'str' object has no attribute 'get'`（`_apply_text_edits`内、`e.get("old_text", "")`）で`run_ai_vs_ai_loop`全体が未捕捉クラッシュ。User AIが`revise_goal`ツールの`edits`パラメータに、`{old_text, new_text}`形式の辞書ではなく生文字列を含む配列を渡したことが原因（LLMがツールスキーマ通りの形式で出力しなかった）。`_apply_text_edits`は`write_agreement`のDeliverable/Decision UPDATE経路とも共有されている関数のため、同種の入力があれば同じ経路でクラッシュしうる。**実装完了（`done`）**: `_apply_text_edits`のループ先頭に`isinstance(e, dict)`チェックを追加し、非dict要素があれば例外を送出する代わりに`edits[{i}]: ...型の値が渡されました`という具体的なエラー文字列を返すようにした（既存のold_text空文字チェックと同じフェイルクローズ・自己修正可能パターン）。回帰テスト2件（`tests/test_r4_smoke.py`）を追加。`python -m py_compile`合格、フルオフラインスイート544件Pass。 | P1 |
 
 ---
 
@@ -3885,6 +3886,28 @@ BL-134の実インシデントを再検証する過程で、当初「Detectorが
 **影響:** F-2.6/BL-033/BL-134が指摘した「監査で検知はされたのに是正フローに乗らずすり抜ける」問題の根本原因（issue_logの可視性・強制力不足）に対応した。今後のドライランで実際にRESOLVE/DEFERの呼び出し率が改善するかは、次回以降の実行ログで検証が必要。
 
 **完了条件:** `python -m py_compile`合格。新規テスト`tests/test_bl136_issue_visibility_and_transition_gate.py`（28件）・既存クラスタ（BL-096/082/086）・フルオフラインスイート（`pytest tests/ -q --ignore=tests/test_f26_detection.py`）542件Pass済み。可能であれば同一シナリオで再ドライランを行い、issueのRESOLVE/DEFER呼び出し率が改善することを確認する。
+
+---
+
+### BL-137: `_apply_text_edits`が非dict要素を含む`edits`で未捕捉クラッシュし、`run_ai_vs_ai_loop`全体が停止した
+
+**状態:** `done`
+
+**経緯:** BL-136実装直後の実ドライラン実行中に、以下のトレースバックでプロセス全体がクラッシュした。
+
+```
+File "cela_main.py", line 3965, in _apply_text_edits
+    old_text = e.get("old_text", "")
+AttributeError: 'str' object has no attribute 'get'
+```
+
+`generate_user_utterance`内でUser AIが`revise_goal`ツール（BL-086、`edits`パラメータ必須）を呼び出した際、LLMが`edits`配列の要素として`{old_text, new_text}`形式の辞書ではなく生文字列を返したことが直接原因。`_apply_text_edits`はこの入力形状を一切検証しておらず、`e.get(...)`がそのまま例外を送出していた。`_apply_text_edits`は`revise_goal`だけでなく`write_agreement`のDeliverable/Decision UPDATE経路（`cela_main.py:1921`付近）とも共有されている関数のため、Expert側の`write_agreement`呼び出しで同様の入力があっても同じ経路でクラッシュしうる、より一般的なリスクだった。
+
+**影響:** ツール呼び出し1回の入力不備が、そのツール呼び出しへのエラー応答に留まらず、`run_ai_vs_ai_loop`全体（LangGraphの`app.stream()`ループ）を未捕捉例外で停止させていた。長時間ドライランがこの1点の脆弱性で全損するリスクがあり、F-2.6/BL-033が目指す「フェイルクローズだが継続可能」という設計原則からの逸脱だった。
+
+**対応（実施済み）:** `_apply_text_edits`（`cela_main.py:3949`）のループ先頭に`isinstance(e, dict)`チェックを追加。非dict要素があれば例外を送出する代わりに、`edits[{i}]: old_text/new_textを持つオブジェクト（辞書）である必要がありますが、{type(e).__name__}型の値が渡されました。`という具体的なエラー文字列を返す（既存の`old_textが空です`チェックと同じフェイルクローズ・ツールループ内自己修正可能パターン）。`edits`自体が文字列の場合（文字ごとにイテレートされる）も、最初の要素で同じチェックに引っかかり安全に停止する。
+
+**完了条件:** `python -m py_compile`合格。回帰テスト2件（`tests/test_r4_smoke.py::test_apply_text_edits_non_dict_edit_item_returns_error_without_crashing`・`test_apply_text_edits_non_dict_edit_item_among_valid_ones_returns_error`）追加。フルオフラインスイート544件Pass。
 
 ---
 
