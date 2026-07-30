@@ -1515,6 +1515,48 @@
 
 ---
 
+### D-105: BL-114（`call_orchestrator`の静的/動的順序矛盾）は、コードでなくコメントを実態に合わせて修正する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-30 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | Claude Sonnet 5（Plan agentの設計案をレビューし採用） |
+| **決定理由** | `call_orchestrator`はBL-104のコメントで「静的先頭・動的末尾」を謳いながら実際は動的な`goal_context`が先頭にあるという矛盾があった。JSON形式指示（末尾の短い固定ブロック）を静的先頭グループへ合流させる案も検討したが、`call_task_plan_reviewer`など他ノードの既存実装が既に「動的ブロックの後にJSON形式指示を残す」形で正しく機能しており、動的ブロックでプレフィックスキャッシュの連続一致が一度途切れた後は短い末尾ブロックを先頭へ動かしてもキャッシュヒット率上の利益がないため、コード側をこの既存の確立済みパターンに合わせ、矛盾していたコメントの記述を修正する方針とした。 |
+| 決定内容 | プロンプトを「静的（役割・肩書き生成指示・BL-078 focus_guidance）→動的（`goal_context`→`user_input`→`agreements_text`→`history_text`）→JSON形式指示（末尾）」の順に並び替え、コメントも実態に一致させた。同じ箇所で専門家タイトル例のドメイン非依存化（BL-116）も同時に実施。 |
+| 影響 | `cela_main.py`（`call_orchestrator`のみ）。既存の順序回帰テスト（`tests/test_bl104_project_plan_toc_and_prompt_reorder.py`）は相対順序を保ったため無修正でPass。`python -m py_compile`合格。 |
+| 関連 BL | [BL-114](back_log/issue_backlog.md#bl-114-call_orchestratorの静的動的順序がコード自身のbl-104コメントと矛盾している) |
+
+---
+
+### D-106: BL-115（ノードプロンプト間の重複ボイラープレート）は、既存の`inspect.getsource()`ベーステストを壊さない範囲でのみ共有化する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-30 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | Plan agent（設計案の主要な制約発見・回避策の提案）/ Claude Sonnet 5（採用・実装） |
+| **決定理由** | `tests/test_bl093_think_tool_scratchpad.py`（`test_node_prompt_names_its_own_tools_alongside_think`等）と`tests/test_bl094_read_tool_orientation.py`は、各ノード関数自身の`inspect.getsource()`にツール名・"BL-093"・"BL-094"等のリテラル文字列が含まれることを要求する設計になっている（BL-093/BL-094導入時に「文言更新忘れを検知する」目的で意図的にそう作られていた）。これは重複ボイラープレートの一部を安易にヘルパー関数へ隠すと、そのテスト群がサイレントに無意味化する（ヘルパーの中身は見ずキャッシュ的にPassし続けるが実際には検知力を失う）のではなく、むしろテストが期待通り「壊れて」教えてくれる、という健全な設計だと判断した。したがって、全ての重複を無条件に集約するのではなく、各ケースでテストとの整合性を個別に検証し、真にbyte-identicalまたは同型の箇所のみ共有化し、テスト制約と衝突する箇所（BL-094同期説明・ツール一覧文）は各関数にliteralのまま残す、という判断基準を採用した。 |
+| 決定内容 | (1) `call_decision_extractor`の未使用`prompt_old`（約60行）を削除。(2) モジュールレベル共有定数`_BL093_THINK_VALUE_PARAGRAPH`/`_THINK_TRAILER_SENTENCE`、共有関数`_verification_throttle_warning(example="")`を新設し、byte-identical/近似だった7関数（`call_task_planner`/`call_resource_arbiter`/`call_integrator`/`call_reviewer`/`call_goal_essence_analyst`/`generate_user_utterance`/`call_task_plan_reviewer`、および`call_expert`の`light_system_prompt`）に適用。(3) `call_detector`内の`domain_prompt`/`prompt`間の重複（気づき欄・issue引き継ぎ説明）は、関数外へは出さずローカル変数（`_observations_block`/`_issue_carryover_prefix`）で関数内集約。(4) BL-094同期説明は当初`_bl094_sync_template()`というパラメータ化ヘルパーを試みたが、`test_bl094_read_tool_orientation.py`の制約に抵触することが実際にテスト失敗で判明したため撤回し、各関数にliteralのまま残した（撤回の経緯をコード中にコメントとして明記）。(5) ツール一覧文（「あなたが使えるツールは...」）も同様の理由で各呼び出し元にインラインのまま維持。(6) `call_expert`の`system_prompt`/`light_system_prompt`の意図的な二重化（BL-025）は統合しない。 |
+| 影響 | `cela_main.py`（9関数＋新規共有定数/関数群）。既存テスト11件（`test_bl087_stage2_task_plan_reviewer_node.py`/`test_bl087_task_planner_prompt_and_resubmission_fix.py`/`test_bl089_anti_repetition_instructions.py`/`test_bl094_read_tool_orientation.py`/`test_bl104_project_plan_toc_and_prompt_reorder.py`）を、共有ヘルパーへの集約に伴うリテラル文字列変更に合わせて更新。フルオフラインスイート514件Pass。 |
+| 関連 BL | [BL-115](back_log/issue_backlog.md#bl-115-ノードプロンプト間の重複ボイラープレートおよびcall_decision_extractorの未使用デッドコードprompt_old) |
+
+---
+
+### D-107: BL-116（バス交通ドメイン特化例）は具体的な数値・語彙のみを一般化し、各例が伝える教訓（judgment criteria）自体は変更しない
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-30 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | Claude Sonnet 5（Plan agentの設計案をレビューし採用） |
+| **決定理由** | D-094が既に確立した設計原則（フレームワークの具体性は「判断基準と罠」に持たせるべきで、ラベル貼りに終わらせない）と同じ理由により、単に具体例を削除するのではなく、各例が実際に伝えている教訓（例: `call_task_plan_reviewer`の「Reviewerが絶対値の確定を強く求めすぎるとtask_plannerがゴール文にない数値をでっち上げる」という因果関係）は保持したまま、教訓を支える具体的な数値・ドメイン語彙（「山間部12km」「車両単価2,500万円」等）だけを一般化されたプレースホルダ表現に置き換える方針とした。教訓ごと薄めてしまうと、BL-117で議論した「フレームワーク名だけのラベル貼り」と同じ失敗を、今度は「具体例だけのラベル貼り」という形で繰り返すことになるため。 |
+| 決定内容 | `call_task_plan_reviewer`/`call_task_planner`/`call_orchestrator`/`call_decision_extractor`の具体的な数値・ドメイン例を一般化。`call_expert`/`call_detector`/`generate_user_utterance`の労基法・シフト関連の記述は実際に読み直した結果、既に汎用的な表現であることを確認し変更しなかった（記録のみ）。`run_ai_vs_ai_loop`のCLIデフォルトデモゴール文字列は、ノードの指示文ではなくユーザーが選択する実行シナリオであるためスコープ外として変更しなかった。あわせて`generate_user_utterance`のf-string由来のゴミ引用符混入バグ（各行が個別に閉じられているかのように書かれ、`\n"`というリテラルな引用符がプロンプト本文へ混入していた）を発見・修正し、再発防止の回帰テスト2件を追加。 |
+| 影響 | `cela_main.py`（4関数のドメイン例＋`generate_user_utterance`の複数箇所）。既存テスト2件（`test_bl087_stage2_task_plan_reviewer_node.py::test_reviewer_prompt_forbids_fabricating_values_absent_from_goal_text`・`test_bl087_task_planner_prompt_and_resubmission_fix.py::test_bl087_task_planner_prompt_references_the_12km_15_percent_failure_example`）を一般化後のリテラル文字列に合わせて更新。新規回帰テスト2件追加。フルオフラインスイート514件Pass。実LLM再ドライランでの一般化後のモデル理解度確認は次回待ち。 |
+| 関連 BL | [BL-116](back_log/issue_backlog.md#bl-116-プロンプトへのバス交通シナリオ特化例の埋め込みおよび冗長な指示文ゴミ文字混入) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
