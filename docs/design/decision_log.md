@@ -1557,6 +1557,34 @@
 
 ---
 
+### D-108: issue_logの「今すぐ解決」と「明示的に将来のtaskへ先送り」の二択（DEFER）はBL-082の申し送りパターンをそのまま再利用する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-30 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | ユーザー（スケジュール調整の必要性を指摘）＋Claude Sonnet 5（既存BL-082パターンの再利用を提案・実装） |
+| **決定理由** | issue_logのescalated行にBL-086同様の「今回の発言内で必ず解決してください」という強制文言を追加する提案に対し、ユーザーから「フェーズをまたいだり、先送りされているものはそのタスクで解決するなど、スケジュール調整も必要」との指摘があった。前提エスカレーション（BL-086）は「ゴール文言と真の目的の矛盾」という即断すべき性質の懸念であるのに対し、issue_logの懸念は本質的にタスク横断・フェーズ横断の性質を持ちうる（BL-134の実例も、task_1_1で検知された懸念が実際にはtask_1_2の数値に関わるものだった）。強制解決一辺倒にすると、正当に後続タスクへ引き継ぐべき懸念まで無理やり今すぐ解決させようとする圧力になり、BL-082が「申し送り」（Directive/status=Deferred/defer_to_task_id）として既に解決済みの問題を車輪の再発明することになる。BL-082の`_append_deferred_note_to_plan`は「対象taskの計画文書に申し送りを追記する」という実績のある経路であり、issue_logにも同じ`defer_to_task_id`という語彙・同じ関数をそのまま再利用することで、一貫した設計にした。 |
+| 決定内容 | `write_issue`ツールに`action_type="DEFER"`を追加（userロールのみ許可、RESOLVEと同じ権限階層）。`defer_to_task_id`（必須、task_planner確定済みリストへの実在チェック付き、BL-039のドット/アンダースコア正規化も踏襲）・`defer_reason`（必須）を指定すると、issue_logの`status`は変更せず（open/escalatedのまま）、新設した`defer_to_task_id`列のみ更新し、既存の`_append_deferred_note_to_plan`をそのまま呼び出して対象taskの計画文書へ申し送りを追記する。BL-125のタスク遷移ゲートは、この`defer_to_task_id`が設定済みの行をブロック対象から除外することで、「今すぐ解決」「明示的に将来のtaskへ先送り」のどちらかが済んでいれば遷移を許可する。 |
+| 影響 | `cela_main.py`（`issue_log`テーブルへの`defer_to_task_id`列追加マイグレーション、`WRITE_ISSUE_TOOL`のパラメータ拡張、`_check_issue_permission`、`_write_issue_impl`のDEFER分岐）。新規テスト`tests/test_bl136_issue_visibility_and_transition_gate.py`のDEFER関連8件でカバー。 |
+| 関連 BL | [BL-136](back_log/issue_backlog.md#bl-136-issue_logが起票されるが解決されない状態だった可視性強制力の非対称性)、[BL-082](back_log/issue_backlog.md#bl-082-task_plannerの計画をホワイトボード化し先送り事項をタスク間で永続的に申し送りできるようにする)、[BL-125](back_log/issue_backlog.md#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ) |
+
+---
+
+### D-109: BL-125のタスク遷移ゲートは、離脱するtaskに紐づくseverity='major'（=escalated）かつ未先送りのissueのみをブロック対象とする（minorはブロックしない）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-30 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | Claude Sonnet 5（設計・実装）、ユーザー承認（Plan Mode） |
+| **決定理由** | 当初、`raised_by='detector_auto'`（機械的バックアップ書き込み、severityは常にminorでCREATEされ再発回数のみでmajor化する）による昇格をゲート対象から除外する案を検討したが、ユーザーから「同じ問題が何度も見つかった＝未解決」という機械的昇格自体がD-079/D-080の意図通りの設計（強制的にmajor化し強制的に解決させる計画）であるとの説明を受け、この案を撤回した。結果として、raised_byを問わずseverity='major'（不変条件によりstatus='escalated'を伴う）であれば等しくゲート対象とする、というシンプルな基準に統一した。一方、severity='minor'（status='open'）はBL-135（本セッションでPart Aとして可視化）の対象に留め、タスク遷移そのものはブロックしない——軽微な懸念まで機械的に遷移をブロックすると、ドライラン全体が些細な指摘で頻繁に停止し、BL-096が意図した「軽量な気づきの記録」という性質と矛盾するため。 |
+| 決定内容 | `_get_blocking_issues_for_transition`は`status='escalated' AND severity='major' AND last_seen_task_id=<離脱task> AND defer_to_task_id IS NULL/''`のみを対象とする。`raised_by`による除外は行わない。 |
+| 影響 | `cela_main.py`（`_get_blocking_issues_for_transition`、`_resolve_task_transition`）。新規テストで`raised_by`を問わずブロックされること、およびminorはブロックされないことを確認（`tests/test_bl136_issue_visibility_and_transition_gate.py`）。 |
+| 関連 BL | [BL-125](back_log/issue_backlog.md#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-134](back_log/issue_backlog.md#bl-134-expertがゴール文にない24時間365日監視前提を無根拠に確定値化しdetectorがmajorエスカレーションしたのに未解決のままtask進行を許してしまった) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
