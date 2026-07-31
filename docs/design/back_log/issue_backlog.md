@@ -3962,7 +3962,9 @@ AttributeError: 'str' object has no attribute 'get'
 
 **対応（実施済み）:** `THINK_TOOL`の`issues`パラメータを`scratch_concerns`へ改名し、descriptionへ「これは永続的なissue_logとは別物で、このツール呼び出しループが終わると消える一時メモである。ターンをまたいで残したい懸念は`write_issue`を使うこと」という趣旨の注記を明記した。対応するモジュール変数`_THINK_ISSUES`→`_THINK_SCRATCH_CONCERNS`、`_think_handler`の返り値キー`current_issues`→`current_scratch_concerns`も同期して改名した。
 
-**完了条件:** `python -m py_compile`合格。新規テスト`tests/test_bl093_think_tool_scratchpad.py::test_think_tool_scratch_concerns_param_disambiguates_from_write_issue`（1件、パラメータ名とdescriptionの`write_issue`明記を検証）追加、既存テスト2件をキー名変更（`issues`→`scratch_concerns`、`current_issues`→`current_scratch_concerns`、`_THINK_ISSUES`→`_THINK_SCRATCH_CONCERNS`）に追随。フルオフラインスイート558件Pass。次回ドライランでissue_log起票率の実際の改善が見られるかは要観察。
+ユーザーから「各ノードのプロンプトでのツール説明では？」との指摘を受け追加対応：JSONツールスキーマのdescriptionだけでなく、`write_issue`と`think`が同一ターンで併記される2箇所のシステムプロンプト本文（自然言語の地の文、モデルが実際の判断時により重視しうる経路）にも、明示的な注記が欠けていたことを確認。`call_detector`（domain review、`_issue_carryover_prefix`共有変数、2パスで使用）と`generate_user_utterance`（User AI）の両方に、「thinkツールのscratch_concernsは、このツール呼び出しループの中だけで消える一時メモであり、後続タスクへは一切引き継がれません。持ち越したい懸念をscratch_concernsに書くだけで満足せず、必ずwrite_issueで記録してください」という一文を追記した。
+
+**完了条件:** `python -m py_compile`合格。新規テスト3件（`tests/test_bl093_think_tool_scratchpad.py::test_think_tool_scratch_concerns_param_disambiguates_from_write_issue`・`test_call_detector_prompt_body_disambiguates_scratch_concerns_from_write_issue`・`test_generate_user_utterance_prompt_body_disambiguates_scratch_concerns_from_write_issue`）追加、既存テスト2件をキー名変更（`issues`→`scratch_concerns`、`current_issues`→`current_scratch_concerns`、`_THINK_ISSUES`→`_THINK_SCRATCH_CONCERNS`）に追随。フルオフラインスイート560件Pass。次回ドライランでissue_log起票率の実際の改善が見られるかは要観察。
 
 **関連:** [BL-096](#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)、[BL-093](#bl-093-ノード内スクラッチパッド-thinkツール理由づけの退避ツールループ内の可変todoissuenotesメモ)、[BL-136](#bl-136-issue_logが起票されるが解決されない状態だった可視性強制力の非対称性)
 
