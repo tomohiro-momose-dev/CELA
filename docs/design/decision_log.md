@@ -1613,6 +1613,20 @@
 
 ---
 
+### D-112: `THINK_TOOL`の`issues`パラメータを`scratch_concerns`へ改名し、`write_issue`との違いをdescriptionで明示する（BL-140）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-31 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（仮説提起・実装指示）、Claude Sonnet 5（検証・実装） |
+| **決定理由** | `log/2026-07-31/1129`のレビューで、issue_logがモデル自身によって能動的に使われない件について、ユーザーから「thinkに書けば永遠に残ると勘違いしているのでは」という仮説が提起された。`THINK_TOOL`の実際のパラメータ定義を確認したところ、まさに`issues`という名前のフィールドが存在し、ツール全体のdescriptionにも「nothing is summarized away or aged out」（BL-108/BL-111）という永続性を示唆する文言があった。しかし`_think_handler`の実装は、この`issues`をモジュールレベルのグローバル変数（`_THINK_ISSUES`）へ一時保存するだけでDBには一切書き込まず、`_reset_think_scratchpad()`が`think`ツールを付与する各ノード関数の呼び出し開始時（＝1ターンごと）に必ず空にするため、そのツールループが終わった瞬間に完全に消える一時メモに過ぎなかった。実際、1129ログの4550行目でDetectorが`think(issues=[...])`へ書いた5件の懸念と、後に別のDetector呼び出しで実際に`write_issue`された懸念（21611〜21637行）がほぼ同一内容であり、モデルが「thinkに書いた＝記録した」と誤解して`write_issue`（真に永続化されターンをまたいで見える）の呼び出しを怠るリスクを裏付ける実例と判断した。名前の類似が原因の構造的な罠であるため、プロンプト文言の追加ではなくパラメータ名自体の改名で根本的に曖昧さを排除するのが最も確実な対策と判断した。 |
+| 決定内容 | `THINK_TOOL`の`issues`パラメータを`scratch_concerns`へ改名し、descriptionに「このツール呼び出しループ内限定の一時メモであり、`write_issue`のような永続的なissue_logではない。ターンをまたいで残したい懸念は`write_issue`を使うこと」という趣旨を明記する。対応するモジュール変数`_THINK_ISSUES`→`_THINK_SCRATCH_CONCERNS`、`_think_handler`の返り値キー`current_issues`→`current_scratch_concerns`も同期して改名する。 |
+| 影響 | `cela_main.py`（`THINK_TOOL`定義・`_think_handler`・関連グローバル変数）。新規テスト`tests/test_bl093_think_tool_scratchpad.py::test_think_tool_scratch_concerns_param_disambiguates_from_write_issue`（1件）、既存テスト2件をキー名変更に追随。フルオフラインスイート558件Pass。次回ドライランでissue_log起票率の実際の改善が見られるかは要観察（プロンプトの曖昧さの一因を除去したのみで、モデルの行動が必ず変わる保証はない）。 |
+| 関連 BL | [BL-140](back_log/issue_backlog.md#bl-140-think_toolのissuesパラメータ名がwrite_issueissue_logと混同されモデルが懸念を書いて満足し永続化しない誤解を誘発していた)、[BL-093](back_log/issue_backlog.md#bl-093-ノード内スクラッチパッド-thinkツール理由づけの退避ツールループ内の可変todoissuenotesメモ)、[BL-096](back_log/issue_backlog.md#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
