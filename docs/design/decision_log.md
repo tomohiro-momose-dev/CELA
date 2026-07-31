@@ -1599,6 +1599,20 @@
 
 ---
 
+### D-111: `_resolve_task_transition`のトリガーを単一LLM出力フィールドだけに依存させず、抽出済みDirectiveからのフォールバックで補強する（BL-139）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-31 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（ドライランレビュー依頼・「すぐ治しましょう」の実装指示）、Claude Sonnet 5（原因特定・設計・実装） |
+| **決定理由** | `log/2026-07-31/0908`のレビューで、`checkpoint.json`の`current_task_id`が最後まで`task_1_2`のまま更新されず、対話ログ・whiteboardsの実態（task_2_1が数百ターン進行）と乖離していることが判明した。原因を追跡すると、`_resolve_task_transition`（BL-024の唯一の書き手）は`call_decision_extractor`という単一のLLM呼び出しが返す巨大なJSON出力の一項目`advances_to_task_id`のみに依存しており、当該ターンではUserが明示的にtask_2_1着手を指示し`extracted_events`自体には正しくtask_2_1向けのDirectiveが抽出されていたにもかかわらず、トップレベルの`advances_to_task_id`だけがnullで返るという抽出漏れが起きていた（`_resolve_task_transition`の完了・拒否いずれの`print`ログもrun全体で一件も出現せず、遷移処理自体が一度も成立していなかったことをログから直接確認）。これは単発の不運ではなく、大きなJSON出力の中でトップレベルの補助フィールドがLLMに軽視されやすいという構造的なリスクであり、BL-096（issue_logの自動起票バックアップ）と同種の「LLMの直接出力だけに頼らず、既に抽出できている構造化データから機械的に補完できる場合は補完する」という安全網パターンを適用するのが最も低リスクで即効性のある対策と判断した。プロンプト文言の調整のみで再発防止を図る案（BL-024の指示をさらに強調する等）も検討したが、プロンプト強化は再発リスクを下げるだけで根絶を保証できず、コード側の決定的な安全網の方が優先度が高いと判断した。BL-082の明示的先送り（`status="Deferred"`）は「今は移行しない」という意思表示であるため、フォールバック対象から明示的に除外する（先送りしたはずのDirectiveが誤って即時遷移トリガーとして扱われる事故を防ぐため）。 |
+| 決定内容 | `decision_extractor_node`内、`_resolve_task_transition`呼び出し直前に、抽出済み`extracted_events`の中から現在タスクと異なる有効な`task_id`を持つDirective（`status != "Deferred"`）を探し、見つかればそれを`transition`の代替シグナルとして採用する。対象は`target_role="user"`の抽出のみ（Expert自身はタスク遷移を決定する権限を持たないため、BL-024の元の指示文言も User側の役割指示にのみ存在する）。LLMが正しく`advances_to_task_id`を返した場合はフォールバックは介入しない。 |
+| 影響 | `cela_main.py`（`decision_extractor_node`）。新規テスト`tests/test_bl139_transition_fallback_from_directive.py`（4件: 実インシデント再現、Deferredの除外確認、正常経路の非上書き確認、Expert側では発火しないことの確認）。フルオフラインスイート557件Pass。 |
+| 関連 BL | [BL-139](back_log/issue_backlog.md#bl-139-decision_extractor_nodeのtransition抽出がllm出力の1項目に依存しており明示的な次タスク指示があってもcurrent_task_idが更新されないことがあった)、[BL-024](back_log/issue_backlog.md#bl-024-current_phaseが初期化後フリーズしtask_id単位の状態追跡が存在しない)、[BL-039](back_log/issue_backlog.md#bl-039-decision_extractorが出力するtask_idの表記ゆれドット-vs-アンダースコアによりタスク遷移がドライラン全体で1回も成功していない)、[BL-096](back_log/issue_backlog.md#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)、[BL-125](back_log/issue_backlog.md#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
