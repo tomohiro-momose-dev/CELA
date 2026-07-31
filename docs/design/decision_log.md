@@ -1627,6 +1627,20 @@
 
 ---
 
+### D-113: `expert_node`は差し戻し再提出をchat_historyへ新規追記せず、直前のassistantエントリを上書きする（BL-141）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-31 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（問題提起・方針提示）、Claude Sonnet 5（原因特定・実装） |
+| **決定理由** | ユーザーから「detectorとエキスパートの差戻しループは見せずにuser->エキスパートの履歴だけに整理できませんか？差戻ループが続くと最初に言ったユーザー発言が見れなくなる恐れがあり、次のユーザーが前のユーザーが何を言ったかわからなくなってしまいます」との指摘があった。調査したところ、Detectorが`constraint_issue="major"`で差し戻すと`route_after_expert_detector`はUserの発言を挟まず`expert_node`へ直接ループバックし（`expert_retry_count`上限3回）、`expert_node`は呼ばれるたびに`chat_history`へ`assistant`メッセージを無条件で追記していた。`chat_history_window`（既定4、`generate_user_utterance`/`call_expert`が依存する「直近N件」切り出し方式）は全ノード共通のため、1タスクで3回差し戻されると、それだけでウィンドウの大半（最大3/4件）が同一タスクの差し戻し往復で埋まり、Userの直近の指示や別タスクの履歴がウィンドウ外へ押し出される構造的リスクがあった。ユーザーが懸念した通り、これは「issueの解消状況をUser AIが把握できなくなる」リスクに直結する（issueの起点になったUserの指摘自体が押し出されうるため）。差し戻し往復の内容自体はagreements DB（Expert/Detectorそれぞれの`write_agreement`呼び出し）に別途記録され続けるため、chat_history側から差し戻し途中経過が消えても監査上の実害はなく、Userにとっては「最終的に何が提出されたか」だけが分かればよいと判断した。 |
+| 決定内容 | `expert_node`末尾で、`chat_history`の直前のエントリが既に`assistant`（＝同一ターン内の差し戻しによる再提出）であれば新規追記せず、そのエントリの`content`を最新の再提出内容で上書きする。直前がuserの発言（＝新しいタスク・新しい指示の直後）であれば従来通り新規追記する。 |
+| 影響 | `cela_main.py`（`expert_node`）。新規テスト`tests/test_bl141_expert_retry_chat_history_collapse.py`（3件）。フルオフラインスイート563件Pass。ユーザーの追加提案「Expertの提出物の中にissueをクリアーしている箇所がないか探させる」は、`generate_user_utterance`に既存の`read_issues`/`write_issue(RESOLVE)`指示（BL-096導入時から存在）で部分的にカバーされていることを確認した上で、機械的強制（BL-125同型のゲート化）は今回のスコープ外とし見送った。 |
+| 関連 BL | [BL-141](back_log/issue_backlog.md#bl-141-detectorexpertの差し戻しループのたびにchat_historyへ新規assistantメッセージが無条件追記されchat_history_windowが同一タスクの往復だけで埋まっていた)、[BL-096](back_log/issue_backlog.md#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)、[BL-125](back_log/issue_backlog.md#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
