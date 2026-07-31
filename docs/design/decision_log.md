@@ -1578,7 +1578,7 @@
 | 日付 | 2026-07-30 |
 | 状態 | `decided`（実装完了） |
 | 決定者 | Claude Sonnet 5（設計・実装）、ユーザー承認（Plan Mode） |
-| **決定理由** | 当初、`raised_by='detector_auto'`（機械的バックアップ書き込み、severityは常にminorでCREATEされ再発回数のみでmajor化する）による昇格をゲート対象から除外する案を検討したが、ユーザーから「同じ問題が何度も見つかった＝未解決」という機械的昇格自体がD-079/D-080の意図通りの設計（強制的にmajor化し強制的に解決させる計画）であるとの説明を受け、この案を撤回した。結果として、raised_byを問わずseverity='major'（不変条件によりstatus='escalated'を伴う）であれば等しくゲート対象とする、というシンプルな基準に統一した。一方、severity='minor'（status='open'）はBL-135（本セッションでPart Aとして可視化）の対象に留め、タスク遷移そのものはブロックしない——軽微な懸念まで機械的に遷移をブロックすると、ドライラン全体が些細な指摘で頻繁に停止し、BL-096が意図した「軽量な気づきの記録」という性質と矛盾するため。 |
+| **決定理由** | 当初、`raised_by='detector_auto'`（機械的バックアップ書き込み、severityは常にminorでCREATEされ再発回数のみでmajor化する）による昇格をゲート対象から除外する案を検討したが、ユーザーから「同じ問題が何度も見つかった＝未解決」という機械的昇格自体がD-079/D-080の意図通りの設計（強制的にmajor化し強制的に解決させる計画）であるとの説明を受け、この案を撤回した。結果として、raised_byを問わずseverity='major'（不変条件によりstatus='escalated'を伴う）であれば等しくゲート対象とする、というシンプルな基準に統一した。一方、severity='minor'（status='open'）はBL-136（本セッションでPart Aとして可視化）の対象に留め、タスク遷移そのものはブロックしない——軽微な懸念まで機械的に遷移をブロックすると、ドライラン全体が些細な指摘で頻繁に停止し、BL-096が意図した「軽量な気づきの記録」という性質と矛盾するため。 |
 | 決定内容 | `_get_blocking_issues_for_transition`は`status='escalated' AND severity='major' AND last_seen_task_id=<離脱task> AND defer_to_task_id IS NULL/''`のみを対象とする。`raised_by`による除外は行わない。 |
 | 影響 | `cela_main.py`（`_get_blocking_issues_for_transition`、`_resolve_task_transition`）。新規テストで`raised_by`を問わずブロックされること、およびminorはブロックされないことを確認（`tests/test_bl136_issue_visibility_and_transition_gate.py`）。 |
 | 関連 BL | [BL-125](back_log/issue_backlog.md#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-134](back_log/issue_backlog.md#bl-134-expertがゴール文にない24時間365日監視前提を無根拠に確定値化しdetectorがmajorエスカレーションしたのに未解決のままtask進行を許してしまった) |
