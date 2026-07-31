@@ -1585,6 +1585,20 @@
 
 ---
 
+### D-110: BL-134候補(a)は罠（ピットフォール）注記として追加し、候補(c)（Detectorのconstraint_issue判定基準の緩和）は見送る
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-07-31 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | Claude Sonnet 5（設計・実装・候補(c)見送りの判断） |
+| **決定理由** | BL-134の未着手候補は2つあった。候補(a)「Expertが部分的な要件を無根拠に拡大解釈する際、ゴール文中の根拠を明示的に求める」はD-094が確立した「マインドセット／目的別行動オプション／罠」の3層モデルに沿った罠（ピットフォール）として素直に追加できる。一方、候補(c)「Detectorが疑義に気づきながらconstraint_issue判定に反映しない点の見直し」は、実際に`call_detector`のドメイン妥当性レビュープロンプト（判定基準）を確認したところ、「情報が不足していて確認できないことをmajorの根拠にしてはいけない」という制約が意図的に設けられていることが判明した。この制約はBL-012/D-011・BL-133が守ろうとしている「モデルの誤検知（false positive）を過度に許容しない」という設計と表裏一体であり、`tests/test_f26_detection.py::test_detector_no_false_positive_within_cap`という非退行テストで直接保護されている。24時間365日問題はまさに「ゴール文の『常駐』の解釈が曖昧」という情報不足型の疑義であり、現行基準通りconstraint_issue=majorではなくobservationsに回ったのは設計通りの動作だった。この経路（observations→issue_log）が実際に是正フローへ接続されていなかったことこそが真の問題であり、それは同日中にBL-125/BL-136で既に解消済みである。したがって候補(c)は、機能していない箇所ではなく、既に機能している判定基準を追加検証した上で「変更不要」と判断し、見送ることにした。 |
+| 決定内容 | call_expert（Expertのドメイン妥当性チェック直後）とgenerate_user_utterance（User AIのドメインレビューチェックリスト）の双方に、部分的な要件の無根拠な拡大解釈を避けるための罠注記を追加。拡大解釈する場合はゴール文中の根拠を明示し、根拠が無い場合はconfidence="provisional"として扱いwrite_issueで記録するよう指示する。call_detectorの判定基準（`情報が不足していて確認できない`ことをmajorの根拠にしない、という文言）は変更しない。 |
+| 影響 | `cela_main.py`（`call_expert`・`generate_user_utterance`の2箇所へプロンプト追加のみ、判定ロジック自体の変更なし）。新規テスト`tests/test_bl134_unsupported_generalization_guard.py`（3件、うち1件はcall_detectorの判定基準が変更されていないことを確認する非退行テスト）。フルオフラインスイート553件Pass。 |
+| 関連 BL | [BL-134](back_log/issue_backlog.md#bl-134-expertがゴール文にない24時間365日監視前提を無根拠に確定値化しdetectorがmajorエスカレーションしたのに未解決のままtask進行を許してしまった)、[BL-012](back_log/issue_backlog.md#bl-012-b51既知誤判定detectorの偽陽性の非退行テストが未定義)、[BL-133](back_log/issue_backlog.md#bl-133-test_detector_no_false_positive_within_capb51非退行d-011が層2リトライ枯渇によるフェイルクローズで33失敗しモデルの誤判定と誤認されるところだった) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
