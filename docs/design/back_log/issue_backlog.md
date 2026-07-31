@@ -3845,12 +3845,12 @@ Detectorの内部思考ログ（python_repl検算過程）にも「12h/dayなら
 
 **影響:** F-2.6/BL-033が本来防ごうとしている「根拠のない前提を確定値として扱う」パターンが、監査（Detector/User AI）で検知・記録はされたのに是正フロー（issue解決・前提の再確認）に接続されず、そのまま後続タスクへすり抜けかけた実例。severity=majorでescalatedされたissueが、実際にはタスク進行を一切ブロックしていない（BL-125が指摘した「issueの未解決状態がフェーズ/タスク遷移を止めない」という既知のギャップと同根）。
 
-**対応（実施済み・未着手）:**
-1. **実施済み（BL-125/BL-136、本セッション）**: severity="major"でstatus="escalated"のissueが未解決・未先送りのまま該当タスクの次タスクへの進行を許してしまう現状のギャップに対応した。`_resolve_task_transition`に`_get_blocking_issues_for_transition`によるゲートを追加し、離脱しようとしているtaskに紐づく未解決issueがあれば遷移をブロックする（BL-136のDEFERで明示的に先送り済みのものは許容）。あわせて、issue_logのstatus='open'（minor）行も毎ターン可視化し（従来はescalated行のみ）、escalated行についてもBL-086同様「今回の発言内で必ずRESOLVEかDEFERを呼んでください」という強制文言を追加した（詳細はBL-136参照）。
-2. **未着手・要検討**: Expertが「最低N名常駐」のような部分的な要件を、運行時間外にまで拡大解釈して確定値化する際、その拡大解釈の根拠をゴール文中の記述に明示的に求める指示をプロンプトに追加する（D-094の「判断基準と罠」路線。「常駐」の対象時間をゴール文の運行時間帯と機械的に照合させる等）。
-3. **未着手・要検討**: Detector自身が疑義に気づきながら`observations`扱いに留め`constraint_issue`をmajor化する根拠に反映しなかった点（前提の疑義とconstraint_issue判定の紐付けが弱い）についても、判定ロジック側の見直しの余地がないか確認する。
+**対応（全て実施済み）:**
+1. **実施済み（BL-125/BL-136）**: severity="major"でstatus="escalated"のissueが未解決・未先送りのまま該当タスクの次タスクへの進行を許してしまう現状のギャップに対応した。`_resolve_task_transition`に`_get_blocking_issues_for_transition`によるゲートを追加し、離脱しようとしているtaskに紐づく未解決issueがあれば遷移をブロックする（BL-136のDEFERで明示的に先送り済みのものは許容）。あわせて、issue_logのstatus='open'（minor）行も毎ターン可視化し（従来はescalated行のみ）、escalated行についてもBL-086同様「今回の発言内で必ずRESOLVEかDEFERを呼んでください」という強制文言を追加した（詳細はBL-136参照）。
+2. **実施済み（D-110）**: Expertが「最低N名常駐」のような部分的な要件を、運行時間外にまで拡大解釈して確定値化する際、その拡大解釈の根拠をゴール文中の記述に明示的に求める罠（ピットフォール）注記を`call_expert`へ追加（D-094の3層モデル路線）。根拠が無い場合はconfidence="provisional"として扱いwrite_issueで記録するよう指示。あわせて`generate_user_utterance`のドメインレビューチェックリストにも同様の確認項目を追加し、User AI側でも拾えるようにした。
+3. **調査完了・変更不要と判断（D-110）**: `call_detector`のドメイン妥当性レビュー基準を確認したところ、「情報が不足していて確認できないことをmajorの根拠にしてはいけない」という制約が意図的に設けられており、これはBL-012/BL-133が守る「モデルの誤検知を過度に許容しない」という設計と表裏一体（非退行テスト`test_detector_no_false_positive_within_cap`で保護済み）と判明。24h/365d問題はまさに情報不足型の疑義であり、observationsに回ったのは設計通り。真の問題（observations→issue_logが是正フローに繋がっていなかったこと）は候補1（BL-125/BL-136）で既に解消済みのため、判定基準自体の変更は見送った。
 
-**完了条件:** 候補(b)はBL-125/BL-136として実装・テスト（`tests/test_bl136_issue_visibility_and_transition_gate.py`のBL-134再現テスト含む）済み。候補(a)(c)は、ユーザーとの相談の上、対応方針を確定し実装した後、`python -m py_compile`合格・既存テストPass。可能であれば同一シナリオで再ドライランを行い、24時間前提そのものが是正されることを確認する。
+**完了条件:** 候補(b)はBL-125/BL-136として実装・テスト（`tests/test_bl136_issue_visibility_and_transition_gate.py`のBL-134再現テスト含む）済み。候補(a)は`tests/test_bl134_unsupported_generalization_guard.py`（3件）で実装・テスト済み。候補(c)は変更不要と判断（同テストファイルに判定基準が変更されていないことを確認する非退行テストを含む）。`python -m py_compile`合格、フルオフラインスイート553件Pass。可能であれば同一シナリオで再ドライランを行い、Expertが拡大解釈の根拠明示・confidence="provisional"化を実際に行うことを確認する。
 
 ---
 
