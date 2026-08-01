@@ -3973,19 +3973,29 @@ AttributeError: 'str' object has no attribute 'get'
 
 ---
 
-### BL-141: Detector⇄Expertの差し戻しループのたびにchat_historyへ新規assistantメッセージが無条件追記され、chat_history_windowが同一タスクの往復だけで埋まっていた
+### BL-141: 【誤診断のためinvalid】Detector⇄Expertの差し戻しループのたびにchat_historyへ新規assistantメッセージが無条件追記される、と当初診断したが実在しなかった
 
-**状態:** `done`
+**状態:** `invalid`（誤診断、既存の仕組みで既に対応済みと判明）
 
 **経緯:** ユーザーから「detectorとエキスパートの差戻しループは見せずにuser->エキスパートの履歴だけに整理できませんか？差戻ループが続くと最初に言ったユーザー発言が見れなくなる恐れがあり、次のユーザーが前のユーザーが何を言ったかわからなくなってしまいます」との指摘。
 
-調査したところ、Detectorが`constraint_issue="major"`で差し戻すと`route_after_expert_detector`はUserの発言を一切挟まず`expert_node`へ直接ループバックする（`expert_retry_count`上限3回まで）。`expert_node`は呼ばれるたびに`state["chat_history"].append({"role": "assistant", "content": output})`を**無条件で**実行していたため、1回のタスクで3回差し戻されると、chat_historyには`assistant`メッセージが3件連続で積み上がっていた。`chat_history_window`（既定4、`generate_user_utterance`/`call_expert`双方がこの直近N件切り出しに依存）は全ノードで一律の「直近N件」方式のため、同一タスクの差し戻し往復だけでウィンドウが埋まり、Userの直近の指示や別タスクの履歴がウィンドウ外へ押し出される実害があった。ユーザーが懸念した通り、これは特に「issueの解消状況をUser AIが把握できなくなる」リスクに直結する（差し戻し往復に押し出されて、issueの元になったUserの指摘そのものが見えなくなりうる）。
+調査時、`expert_node`のソースのうち末尾（`output = call_expert(...)`以降）だけを確認し、`state["chat_history"].append({"role": "assistant", "content": output})`が無条件実行されているように見えたため、「差し戻しのたびにchat_historyへassistantメッセージが無条件追記され、`chat_history_window`（既定4）が同一タスクの往復だけで埋まる」と誤って結論づけ、修正（直前のエントリが既にassistantなら新規追記せず上書きする処理）を追加した。
 
-**対応（実施済み）:** `expert_node`末尾で、`chat_history`の直前のエントリが既に`assistant`（＝同一ターン内のDetector差し戻しによる再提出）であれば新規追記せず、そのエントリを最新の再提出内容で上書きするよう変更した。これにより、Userから見えるchat_historyはUser⇄Expertの最終提出のみに整理され、差し戻しが何回起きてもchat_history上は1エントリのまま（内容だけが更新され続ける）になる。差し戻し往復自体はagreements DB（Expertの`write_agreement`呼び出し・Detectorの`write_agreement`によるstatus更新）経由で別途監査可能なため、chat_history側から消えても実害はない。
+しかし後日、`expert_node`の**冒頭**（`call_expert`呼び出しの直前）を改めて確認したところ、このセッション開始前から既に次のコードが存在していたことが判明した（`git show HEAD:cela_main.py`で当該行が変更差分に含まれないことを確認済み＝コミット済みの既存コード）：
 
-なお、ユーザーからの追加提案「エキスパートの提出物の中にissueをクリアーしている個所がないか探させるか」については、`generate_user_utterance`に既に「【最低限、iter=1で一度はread_issuesを呼び...】Expertの回答がその懸念を解消していれば、write_issue(action_type="RESOLVE"...)で明示的にクローズしてください」という指示が存在することを確認した（BL-096導入時から）。強制力のさらなる強化（BL-125のタスク遷移ゲートのような機械的強制）は今回のスコープ外とし、記録のみ。
+```python
+if state.get("constraint_issue") in ("major"):
+    if state["chat_history"] and state["chat_history"][-1]["role"] == "assistant":
+        state["chat_history"].pop()
+        state["expert_retry_count"] += 1
+        ...
+```
 
-**完了条件:** `python -m py_compile`合格。新規テスト`tests/test_bl141_expert_retry_chat_history_collapse.py`（3件: user直後は通常追記されること、単発差し戻しで上書きされること、3連続差し戻しでもchat_historyのassistantエントリが1件に収束すること）追加。フルオフラインスイート563件Pass。
+Detectorがmajor判定で差し戻す＝`state["constraint_issue"] == "major"`のときは、`call_expert`を呼ぶ**前**に直前のchat_history末尾（前回の却下された提出）を`pop`しており、その後末尾で新しい提出を`append`するため、正味の増減は0（pop 1件・append 1件）で、差し戻しが何回続いてもchat_historyの長さは一定に保たれていた。User側の`generate_user_utterance_node`にも同型のpopロジックが存在する（`cela_main.py`、`state["chat_history"].pop()`＋`user_retry_count`加算）。つまり報告された問題は当初から存在しなかった。
+
+**対応（実施済み）:** 誤って追加した重複コード（`expert_node`末尾の「直前のエントリが既にassistantなら新規追記せず上書き」処理）を削除し、既存の冒頭popロジックのみへ戻した。当時この誤診断に基づいて書いた回帰テスト`tests/test_bl141_expert_retry_chat_history_collapse.py`は、既存の冒頭popロジック（`constraint_issue=="major"`をトリガーとする）を正しく検証する内容へ全面差し替えた。D-113（decision_log.md）・decision_lineage.md論点94も、本訂正を反映して更新した。
+
+**教訓:** 対象関数のソースを部分的にしか読まずに「無条件で実行される」と断定してはならない。特に、ループ内の条件分岐が関数の**冒頭**（呼び出し前のガード節）にあるパターンは見落としやすく、末尾の処理だけを見て挙動を結論づけると誤診断に至る。次回以降、`inspect.getsource()`等で関数全体を俯瞰してから挙動を判断すること。
 
 **関連:** [BL-096](#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-136](#bl-136-issue_logが起票されるが解決されない状態だった可視性強制力の非対称性)
 
