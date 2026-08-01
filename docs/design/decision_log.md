@@ -1656,6 +1656,20 @@
 
 ---
 
+### D-115: 差し戻しプロンプトへ、Mermaid等の全体図ではなくPython側で機械的に計算した「現在地ラベル」（差し戻し回数・繰り返し検知）を注入する（BL-143）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-01 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（設計相談・確認質問）、Claude Sonnet 5（調査・設計・実装） |
+| **決定理由** | ユーザーから「各ノードが今の状況とやるべきことの整理をもっとよりよくできる仕組みはないか、例えばMermaidで図を書いて議論の流れを示し、いま自分がやるべき思考の分岐を示せないか」との相談があった。AIは、LLMに図の解釈という追加の推論ステップを委ねるより、CELAが既にBL-086/BL-125/BL-136/BL-142で使っている「Pythonのif/elseでstateを判定し、該当分岐専用の指示文だけを決定論的に注入する」パターンの方が確実性が高いと回答した。続けてユーザーが「いま現在はDetectorの指摘文だけのっているんでしたっけ？」と確認し、AIが調査した結果、User/Expert双方の差し戻しプロンプトには`constraint_issue_log[-1:]`（Detectorの直近1件の判定の生repr）のみが載っており、「何回目の差し戻しか」（`user_retry_count`/`expert_retry_count`はルーティング判定にのみ使われプロンプトには一切出ていなかった）・「前回と同じ指摘の繰り返しか」という、Python側で既に計算可能なのに渡っていない情報が欠けていたことが判明した。BL-142で見た「Userが気づかず同じ承認を繰り返す」空回りも、この現在地情報の欠如が一因と考え、Mermaid案は採らずPython側で計算する現在地ラベルを追加する方針とした。 |
+| 決定内容 | 新規ヘルパー`_build_retry_situation_label(state, retry_count, max_retries=3)`を新設し、(1) 差し戻し回数と残り試行回数（`route_after_*_detector`の`retry_count>=3`エスカレーション条件と揃えたmax_retries=3）、(2) `retry_count>=2`（同一差し戻し連鎖内であることが保証される場合のみ）で`constraint_issue_log`直近2件のcommentを`difflib.SequenceMatcher`比較し類似度0.6以上なら繰り返し警告、の2点を機械的に生成し、`call_expert`・`generate_user_utterance`双方の差し戻しプロンプト冒頭へ注入する。 |
+| 影響 | `cela_main.py`（新規`_build_retry_situation_label`、`call_expert`・`generate_user_utterance`）。新規テスト`tests/test_bl143_retry_situation_label.py`（8件）。フルオフラインスイート574件Pass。次回ドライランでUser/Expertがこの現在地情報を踏まえた行動を取るようになるかは要観察。 |
+| 関連 BL | [BL-143](back_log/issue_backlog.md#bl-143-差し戻しプロンプトにdetectorの指摘文だけが載っており何回目の差し戻しか前回と同じ指摘の繰り返しかというpython側で計算可能な現在地情報が渡っていなかった)、[BL-142](back_log/issue_backlog.md#bl-142-userの承認発言がmajor判定されてもexpertへの修正指示ではなくuser-ai自身への言い直し要求に留まり同じ承認を言い回しを変えて繰り返す空回りが発生していた) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
