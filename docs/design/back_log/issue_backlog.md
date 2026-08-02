@@ -3665,6 +3665,8 @@ Geminiの提案表全文・評価根拠は`docs/design/back_log/BL-117/BL117_inv
 
 **状態:** `done`
 
+**基本設計:** [BL136_basic_design.md](BL-136/BL136_basic_design.md) Part D（BL-136と一体設計、Plan Modeで3体のExploreエージェントによる調査を経て確定。後日back_logフォルダ整理の際にこのセッションで復元・保存）。
+
 **経緯:** ユーザー質問「issue未解決であればフェーズを超えられない仕組みは実装済みか」を受けて確認した時点では、`_resolve_task_transition`（BL-024の唯一の書き手）はphase/task遷移の唯一の書き込み口でありながら、`phase_id`/`task_id`がtask_planner確定済みリストに実在するかのみをチェックし、issue_logのopen/escalated状態は一切参照していなかった。存在したのは「特定フェーズだけ待たせる」スコープを絞った足止めではなく、「escalated issueが1件でもあれば議論全体を`stagnant`扱いにし、最終的に全体をhaltさせる」（BL-096）という粗い全体停止の安全弁のみだった。
 
 その後、BL-134（Expertが24時間365日前提を無根拠に確定値化し、Detectorがmajorエスカレーションしたのに未解決のままtask_1_1→task_1_2の遷移が起きてしまった実インシデント）の分析から、このギャップが実害を伴うことが確認され、実装に着手した。
@@ -3886,6 +3888,8 @@ Detectorの内部思考ログ（python_repl検算過程）にも「12h/dayなら
 
 **状態:** `done`
 
+**基本設計:** [BL136_basic_design.md](BL-136/BL136_basic_design.md)（Part A〜D、BL-125と一体設計。Plan Modeで3体のExploreエージェントによる調査を経て確定。後日back_logフォルダ整理の際にこのセッションで復元・保存）。
+
 **経緯:** ユーザー指摘「前まではissueが活発に使われていたのに今回はあまり活用されていない。たまたまか？」を受けて調査した。`log/2026-07-30/1236`の実行時DB（`cela.db`）を`run_id`で集計したところ、issue_logに7件のissueが起票されていたが（severity=major/status=escalated 3件、severity=minor/status=open 4件）、`resolved_by`/`resolved_at`が埋まった行は**0件**だった。timestampはturn 1〜3にわたって断続的に発生しており、序盤に集中していたわけではない。
 
 コードを確認したところ、2点の設計上の非対称性が原因と判明した:
@@ -4094,6 +4098,8 @@ Detectorがmajor判定で差し戻す＝`state["constraint_issue"] == "major"`�
 
 **状態:** `done`
 
+**基本設計:** [BL146_147_148_basic_design.md](BL-146/BL146_147_148_basic_design.md)（BL-147/BL-148と一体設計。Plan Modeで3体のExploreエージェント＋Planエージェントによる調査を経て確定）。
+
 **経緯:** `log/2026-08-02/0832`ドライランのレビューで「BL-125のブロック表示後もOrchestratorが一時的にtask_1_2の作業を進めた」という指摘があり詳細調査したところ、`current_task_id`自体は一度も巻き戻っておらず（`_resolve_task_transition`の遷移成功printが当該run全体で0件）、実際には別の独立したバグが根本原因だった。`_write_agreement_impl`/`_commit_agreement_from_tool`は、LLMがツール引数で指定した`task_id`をtask_plannerの正式な計画に実在するか（BL-131）でしか検証しておらず、`state["current_task_id"]`（BL-125が遷移をブロックしている対象そのもの）とは一切照合していなかった。そのためBL-125が`current_task_id`のタスク遷移をブロックしていても、Expertは`task_id="task_1_2"`のように任意の他タスクを指定してDeliverableを実際に書き込めてしまい（SUPERSEDEを除く）、Detectorがそれをtask_1_2の正式な成果物として本当にレビューしてしまう実害を確認した。
 
 なお、この過程でユーザーから「後続タスクで詳細検討した結果、先発タスクの成果物も修正する必要があった場合の経路は確保されているか？」という確認があり、`action_type="SUPERSEDE"`（BL-062/080/084で実装済み、他タスクの内容を正規に改訂する既存の正当な経路）はこのゲートの対象外として維持することを確認・合意した。
@@ -4110,6 +4116,8 @@ Detectorがmajor判定で差し戻す＝`state["constraint_issue"] == "major"`�
 
 **状態:** `done`
 
+**基本設計:** [BL146_147_148_basic_design.md](BL-146/BL146_147_148_basic_design.md)（BL-146/BL-148と一体設計）。
+
 **経緯:** BL-146と同じ`log/2026-08-02/0832`調査の過程で発見。`read_deliverable_file`は`write_agreement`（BL-131）と異なりtask_idの実在チェックを一切行っておらず、存在しないtask_idを指定しても素通りしていた。特にtask_idと`file_path`を同時指定した場合、`task_id`が空でない限りDB逆引きを試みるが、逆引きが失敗し`file_path`が指定されていれば`elif not file_path:`分岐が偽になりそのまま`file_path`側の読み込みへ進んでしまうため、「存在しないtask_idを指定しつつfile_pathで読み込みを通過させる」抜け道になっていた。
 
 **対応（実施済み）:** `_read_deliverable_file_handler`に`state: dict | None = None`引数を追加し、`TOOL_DISPATCH["read_deliverable_file"]`から実際に渡すようにした（従来は`state`を一切受け取らず破棄していた）。`task_id`が指定されている場合、`file_path`分岐に入るより前に`_find_task_by_id`/`pending_task_ids`（BL-131と同型の実在チェック）を行い、計画に存在しなければエラーを返すようにした。実在する他タスクの成果物への参照読み（本ツール本来の目的）は制限しない。
@@ -4123,6 +4131,8 @@ Detectorがmajor判定で差し戻す＝`state["constraint_issue"] == "major"`�
 ### BL-148: Orchestratorがcurrent_task_id・計画・成果物を一切参照できないまま、Expert選定・focus_guidanceを決めていた
 
 **状態:** `done`
+
+**基本設計:** [BL146_147_148_basic_design.md](BL-146/BL146_147_148_basic_design.md)（BL-146/BL-147と一体設計）。
 
 **経緯:** BL-146と同じ`log/2026-08-02/0832`調査で発見。Orchestrator（`call_orchestrator`）はツールを一切持たない単発JSON応答（`tools=`引数省略）で、プロンプトに`current_task_id`・タスク計画・issue状況が一切含まれていなかった。専門家選定はUser AI/Expert AIの対話の生テキストのみに基づいて行われるため、対話がBL-125でブロックされているタスクとは別のタスクへ漂うと、`current_task_id`がまだ元のタスクにピンされていても専門家選定がそちらへ引っ張られてしまう。実際、Detector自身がこの矛盾（「現在のタスクはtask_1_2」と言われたのにtask_1_1の受入基準が渡ってくる）に気づき「プロンプトのバグだと思う」と自己申告していたログ（`log_with_prompt.md`）が残っていた。ユーザーからも「Orchestratorのツールは必要な情報が見れるツールが渡されていますか？Orchestratorもツールループ化が必要です」との明示的な指示があった。
 
@@ -4278,3 +4288,5 @@ Detectorがmajor判定で差し戻す＝`state["constraint_issue"] == "major"`�
 | 2026-07-31 | ユーザーから2点の追加指摘。(1)「userのプロンプトにはissueを確認しろというプロンプトはありますよね？」に対し、`generate_user_utterance`に既存の`read_issues`/`write_issue(RESOLVE)`指示（BL-096導入時から存在）を確認し提示。(2)「detectorとエキスパートの差戻しループは見せずにuser->エキスパートの履歴だけに整理できませんか？差戻ループが続くと最初に言ったユーザー発言が見れなくなる恐れがあり…」との指摘を受け調査。Detectorがmajor判定で差し戻すと`route_after_expert_detector`がUserの発言を挟まず`expert_node`へ直接ループバックし（最大3回）、`expert_node`が差し戻しのたびに新規`assistant`メッセージを無条件で`chat_history`へ追記していたため、`chat_history_window`（既定4）が同一タスクの差し戻し往復だけで埋まりUserの直近の指示が押し出される実害を確認。BL-140の`_issue_carryover_prefix`変更で示した通り、まずJSONスキーマだけでなくプロンプト本文で違いを明示する重要性を踏まえ、これも根本原因（`expert_node`の無条件追記）を直す方針とした。BL-141として新規起票・即`done`化：`expert_node`末尾で、直前のchat_historyエントリが既に`assistant`（＝同一ターン内の再提出）であれば新規追記せず上書きするよう変更。新規テスト`tests/test_bl141_expert_retry_chat_history_collapse.py`（3件）追加。`python -m py_compile`合格、フルオフラインスイート563件Pass。 |
 | 2026-07-31 | ユーザーから「何回か突然ログが途切れているのも、間違ってノートパソコンを休止状態にしたりしてしまったため」との説明があり、BL-129（`log/2026-07-28/1233`・`1420`等でログがHALT/完了メッセージなしに唐突に途切れる、原因未切り分けのまま`open`だった問題）の主因が、コード側のバグではなく実行環境（ノートPCの意図しない休止状態移行）だったと判明。BL-129の優先度をP2→P3へ引き下げ、経緯欄へ追記。コード変更は行っていない。 |
 | 2026-08-02 | `log/2026-08-02/0832`レビュー、続けてOrchestrator（`call_orchestrator`）関連バグの調査（`write_agreement`/`read_deliverable_file`がBL-125のタスク遷移ゲートを内容レベルで迂回できる、Orchestratorが`current_task_id`/計画/issue状況を一切見れずツールも持たない、の2系統3件。BL-146〜148として別途起票予定、Plan Modeで設計検討中）。ユーザーから「majorとなったissue・後続タスクへの申し送りは、Detector/Reflectorの正当性監査後、タスクプランナー経由で明示的にタスク化した方がissue消化がスムーズになるのでは」との提案、および「タスクの修正が今後ぽろぽろ出てくるはずなので、1タスク追加・削除・修正の軽量APIが欲しい」との追加要望を受け、BL-145として新規起票（`open`、設計相談のみ）。調査の結果、`write_issue(DEFER)`は`plan_drafts`（文書ホワイトボード）への申し送りテキスト追記に留まり、コード側のゲートが実際に参照する`state["phases"]`（構造データ）へissueを正式タスクとして組み込む経路も、`state["phases"]`自体への差分編集API（1タスクだけ追加・削除・修正する軽量API）も存在しないことを確認。BL-144の滞留検知（`escalated_issue_first_seen_round`）とtask_plannerの既存再計画トリガー（`plan_revision_reason`）を再利用する方針を検討候補として記録。 |
+| 2026-08-02 | ユーザー指示「FixA-Cを着手」を受け、BL-146（`write_agreement`のcurrent_task_idゲート、SUPERSEDE除く）・BL-147（`read_deliverable_file`のtask_id実在チェック）・BL-148（Orchestratorのツールループ化、読み取り専用4ツール付与）を実装。新規テスト16件追加、既存`tests/test_r3_smoke.py`のBL-040テストの回帰を修正。D-116（未記入だったBL-144分）・D-117・D-118・D-119として記録。`python -m py_compile`合格、フルオフラインスイート596件Pass、`check_docs_consistency.py`合格。続けて`log/2026-08-02/2222`ドライランをレビューし、BL-148がOrchestratorの全呼び出しで`current_task_id`ブロックを正しく注入し専門家選定の矛盾が再発しないことを確認。BL-146/147は他タスクへの誤操作の試み自体が発生せず未検証（バグの不在は確認、ゲートの実効性は未実証）。ランはOpenRouter無料枠の日次上限到達＋Ctrl+Cによる手動一時停止で終了しており、クラッシュではないことを確認。 |
+| 2026-08-03 | ユーザー指示「back_logフォルダの中の整理がおざなりだったので整理をします。BL-126以降のプランや調査結果をback_logフォルダに保存。この手順がAGENTS.mdにない場合、書いておいてください」を受け、既存の`docs/design/back_log/BL-xxx/`フォルダ規約（BL-096/103/104/114-117/126、実装時にPlan mode/Explore・Planエージェントを使った案件のみ個別フォルダを持つ）をAGENTS.mdの§7へ明文化（フェーズレベルの`cela_phaseN_impl_Plan.md`規約とは別に、BL単位のPlan/調査は`back_log/BL-xxx/`へ保存する旨を追記）。あわせて、BL-126以降でPlan mode/Explore・Planエージェントによる設計・調査を経ながらback_logフォルダに未保存だった2件を特定し保存：(1) BL-125/BL-136（2026-07-30実装、当時のPlanが未保存のままだったが、本セッション冒頭で偶然読み取っていた内容から復元）→`BL-136/BL136_basic_design.md`として保存、issue_backlog.mdのBL-125/BL-136両方から相互リンク。(2) BL-146/BL-147/BL-148（本日実装、Plan本体＋Planエージェントの詳細設計レポートを統合）→`BL-146/BL146_147_148_basic_design.md`として保存、issue_backlog.mdの3件から相互リンク。BL-131は既に`BL-126/BL126_basic_design.md`§2.5・§2.6でカバー済みと確認（追加保存不要）。BL-114〜117は元々個別フォルダ済み。BL-127/130/134/137/139〜145はPlan mode/Explore・Planエージェントを使わない直接修正だったため、既存規約上フォルダ化の対象外と判断（decision_lineage.mdの各論点エントリで議論経緯は既にカバー済み）。`check_docs_consistency.py`合格（アンカーslugify不一致を数箇所発見・修正）。コード変更は行っていない。 |
