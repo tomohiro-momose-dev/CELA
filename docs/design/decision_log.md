@@ -1670,6 +1670,62 @@
 
 ---
 
+### D-116: `reflection_node`のBL-096機械的stagnant上書きを、escalated issueの単なる「存在」ではなく「ユーザーノードを3回通過しても未解決」という滞留に条件を絞る（BL-144）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-02 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（閾値の指定・承認）、Claude Sonnet 5（調査・設計・実装） |
+| **決定理由** | `log/2026-08-02/0832`のドライランレビューで、reflection自身が明確に`"continuing"`（健全な進捗中）と判定していたサイクルまで、BL-096の機械的上書き（escalated行が1件でもあれば無条件でstagnant化）によりfacilitation_countの猶予が誤って消費されていたことが判明した。AIから「同じescalated issueが複数サイクルにわたって進展していない場合のみstagnantとする」という改善方針を提案したところユーザーが同意し、具体的な閾値として「ユーザーノード（`generate_user_utterance_node`）を3回通過する」を明示的に指定した。 |
+| 決定内容 | `LineageState`へ新規フィールド`escalated_issue_first_seen_round: dict[str, int]`（issue_log行id→初めてescalated状態で観測した`round_count`）を追加。`reflection_node`はescalated行ごとに初観測roundを記録し、現在の`round_count`との差が3以上（＝ユーザーノードを3回通過しても未解決）の行が1件でもあれば`discussion_status`を`"stagnant"`へ上書きする。解決・先送り済みで一覧から消えたissueは追跡からも削除する（再度escalatedになれば新規の滞留として扱う）。 |
+| 影響 | `cela_main.py`（`LineageState`、`reflection_node`、初期state辞書）。新規テスト`tests/test_bl144_escalated_issue_staleness_threshold.py`（4件）。`python -m py_compile`合格、フルオフラインスイート578件Pass。`write_issue`のRESOLVE/DEFERが依然ほぼ呼ばれない現状では、閾値を上げるだけでは根本解決にならず、issueの実際の解決を促す仕組み（BL-136の強制プロンプト、BL-145の検討中の方針等）との併用が前提。 |
+| 関連 BL | [BL-144](back_log/issue_backlog.md#bl-144-reflection_nodeのbl-096機械的stagnant上書きがescalated-issueの単なる存在で無条件発火しreflection自身が健全な進捗と判定した回まで停滞扱いしていた)、[BL-096](back_log/issue_backlog.md#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設) |
+
+---
+
+### D-117: `write_agreement`のCREATE/UPDATEは実効上のcurrent_task_idと一致するタスクのみを対象とし、SUPERSEDEのみ例外とする（BL-146）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-02 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（バグ修正の承認、SUPERSEDE経路の確保についての確認質問）、Claude Sonnet 5（調査・設計・実装） |
+| **決定理由** | `log/2026-08-02/0832`の「BL-125ブロック後もOrchestratorがtask_1_2の作業を進めた」という指摘の詳細調査で、`current_task_id`自体は巻き戻っておらず、実際には`write_agreement`がBL-131（task_plannerの計画への実在チェック）しか行っておらずBL-125のブロック対象（`state["current_task_id"]`）とは無関係に任意タスクへの書き込みを許してしまう、という別のバグが根本原因だと判明した。書き込み（進捗の記録）は、遷移がまだ許可されていないタスクに対しては行わせるべきではないという判断のもと、current_task_id一致を強制する方針とした。ユーザーから「後続タスクの検討結果、先発タスクの成果物を修正する必要がある場合の経路は確保されているか」との確認があり、既存のSUPERSEDE機構（BL-062/080/084）がまさにこの正規の改訂経路であることを確認し、このゲートの対象外として維持することで合意した。read（参照読み）側は別問題としてBL-147で対応し、こちらは書き込みのみに限定した（他タスクの成果物を参照しながら作業すること自体は正当な用途のため）。 |
+| 決定内容 | `_effective_current_task_id_from(state)`（`_get_current_task`のcurrent_phase先頭タスクへのフォールバックを再利用）を新設し、`_write_agreement_impl`でentry_type in (Directive, Deliverable)かつaction_type != SUPERSEDEの場合、task_idがこの実効値と一致しなければ拒否する。`current_phase`/`phases`情報が無い簡易呼び出しはフェイルオープンでスキップする。 |
+| 影響 | `cela_main.py`（`_effective_current_task_id_from`、`_write_agreement_impl`、`TOOL_DISPATCH["write_agreement"]`）。新規テスト`tests/test_bl146_write_agreement_current_task_gate.py`（6件）。既存`tests/test_bl131_write_agreement_task_id_validation.py`（9件）は無修正でPass。フルオフラインスイート596件Pass。 |
+| 関連 BL | [BL-146](back_log/issue_backlog.md#bl-146-write_agreementがbl-125のタスク遷移ゲートcurrent_task_idを内容レベルで迂回できブロック中の他タスクへ実際にdeliverableを書き込めていた)、[BL-125](back_log/issue_backlog.md#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-131](back_log/issue_backlog.md#bl-131-task_plannerの正式なフェーズタスク計画に存在しないtask_idtask_1_1_review等でwrite_agreementwhiteboardが作成されてしまう構造的リスク) |
+
+---
+
+### D-118: `read_deliverable_file`はtask_id指定時、file_path併用の有無に関わらず計画への実在チェックを先に行う（BL-147）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-02 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | Claude Sonnet 5（調査・設計・実装、ユーザーの包括承認「見つけたバグはすべて直す」の範囲内） |
+| **決定理由** | D-117と同じ調査過程で、`read_deliverable_file`が`write_agreement`（BL-131）と異なりtask_idの実在チェックを一切行っておらず、特にtask_idと`file_path`を同時指定した場合はtask_idが実質無視されfile_path側でそのまま読めてしまう抜け道があると判明した。読み取り（他タスクの成果物を参照する用途）自体はD-117とは異なり正当な用途のため制限すべきではないが、「存在しない/誤ったtask_idを指定しても気づかれない」という防御の欠如自体はBL-131と同型のリスクであり、既存パターン（実在チェック）を再利用して塞ぐこととした。 |
+| 決定内容 | `_read_deliverable_file_handler`に`state`引数を追加し実際に受け取るようにした上で、task_id指定時はfile_path分岐に入るより先に`_find_task_by_id`/`pending_task_ids`による実在チェックを行う。存在する他タスクの成果物への参照読みは従来通り制限しない。 |
+| 影響 | `cela_main.py`（`_read_deliverable_file_handler`、`TOOL_DISPATCH["read_deliverable_file"]`）。新規テスト`tests/test_bl147_read_deliverable_file_task_id_validation.py`（6件）。既存`tests/test_r3_smoke.py::test_bl040_read_deliverable_file_lookup_by_task_id`をstate明示指定・新エラー挙動に合わせて更新。フルオフラインスイート596件Pass。 |
+| 関連 BL | [BL-147](back_log/issue_backlog.md#bl-147-read_deliverable_fileがtask_idの実在チェックを一切行っておらずfile_path併用時は事実上無視される)、[BL-131](back_log/issue_backlog.md#bl-131-task_plannerの正式なフェーズタスク計画に存在しないtask_idtask_1_1_review等でwrite_agreementwhiteboardが作成されてしまう構造的リスク)、[BL-040](back_log/issue_backlog.md#bl-040-read_deliverable_fileがfile_path直接指定に依存し実質的に発見不能だった問題) |
+
+---
+
+### D-119: Orchestratorに読み取り専用ツール（read_project_plan/read_deliverable_file/read_verified_fact/think）のみを付与し、書き込み系ツールは与えない（BL-148）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-02 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（「Orchestratorのツールは必要な情報が見れるツールが渡されていますか？Orchestratorもツールループ化が必要です」との明示的指示）、Claude Sonnet 5（調査・設計・実装） |
+| **決定理由** | `log/2026-08-02/0832`調査で、Orchestrator（`call_orchestrator`）がツールを一切持たない単発JSON応答で、`current_task_id`・計画・issue状況を一切参照できないまま専門家選定を行っていることが判明した。対話の生テキストのみに基づく選定が、BL-125でブロックされているタスクとは別のタスクへ対話が漂った際に専門家選定を引きずられさせ、Detector自身が「プロンプトのバグだと思う」と自己申告するほどの構造的矛盾を生んでいた。これはBL-109（call_orchestratorを含む単発判定4ノードからTHINK_TOOLを外しtools=Noneへ差し戻した決定）への回帰ではないかと検討したが、BL-109の趣旨は「複数ツールを組み合わせる必要のない単発判定タスクにTHINK_TOOL単体だけ持たせても無意味」という点にあり、今回付与するのは複数の実質的な読み取りツールであるため趣旨は異なる。BL-126 Stage Dで`call_facilitator`が同様の理由（本質対話で書き込み系ツールが必要になった）でBL-109対象外へ変更された前例があり、これと同型の「正当な理由が生じたノードをBL-109対象から個別に除外する」パターンを踏襲した。書き込み系ツールを与えない理由は、Orchestratorの出力が専門家選定メタデータに限定され状態を変更しない役割であるため（`_check_write_permission`のロール表にも`"orchestrator"`は存在しない）。 |
+| 決定内容 | `call_orchestrator`のプロンプトへ`_build_task_scope_context`/`_build_project_plan_toc`による現在タスクの構造化情報を追加し、`query_AI`呼び出しへ`tools=[READ_PROJECT_PLAN_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_VERIFIED_FACT_TOOL, THINK_TOOL], state=state`を付与する（書き込み系ツールは含めない）。BL-109の対象一覧から`call_orchestrator`を除外する。`orchestrator_node`の入出力契約は変更しない。 |
+| 影響 | `cela_main.py`（`call_orchestrator`）。既存`tests/test_bl093_think_tool_scratchpad.py::test_bl109_single_shot_judgment_nodes_reverted_to_tools_none`を更新、新規`test_bl148_call_orchestrator_is_tool_loop_capable`・`_NODE_TOOL_NAME_REMINDERS`エントリ、新規`tests/test_bl148_orchestrator_tool_loop.py`（4件）追加。既存`tests/test_bl078_orchestrator_focus_guidance.py`は無修正でPass。フルオフラインスイート596件Pass。ツールループ化によるレイテンシ・トークンコスト増（他の周期実行ノードより高頻度で呼ばれるため）は次回実ドライランでの観察事項として残す。 |
+| 関連 BL | [BL-148](back_log/issue_backlog.md#bl-148-orchestratorがcurrent_task_id計画成果物を一切参照できないままexpert選定focus_guidanceを決めていた)、[BL-109](back_log/issue_backlog.md#bl-109-複数ツールを組み合わせて検討する必要のない単発判定抽出4ノードorchestratordecision-extractorreflectionfacilitatorからthink_toolを外しtoolsnoneの単一応答パスへ差し戻す)、[BL-146](back_log/issue_backlog.md#bl-146-write_agreementがbl-125のタスク遷移ゲートcurrent_task_idを内容レベルで迂回できブロック中の他タスクへ実際にdeliverableを書き込めていた) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
