@@ -4228,6 +4228,24 @@ DetectorはExpertの実際の提出内容を`read_deliverable_file(task_id="task
 
 ---
 
+### BL-153-PLACEHOLDER-DO-NOT-MATCH: Facilitatorが`write_agreement`で`entry_type="Deliverable"`のタスク成果物を書き込めてしまう（想定外のロール越権）
+
+**状態:** `open`（記録のみ、実装未着手）
+
+**経緯:** `log/2026-08-03/1347`ドライランをレビューした際にユーザーが発見。Facilitatorが`write_agreement`（`status="Proposed"`, `action_type="SUPERSEDE"`, `entry_type="Deliverable"`）でtask_1_3の成果物本体（3案の定量比較の全文）を書き込んでいた。
+
+`call_facilitator`のツール一覧は`[THINK_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, WRITE_AGREEMENT_TOOL]`（cela_main.py:6562）で、`_check_write_permission`（1776-1804行目）の`ALLOWED_STATUS_BY_ROLE`は`"facilitator": {"Proposed"}`——BL-126 Stage Dで「本質対話の開始提起（`entry_type="EssenceProposal"`）をProposedとしてのみ記録できる」という意図で追加されたものだが、**`entry_type`自体を制限するチェックはどこにも存在しない**。そのため`status="Proposed"`でありさえすれば、Facilitatorは`EssenceProposal`だけでなく`Deliverable`（本来Expertの成果物専用）も`Decision`も`Directive`も、意図的な設計外で書き込めてしまう。
+
+ユーザーの整理：「ファシリテーターの意思決定を残す趣旨でwrite_agreementを使えるようにしていたが、ドキュメントを書き込むことは想定していなかった。ファシリテーターの指摘は成果物直接ではなくホワイトボードに書き込む方が良いかもしれない」——すなわちFacilitatorの所見・指摘は（a）Expertの成果物（Deliverable）を直接上書き・SUPERSEDEするのではなく、（b）ホワイトボードへの注釈（BL-076の`_annotate_whiteboard_with_detector_comment`と同種の仕組み）や、決定事項DBへの`Decision`/`EssenceProposal`としての記録に限定すべき、という設計意図とのギャップ。
+
+**対応（未着手）:** `_check_write_permission`または`_commit_agreement_from_tool`に、ロールごとに許可する`entry_type`の制限を追加する（例: `facilitator`は`{"EssenceProposal", "Decision"}`のみ許可し`Deliverable`/`Directive`は拒否）。既存の`ALLOWED_STATUS_BY_ROLE`と対になる`ALLOWED_ENTRY_TYPE_BY_ROLE`のような表を新設する案が有力候補（詳細設計は未着手）。
+
+**完了条件:** 未定（設計未着手のため）。
+
+**関連:** [BL-126](#bl-126-bl-086の前提エスカレーションはexpertのリアクティブな経路に限定されておりfacilitatoruser-aiがゴール制約自体を能動的に問い直すプロアクティブな創造的議論モードが未設計)、[BL-076](#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
