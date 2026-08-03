@@ -4425,6 +4425,8 @@ DetectorはExpertの実際の提出内容を`read_deliverable_file(task_id="task
 
 **基本設計:** Plan modeで実施（Explore agent1体による事前調査＋Plan mode内での根本原因確認、`docs/design/decision_lineage.md`論点109参照）。
 
+新規テスト`tests/test_bl160_reasoning_channel_content_fallback.py`（8件：tools=None分岐でのフォールバック発火・非発火2種の回帰・content優先の回帰、ツールループ最終応答でのフォールバック発火・非発火2種の回帰・content優先の回帰、`call_decision_extractor`のリトライ成功シナリオ、リトライ全滅時のフェイルクローズ回帰）追加。`python -m py_compile`合格、フルオフラインスイート651件Pass。実ドライランでの効果確認は次回待ち（deepseek-v4-flash-0731/nemotron_3_ultra双方の環境で今回の握りつぶしパターンが再発しないことを確認予定）。
+
 **関連:** [BL-159](#bl-159-cela_mainpy全体約50箇所のサイレントな機械的暗黙的動作へprintによる可視化を追加)（本バグはBL-159のprint可視化がなければログからは発見できなかった）、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-139](#bl-139-decision_extractor_nodeのtransition抽出がllm出力の1項目に依存しており明示的な次タスク指示があってもcurrent_task_idが更新されないことがあった)（トップレベル`advances_to_task_id`欠落への既存フォールバックだが、本バグはcontent自体が丸ごと空になるため`extracted_events`も含め全損しBL-139のフォールバックも機能しない）、[BL-109](#bl-109-複数ツールを組み合わせて検討する必要のない単発判定抽出4ノードorchestratordecision-extractorreflectionfacilitatorからthink_toolを外しtoolsnoneの単一応答パスへ差し戻す)
 
 ---
