@@ -4405,7 +4405,7 @@ DetectorはExpertの実際の提出内容を`read_deliverable_file(task_id="task
 
 失敗のたびに、その turn の`advances_to_task_id`（BL-024のタスク遷移シグナル）を含む抽出結果が全損し、User/Expertの会話内容は`task_1_3`→`task_2_1`と実質的に進んでいるにもかかわらず、`current_task_id`は実行終了までDBの上では`task_1_2`のまま固着した。会話が先行しDBが追随しないため、以降`write_agreement`が「task_id 'task_2_1' は現在のタスク（'task_1_2'）と一致しません」で正規の成果物登録を拒否し続け、User/Expert双方が毎ターン食い違いを説明・迂回する空転が発生した（BL-125/146/157/158系の症状と同一の見た目だが、原因は全く別）。
 
-**根本原因:** `query_AI`のtools=None非ストリーミング分岐（`cela_main.py:3076-3114`）は、ストリーミング応答を`delta.reasoning`（思考チャンネル、`reasoning_parts`に蓄積）と`delta.content`（回答チャンネル、`content_parts`に蓄積）へ振り分け、最終的に`content = "".join(content_parts)`のみを戻り値として使い（3113行目）、空なら`"(APIから空の応答が返されました)"`という固定文字列を返す（3114行目）。`reasoning_parts`は`_LAST_REASONING_TEXT`グローバルへ保存されるのみで、この空応答フォールバックには一切使われない。
+**根本原因:** `_query_AI_live`のtools=None非ストリーミング分岐（`cela_main.py:3076-3114`）は、ストリーミング応答を`delta.reasoning`（思考チャンネル、`reasoning_parts`に蓄積）と`delta.content`（回答チャンネル、`content_parts`に蓄積）へ振り分け、最終的に`content = "".join(content_parts)`のみを戻り値として使い（3113行目）、空なら`"(APIから空の応答が返されました)"`という固定文字列を返す（3114行目）。`reasoning_parts`は`_LAST_REASONING_TEXT`グローバルへ保存されるのみで、この空応答フォールバックには一切使われない。
 
 `call_decision_extractor`（`cela_main.py:6403`）はこの関数を`tools`引数なしで呼ぶため必ずこの分岐を通る。実ログを直接確認したところ、3回とも失敗直前の`💭 [Decision Extractor] 思考:`ログに`advances_to_task_id`込みの完全に正しいJSONがそのまま出力されており、`finish_reason=="length"`（打ち切り）の警告ログも一切出ていない。つまりモデルは正しい最終回答を生成し終えていたが、それが丸ごと`reasoning`チャンネル側に出力され`content`チャンネルが空のまま応答が終了し、既存コードには「contentが空でreasoningが非空なら中身を確認する」という経路が存在しないため、正しい答えがそこにあるまま握りつぶされていた。
 
