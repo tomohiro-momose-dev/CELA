@@ -1768,6 +1768,20 @@
 
 ---
 
+### D-123: escalated issueをReflectorの正当性監査経由でタスクプランナーへ組み込む際、issueは`resolved`ではなく新ステータス`planned`へ遷移させる（BL-145）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-03 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（`resolved`→`planned`への変更指示、DEFER済み除外・監査行不要・回数上限不要の各確認）、Claude Sonnet 5（調査・設計・実装、Plan ModeでExplore/Planエージェントを併用） |
+| **決定理由** | `log/2026-08-03/1347`で、detector_auto起票の汎用issueが一度もRESOLVE/DEFERされないままBL-125のタスク遷移ゲートを塞ぎ続けSUPERSEDE迂回（BL-152の引き金）を招く実害を確認し、ユーザー提案済みのBL-145（issue→タスク明示化）に着手した。Plan agentの当初案は「task_planner_nodeの計画再構成成功直後、対象issueを即座にresolvedにする」だったが、ユーザーが「resolvedとするのは語弊が生まれる可能性がある」「延期も可能とする」「無理やり解決しようとして議論のデッドロック化も避けたい」と指摘。task_plannerが計画へ組み込んだ事実は「対応予定ができた」に過ぎず「本当に解決した」ことの証明にはならないため、真の解決確認はuser role経由の既存write_issue(RESOLVE)に委ね、task_planner側は新ステータス`planned`（計画済み）への遷移に留めるべき、というユーザー自身の設計判断による。あわせて、既にDEFER済みのstale issueは二重の受け皿を避けるため対象外とする、write_agreementでの追加監査行は既存のdecision_log+resolution_note相当の記録で十分なため追加しない、issue駆動の再構成回数に追加の上限は設けない（planned後はescalated一覧・滞留追跡から自然に外れ自己抑制される）、の3点もユーザー確認済み。 |
+| 決定内容 | `reflection_node`がBL-144の滞留検知（3ラウンド未解決）と既存DEFER除外フィルタで対象issueを特定し、`plan_revision_reason`/新規`plan_revision_issue_ids`経由で`task_planner_node`へ引き継ぐ。`task_planner_node`は計画再構成成功後、新規ヘルパー`_mark_issue_planned`（id基準の直接DB更新、`_check_issue_permission`を経由しない非LLMゲート）で対象issueを`status='planned'`へ遷移させ、埋め込み先task_idを既存の`defer_to_task_id`列（BL-136のDEFERと同じ意味を再利用）に記録する。`'planned'`は`_write_issue_impl`の`status != 'resolved'`判定を満たすため、既存のDEFER（さらなる先送り）・CREATE経由の再発検知（occurrence_count>=2での再escalated化）がコード変更なしでそのまま機能する。真の`resolved`化はuser roleの既存経路にのみ許可する。`state["phases"]`への軽量差分編集APIの新設は本BLの範囲外とし、既存の`plan_revision_reason`→全再生成経路を再利用する（将来BLへ切り出し）。`facilitator_node`のEssence Dialogue収束には、`plan_revision_reason`使用中は上書きしない防御ガードを追加（グラフトポロジ解析上は現状衝突しないが将来の変更への防御）。`planned`issueは`generate_user_utterance`へ非強制の参考情報として可視化する。 |
+| 影響 | `cela_main.py`（`LineageState`、`reflection_node`、`task_planner_node`、新規`_mark_issue_planned`/`_get_planned_issues`/`_build_planned_issue_pin_text`、`facilitator_node`、`generate_user_utterance`）。新規テスト`tests/test_bl145_issue_driven_plan_formalization.py`（16件）追加。既存BL-096/086/126 Stage C・D/136/144/146-148関連テスト（132件）は無修正でPass。`python -m py_compile`合格、フルオフラインスイート623件Pass。実ドライランでの効果確認（issue formalizationの実発火、`planned`issueの後続タスク内言及）は次回待ち。 |
+| 関連 BL | [BL-145](back_log/issue_backlog.md#bl-145-エスカレーションissue申し送りissueをdetectorreflectorの正当性監査を経てタスクプランナー経由で明示的にタスク化する)、[BL-136](back_log/issue_backlog.md#bl-136-issue_logが起票されるが解決されない状態だった可視性強制力の非対称性)、[BL-144](back_log/issue_backlog.md#bl-144-reflection_nodeのbl-096機械的stagnant上書きがescalated-issueの単なる存在で無条件発火しreflection自身が健全な進捗と判定した回まで停滞扱いしていた)、[BL-152](back_log/issue_backlog.md#bl-152-verify_whiteboard_excerptが今レビューすべき成果物ではなく常にcurrent_task_idのホワイトボードだけを見ていた) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
