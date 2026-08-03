@@ -1794,6 +1794,18 @@
 | 影響 | `cela_main.py`（`_check_issue_permission`、`_write_issue_impl`、`decision_extractor_node`、`_build_open_issue_pin_text`）。新規テスト`tests/test_bl154_decision_extractor_issue_log_bridge.py`（8件）追加。既存BL-082/096/125/136/139/144/145関連テストは無修正でPass。`python -m py_compile`合格、フルオフラインスイート630件Pass（1件failedは本BLと無関係の既存未コミット差分、issue_backlog.md BL-154参照）。留意点：この経路由来のissueは`defer_to_task_id`が誕生時から設定済みのため、escalated化後もBL-125のブロック判定には決して該当しない（手動DEFER済みissueと同じ既存仕様、新規の抜け穴ではない）。実ドライランでの効果確認は次回待ち。 |
 | 関連 BL | [BL-154](back_log/issue_backlog.md#bl-154-decision_extractorのdirectivedeferred自動抽出をissue_logへも橋渡しする)、[BL-096](back_log/issue_backlog.md#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)、[BL-082](back_log/issue_backlog.md#bl-082-task_plannerの計画をホワイトボード化し先送り事項をタスク間で永続的に申し送りできるようにする)、[BL-125](back_log/issue_backlog.md#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-145](back_log/issue_backlog.md#bl-145-エスカレーションissue申し送りissueをdetectorreflectorの正当性監査を経てタスクプランナー経由で明示的にタスク化する) |
 
+### D-125: `MAX_TOOL_ITER`を20→30へ引き上げる（BL-155）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-03 |
+| 状態 | `decided`（実装済み、テスト追従のみ実施） |
+| 決定者 | t-momose（承認・理由提示） |
+| **決定理由** | task_plan_reviewerによる差し戻し発生時、task_plannerが差し戻し対象タスクの内容を1件ずつ改めて把握し直す過程でツール呼び出し回数が嵩み、旧上限20に迫り非収束クラッシュのリスクが実ドライランで観測されたため。値自体は本セッション開始前から作業ツリーに未コミットで変更済み（コード内コメントに変更理由の追記なし、対応するBL/D記録も未作成）だった。フルオフラインスイートで`tests/test_bl093_think_tool_scratchpad.py::test_max_tool_iter_raised_to_20`の失敗として顕在化したため、AGENTS.md §7（定数変更の厳格管理）に従い実装は変更せずユーザーに確認を仰いだところ、上記理由が明示的に提示されたため正式に承認・記録する。 |
+| 決定内容 | `cela_main.py`の`MAX_TOOL_ITER`は30のまま維持（コード変更なし）。既存の変更履歴コメント（BL-014→BL-028→BL-093の来歴が並記されている箇所）へ20→30の変更理由を追記。テストを`test_max_tool_iter_raised_to_30`へ改名し期待値を30に更新。 |
+| 影響 | `cela_main.py`（コメントのみ追記、`MAX_TOOL_ITER`の値自体は無変更）、`tests/test_bl093_think_tool_scratchpad.py`（テスト名・期待値更新）。フルオフラインスイートの唯一の失敗が解消。 |
+| 関連 BL | [BL-155](back_log/issue_backlog.md#bl-155-max_tool_iterの2030変更未コミット差分にbldを事後付与)、[BL-154](back_log/issue_backlog.md#bl-154-decision_extractorのdirectivedeferred自動抽出をissue_logへも橋渡しする) |
+
 ---
 
 ## 未決定（pending）
