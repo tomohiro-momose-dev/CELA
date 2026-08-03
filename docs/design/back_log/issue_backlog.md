@@ -4393,9 +4393,9 @@ DetectorはExpertの実際の提出内容を`read_deliverable_file(task_id="task
 
 ---
 
-### BL-160: `query_AI`のtools=None非ストリーミング分岐が、最終回答がreasoningチャンネルへ出力されcontentが空になったケースを「空応答」としてサイレントに握りつぶし、1ターン分のDecision/Directive/Deliverable抽出・タスク遷移シグナルが丸ごと失われる
+### BL-160: `_query_AI_live`が、最終回答がreasoningチャンネルへ出力されcontentが空になったケースを「空応答」としてサイレントに握りつぶし、1ターン分のDecision/Directive/Deliverable抽出・タスク遷移シグナルが丸ごと失われる
 
-**状態:** `open`
+**状態:** `done`
 
 **経緯:** ユーザー指示「08-04/0715,0807のログをレビュー」を受け`log/2026-08-04/0715`・`log/2026-08-04/0807`をExplore agent2体でレビュー。BL-159で追加したprint可視化により、0807で以下のログが4回中3回出現していることを確認：
 
