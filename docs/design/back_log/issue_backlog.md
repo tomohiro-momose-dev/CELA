@@ -4079,23 +4079,30 @@ Detectorがmajor判定で差し戻す＝`state["constraint_issue"] == "major"`�
 
 ### BL-145: エスカレーションissue・申し送りissueを、Detector/Reflectorの正当性監査を経てタスクプランナー経由で明示的にタスク化する
 
-**状態:** `open`（設計相談のみ、実装未着手）
+**状態:** `done`
 
-**経緯:** `log/2026-08-02/0832`レビューで見つかったOrchestrator関連のバグ調査（`write_agreement`/`read_deliverable_file`がBL-125のタスク遷移ゲートを内容レベルで迂回できる問題、Orchestratorが`current_task_id`/計画/issue状況を一切参照できずツールも持たない問題——BL-146〜148として別途起票予定）の過程で、ユーザーから「majorとなったissueや後続タスクへの申し送りは、Detector、もしくはReflectorで正当性の監査後、タスクプランナー経由で明示的にタスク化し整理したほうが良いかもしれない。そちらの方がスムーズにissue消化ができそうな気がする」との設計提案があった。
+**基本設計:** [BL145_basic_design.md](BL-145/BL145_basic_design.md)（Plan Mode、Explore 1体 + Plan 1体）。
 
-現状の関連機構を調査したところ、以下が判明した：
-- `write_issue(action_type="DEFER")`（BL-136）は、対象task_idの`plan_drafts`（版管理される「フェーズ・タスク表ホワイトボード」文書）へ申し送りテキストを追記するのみで、issueを正式な`task_id`として`state["phases"]`へ組み込む経路は存在しない。
-- `state["phases"]`（`task_id`・`depends_on`・`acceptance_criteria`等を持つ構造データ本体。`_find_task_by_id`やBL-125/131のゲート等、コード側の検証はすべてこちらを参照し、`plan_drafts`は参照しない）は、`task_planner_node`が`state["plan_revision_reason"]`非空時（`task_plan_reviewer`の差し戻し／Essence Dialogue収束の2経路のみ）にのみ`existing_phases`全体をLLMで再生成する方式であり、「1タスクだけ追加・削除・修正する」という軽量な差分APIは存在しない（`plan_drafts`が持つ`apply_plan_patch`のようなパッチ機構は`state["phases"]`側にはない）。
-- BL-144で実装済みの滞留検知（`escalated_issue_first_seen_round`：同一escalated issueがユーザーノードを3回通過しても未解決）は、「正当性がありかつ解消されていない」issueを機械的に検出する既存シグナルとして転用できる。
+**経緯:** `log/2026-08-02/0832`レビューで見つかったOrchestrator関連のバグ調査（BL-146〜148）の過程で、ユーザーから「majorとなったissueや後続タスクへの申し送りは、Detector、もしくはReflectorで正当性の監査後、タスクプランナー経由で明示的にタスク化し整理したほうが良いかもしれない」との設計提案があった。当初は設計相談のみで実装未着手だったが、`log/2026-08-03/1347`ドライランで、detector_auto起票の汎用issue（16回occurrence蓄積）が一度もRESOLVE/DEFERされないままBL-125のタスク遷移ゲートを塞ぎ続け、Expert/User AIがSUPERSEDEで正規のゲートを迂回し続ける実害（BL-152の引き金にもなった）を確認したことを受け、実装に着手した。
 
-ユーザーから追加要望：「おそらく今後途中でタスクの修正がぽろぽろ出てくると思うので、1タスク追加・消す・あるいは修正するといった軽量APIが欲しい」——これは本BLの実現方式そのものの前提条件であり、単独でも汎用的な価値を持つため、ここに明示的に記録する（`state["phases"]`に対する差分編集APIが無いことが、issue→タスク明示化・その他の途中でのタスク修正全般を妨げている根本要因）。
+調査の結果、以下が判明していた：
+- `write_issue(action_type="DEFER")`（BL-136）は、対象task_idの`plan_drafts`へ申し送りテキストを追記するのみで、issueを正式な`task_id`として`state["phases"]`へ組み込む経路は存在しない。
+- `state["phases"]`は`task_planner_node`が`state["plan_revision_reason"]`非空時（`task_plan_reviewer`の差し戻し／Essence Dialogue収束の2経路のみ）にのみ`existing_phases`全体をLLMで再生成する方式であり、軽量な差分APIは存在しない（BL-126 Stage Cの「supersede機構」もLLMの新計画とold_phasesの`task_id`集合差分を事後的に記帳するだけの監査ブックキーピングであり、編集プリミティブそのものではない）。
+- BL-144の滞留検知（`escalated_issue_first_seen_round`：同一escalated issueがユーザーノードを3回通過しても未解決）は、「正当性がありかつ解消されていない」issueを機械的に検出する既存シグナルとして転用できる。
 
-**検討した設計方針（未実装、フォローアップ時の出発点）:**
-1. `state["phases"]`に対する軽量なタスク追加・削除・修正API（`plan_drafts`のパッチ方式とは別に、構造データ側にも差分編集を許す新機構）をまず検討する。全体再生成方式を都度使うのは重く、テスト・レビューコストも高い。
-2. 正当性監査の主体はDetector（毎ターン監査）ではなくReflector（周期監査）に寄せるのが役割分担として自然。Reflectorの監査タイミングでBL-144の滞留検知が「正当かつ未解消」と判定したissueについて、`plan_revision_reason`（または上記1の軽量APIがあればそちら）を用いてタスクプランナーへ明示的に組み込ませる。
-3. タスクへ吸収されたissueは`write_issue(RESOLVE)`等でクローズし、issue_log側の二重管理を防ぐ。
+**スコープ限定の決定：** `state["phases"]`への軽量な差分編集API（1タスク単位の追加・削除・修正プリミティブ）は本BLでは作らない。既存の`plan_revision_reason`→`task_planner_node`全再生成という、reviewer差し戻し・Essence Dialogue収束が既に使っている経路をそのまま再利用する（差分APIは将来BLとして切り出す）。
 
-**関連:** [BL-096](#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-136](#bl-136-issue_logが起票されるが解決されない状態だった可視性強制力の非対称性)、[BL-144](#bl-144-reflection_nodeのbl-096機械的stagnant上書きがescalated-issueの単なる存在で無条件発火しreflection自身が健全な進捗と判定した回まで停滞扱いしていた)、[BL-082](#bl-082-task_plannerの計画をホワイトボード化し先送り事項をタスク間で永続的に申し送りできるようにする)
+**実装内容（実施済み）：**
+1. `LineageState`へ`plan_revision_issue_ids: list[str]`を追加（`plan_revision_reason`と対でセット・クリア）。
+2. `reflection_node`：BL-144の滞留検知後、既にDEFER済み（`defer_to_task_id`設定済み）でないstale escalated issueについて、`plan_revision_reason`が他要因で未使用の場合のみ、issue詳細（topic/description/occurrence_count/issue_id）を含む理由文と`plan_revision_issue_ids`をセットする。`call_reflection`（LLM呼び出し本体、`tools=None`）は無変更、完全にPython側の決定論的処理。
+3. `task_planner_node`：`revision_issue_ids`を`revision_reason`と同じタイミングで取得・クリア。計画再構成成功後、新規ヘルパー`_mark_issue_planned`（id基準の直接DB更新、tool経由・LLMゲート経由ではない）で対象issueを新ステータス`'planned'`へ遷移させ、埋め込み先task_id一覧の先頭を`defer_to_task_id`列（BL-136のDEFERと同じ「今このissueの面倒を見ているtask_id」の意味を再利用）に記録する。
+4. **設計協議による変更**：当初案の「即座に`resolved`化」を、ユーザー指摘（「resolvedとするのは語弊が生まれる可能性がある」「延期も可能とする」「無理やり解決しようとして議論のデッドロック化も避けたい」）を受け、`'planned'`という中間状態へ変更した。`'planned'`は`_write_issue_impl`のCREATE/DEFER/RESOLVEが判定条件とする`status != 'resolved'`を満たすため、既存のDEFER（さらなる先送り）・CREATE経由の再発検知（occurrence_count>=2での再escalated化）がコード変更なしでそのまま機能する。真の`resolved`化は、user role経由の既存`write_issue(RESOLVE)`で人間側代理が明示的に行う。
+5. `facilitator_node`のEssence Dialogue収束ブロックに、`plan_revision_reason`使用中は上書きせず持ち越す防御ガードを追加（Plan agentによるグラフトポロジ解析で現状は衝突が起こり得ないことを確認済み、将来のグラフ変更に対する防御）。
+6. 新規`_get_planned_issues`/`_build_planned_issue_pin_text`（`_get_open_issues`と同型）を`generate_user_utterance`へ配線し、`planned`issueを非強制の参考情報として可視化（BL-136の強制解決文言とは別枠、無理な即時対応は求めずデッドロック化を回避）。
+
+新規テスト`tests/test_bl145_issue_driven_plan_formalization.py`（16件: reflection_nodeのトリガー判定、task_planner_nodeによる決定論的planned遷移、DEFER/CREATE再発検知の回帰確認、facilitator_nodeの衝突防御、可視化ブロック）追加。既存のBL-096/086/126 Stage C・D/136/144/146-148関連テスト（計132件）は無修正でPass。`python -m py_compile`合格、フルオフラインスイート623件Pass。
+
+**関連:** [BL-096](#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-136](#bl-136-issue_logが起票されるが解決されない状態だった可視性強制力の非対称性)、[BL-144](#bl-144-reflection_nodeのbl-096機械的stagnant上書きがescalated-issueの単なる存在で無条件発火しreflection自身が健全な進捗と判定した回まで停滞扱いしていた)、[BL-082](#bl-082-task_plannerの計画をホワイトボード化し先送り事項をタスク間で永続的に申し送りできるようにする)、[BL-152](#bl-152-verify_whiteboard_excerptが今レビューすべき成果物ではなく常にcurrent_task_idのホワイトボードだけを見ていた)
 
 ---
 
