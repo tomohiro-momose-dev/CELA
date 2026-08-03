@@ -1806,6 +1806,18 @@
 | 影響 | `cela_main.py`（コメントのみ追記、`MAX_TOOL_ITER`の値自体は無変更）、`tests/test_bl093_think_tool_scratchpad.py`（テスト名・期待値更新）。フルオフラインスイートの唯一の失敗が解消。 |
 | 関連 BL | [BL-155](back_log/issue_backlog.md#bl-155-max_tool_iterの2030変更未コミット差分にbldを事後付与)、[BL-154](back_log/issue_backlog.md#bl-154-decision_extractorのdirectivedeferred自動抽出をissue_logへも橋渡しする) |
 
+### D-126: `_query_AI_live`のAPIエラーリトライ時print文言を、BL-122導入後の実際の挙動（このiteration単位のみやり直し）に合わせて修正する（BL-156）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-03 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（ドライラン中のログを見て「APIエラー時には直前の思考は温存されるんでしたっけ？」と質問、「さくっと直してください」で承認） |
+| **決定理由** | 調査の結果、`loop_messages`/`reasoning_parts_all`/`iteration_start`はBL-122によりリトライを跨いで温存され、失われるのはエラー発生時点のiteration自体の途中経過のみと判明した。一方、リトライ時のprint文言「ツールループを最初からやり直します」はBL-122以前（当時は実際にiter=1へ巻き戻っていた）の挙動を説明する隣接コメントがそのまま残っており、現在の実装と食い違っていた。表示文言のみのズレでロジックへの影響はないため、コメント同様に簡潔な修正で足りると判断した。 |
+| 決定内容 | print文言を「このiterationのAPI呼び出しをやり直します」へ修正。隣接するBL-046由来コメントへBL-122以降は巻き戻らない旨を追記。 |
+| 影響 | `cela_main.py`（`_query_AI_live`のprint文言・コメントのみ）。ロジック変更なし、対応テストなし。 |
+| 関連 BL | [BL-156](back_log/issue_backlog.md#bl-156-_query_ai_liveのapiエラーリトライ時のprint文言がbl-122以前のiter1へ巻き戻る挙動のまま実装と食い違っていた)、[BL-122](back_log/issue_backlog.md#bl-122-apiエラー時のツールループ全体巻き戻しリトライbl-009bl-046がモデル変更nemotron後に発生頻度が明らかに増加し実害が拡大している) |
+
 ---
 
 ## 未決定（pending）
