@@ -1726,6 +1726,34 @@
 
 ---
 
+### D-120: `call_detector`のescalation pin注入はドメイン妥当性レビュー（Pass 1）にのみ行い、数値監査（Pass 2）は対象外とする（BL-123）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-03 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | Claude Sonnet 5（調査・設計・実装、ユーザーの「即効性項目セット（BL-123・BL-135）」選択の範囲内） |
+| **決定理由** | 別AI（Cline/deepseek経由）によるコードベース全体レビューでBL-123（`_build_escalation_pin_text`が`call_expert`/`generate_user_utterance`には注入されているが`call_detector`には一切注入されていない）が再指摘され、コードを直接確認して正確と検証した。`call_detector`はドメイン妥当性レビュー（Pass 1、前提・実現可能性等を評価）と数値監査（Pass 2、算術検算に専念、既存の明示的指示で「ここでは検算する必要はありません」とスコープを絞っている）という独立した2つのLLM呼び出しを持つため、どちらに注入するかが実装上の分岐点だった。escalated issueは典型的にドメイン・前提レベルの懸念（労基法、実現可能性等）でありPass 1と意味的に最も適合すること、Pass 1の指摘が既存の`domain_findings_block`経由でPass 2へ既に伝播する設計があることから、Pass 1のみへの注入で十分と判断し、Pass 2の「検算専念」というスコープの明確さを崩さないことを優先した。 |
+| 決定内容 | `call_detector`内、`domain_prompt`構築直前で`escalation_pin`/`escalation_pin_block`を計算し（`_build_escalation_pin_text(get_active_conn(), state["run_id"])`、`call_expert`と同じ条件分岐パターン）、`domain_prompt`のf-string内、他のDB由来コンテキストブロック（Freeze状況等）と並ぶ位置へ埋め込む。`prompt`（数値監査パス）側には注入しない。 |
+| 影響 | `cela_main.py`（`call_detector`）。新規テスト`tests/test_bl123_detector_escalation_pin.py`（3件: `_build_escalation_pin_text`参照確認、Pass 1限定の確認、条件分岐埋め込みの確認）。フルオフラインスイート600件Pass。実LLM再ドライランでDetectorがescalated issueを把握した上で判定していることの確認は次回待ち。 |
+| 関連 BL | [BL-123](back_log/issue_backlog.md#bl-123-call_detectorだけがescalated-issueの強制注入_build_escalation_pin_textbl-103を受け取っておらず他ロールが既に折り込み済みの懸念を独立に再判定してしまう)、[BL-103](back_log/issue_backlog.md#bl-103-hydrateノード間コンテキスト引き継ぎの改善) |
+
+---
+
+### D-121: `ask_user_question`の`blocking_reason`を`expert_pending_question`と同じ寿命でstateへ伝播し、User AIの相談応答プロンプトへ表示する（BL-135）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-03 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | Claude Sonnet 5（調査・設計・実装、ユーザーの「即効性項目セット（BL-123・BL-135）」選択の範囲内） |
+| **決定理由** | 別AI（Cline/deepseek経由）のレビューでBL-135（`ASK_USER_QUESTION_TOOL`の`required`パラメータ`blocking_reason`がUser AIの相談応答プロンプトに埋め込まれていない）が再指摘された。調査の結果、`_ask_user_question_tool_impl`は既に`blocking_reason`を`_LAST_ASK_USER_QUESTION`へ正しく格納し`get_last_ask_user_question()`もそれを含む辞書を返す設計だったため、ツール本体の変更は不要と判明し、欠けていたのは`expert_node`での`state`への反映と`generate_user_utterance`での表示のみだった。`expert_pending_question`と全く同じライフサイクル（`expert_node`が設定、`generate_user_utterance_node`が消費・リセット）を持つ姉妹フィールドとして扱うのが最も一貫性が高いと判断した。 |
+| 決定内容 | `LineageState`へ`expert_blocking_reason: str`を追加（`expert_pending_question`の直後、同じ寿命管理コメント下）。初期state辞書にも追加。`expert_node`が`state["expert_pending_question"]`設定の直後に`state["expert_blocking_reason"] = _ask_q["blocking_reason"] if _ask_q else ""`を追加。`generate_user_utterance_node`の消費・リセット箇所（`expert_consultation_mode`/`expert_pending_question`のリセットと同じ場所）にも`expert_blocking_reason`のリセットを追加。`generate_user_utterance`のBL-130相談応答モードのプロンプトへ、`質問: {state['expert_pending_question']}`の直後に`理由: {state.get('expert_blocking_reason', '')}`を追記。 |
+| 影響 | `cela_main.py`（`LineageState`、初期state辞書、`expert_node`、`generate_user_utterance_node`、`generate_user_utterance`）。`tests/test_bl130_ask_user_question.py`へ4件のアサーション追加＋新規テスト1件（計5件変更）。フルオフラインスイート600件Pass。`ask_user_question`が実際に呼ばれるドライランでの表示確認は次回待ち。 |
+| 関連 BL | [BL-135](back_log/issue_backlog.md#bl-135-ask_user_questionのblocking_reasonがuser-aiの相談応答プロンプトに埋め込まれていない)、[BL-130](back_log/issue_backlog.md#bl-130-expertが成果物を出さずにuser-aiへ質問相談できる双方向チャネルが未設計現状はuserexpertへの一方向指示のみ) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
