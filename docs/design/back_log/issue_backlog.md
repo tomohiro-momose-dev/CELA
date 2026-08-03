@@ -183,6 +183,7 @@
 | BL-149 | 低 | `cela_main.py`（`_safe_json_parse`のフォールバック戦略ロギング不足） | コードベース全体のバグチェック（2026-08-03）で発見。`_safe_json_parse`（complexity=16, cognitive=37, 68行）は複数のフォールバック戦略（フェンスブロック抽出・`{`/`[`優先順位判定・末尾補完等）を順に試す設計だが、どの戦略で成功・失敗したかがログ出力されない。BL-133で`_query_and_parse_with_retry`に300字プレビューを追加したが、`_safe_json_parse`自体の成功/失敗時の戦略ログは未追加。BL-088（`{`/`[`優先順位バグ）やBL-089（複数フェンスブロック混線）の類問題が再発した際、原因切り分けが困難。**状態**: `open`（記録のみ、優先度低）。 | P3 |
 | BL-150 | 低 | `cela_main.py`（高複雑度関数のリファクタリング候補） | 同バグチェックで発見。Codebase Memory MCPの複雑度メトリクスより、`decision_extractor_node`（complexity=26, cognitive=91, 5 loops, 202行）と`_commit_agreement_from_tool`（complexity=26, cognitive=78, 159行, out-degree=12）がコードベース全体で最も複雑。`call_detector`（493行）も関数長として突出。BL-098/BL-118（ファイル分割）と関連するが、ファイル分割前に個別関数の責務分割・サブ関数抽出を先行させるべき。`decision_extractor_node`は抽出ロジック（User/Expert分岐）・遷移解決・DB書き込みの3責務を1関数で抱え、`_commit_agreement_from_tool`はCREATE/UPDATE/SUPERSEDE × Decision/Directive/Deliverable/EssenceProposalの全組合せを1関数で処理している。**状態**: `open`（記録のみ、BL-098/118のファイル分割着手時に合わせて検討）。 | P3 |
 | BL-151 | 高 | `cela_main.py`（`_apply_text_edits`、`_revise_goal_tool_impl`） | `log/2026-08-03/1110`ドライラン中に発見。`revise_goal`のedits[0].old_textが、`generate_user_utterance`のプロンプト表示専用の絵文字装飾（「👉 {user_goal}」、実際の格納内容`_CURRENT_GOAL_TEXT`には含まれない）を含んでいたため、User AIが同じ誤った引用を最低9回（BL-056bの残り回数通知が発火する直前まで）再試行し続け、一度も自己修復できなかった。エラーメッセージが「一字一句正確な引用か確認してください」としか言わず実際の格納内容を一切見せていなかったことが根本原因。BL-086の中心機能（前提矛盾に気づいた発注者自身がゴールを是正する経路）が、まさにその想定シナリオで機能しなかった実インシデント。**実装完了（`done`）**: `_apply_text_edits`へ`content_label`パラメータを追加（デフォルト「現在のホワイトボード内容」、`revise_goal`からは「現在のゴール文」を指定）。`exact_count==0`（不一致）時のエラーへ、実際の格納内容の先頭400字スニペット（`_TEXT_EDIT_SNIPPET_MAX_CHARS`）を含めるようにし、同ターン内でモデルが実際の文言を見て自己修復できるようにした。あわせて同種の「表示専用装飾がツールの照合対象からずれている」箇所が他にないか調査し、`call_expert`（Expert自身のプロンプト、5319行目付近）・`call_reflection`（終了監査プロンプト、6367行目付近）・`call_orchestrator`（5055行目付近「Goal: 」プレフィックス）にも同型の装飾があるが、いずれもexact-text一致を要求するツール（`revise_goal`はuserロール専用でExpert/Orchestrator/Reflectionは呼べない）を持たない文脈であるため現状は機能的な罠になっていないことを確認した（将来ロール権限が拡張された場合の潜在リスクとして記録のみ、対応は不要と判断）。新規テスト`tests/test_bl151_apply_text_edits_error_snippet.py`（8件）追加。`python -m py_compile`合格。 | P1 |
+| BL-152 | 高 | `cela_main.py`（`call_detector`の`whiteboard_block`構築、`_verify_whiteboard_excerpt_handler`、`detector_node`の注釈挿入呼び出し） | `log/2026-08-03/1347`ドライラン中（BL-151修正後の再開ラン）に発見。`verify_whiteboard_excerpt`（BL-079）が、Detectorが実際に監査しようとしている成果物ではなく、**常に`state["current_task_id"]`のホワイトボードとだけ照合している**ことが判明。ExpertがBL-146のSUPERSEDE経路（他タスク改訂の正規手段、current_task_idゲートの対象外）でtask_1_3の成果物を書き込んだ際、`current_task_id`はBL-125のゲートによりまだtask_1_1のまま（正式な遷移未成立）だった。しかし`call_detector`の`whiteboard_block`（現在タスクの最新ホワイトボードとしてDetectorへ提示するR4文脈）・`_verify_whiteboard_excerpt_handler`（`_CURRENT_TASK_ID`/`_CURRENT_PHASE_ID`グローバル参照）・`detector_node`の`_annotate_whiteboard_with_detector_comment`呼び出し（実際の注釈挿入先）の3箇所すべてが無条件に`current_task_id`（task_1_1）を対象にしており、Detectorが`read_deliverable_file(task_id="task_1_3")`で正しく読んだtask_1_3の内容からどれだけ正確に引用しても`verify_whiteboard_excerpt`は常に不一致（task_1_1と照合しているため）になる。実測：わずか2ターンで`verify_whiteboard_excerpt`が96回呼ばれ79回（82%）失敗、1エピソードでは`"案A"`という2文字の引用すら失敗し続けMAX_TOOL_ITER=20を丸ごと消費（`ツールを外し、テキスト最終応答を強制`）、たまたま両タスクに共通する汎用語句`"ピーク需要"`がiter=19で偶然一致したためtarget_excerptとして採用された。この判定は最終的に`major`となり注釈挿入（`Whiteboard Annotated`ログ）まで進んでおり、task_1_3固有の批判コメント（乗合タクシー実現性・中古バス混在・山間部按分の恣意性等）が`current_task_id`基準でtask_1_1のホワイトボードへ誤って埋め込まれた可能性が高い（無関係な文書が汚染され、本来指摘すべきtask_1_3側には注釈が付かない）。修正の手掛かりとして、`expert_node`が`write_agreement`実行後に必ずセットする`state["expert_last_whiteboard_edit"]`（`{phase_id, task_id, version}`、今ターン実際に書き込まれた対象を正確に保持）が既に存在するが、`call_detector`/`detector_node`のどこからも参照されていない（現状はロールバック判定など別用途のみ）。**状態**: `open`（記録のみ、実装未着手。ユーザーがドライランを一時停止し起票を優先、他の点検と合わせて対応方針を検討中）。 | P1 |
 
 ---
 
@@ -4196,6 +4197,34 @@ Detectorがmajor判定で差し戻す＝`state["constraint_issue"] == "major"`�
 **完了条件:** `python -m py_compile`合格。新規`tests/test_bl151_apply_text_edits_error_snippet.py`（8件: スニペット含有・デフォルト/カスタムcontent_label・長文切り詰め・短文非切り詰め・複数一致エラーの形状不変・revise_goal経由の実インシデント再現）追加。既存`tests/test_bl081_edits_loose_match_fallback.py`・`tests/test_bl086_escalation_freeze_goal_revision.py`は無修正でPass（エラーメッセージに「件」を含む既存アサーションと非衝突）。
 
 **関連:** [BL-086](#bl-086-前提エスカレーション経路-freeze復活-ゴール改定goalshifteventの実消費化)、[BL-081](#bl-081-write_agreementのeditsold_textnew_textがmarkdownテーブル行頭の全角スペースパイプ記号の有無で完全一致に失敗しやすかった)、[BL-137](#bl-137-_apply_text_editsが非dict要素を含むeditsで未捕捉クラッシュしrun_ai_vs_ai_loop全体が停止した)
+
+---
+
+### BL-152: `verify_whiteboard_excerpt`が「今レビューすべき成果物」ではなく、常に`current_task_id`のホワイトボードだけを見ていた
+
+**状態:** `open`（記録のみ、実装未着手）
+
+**経緯:** `log/2026-08-03/1347`ドライラン（BL-151修正後、`1110`を一時停止して再開したラン）をレビューした際にユーザーが発見・AIが調査。
+
+このターンでは、ExpertがBL-146のSUPERSEDE経路（他タスク改訂の正規手段。`_effective_current_task_id_from`によるcurrent_task_idゲートは`action_type != "SUPERSEDE"`の場合のみ適用されるため、SUPERSEDEはこのゲートの対象外）を使ってtask_1_3の成果物を新規に書き込んでいた。Expert自身「the system says the current task is task_1_1」と認識した上で、意図的にSUPERSEDEでtask_1_3を先行して書いたという経緯がログに残っている。しかし`state["current_task_id"]`は`_resolve_task_transition`（BL-125）による正式な遷移がまだ成立していないためtask_1_1のままだった。
+
+この状態でDetectorがtask_1_3の成果物を監査した際、以下の3箇所がすべて無条件に`state["current_task_id"]`（task_1_1）を対象にしていることが判明した：
+
+1. `call_detector`の`whiteboard_block`構築（cela_main.py:5541〜5546、`_current_task_id = current_task.get("task_id", "")`——`current_task = _get_current_task(state)`はcurrent_task_id依存のフォールバック）。「R4: 現在タスクの成果物・最新ホワイトボード」としてDetectorへ提示される内容が、実際にレビューすべきtask_1_3ではなくtask_1_1のものになっていた。
+2. `_verify_whiteboard_excerpt_handler`（cela_main.py:1229〜、BL-079）は`_CURRENT_TASK_ID`/`_CURRENT_PHASE_ID`のモジュールグローバルのみを参照し、`call_detector`冒頭（5524〜5525行目）で`state.get("current_task_id", "")`からセットされたままの値（task_1_1）と照合する。
+3. `detector_node`の`_annotate_whiteboard_with_detector_comment`呼び出し（cela_main.py:7847〜7853、BL-076）も同じく`current_task_id = state.get("current_task_id", "")`（detector_node冒頭）を注釈挿入先として渡している。
+
+DetectorはExpertの実際の提出内容を`read_deliverable_file(task_id="task_1_3")`で正しく読んで評価していたが、`verify_whiteboard_excerpt`でどれだけ正確に引用してもtask_1_1のホワイトボードと照合される限り一致するはずがない——実際、`"案A"`というたった2文字の引用すら19回連続で不一致になり続けた（`log/2026-08-03/1347`のあるエピソードで実測）。
+
+**実測された被害規模:** わずか2ターンの間に`verify_whiteboard_excerpt`が96回呼ばれ、79回（82%）が不一致で失敗。上記の1エピソードではMAX_TOOL_ITER=20を丸ごと消費し「最終iteration（20）のためツールを外し、テキスト最終応答を強制します」に至った（tool_calls使用=19回）。たまたま両タスクに共通する汎用語句「ピーク需要」がiter=19で偶然一致したため、それが`target_excerpt`として採用された。この判定は`constraint_issue: "major"`となり、実際に`Whiteboard Annotated`（注釈挿入成功）ログまで進んでいる——つまりtask_1_3固有の批判コメント（乗合タクシー実現性の疑義、中古有人バス混在による本質乖離、山間部需要按分の恣意性、クラウド化リスク未評価）が、`current_task_id`基準でtask_1_1のホワイトボードへ誤って埋め込まれた可能性が高い。無関係な文書が汚染される一方、本来指摘すべきtask_1_3側には注釈が付かないという、silent（クラッシュしない）データ破損モードである。
+
+**なぜ今まで気づけなかったか:** (1) このバグはクラッシュせず「不一致で再試行するモデル」という表面上の挙動しか見えないため、BL-081（Markdown装飾による引用不一致）と同種の「モデルが引用を雑にしている」問題に見えてしまい、コードを疑う動機になりにくかった。(2) `verify_whiteboard_excerpt`が最終的に「たまたま一致する汎用語句」を見つけて`ok: True`を返すことがあるため、失敗が完全な機能停止ではなく「効率が悪いだけ」に見え、個々のログを目視するだけでは79/96という失敗率が定量化されず見過ごされやすい。(3) このバグの引き金となる「current_task_idが指す対象とは別のタスクへSUPERSEDEで先行して成果物を書く」という具体的な組み合わせ自体が、BL-146（2026-08-02実装、SUPERSEDEをcurrent_task_idゲートから明示的に除外）以降に発生しやすくなった可能性がある比較的レアなシナリオであり、通常の同一タスク内レビューでは`current_task_id`と実際にレビューすべきタスクが一致するため表面化しない。
+
+**対応の手掛かり（未実装）:** `expert_node`が`write_agreement`実行後に必ずセットする`state["expert_last_whiteboard_edit"]`（cela_main.py:7695、`get_last_whiteboard_edit()`の戻り値`{phase_id, task_id, version}`、今ターン実際に書き込まれた対象を正確に保持）が既に存在するが、`call_detector`/`detector_node`のどこからも参照されていない（現状はコメントにある通り「次ターンのロールバック判定のため」という別用途のみ）。この値が存在する場合（＝このターンでDeliverableの書き込みが実際にあった場合）はそちらを優先し、`current_task_id`はフォールバックとして扱う設計が候補になる。
+
+**完了条件:** 未定（設計未着手のため）。
+
+**関連:** [BL-076](#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)、[BL-079](#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる)、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-146](#bl-146-write_agreementがbl-125のタスク遷移ゲートcurrent_task_idを内容レベルで迂回できブロック中の他タスクへ実際にdeliverableを書き込めていた)
 
 ---
 
