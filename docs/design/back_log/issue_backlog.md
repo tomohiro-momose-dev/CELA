@@ -191,6 +191,7 @@
 | BL-157 | 高 | `cela_main.py`（`_bump_issue_occurrence`、`_read_issues_handler`） | `log/2026-08-03/2233`レビューでcurrent_task_idが遷移しない問題を追跡した結果、BL-096の自動バックアップ（`detector_node`、`raised_by='detector_auto'`、汎用catch-allトピック`detector_observation_<task_id>`）が、`current_task_id`が実際の会話の主題より遅れて更新されるタイミングで無関係な指摘を同一バケツへ混入させ、occurrence_count>=2による機械的major/escalated化（D-079/D-080）を見せかけの再発で発火させていたことが判明。実例：User AIが「task_1_2をやれ」と発言→`detector_node`（target_role="user"）のobservationsがtask_1_2についての無関係な指摘→current_task_idはまだ"task_1_1"のため`detector_observation_task_1_1`へ混入→occurrence_count 1→2→major/escalated化→BL-125が（正しく設計通り）遷移をブロック。**実装完了（`done`）**：`_bump_issue_occurrence`・`_read_issues_handler`の両方に`raised_by != 'detector_auto'`の条件を追加し、detector_auto起票行はoccurrence_countに関わらずminor/openのまま維持するようにした（他ロールの既存挙動は無変更）。あわせて再発カウント・昇格・抑制の各分岐にprintログを追加（ユーザー指示：「今後このようなコード側の機械的・暗黙的動作のブラックボックスを可視化するために、すべての動作にprintによるでバックログを追加してください」）。新規テスト`tests/test_bl157_detector_auto_occurrence_exemption.py`（5件）追加。`python -m py_compile`合格、フルオフラインスイート643件Pass。 | P1 |
 | BL-158 | 高 | `cela_main.py`（`detector_node`、write_issue成功トラッキング一式） | 同ログ調査の続き。ユーザーの原則「根本的にはユーザーがタスクを次に進めてはいけませんし、detectorが弾くべきです」を受け、`generate_user_utterance`の既存の強制文言（`_get_forced_escalated_issues_text`、BL-136）がUser AIに無視され得ること（実ログで確認）、かつ`call_detector`（target_role="user"）のレビュー基準に「現在のタスクに未解決のescalated issueが残ったまま前進しようとしていないか」のチェックが一切存在しなかったことを確認。**実装完了（`done`）**：LLMの指示追従に頼らない決定論的なPython側却下として、BL-125の実ゲートと完全に同一の`_get_blocking_issues_for_transition`を単一の判断源として再利用し、`detector_node`（target_role=="user"のみ）へ機械的な却下ロジックを追加した。あわせて`write_issue(RESOLVE/DEFER)`が今回のターンで成功したかを追跡する新規フラグ`user_wrote_issue_resolution`（`_LAST_WRITE_AGREEMENT_SUCCEEDED`と同型のグローバル+アクセサ+`LineageState`フィールド）を新設し、ブロック対象issueが残っており今回RESOLVE/DEFERが呼ばれていない場合のみ機械的にmajorへ上書きする。留意点：この却下は「前進しようとしている発言」に限定せず、ブロック対象issueが残っている限り毎ターン発火する（`route_after_user_detector`の3回リトライ上限があるため無限ループにはならない）。新規テスト`tests/test_bl158_detector_rejects_premature_advancement.py`（7件）追加。`python -m py_compile`合格、フルオフラインスイート643件Pass、BL-096/136/144/145/154関連98件も無退行。 | P1 |
 | BL-159 | 中 | `cela_main.py`（全体、約50箇所） | ユーザー指示「機械的・暗黙的動作の可視化はコード内のすべての個所について実施してください。全体のデバッグ性を高めます」を受け、Explore agent2体でcela_main.py全体（約9300行）を2回に分けて完全走査し、printによる可視化が欠けている「サイレントな機械的・暗黙的動作」を12段階のTierに分類・列挙（halt/不変条件強制、goal/agreement変異、権限拒否、issueライフサイクル、plan注釈のfire-and-forget、LLM JSONパース失敗フォールバック、verified_facts上書き、ルーティング異常、モード切替、LLM向けone-shot通知、コスメティックなフォールバック、ストリーミング内部/スキーマ移行）。ユーザー確認（AskUserQuestion）により「未調査部分も含め全体調査を先に完了」「Tier 1〜11すべて対応」「Tierごとに順次py_compile」の方針で実施。**実装完了（`done`）**：約50箇所へprint文を追加。調査の過程で`run_ai_vs_ai_loop`内に実際のバグ（decision表示ループの`else`節が実行されないトリプルクォート文字列リテラルのままで、orchestrator/decision_extractor以外の全ロールの決定がコンソールに一切出力されていなかった死にコード）を発見し、実際のprint呼び出しへ修正した。他は全て既存動作を変えない純粋な可視化追加（DB書き込み・状態遷移・フォールバック発生・権限拒否・スキーマ移行等の事実をprintするのみ）。テスト変更なし（出力内容を検証するテストは存在せず、全て既存テストの回帰確認のみ）。`python -m py_compile`合格、Tierごとの区切りでフルオフラインスイート643件Pass（複数回）を確認。 | P3 |
+| BL-160 | 高 | `cela_main.py`（`query_AI`のtools=None非ストリーミング分岐、`call_decision_extractor`ほかtools=Noneで呼ばれる全ノード） | ユーザー指示「08-04/0715,0807のログをレビュー」を受け`log/2026-08-04/0715`・`log/2026-08-04/0807`をExplore agent2体でレビュー。BL-159のprint可視化により、0807で`⚠️ [Decision Extractor] JSON解析に失敗しました（生レスポンス冒頭300字: '(APIから空の応答が返されました)'）`が4回中3回発生し、そのたびに`current_task_id`の遷移シグナル（`advances_to_task_id`）を含む抽出結果全体が失われ、`current_task_id`が実行全体を通して`task_1_2`に固着したまま会話内容だけが先行する実害を確認。追加調査（`query_AI`のtools=None分岐、`cela_main.py:3076-3114`を直接確認）により、3回とも失敗直前の`💭思考`ログ（`delta.reasoning`）に`advances_to_task_id`込みの完全に正しいJSONがそのまま出力されていたにもかかわらず、`content = "".join(content_parts)`（`delta.content`のみ）が空だったために`"(APIから空の応答が返されました)"`が返され、`reasoning_parts`（`_LAST_REASONING_TEXT`に保存されるのみでフォールバックには一切使われない）が丸ごと破棄されていたことが根本原因と判明。0715ではDecision Extractorの思考ストリームが同一の中国語文断片を数百回繰り返す暴走に陥りJSONが完成しないまま運用者がCtrl+Cで中断しており、同じ「reasoning/content分離の破綻」が別の形（無限化）で現れた可能性が高い。ユーザーからの補足：この回はモデルを従来の`nemotron_3_ultra`ではなく新規リリース直後の`deepseek-v4-flash-0731`（ポスト学習モデル）で実行しており、モデル自体の挙動不安定性が引き金になっている可能性がある。ただし「reasoning側に答えが出ても拾えずに握りつぶす」という設計上の穴自体は、どのモデル・プロバイダーでも同型の実害（1ターン分の抽出・遷移情報の完全消失、しかもエラーとしてすら露見しない）を引き起こしうる。**状態**: `open`（記録のみ、修正はPlan Modeで設計予定）。 | P0 |
 
 ---
 
@@ -4389,6 +4390,36 @@ DetectorはExpertの実際の提出内容を`read_deliverable_file(task_id="task
 テスト変更なし（出力内容自体を検証するテストは存在しないため）。各Tier完了ごとに`python -m py_compile`、要所で`pytest tests/ -q --ignore=tests/test_f26_detection.py`（643件Pass、複数回確認）を実行。
 
 **関連:** [BL-157](#bl-157-bl-096の自動バックアップdetector_autoがcurrent_task_idキーの陳腐化により無関係な指摘を同一バケツへ混入させ見せかけの再発でmajorescalated化していた)、[BL-158](#bl-158-detectorの-user-レビューパスに未解決issueを残したままの前進を機械的に却下する仕組みを追加)
+
+---
+
+### BL-160: `query_AI`のtools=None非ストリーミング分岐が、最終回答がreasoningチャンネルへ出力されcontentが空になったケースを「空応答」としてサイレントに握りつぶし、1ターン分のDecision/Directive/Deliverable抽出・タスク遷移シグナルが丸ごと失われる
+
+**状態:** `open`
+
+**経緯:** ユーザー指示「08-04/0715,0807のログをレビュー」を受け`log/2026-08-04/0715`・`log/2026-08-04/0807`をExplore agent2体でレビュー。BL-159で追加したprint可視化により、0807で以下のログが4回中3回出現していることを確認：
+
+```
+⚠️ [Decision Extractor] JSON解析に失敗しました（生レスポンス冒頭300字: '(APIから空の応答が返されました)'）。このターンのDecision/Directive/Deliverable抽出は全て失われます。
+```
+
+失敗のたびに、その turn の`advances_to_task_id`（BL-024のタスク遷移シグナル）を含む抽出結果が全損し、User/Expertの会話内容は`task_1_3`→`task_2_1`と実質的に進んでいるにもかかわらず、`current_task_id`は実行終了までDBの上では`task_1_2`のまま固着した。会話が先行しDBが追随しないため、以降`write_agreement`が「task_id 'task_2_1' は現在のタスク（'task_1_2'）と一致しません」で正規の成果物登録を拒否し続け、User/Expert双方が毎ターン食い違いを説明・迂回する空転が発生した（BL-125/146/157/158系の症状と同一の見た目だが、原因は全く別）。
+
+**根本原因:** `query_AI`のtools=None非ストリーミング分岐（`cela_main.py:3076-3114`）は、ストリーミング応答を`delta.reasoning`（思考チャンネル、`reasoning_parts`に蓄積）と`delta.content`（回答チャンネル、`content_parts`に蓄積）へ振り分け、最終的に`content = "".join(content_parts)`のみを戻り値として使い（3113行目）、空なら`"(APIから空の応答が返されました)"`という固定文字列を返す（3114行目）。`reasoning_parts`は`_LAST_REASONING_TEXT`グローバルへ保存されるのみで、この空応答フォールバックには一切使われない。
+
+`call_decision_extractor`（`cela_main.py:6403`）はこの関数を`tools`引数なしで呼ぶため必ずこの分岐を通る。実ログを直接確認したところ、3回とも失敗直前の`💭 [Decision Extractor] 思考:`ログに`advances_to_task_id`込みの完全に正しいJSONがそのまま出力されており、`finish_reason=="length"`（打ち切り）の警告ログも一切出ていない。つまりモデルは正しい最終回答を生成し終えていたが、それが丸ごと`reasoning`チャンネル側に出力され`content`チャンネルが空のまま応答が終了し、既存コードには「contentが空でreasoningが非空なら中身を確認する」という経路が存在しないため、正しい答えがそこにあるまま握りつぶされていた。
+
+0715では同じDecision Extractorの思考ストリームが、同一の中国語文断片を数百回繰り返す暴走に陥りJSONが完成しないまま運用者がCtrl+Cで中断している。JSONが完成せず無限化した点は今回の3件（JSONは完成したがcontentに出なかった）と症状は異なるが、いずれも「reasoning/contentの分離が破綻する」という同種の不安定挙動の別の現れである可能性が高い。
+
+**ユーザーからの補足:** この2回のドライランはモデルを従来の`nemotron_3_ultra`ではなく、リリース直後の`deepseek-v4-flash-0731`（ポスト学習モデル）に切り替えて実行しており、モデル自体の挙動不安定性が引き金になっている可能性がある。ただし「reasoning側に完成した答えが出てもプログラム側が拾わずに握りつぶす」という設計上の穴自体は、モデル固有の不具合ではなくコード側の欠落であり、どのモデル・プロバイダーの組み合わせであっても再現しうる。しかもこの握りつぶしは「JSON解析に失敗しました」という警告ログこそ出るが例外や停止には至らないため、BL-159以前は完全にサイレントに（ログにすら残らず）1ターン分の情報が消失していた。
+
+**影響範囲:** `query_AI`のtools=None分岐は`call_decision_extractor`以外にも、`label_lower`が同分岐を通る他のtools無し呼び出し（task_planner等の単発判定ノード）でも共有されるコードパスであり、同型の実害が他ノードでも起こりうる（BL-109参照）。
+
+**対応内容：** 未着手。Plan Modeで修正設計を行う。
+
+**基本設計:** 未着手（本エントリ起票直後にPlan Modeで実施予定）。
+
+**関連:** [BL-159](#bl-159-cela_mainpy全体約50箇所のサイレントな機械的暗黙的動作へprintによる可視化を追加)（本バグはBL-159のprint可視化がなければログからは発見できなかった）、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-139](#bl-139-decision_extractor_nodeのtransition抽出がllm出力の1項目に依存しており明示的な次タスク指示があってもcurrent_task_idが更新されないことがあった)（トップレベル`advances_to_task_id`欠落への既存フォールバックだが、本バグはcontent自体が丸ごと空になるため`extracted_events`も含め全損しBL-139のフォールバックも機能しない）、[BL-109](#bl-109-複数ツールを組み合わせて検討する必要のない単発判定抽出4ノードorchestratordecision-extractorreflectionfacilitatorからthink_toolを外しtoolsnoneの単一応答パスへ差し戻す)
 
 ---
 
