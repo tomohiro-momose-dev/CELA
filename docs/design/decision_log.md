@@ -1842,6 +1842,18 @@
 | 影響 | `cela_main.py`（`_LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED`関連一式、`detector_node`、`LineageState`、`generate_user_utterance_node`）。新規テスト`tests/test_bl158_detector_rejects_premature_advancement.py`（7件）追加。`python -m py_compile`合格、フルオフラインスイート643件Pass、BL-096/136/144/145/154関連98件も無退行。留意点：フラグは「今回RESOLVE/DEFERのどれかが成功したか」という粗い真偽値であり、「ブロック中の複数issueのうちどれを解決したか」までは区別しない（最初の実装はこの粒度、必要なら後続で絞り込む）。実ドライランでの効果確認は次回待ち。 |
 | 関連 BL | [BL-158](back_log/issue_backlog.md#bl-158-detectorの-user-レビューパスに未解決issueを残したままの前進を機械的に却下する仕組みを追加)、[BL-157](back_log/issue_backlog.md#bl-157-bl-096の自動バックアップdetector_autoがcurrent_task_idキーの陳腐化により無関係な指摘を同一バケツへ混入させ見せかけの再発でmajorescalated化していた)、[BL-125](back_log/issue_backlog.md#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-136](back_log/issue_backlog.md#bl-136-issue_logが起票されるが解決されない状態だった可視性強制力の非対称性) |
 
+### D-129: cela_main.py全体（約50箇所）のサイレントな機械的・暗黙的動作へprintによる可視化を一括追加する（BL-159）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-04 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（「今後このようなコード側の機械的・暗黙的動作のブラックボックスを可視化するために、すべての動作にprintによるでバックログを追加してください」に続き「機械的・暗黙的動作の可視化はコード内のすべての個所について実施してください。全体のデバッグ性を高めます」と全体適用を明示指示、AskUserQuestionで調査順序・優先度範囲・実装単位の3点を確認して承認） |
+| **決定理由** | BL-157/158の調査で、DB内部で静かにoccurrence_countが上がってescalated化する、Detectorの判定が機械的に上書きされる、といった挙動が一切printされておらず、その分ドライランのログから根本原因を突き止める調査に時間を要した。これはBL-157/158に限った局所的な問題ではなく、cela_main.py全体に共通する設計上の欠落（重要な決定が下される箇所ほどコンソールに何も出ない）と判断し、ユーザーの明示指示に基づき全体へ適用する。 |
+| 決定内容 | Explore agent 2体でcela_main.py全体（約9300行）を2パスで完全走査し、約50箇所を12段階のTierに分類（halt/不変条件強制、goal/agreement変異、権限拒否、issueライフサイクル、plan注釈のfire-and-forget、LLM JSONパース失敗フォールバック、verified_facts上書き、ルーティング異常、モード切替、LLM向けone-shot通知、コスメティックなフォールバック、ストリーミング内部/スキーマ移行）。AskUserQuestionで(a)未調査範囲も含め先に全体調査完了、(b)Tier 1〜11すべて対応（低優先度分も含む）、(c)Tierごとに順次py_compileして進める、の3点を確認の上、Tierごとにprintを追加しながら`python -m py_compile`・要所でフルオフラインスイートを実行して回帰がないことを確認した。 |
+| 影響 | `cela_main.py`（約50箇所、Tier 1〜12）。調査の副産物として`run_ai_vs_ai_loop`内の実バグ（決定表示の`else`節がトリプルクォート文字列リテラルのまま`print()`に渡されておらず、orchestrator/decision_extractor以外の全ロールの決定がコンソールに一切出力されていなかった死にコード）を発見し、実際の`print(...)`呼び出しへ修正した（唯一の動作変更）。他は全て既存動作を変えない純粋な可視化追加。テスト変更なし、`python -m py_compile`合格、フルオフラインスイート643件Pass（Tierごとに複数回確認）。 |
+| 関連 BL | [BL-159](back_log/issue_backlog.md#bl-159-cela_mainpy全体約50箇所のサイレントな機械的暗黙的動作へprintによる可視化を追加)、[BL-157](back_log/issue_backlog.md#bl-157-bl-096の自動バックアップdetector_autoがcurrent_task_idキーの陳腐化により無関係な指摘を同一バケツへ混入させ見せかけの再発でmajorescalated化していた)、[BL-158](back_log/issue_backlog.md#bl-158-detectorの-user-レビューパスに未解決issueを残したままの前進を機械的に却下する仕組みを追加) |
+
 ---
 
 ## 未決定（pending）
