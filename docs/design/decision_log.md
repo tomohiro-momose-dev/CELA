@@ -1856,6 +1856,20 @@
 
 ---
 
+### D-130: `_query_AI_live`の非ツール分岐・ツール呼び出しループ双方に、contentが空・reasoningが非空の場合のフォールバックを追加し、`call_decision_extractor`にも層2リトライを追加する（BL-160）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-04 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（ログレビュー指示「08-04/0715,0807のログをレビュー」を受けAIが根本原因を特定・報告し起票、続けて「BL起票後、修正プランをお願いします」の指示でPlan Modeによる設計・実装を承認） |
+| **決定理由** | `log/2026-08-04/0807`で`current_task_id`が実行全体を通して固着する実害が発生し、原因を追ったところ、`_query_AI_live`のtools=None分岐（`call_decision_extractor`が経由）が、モデルが完成した最終JSONを丸ごとreasoningチャンネル（`delta.reasoning`）へ出力しcontentチャンネルが空のまま応答を終えたケースを「空応答」として扱い、reasoning側に既に出ている正しい答えを一切参照せずに`"(APIから空の応答が返されました)"`を返していたことが判明した。ユーザーからの補足で、当該ドライランはモデルをリリース直後の`deepseek-v4-flash-0731`に切り替えて実行しておりモデル自体の不安定性が引き金である可能性が示されたが、「reasoning側に完成した答えが出てもプログラム側が拾わず握りつぶす」という設計上の穴自体はモデル非依存のコード側欠陥であり、修正が必要と判断した。 |
+| 決定内容 | (1) tools=None分岐（`cela_main.py:3076-3114`）・(2) ツール呼び出しループの最終応答（`cela_main.py:3236-3246`、Expert/User AI/Detector等ツールを持つ全ノードが通る同型の欠陥箇所）の両方に、content空・reasoning非空の場合のみreasoning全文（(2)は既存の`_reasoning_start_idx`で最終iterationのみに絞る）を代替contentとして使うフォールバックを追加。(3) `call_decision_extractor`（従来リトライなしの単発呼び出し）を既存の`_query_and_parse_with_retry`でラップし、他のJSON判定ノードと同水準の層2リトライ保護を持たせた。`_safe_json_parse`自体は無変更（既にプロース混在JSONに頑健な設計だったため）。 |
+| 影響 | `cela_main.py`（`_query_AI_live`2箇所、`call_decision_extractor`1箇所）。新規テスト`tests/test_bl160_reasoning_channel_content_fallback.py`（8件）追加。`python -m py_compile`合格、フルオフラインスイート651件Pass。実ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-160](back_log/issue_backlog.md#bl-160-_query_ai_liveが最終回答がreasoningチャンネルへ出力されcontentが空になったケースを空応答としてサイレントに握りつぶし1ターン分のdecisiondirectivedeliverable抽出タスク遷移シグナルが丸ごと失われる)、[BL-159](back_log/issue_backlog.md#bl-159-cela_mainpy全体約50箇所のサイレントな機械的暗黙的動作へprintによる可視化を追加) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
