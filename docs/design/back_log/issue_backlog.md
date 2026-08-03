@@ -190,6 +190,7 @@
 | BL-156 | 低 | `cela_main.py`（`_query_AI_live`のAPIエラーリトライ時のprint文言・隣接コメント） | ユーザーがドライラン中のnemotron-3-ultra-550b-a55b:freeのResourceExhaustedエラーを見て「APIエラー時には直前の思考は温存されるんでしたっけ？」と質問。調査の結果、`loop_messages`/`reasoning_parts_all`/`iteration_start`はBL-122によりリトライを跨いで温存される（過去の完了済みiterationの思考ログ・tool結果は失われない）一方、エラーが起きたそのiteration自体の思考・tool_call引数はストリーミング途中で例外が飛ぶため破棄され、同じiteration番号でAPI呼び出しのみやり直されることが判明。しかし当該リトライ時のprint文言「ツールループを**最初から**やり直します」がBL-122以前（当時は本当にiter=1へ巻き戻っていた）の挙動を説明する隣接コメントのままで、現在の実装と食い違っていた。**実装完了（`done`）**：print文言を「このiterationのAPI呼び出しをやり直します」へ修正し、隣接コメントにもBL-122以降は巻き戻らない旨を追記。テスト変更なし（文言のみでロジック変更なし、対応するテストも存在せず）。 | P3 |
 | BL-157 | 高 | `cela_main.py`（`_bump_issue_occurrence`、`_read_issues_handler`） | `log/2026-08-03/2233`レビューでcurrent_task_idが遷移しない問題を追跡した結果、BL-096の自動バックアップ（`detector_node`、`raised_by='detector_auto'`、汎用catch-allトピック`detector_observation_<task_id>`）が、`current_task_id`が実際の会話の主題より遅れて更新されるタイミングで無関係な指摘を同一バケツへ混入させ、occurrence_count>=2による機械的major/escalated化（D-079/D-080）を見せかけの再発で発火させていたことが判明。実例：User AIが「task_1_2をやれ」と発言→`detector_node`（target_role="user"）のobservationsがtask_1_2についての無関係な指摘→current_task_idはまだ"task_1_1"のため`detector_observation_task_1_1`へ混入→occurrence_count 1→2→major/escalated化→BL-125が（正しく設計通り）遷移をブロック。**実装完了（`done`）**：`_bump_issue_occurrence`・`_read_issues_handler`の両方に`raised_by != 'detector_auto'`の条件を追加し、detector_auto起票行はoccurrence_countに関わらずminor/openのまま維持するようにした（他ロールの既存挙動は無変更）。あわせて再発カウント・昇格・抑制の各分岐にprintログを追加（ユーザー指示：「今後このようなコード側の機械的・暗黙的動作のブラックボックスを可視化するために、すべての動作にprintによるでバックログを追加してください」）。新規テスト`tests/test_bl157_detector_auto_occurrence_exemption.py`（5件）追加。`python -m py_compile`合格、フルオフラインスイート643件Pass。 | P1 |
 | BL-158 | 高 | `cela_main.py`（`detector_node`、write_issue成功トラッキング一式） | 同ログ調査の続き。ユーザーの原則「根本的にはユーザーがタスクを次に進めてはいけませんし、detectorが弾くべきです」を受け、`generate_user_utterance`の既存の強制文言（`_get_forced_escalated_issues_text`、BL-136）がUser AIに無視され得ること（実ログで確認）、かつ`call_detector`（target_role="user"）のレビュー基準に「現在のタスクに未解決のescalated issueが残ったまま前進しようとしていないか」のチェックが一切存在しなかったことを確認。**実装完了（`done`）**：LLMの指示追従に頼らない決定論的なPython側却下として、BL-125の実ゲートと完全に同一の`_get_blocking_issues_for_transition`を単一の判断源として再利用し、`detector_node`（target_role=="user"のみ）へ機械的な却下ロジックを追加した。あわせて`write_issue(RESOLVE/DEFER)`が今回のターンで成功したかを追跡する新規フラグ`user_wrote_issue_resolution`（`_LAST_WRITE_AGREEMENT_SUCCEEDED`と同型のグローバル+アクセサ+`LineageState`フィールド）を新設し、ブロック対象issueが残っており今回RESOLVE/DEFERが呼ばれていない場合のみ機械的にmajorへ上書きする。留意点：この却下は「前進しようとしている発言」に限定せず、ブロック対象issueが残っている限り毎ターン発火する（`route_after_user_detector`の3回リトライ上限があるため無限ループにはならない）。新規テスト`tests/test_bl158_detector_rejects_premature_advancement.py`（7件）追加。`python -m py_compile`合格、フルオフラインスイート643件Pass、BL-096/136/144/145/154関連98件も無退行。 | P1 |
+| BL-159 | 中 | `cela_main.py`（全体、約50箇所） | ユーザー指示「機械的・暗黙的動作の可視化はコード内のすべての個所について実施してください。全体のデバッグ性を高めます」を受け、Explore agent2体でcela_main.py全体（約9300行）を2回に分けて完全走査し、printによる可視化が欠けている「サイレントな機械的・暗黙的動作」を12段階のTierに分類・列挙（halt/不変条件強制、goal/agreement変異、権限拒否、issueライフサイクル、plan注釈のfire-and-forget、LLM JSONパース失敗フォールバック、verified_facts上書き、ルーティング異常、モード切替、LLM向けone-shot通知、コスメティックなフォールバック、ストリーミング内部/スキーマ移行）。ユーザー確認（AskUserQuestion）により「未調査部分も含め全体調査を先に完了」「Tier 1〜11すべて対応」「Tierごとに順次py_compile」の方針で実施。**実装完了（`done`）**：約50箇所へprint文を追加。調査の過程で`run_ai_vs_ai_loop`内に実際のバグ（decision表示ループの`else`節が実行されないトリプルクォート文字列リテラルのままで、orchestrator/decision_extractor以外の全ロールの決定がコンソールに一切出力されていなかった死にコード）を発見し、実際のprint呼び出しへ修正した。他は全て既存動作を変えない純粋な可視化追加（DB書き込み・状態遷移・フォールバック発生・権限拒否・スキーマ移行等の事実をprintするのみ）。テスト変更なし（出力内容を検証するテストは存在せず、全て既存テストの回帰確認のみ）。`python -m py_compile`合格、Tierごとの区切りでフルオフラインスイート643件Pass（複数回）を確認。 | P3 |
 
 ---
 
@@ -4358,6 +4359,36 @@ DetectorはExpertの実際の提出内容を`read_deliverable_file(task_id="task
 新規テスト`tests/test_bl158_detector_rejects_premature_advancement.py`（7件：機械的却下の発火、target_role=="assistant"への非影響、ブロック対象なし時の非発火、`user_wrote_issue_resolution=True`時の非発火、実際のDEFER成功による自然な解消、元コメントの保持、BL-157適用後のdetector_auto起票issueの非該当）追加。`python -m py_compile`合格、フルオフラインスイート643件Pass、BL-096/136/144/145/154関連98件も無退行。実ドライランでの効果確認は次回待ち。
 
 **関連:** [BL-157](#bl-157-bl-096の自動バックアップdetector_autoがcurrent_task_idキーの陳腐化により無関係な指摘を同一バケツへ混入させ見せかけの再発でmajorescalated化していた)、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-136](#bl-136-issue_logが起票されるが解決されない状態だった可視性強制力の非対称性)、[BL-148](#bl-148-orchestratorがcurrent_task_id計画成果物を一切参照できないままexpert選定focus_guidanceを決めていた)
+
+---
+
+### BL-159: cela_main.py全体（約50箇所）のサイレントな機械的・暗黙的動作へprintによる可視化を追加
+
+**状態:** `done`
+
+**経緯:** BL-157/158の調査・修正を通じて、DB内部で静かにoccurrence_countが上がってescalated化する、Detectorの判定が機械的に上書きされる、といった「コード側の機械的・暗黙的な動作」が可視化されておらず、その分ドライランのログから根本原因を突き止める調査が難航したことをユーザーが指摘。「今後このようなコード側の機械的・暗黙的動作のブラックボックスを可視化するために、すべての動作にprintによるでバックログを追加してください」（BL-157/158実装時）に続き、「機械的・暗黙的動作の可視化はコード内のすべての個所について実施してください。全体のデバッグ性を高めます」という全体適用の指示を受けた。
+
+**調査:** Explore agent 2体を使い、cela_main.py全体（約9300行）を2パスに分けて完全走査した（1パス目: 1-500/828-2650/3700-3830/3986-4063/4194-4260/4380-4406/6724-6773/7237-9103、2パス目: 残りの未走査範囲——`call_expert`/`call_detector`/`call_reflection`/`call_facilitator`/`call_task_planner`/`call_task_plan_reviewer`本体、`query_AI`/`_query_AI_live`のストリーミング内部、`init_db`のスキーマ移行等）。合計約50箇所を12段階のTierに分類：
+1. halt/不変条件強制（risk=high即halt、facilitation_count/review_count上限、REPLタイムアウト、target_excerptのプログラム側フォールバック）
+2. goal/agreement変異（escalate/resolve premise concern、revise_goal、freeze_agreement、Decision/Directive INSERT）
+3. 権限/ゲーティング拒否（`_check_write_permission`/`_check_issue_permission`/`_check_repl_code_safety`/Freeze保護）
+4. issueライフサイクル（write_issueのCREATE初回・RESOLVE・DEFER）
+5. plan注釈のfire-and-forget（`_append_deferred_note_to_plan`/`_append_reviewer_comment_to_plan`の失敗が3箇所の呼び出し元で握りつぶされていた）
+6. LLM JSONパース失敗フォールバック（`call_orchestrator`/`call_decision_extractor`/`call_resource_arbiter`/`call_integrator`が`_safe_json_parse`を直接呼び層2リトライを経由しないため、パース失敗が無言でフォールバック値に化けていた）
+7. verified_facts上書き（`upsert_verified_fact`の既存値サイレント上書き）
+8. ルーティング異常（`route_after_task_plan_reviewer`のみ無印字、`_get_current_task`のタスクID不一致フォールバック、Detectorの2パス判定統合・target_excerpt差し替え、`_aggregate_global_constraints`の壊れたresource_claimsスキップ）
+9. モード切替/状態フラグ（Essence Dialogue開始/継続、Expert相談モード開始、Arbiterのリソース超過調停ブランチ全体、task_plannerのcurrent_phase確定、ターン予算枯渇での自然終了）
+10. LLM向けone-shot通知がコンソールに見えない（`_build_escalation_resume_notice`/`_build_task_transition_blocked_notice`）＋**実バグ発見**：`run_ai_vs_ai_loop`の決定表示ループで、orchestrator/decision_extractor以外の全ロール（expert/detector/user/task_planner/arbiter/reflection等）向けの分岐が、`print(...)`ではなくトリプルクォート文字列リテラルのまま何もしない死にコードになっており、これらの決定がターン中一切コンソールに出力されていなかった
+11. コスメティックなフォールバック（Orchestratorの専門家名空文字フォールバック、whiteboard/plan_drafts更新成功、read_deliverable_fileのnot_found系、`_apply_text_edits`の一致失敗）
+12. ストリーミング内部/スキーマ移行（ツール残り回数僅少通知のコンソール非表示、issue_log/agreements/verified_factsの3件のサイレントALTER TABLE）
+
+**対応内容（実施済み）：** ユーザーへAskUserQuestionで3点確認——(a) 未調査範囲も先に完全調査してから修正するか→「先に全体調査を完了させる」を選択、(b) Tier 10/11の低優先度分も含めるか→「Tier 1〜11すべて対応」を選択、(c) 実装単位→「Tierごとに分けて順次py_compile」を選択。この方針に従い、Tier 1から12まで順に約50箇所へprint文を追加し、各Tier完了後に`python -m py_compile`、要所でフルオフラインスイートを実行して回帰がないことを確認した。Tier 10で発見した`run_ai_vs_ai_loop`の死にコードは、既存の`print(f"  [{d['who']}] {d['what']} ({d['why']})")`形式の実際のprint呼び出しへ修正した（唯一の動作変更、他は全て既存動作を変えない純粋な可視化追加）。
+
+**基本設計:** 大量の機械的な追記のためPlan Mode不使用（AskUserQuestionでの方針確認のみ）。
+
+テスト変更なし（出力内容自体を検証するテストは存在しないため）。各Tier完了ごとに`python -m py_compile`、要所で`pytest tests/ -q --ignore=tests/test_f26_detection.py`（643件Pass、複数回確認）を実行。
+
+**関連:** [BL-157](#bl-157-bl-096の自動バックアップdetector_autoがcurrent_task_idキーの陳腐化により無関係な指摘を同一バケツへ混入させ見せかけの再発でmajorescalated化していた)、[BL-158](#bl-158-detectorの-user-レビューパスに未解決issueを残したままの前進を機械的に却下する仕組みを追加)
 
 ---
 
