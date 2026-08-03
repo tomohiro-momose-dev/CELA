@@ -4413,11 +4413,17 @@ DetectorはExpertの実際の提出内容を`read_deliverable_file(task_id="task
 
 **ユーザーからの補足:** この2回のドライランはモデルを従来の`nemotron_3_ultra`ではなく、リリース直後の`deepseek-v4-flash-0731`（ポスト学習モデル）に切り替えて実行しており、モデル自体の挙動不安定性が引き金になっている可能性がある。ただし「reasoning側に完成した答えが出てもプログラム側が拾わずに握りつぶす」という設計上の穴自体は、モデル固有の不具合ではなくコード側の欠落であり、どのモデル・プロバイダーの組み合わせであっても再現しうる。しかもこの握りつぶしは「JSON解析に失敗しました」という警告ログこそ出るが例外や停止には至らないため、BL-159以前は完全にサイレントに（ログにすら残らず）1ターン分の情報が消失していた。
 
-**影響範囲:** `query_AI`のtools=None分岐は`call_decision_extractor`以外にも、`label_lower`が同分岐を通る他のtools無し呼び出し（task_planner等の単発判定ノード）でも共有されるコードパスであり、同型の実害が他ノードでも起こりうる（BL-109参照）。
+**影響範囲:** `_query_AI_live`のtools=None分岐は`call_decision_extractor`以外にも`call_reflection`（`_query_and_parse_with_retry`経由）が通る共有コードパスであり、同型の実害が起こりうる。加えて調査の過程で、ツール呼び出しループの最終応答（`cela_main.py:3236-3246`、Expert/User AI/Detector/Orchestrator/Resource Arbiter/Facilitator/Integrator/Task Planner等ツールを持つ全ノードが通る経路）にも同一パターンの欠陥（`content = msg.content`のみを使い、空なら同じ固定文字列を返す）が存在することを確認した。
 
-**対応内容：** 未着手。Plan Modeで修正設計を行う。
+**対応内容（実施済み）：** Plan Modeで設計し3点を修正した。
 
-**基本設計:** 未着手（本エントリ起票直後にPlan Modeで実施予定）。
+1. **`tools is None`分岐**（`cela_main.py:3076-3114`）：`content`が空・`_LAST_REASONING_TEXT`（reasoning全文）が非空の場合、reasoning全文を`content`の代替として採用するフォールバックを追加。直前の`finish_reason=="length"`チェック（max_tokens打ち切り検知、既存コード）を通過済みの箇所でのみ発動するため、「打ち切りではなく自発的終了だが答えがreasoning側に出た」ケースにのみ安全に適用される。
+2. **ツール呼び出しループの最終応答**（`cela_main.py:3236-3246`）：同型のフォールバックを追加。ただし全iteration累積の`_LAST_REASONING_TEXT`をそのまま使うと過去iterationの無関係な思考が混入し誤抽出のリスクがあるため、既存の`_reasoning_start_idx`（BL-093でreasoning digestの切り出し用に導入済み、`reasoning_parts_all[_reasoning_start_idx:]`で「このiterationだけ」を取り出せる）を再利用し、最終iterationのreasoningのみに意図的にスコープを絞った。
+3. **`call_decision_extractor`のリトライ追加**（`cela_main.py:6252`〜）：従来は`query_AI`への単発呼び出しでリトライが一切なく、失敗＝そのターンの抽出が即座に全損していた（`call_reflection`等の他のtools=Noneノードは既に`_query_and_parse_with_retry`で保護済みだった非対称性）。同関数でラップし、他のJSON判定ノードと同水準の層2リトライ保護（既定2回）を持たせた。
+
+`_safe_json_parse`（`cela_main.py:3438-3505`）自体は無変更。フェンスブロック抽出・`{`/`[`優先順位判定・末尾トリム（BL-088/BL-089由来）により、既に「説明文＋JSON」という混在テキストに頑健な設計だったため、reasoningテキストをそのまま渡しても正しく抽出できる。
+
+**基本設計:** Plan modeで実施（Explore agent1体による事前調査＋Plan mode内での根本原因確認、`docs/design/decision_lineage.md`論点109参照）。
 
 **関連:** [BL-159](#bl-159-cela_mainpy全体約50箇所のサイレントな機械的暗黙的動作へprintによる可視化を追加)（本バグはBL-159のprint可視化がなければログからは発見できなかった）、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-139](#bl-139-decision_extractor_nodeのtransition抽出がllm出力の1項目に依存しており明示的な次タスク指示があってもcurrent_task_idが更新されないことがあった)（トップレベル`advances_to_task_id`欠落への既存フォールバックだが、本バグはcontent自体が丸ごと空になるため`extracted_events`も含め全損しBL-139のフォールバックも機能しない）、[BL-109](#bl-109-複数ツールを組み合わせて検討する必要のない単発判定抽出4ノードorchestratordecision-extractorreflectionfacilitatorからthink_toolを外しtoolsnoneの単一応答パスへ差し戻す)
 
