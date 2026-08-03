@@ -1754,6 +1754,20 @@
 
 ---
 
+### D-122: `_apply_text_edits`のold_text不一致エラーへ、格納内容の実際のスニペットを含める（BL-151）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-03 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（「2の修正案で修正」との指示、「他で同じような装飾字の罠がないか調査」の追加指示）、Claude Sonnet 5（原因特定・設計・実装・調査） |
+| **決定理由** | `log/2026-08-03/1110`ドライランで、BL-086の中心機能である`revise_goal`（発注者自身が前提矛盾に気づきゴールを是正する経路）が初めて実発火したにもかかわらず、edits[0]が最低9回連続で同一理由で失敗し続けていることが判明した。原因は`generate_user_utterance`がゴール文を表示する際に付加する装飾（「👉 {user_goal}」、6736行目、改行を挟まず本文と同じ行に連結）が、`revise_goal`が実際に照合する`_CURRENT_GOAL_TEXT`（装飾を含まない生のシナリオ定義文）には存在しないことだった。修正案として(1)`_revise_goal_tool_impl`が照合前に先頭の「👉 」を機械的に除去する狭い対症療法、(2)`_apply_text_edits`が不一致時に実際の格納内容をエラーへ含め、モデルが同ターン内で自己修復できるようにする堅牢な修正、の2案を提示したところユーザーが(2)を選択した。(2)は特定の絵文字パターンに依存しない一般解であり、`write_agreement`の同種`edits`経路（whiteboard更新）にも同じ恩恵が及ぶ点、および将来別の表示専用装飾が同種の乖離を生んだ場合にも自己修復可能になる点で、根本原因への対症療法(1)より優れると判断した。 |
+| 決定内容 | `_apply_text_edits`（cela_main.py:4041〜）へ`content_label: str = "現在のホワイトボード内容"`パラメータを追加。`exact_count==0`（完全一致・緩い一致とも0件）の分岐で、`current_content`の先頭`_TEXT_EDIT_SNIPPET_MAX_CHARS`（400字）をエラーメッセージへ追記する（超過時は「…（以下省略）」を付与）。`_revise_goal_tool_impl`の呼び出しでは`content_label="現在のゴール文"`を明示指定する。あわせて`state['goal']`/`user_goal`の全埋め込み箇所（`call_orchestrator`・`call_expert`・`call_reflection`）と、`write_agreement`が参照するホワイトボード表示・Decision型agreements一覧表示を調査し、同型の装飾は他にも存在するが（a）exact-text一致を要求する`revise_goal`はuserロール専用でExpert/Orchestrator/Reflectionは呼べない、（b）ホワイトボード表示は見出しと本文が改行で分離されており同一行連結の罠になっていない、（c）Decision型agreements一覧の同一行連結装飾は`write_agreement`の`edits`機構がentry_type="Deliverable"限定のため対象外、の3点により現状は機能的な罠になっていないことを確認し、追加のコード変更は不要と判断した。 |
+| 影響 | `cela_main.py`（`_apply_text_edits`、`_revise_goal_tool_impl`）。新規テスト`tests/test_bl151_apply_text_edits_error_snippet.py`（8件）追加。既存`tests/test_bl081_edits_loose_match_fallback.py`・`tests/test_bl086_escalation_freeze_goal_revision.py`は無修正でPass。`python -m py_compile`合格。08-03/1110ドライランは本修正後の再ドライランでの効果確認が次回待ち（本修正時点でランは継続中のため、修正はコードへのみ適用しライブプロセスへは影響しない）。 |
+| 関連 BL | [BL-151](back_log/issue_backlog.md#bl-151-revise_goalのold_textがプロンプト表示専用の絵文字装飾を含んでいたため9回以上自己修復に失敗し続けた)、[BL-086](back_log/issue_backlog.md#bl-086-前提エスカレーション経路-freeze復活-ゴール改定goalshifteventの実消費化)、[BL-081](back_log/issue_backlog.md#bl-081-write_agreementのeditsold_textnew_textがmarkdownテーブル行頭の全角スペースパイプ記号の有無で完全一致に失敗しやすかった) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
