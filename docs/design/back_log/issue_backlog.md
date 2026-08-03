@@ -187,6 +187,7 @@
 | BL-153 | 中 | `cela_main.py`（`_check_write_permission`、`call_facilitator`のツール一覧） | `log/2026-08-03/1347`ドライラン中に発見。Facilitatorが`write_agreement(status="Proposed", action_type="SUPERSEDE", entry_type="Deliverable")`でtask_1_3の成果物本体（3案比較の全文）を書き込んでいた。`_check_write_permission`の`ALLOWED_STATUS_BY_ROLE`（`"facilitator": {"Proposed"}`、BL-126 Stage D）は`entry_type`自体を制限しておらず、`status="Proposed"`でありさえすればFacilitatorは本来Expert専用のDeliverableも書き込めてしまう。ユーザー指摘：「ファシリテーターの意思決定を残す趣旨でwrite_agreementを使えるようにしていたが、ドキュメントを書き込むことは想定していなかった。指摘は成果物直接ではなくホワイトボードに書き込む方が良いかもしれない」。**状態**: `open`（記録のみ、実装未着手。別BLとして起票、対応はロールごとの`entry_type`制限表の新設が候補）。 | P2 |
 | BL-154 | 高 | `cela_main.py`（`_check_issue_permission`、`_write_issue_impl`、`decision_extractor_node`、`_build_open_issue_pin_text`） | BL-145完了後のQ&Aで、コードベースに3つの並行した「先送り事項」追跡機構（issue_log/agreements Directive-Deferred/plan_drafts）が互いを認識しておらず、BL-125の遷移ゲート・BL-144の滞留検知・BL-145のタスク明示化がいずれもissue_logのみを参照するため、Expertが成果物内で宣言した先送り（`decision_extractor_node`が自動抽出、Expert自身はwrite_issueツールを持たないためこれが唯一の捕捉経路）にはこれらのセーフティネットが一切効かないことが判明。**実装完了（`done`）**：Expertへの新規ツール付与はせず、`decision_extractor_node`がagreements Directive/Deferredの自動抽出と同時にissue_log側にも橋渡しするよう変更。新規内部ロール`decision_extractor_auto`（`detector_auto`と同型、CREATE専用、LLMツール呼び出し経路からは到達不能）を追加し、`_write_issue_impl`のCREATE分岐を拡張してこのロールのみ`defer_to_task_id`を作成時点で設定可能に（再発時は最新宣言が勝つ）。`target_role`によるゲーティングはせずExpert/User双方に一律適用（BL-082がUserブランチの非対称バグだった前例を踏まえた判断）。BL-125/144/145は`raised_by`を見ないため無変更で対応。新規テスト`tests/test_bl154_decision_extractor_issue_log_bridge.py`（8件）追加。`python -m py_compile`合格、フルオフラインスイート630件Pass（1件は無関係な既存の未コミット差分によるテスト不整合、詳細は経緯欄参照）。 | P1 |
 | BL-155 | 低 | `cela_main.py`（`_query_AI_live`内コメントのみ）、`tests/test_bl093_think_tool_scratchpad.py` | BL-154検証時のフルスイートで発見。`MAX_TOOL_ITER`が作業ツリー上で20→30へ未コミット・無記録のまま変更済みだった（AGENTS.md §7違反状態）。ユーザーへ確認したところ「task_plan_reviewerの差し戻し後、task_plannerが差戻しタスクを1件ずつ把握し直す過程で上限20に引っかかる事態をログで観測したため」との理由提示があり、正式承認・記録。**実装完了（`done`）**：値は無変更（既に30）、変更履歴コメントへ追記、テストを`test_max_tool_iter_raised_to_30`へ改名し期待値更新。 | P3 |
+| BL-156 | 低 | `cela_main.py`（`_query_AI_live`のAPIエラーリトライ時のprint文言・隣接コメント） | ユーザーがドライラン中のnemotron-3-ultra-550b-a55b:freeのResourceExhaustedエラーを見て「APIエラー時には直前の思考は温存されるんでしたっけ？」と質問。調査の結果、`loop_messages`/`reasoning_parts_all`/`iteration_start`はBL-122によりリトライを跨いで温存される（過去の完了済みiterationの思考ログ・tool結果は失われない）一方、エラーが起きたそのiteration自体の思考・tool_call引数はストリーミング途中で例外が飛ぶため破棄され、同じiteration番号でAPI呼び出しのみやり直されることが判明。しかし当該リトライ時のprint文言「ツールループを**最初から**やり直します」がBL-122以前（当時は本当にiter=1へ巻き戻っていた）の挙動を説明する隣接コメントのままで、現在の実装と食い違っていた。**実装完了（`done`）**：print文言を「このiterationのAPI呼び出しをやり直します」へ修正し、隣接コメントにもBL-122以降は巻き戻らない旨を追記。テスト変更なし（文言のみでロジック変更なし、対応するテストも存在せず）。 | P3 |
 
 ---
 
@@ -4294,6 +4295,25 @@ DetectorはExpertの実際の提出内容を`read_deliverable_file(task_id="task
 **基本設計:** なし（コメント追記とテスト追従のみ、Plan Mode不要の軽微な変更と判断）。
 
 **関連:** [D-125](../decision_log.md#d-125-max_tool_iterを2030へ引き上げるbl-155)、[BL-154](#bl-154-decision_extractorのdirectivedeferred自動抽出をissue_logへも橋渡しする)、[BL-093](#bl-093-ノード内スクラッチパッド-thinkツール理由づけの退避ツールループ内の可変todoissuenotesメモ)
+
+---
+
+### BL-156: `_query_AI_live`のAPIエラーリトライ時のprint文言が、BL-122以前の「iter=1へ巻き戻る」挙動のまま実装と食い違っていた
+
+**状態:** `done`
+
+**経緯:** ユーザーがドライラン中のnemotron-3-ultra-550b-a55b:free経由のResourceExhaustedエラー（`Upstream error from Nvidia: ... Worker local total request limit reached (32/32)`）を見て、「APIエラー時には直前の思考は温存されるんでしたっけ？」と質問。調査の結果、次の2点が判明した：
+
+1. `loop_messages`/`reasoning_parts_all`/`iteration_start`はいずれも関数冒頭（リトライのfor attemptループの外）で初期化され、リトライしても再初期化されない（BL-122）。過去に完了したiterationの思考（`"【BL-093: iter N の思考ログ（自動保存）】"`として`loop_messages`へ既に確定済み）・tool結果はリトライ後も温存される。
+2. ただしエラーが発生したそのiteration自体については、ストリーミング中（`for chunk in stream:`）に例外が飛ぶため、思考のダイジェスト化・`loop_messages`への追記処理（該当iterationの`msg`構築より後）に到達せず、そのiterationの途中経過は破棄され、同じiteration番号でAPI呼び出しのみやり直される。
+
+この2点自体は正しい設計（BL-046/BL-122での意図的な改善）だったが、リトライ発生時のprint文言「ツールループを**最初から**やり直します」は、BL-122以前（当時は実際にiter=1へ巻き戻っていた）の挙動を説明する隣接コメントがそのまま残っていたため、現在の実装（実際にはこのiterationのAPI呼び出し1回分のみやり直し）と食い違っていた。表示専用の文言が実装の変遷に追従していなかった、BL-151と同種の軽微な事後ズレ。
+
+**対応内容：** print文言を「一時的なAPIエラー、{delays[attempt]}秒後に**このiterationの**API呼び出しをやり直します」へ修正。隣接コメントへBL-122以降は巻き戻らない旨を追記。ロジック自体（リトライ範囲・保持される状態）は無変更。対応するテストは存在せず、既存テストへの影響もない。
+
+**基本設計:** なし（表示文言・コメント修正のみ、Plan Mode不要）。
+
+**関連:** [BL-155](#bl-155-max_tool_iterの2030変更未コミット差分にbldを事後付与)、[BL-122](#bl-122-apiエラー時のツールループ全体巻き戻しリトライbl-009bl-046がモデル変更nemotron後に発生頻度が明らかに増加し実害が拡大している)
 
 ---
 
