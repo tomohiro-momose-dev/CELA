@@ -4359,8 +4359,6 @@ DetectorはExpertの実際の提出内容を`read_deliverable_file(task_id="task
 
 新規テスト`tests/test_bl158_detector_rejects_premature_advancement.py`（7件：機械的却下の発火、target_role=="assistant"への非影響、ブロック対象なし時の非発火、`user_wrote_issue_resolution=True`時の非発火、実際のDEFER成功による自然な解消、元コメントの保持、BL-157適用後のdetector_auto起票issueの非該当）追加。`python -m py_compile`合格、フルオフラインスイート643件Pass、BL-096/136/144/145/154関連98件も無退行。実ドライランでの効果確認は次回待ち。
 
-新規テスト`tests/test_bl160_reasoning_channel_content_fallback.py`（8件：tools=None分岐でのフォールバック発火・非発火2種の回帰、content優先の回帰、ツールループ最終応答でのフォールバック発火・非発火2種の回帰、content優先の回帰、`call_decision_extractor`のリトライ成功シナリオ、リトライ全滅時のフェイルクローズ回帰）追加。`python -m py_compile`合格、フルオフラインスイート651件Pass。実ドライランでの効果確認は次回待ち（deepseek-v4-flash-0731/nemotron_3_ultra双方の環境で今回の握りつぶしパターンが再発しないことを確認予定）。
-
 **関連:** [BL-157](#bl-157-bl-096の自動バックアップdetector_autoがcurrent_task_idキーの陳腐化により無関係な指摘を同一バケツへ混入させ見せかけの再発でmajorescalated化していた)、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-136](#bl-136-issue_logが起票されるが解決されない状態だった可視性強制力の非対称性)、[BL-148](#bl-148-orchestratorがcurrent_task_id計画成果物を一切参照できないままexpert選定focus_guidanceを決めていた)
 
 ---
