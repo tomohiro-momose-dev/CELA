@@ -182,6 +182,7 @@
 | BL-148 | 高 | `cela_main.py`（`call_orchestrator`、`_build_task_scope_context`/`_build_project_plan_toc`の再利用） | BL-146と同じ調査で発見。Orchestrator（`call_orchestrator`）はツールを一切持たない単発JSON応答で、プロンプトに`current_task_id`・タスク計画・issue状況が一切含まれていなかった。専門家選定はUser AI/Expert AIの対話の生テキストのみに基づいて行われるため、対話がBL-125でブロックされているタスクとは別のタスクへ漂うと、`current_task_id`がまだ元のタスクにピンされていても専門家選定がそちらへ引っ張られる実害が`log/2026-08-02/0832`で確認された（Detector自身が「プロンプトのバグだと思う」と自己申告するほどの構造的な矛盾）。ユーザーからも「Orchestratorのツールは必要な情報が見れるツールが渡されていますか？Orchestratorもツールループ化が必要です」との明示的な指示。**実装完了（`done`）**: `call_orchestrator`のプロンプトへ`_build_task_scope_context`（current_task_json/未充足の要求項目）・`_build_project_plan_toc`（計画目次）による現在タスクの構造化情報を追加。`query_AI`呼び出しを単発JSON応答からツールループ（`tools=[READ_PROJECT_PLAN_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_VERIFIED_FACT_TOOL, THINK_TOOL], state=state`）へ変更。Orchestratorの役割は専門家選定メタデータの生成のみで状態を変更しないため、書き込み系ツール（write_agreement等）は意図的に付与しない（`_check_write_permission`のロール表にも`"orchestrator"`は存在しない）。BL-109（単発判定ノードのtools=None化）の対象一覧から`call_orchestrator`を除外し、BL-126 Stage D（`call_facilitator`の同型の差し戻し）と同じ理由づけとした。既存`tests/test_bl093_think_tool_scratchpad.py::test_bl109_single_shot_judgment_nodes_reverted_to_tools_none`を更新（対象リストから`call_orchestrator`を除去）、新規`test_bl148_call_orchestrator_is_tool_loop_capable`・`_NODE_TOOL_NAME_REMINDERS`エントリ・`tests/test_bl148_orchestrator_tool_loop.py`（4件）を追加。`orchestrator_node`自体は無変更（既存の入出力契約を維持）。`python -m py_compile`合格、フルオフラインスイート596件Pass。 | P1 |
 | BL-149 | 低 | `cela_main.py`（`_safe_json_parse`のフォールバック戦略ロギング不足） | コードベース全体のバグチェック（2026-08-03）で発見。`_safe_json_parse`（complexity=16, cognitive=37, 68行）は複数のフォールバック戦略（フェンスブロック抽出・`{`/`[`優先順位判定・末尾補完等）を順に試す設計だが、どの戦略で成功・失敗したかがログ出力されない。BL-133で`_query_and_parse_with_retry`に300字プレビューを追加したが、`_safe_json_parse`自体の成功/失敗時の戦略ログは未追加。BL-088（`{`/`[`優先順位バグ）やBL-089（複数フェンスブロック混線）の類問題が再発した際、原因切り分けが困難。**状態**: `open`（記録のみ、優先度低）。 | P3 |
 | BL-150 | 低 | `cela_main.py`（高複雑度関数のリファクタリング候補） | 同バグチェックで発見。Codebase Memory MCPの複雑度メトリクスより、`decision_extractor_node`（complexity=26, cognitive=91, 5 loops, 202行）と`_commit_agreement_from_tool`（complexity=26, cognitive=78, 159行, out-degree=12）がコードベース全体で最も複雑。`call_detector`（493行）も関数長として突出。BL-098/BL-118（ファイル分割）と関連するが、ファイル分割前に個別関数の責務分割・サブ関数抽出を先行させるべき。`decision_extractor_node`は抽出ロジック（User/Expert分岐）・遷移解決・DB書き込みの3責務を1関数で抱え、`_commit_agreement_from_tool`はCREATE/UPDATE/SUPERSEDE × Decision/Directive/Deliverable/EssenceProposalの全組合せを1関数で処理している。**状態**: `open`（記録のみ、BL-098/118のファイル分割着手時に合わせて検討）。 | P3 |
+| BL-151 | 高 | `cela_main.py`（`_apply_text_edits`、`_revise_goal_tool_impl`） | `log/2026-08-03/1110`ドライラン中に発見。`revise_goal`のedits[0].old_textが、`generate_user_utterance`のプロンプト表示専用の絵文字装飾（「👉 {user_goal}」、実際の格納内容`_CURRENT_GOAL_TEXT`には含まれない）を含んでいたため、User AIが同じ誤った引用を最低9回（BL-056bの残り回数通知が発火する直前まで）再試行し続け、一度も自己修復できなかった。エラーメッセージが「一字一句正確な引用か確認してください」としか言わず実際の格納内容を一切見せていなかったことが根本原因。BL-086の中心機能（前提矛盾に気づいた発注者自身がゴールを是正する経路）が、まさにその想定シナリオで機能しなかった実インシデント。**実装完了（`done`）**: `_apply_text_edits`へ`content_label`パラメータを追加（デフォルト「現在のホワイトボード内容」、`revise_goal`からは「現在のゴール文」を指定）。`exact_count==0`（不一致）時のエラーへ、実際の格納内容の先頭400字スニペット（`_TEXT_EDIT_SNIPPET_MAX_CHARS`）を含めるようにし、同ターン内でモデルが実際の文言を見て自己修復できるようにした。あわせて同種の「表示専用装飾がツールの照合対象からずれている」箇所が他にないか調査し、`call_expert`（Expert自身のプロンプト、5319行目付近）・`call_reflection`（終了監査プロンプト、6367行目付近）・`call_orchestrator`（5055行目付近「Goal: 」プレフィックス）にも同型の装飾があるが、いずれもexact-text一致を要求するツール（`revise_goal`はuserロール専用でExpert/Orchestrator/Reflectionは呼べない）を持たない文脈であるため現状は機能的な罠になっていないことを確認した（将来ロール権限が拡張された場合の潜在リスクとして記録のみ、対応は不要と判断）。新規テスト`tests/test_bl151_apply_text_edits_error_snippet.py`（8件）追加。`python -m py_compile`合格。 | P1 |
 
 ---
 
@@ -4171,6 +4172,30 @@ Detectorがmajor判定で差し戻す＝`state["constraint_issue"] == "major"`�
 **完了条件:** リファクタリング実施時、`python -m py_compile`合格・既存テスト（特に該当関数を直接呼ぶ/ソース検査する各種テスト）が無修正または軽微な更新でPassすること。振る舞いの変更は一切伴わないことをフルオフラインスイートで確認する。
 
 **関連:** [BL-098](#bl-098-cela_mainpyの責務分離永続化層ツール層プロンプトノード層uiログ層)、[BL-118](#bl-118-cela_mainpyのモジュール分割クラスノード単位でのファイル化疎結合化)
+
+---
+
+### BL-151: `revise_goal`のold_textが、プロンプト表示専用の絵文字装飾を含んでいたため9回以上自己修復に失敗し続けた
+
+**状態:** `done`
+
+**経緯:** `log/2026-08-03/1110`ドライラン（BL-086/BL-126で設計した「発注者自身が前提矛盾に気づきゴールを是正する」経路が初めて実発火したケース）をレビューした際にユーザーが発見。User AIがfacilitatorの提言を受けてゴール文の手段固定（「AIオンデマンド自動運転バス」という手段が予算・地理・需要の物理的制約下で矛盾を生んでいる）に気づき、`escalate_premise_concern`→`revise_goal`という設計通りの流れを正しく踏んだにもかかわらず、`revise_goal`のedits[0]がiter=1から少なくともiter=9まで**同一の理由で連続失敗**していた。
+
+原因を`_revise_goal_tool_impl`（cela_main.py:1663〜）と`generate_user_utterance`（同6710〜）を突き合わせて特定した。`generate_user_utterance`がUser AIへ見せるプロンプトはゴール文の先頭に表示専用の装飾を付加している（`👉 {user_goal}\n`、6736行目、改行を挟まず装飾と本文が同じ行に連結される形）。一方`revise_goal`が実際に照合する対象（`_CURRENT_GOAL_TEXT = user_goal = state["goal"]`）は、シナリオ定義の生テキスト（`TARGET_GOAL`、9040〜9041行目）そのもので絵文字を含まない。User AIが（プロンプトに忠実に）「👉 過疎地域向け「AIオンデマンド自動運転バス」の導入計画と安全基準策定」を一字一句正確に引用しようとするほど、実際の照合対象と一致しなくなるという構造的な罠だった。`_apply_text_edits`の緩い一致フォールバック（BL-081）も空白・`*`・`|`のみ正規化対象で絵文字は対象外のため救えず、失敗時のエラーメッセージも「一字一句正確な引用か確認してください」としか言わず実際の格納内容を一切見せていなかったため、User AIは同じ誤った仮説（「引用の切り方が違う」）を延々再試行し続けていた。MAX_TOOL_ITER=20への到達によるクラッシュではなく、BL-056bの「残り回数逼迫通知」（iter=17〜19で発火）が先に働いてツール呼び出しを打ち切らせる可能性が高く即座のプロセスクラッシュリスクは低かったが、このターンでのゴール改定は静かに失敗し、エスカレーションは未解決のまま残り続ける実害があった。
+
+**対応（実施済み）:** `_apply_text_edits`（cela_main.py:4041〜）へ`content_label: str = "現在のホワイトボード内容"`パラメータを追加し、`_revise_goal_tool_impl`からの呼び出しでは`content_label="現在のゴール文"`を明示的に指定するよう変更した。`exact_count==0`（完全一致・緩い一致とも0件）でエラーを返す分岐に、`current_content`の実際の内容の先頭`_TEXT_EDIT_SNIPPET_MAX_CHARS`（400字）分をエラーメッセージへ含めるようにした（400字超の場合は「…（以下省略）」を付与）。これにより、表示用装飾と格納内容の乖離という原因不明のケースでも、モデルが同ターン内のツールループで実際の文言を見て自己修復できるようになる（BL-081「Expertが同ターン内のツールループで修正・再試行できるよう、原因を具体的に伝える」という既存の設計思想の延長）。
+
+あわせて、同種の「プロンプト表示専用の装飾が、ツールの照合対象である格納内容からずれている」箇所が他にないか、`state['goal']`/`user_goal`の全埋め込み箇所と、`_apply_text_edits`のもう一方の呼び出し元（`write_agreement`のDeliverable UPDATE経路、1955行目）が参照するホワイトボード表示箇所を調査した。
+
+- `call_orchestrator`（5055行目、`f"Goal: {state['goal']}\n..."`）・`call_expert`（5319行目、`👉 {state['goal']}`）・`call_reflection`（6367行目、`👉 {state['goal']}`）にも同型の装飾があるが、`revise_goal`はuserロール専用（`_revise_goal_tool_impl`の`caller_role != "user"`チェック）でOrchestrator/Expert/Reflectionはいずれも呼べないため、現状は機能的な罠になっていないことを確認した。
+- `write_agreement`のDeliverable UPDATE経路が参照するホワイトボード表示（`_build_task_scope_context`の`whiteboard_text`、4706〜4708行目、および`call_detector`の`whiteboard_block`、5544〜5546行目）は、いずれも見出し行と本文が改行で明確に分離されておりgoal文のケースのような同一行連結の罠にはなっていないことを確認した。
+- Decision型agreementsの一覧表示（`_build_agreements_context`、4574〜4590行目）は`[id] icon[label] topic: {content_preview}`という同一行連結の装飾を持ち、かつ`content_preview`は150字で切り詰められているが、`write_agreement`の`edits`パラメータはentry_type="Deliverable"の場合のみ処理される設計（1942〜1962行目）であり、非Deliverable（Decision）entryのUPDATEはedits機構を通らないため、現状これも機能的な罠にはなっていないことを確認した。
+
+上記3件はいずれも現時点では実害がないため追加のコード変更は行わず、記録のみに留めた（`content_label`によるエラー可視化の一般的な強化は既に適用済みのため、将来これらの文脈でexact-text一致を要求するツールが追加された場合でも、同種のドライランでの自己修復不能状態には陥りにくい）。
+
+**完了条件:** `python -m py_compile`合格。新規`tests/test_bl151_apply_text_edits_error_snippet.py`（8件: スニペット含有・デフォルト/カスタムcontent_label・長文切り詰め・短文非切り詰め・複数一致エラーの形状不変・revise_goal経由の実インシデント再現）追加。既存`tests/test_bl081_edits_loose_match_fallback.py`・`tests/test_bl086_escalation_freeze_goal_revision.py`は無修正でPass（エラーメッセージに「件」を含む既存アサーションと非衝突）。
+
+**関連:** [BL-086](#bl-086-前提エスカレーション経路-freeze復活-ゴール改定goalshifteventの実消費化)、[BL-081](#bl-081-write_agreementのeditsold_textnew_textがmarkdownテーブル行頭の全角スペースパイプ記号の有無で完全一致に失敗しやすかった)、[BL-137](#bl-137-_apply_text_editsが非dict要素を含むeditsで未捕捉クラッシュしrun_ai_vs_ai_loop全体が停止した)
 
 ---
 
