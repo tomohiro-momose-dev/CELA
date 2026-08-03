@@ -188,6 +188,8 @@
 | BL-154 | 高 | `cela_main.py`（`_check_issue_permission`、`_write_issue_impl`、`decision_extractor_node`、`_build_open_issue_pin_text`） | BL-145完了後のQ&Aで、コードベースに3つの並行した「先送り事項」追跡機構（issue_log/agreements Directive-Deferred/plan_drafts）が互いを認識しておらず、BL-125の遷移ゲート・BL-144の滞留検知・BL-145のタスク明示化がいずれもissue_logのみを参照するため、Expertが成果物内で宣言した先送り（`decision_extractor_node`が自動抽出、Expert自身はwrite_issueツールを持たないためこれが唯一の捕捉経路）にはこれらのセーフティネットが一切効かないことが判明。**実装完了（`done`）**：Expertへの新規ツール付与はせず、`decision_extractor_node`がagreements Directive/Deferredの自動抽出と同時にissue_log側にも橋渡しするよう変更。新規内部ロール`decision_extractor_auto`（`detector_auto`と同型、CREATE専用、LLMツール呼び出し経路からは到達不能）を追加し、`_write_issue_impl`のCREATE分岐を拡張してこのロールのみ`defer_to_task_id`を作成時点で設定可能に（再発時は最新宣言が勝つ）。`target_role`によるゲーティングはせずExpert/User双方に一律適用（BL-082がUserブランチの非対称バグだった前例を踏まえた判断）。BL-125/144/145は`raised_by`を見ないため無変更で対応。新規テスト`tests/test_bl154_decision_extractor_issue_log_bridge.py`（8件）追加。`python -m py_compile`合格、フルオフラインスイート630件Pass（1件は無関係な既存の未コミット差分によるテスト不整合、詳細は経緯欄参照）。 | P1 |
 | BL-155 | 低 | `cela_main.py`（`_query_AI_live`内コメントのみ）、`tests/test_bl093_think_tool_scratchpad.py` | BL-154検証時のフルスイートで発見。`MAX_TOOL_ITER`が作業ツリー上で20→30へ未コミット・無記録のまま変更済みだった（AGENTS.md §7違反状態）。ユーザーへ確認したところ「task_plan_reviewerの差し戻し後、task_plannerが差戻しタスクを1件ずつ把握し直す過程で上限20に引っかかる事態をログで観測したため」との理由提示があり、正式承認・記録。**実装完了（`done`）**：値は無変更（既に30）、変更履歴コメントへ追記、テストを`test_max_tool_iter_raised_to_30`へ改名し期待値更新。 | P3 |
 | BL-156 | 低 | `cela_main.py`（`_query_AI_live`のAPIエラーリトライ時のprint文言・隣接コメント） | ユーザーがドライラン中のnemotron-3-ultra-550b-a55b:freeのResourceExhaustedエラーを見て「APIエラー時には直前の思考は温存されるんでしたっけ？」と質問。調査の結果、`loop_messages`/`reasoning_parts_all`/`iteration_start`はBL-122によりリトライを跨いで温存される（過去の完了済みiterationの思考ログ・tool結果は失われない）一方、エラーが起きたそのiteration自体の思考・tool_call引数はストリーミング途中で例外が飛ぶため破棄され、同じiteration番号でAPI呼び出しのみやり直されることが判明。しかし当該リトライ時のprint文言「ツールループを**最初から**やり直します」がBL-122以前（当時は本当にiter=1へ巻き戻っていた）の挙動を説明する隣接コメントのままで、現在の実装と食い違っていた。**実装完了（`done`）**：print文言を「このiterationのAPI呼び出しをやり直します」へ修正し、隣接コメントにもBL-122以降は巻き戻らない旨を追記。テスト変更なし（文言のみでロジック変更なし、対応するテストも存在せず）。 | P3 |
+| BL-157 | 高 | `cela_main.py`（`_bump_issue_occurrence`、`_read_issues_handler`） | `log/2026-08-03/2233`レビューでcurrent_task_idが遷移しない問題を追跡した結果、BL-096の自動バックアップ（`detector_node`、`raised_by='detector_auto'`、汎用catch-allトピック`detector_observation_<task_id>`）が、`current_task_id`が実際の会話の主題より遅れて更新されるタイミングで無関係な指摘を同一バケツへ混入させ、occurrence_count>=2による機械的major/escalated化（D-079/D-080）を見せかけの再発で発火させていたことが判明。実例：User AIが「task_1_2をやれ」と発言→`detector_node`（target_role="user"）のobservationsがtask_1_2についての無関係な指摘→current_task_idはまだ"task_1_1"のため`detector_observation_task_1_1`へ混入→occurrence_count 1→2→major/escalated化→BL-125が（正しく設計通り）遷移をブロック。**実装完了（`done`）**：`_bump_issue_occurrence`・`_read_issues_handler`の両方に`raised_by != 'detector_auto'`の条件を追加し、detector_auto起票行はoccurrence_countに関わらずminor/openのまま維持するようにした（他ロールの既存挙動は無変更）。あわせて再発カウント・昇格・抑制の各分岐にprintログを追加（ユーザー指示：「今後このようなコード側の機械的・暗黙的動作のブラックボックスを可視化するために、すべての動作にprintによるでバックログを追加してください」）。新規テスト`tests/test_bl157_detector_auto_occurrence_exemption.py`（5件）追加。`python -m py_compile`合格、フルオフラインスイート643件Pass。 | P1 |
+| BL-158 | 高 | `cela_main.py`（`detector_node`、write_issue成功トラッキング一式） | 同ログ調査の続き。ユーザーの原則「根本的にはユーザーがタスクを次に進めてはいけませんし、detectorが弾くべきです」を受け、`generate_user_utterance`の既存の強制文言（`_get_forced_escalated_issues_text`、BL-136）がUser AIに無視され得ること（実ログで確認）、かつ`call_detector`（target_role="user"）のレビュー基準に「現在のタスクに未解決のescalated issueが残ったまま前進しようとしていないか」のチェックが一切存在しなかったことを確認。**実装完了（`done`）**：LLMの指示追従に頼らない決定論的なPython側却下として、BL-125の実ゲートと完全に同一の`_get_blocking_issues_for_transition`を単一の判断源として再利用し、`detector_node`（target_role=="user"のみ）へ機械的な却下ロジックを追加した。あわせて`write_issue(RESOLVE/DEFER)`が今回のターンで成功したかを追跡する新規フラグ`user_wrote_issue_resolution`（`_LAST_WRITE_AGREEMENT_SUCCEEDED`と同型のグローバル+アクセサ+`LineageState`フィールド）を新設し、ブロック対象issueが残っており今回RESOLVE/DEFERが呼ばれていない場合のみ機械的にmajorへ上書きする。留意点：この却下は「前進しようとしている発言」に限定せず、ブロック対象issueが残っている限り毎ターン発火する（`route_after_user_detector`の3回リトライ上限があるため無限ループにはならない）。新規テスト`tests/test_bl158_detector_rejects_premature_advancement.py`（7件）追加。`python -m py_compile`合格、フルオフラインスイート643件Pass、BL-096/136/144/145/154関連98件も無退行。 | P1 |
 
 ---
 
@@ -4314,6 +4316,48 @@ DetectorはExpertの実際の提出内容を`read_deliverable_file(task_id="task
 **基本設計:** なし（表示文言・コメント修正のみ、Plan Mode不要）。
 
 **関連:** [BL-155](#bl-155-max_tool_iterの2030変更未コミット差分にbldを事後付与)、[BL-122](#bl-122-apiエラー時のツールループ全体巻き戻しリトライbl-009bl-046がモデル変更nemotron後に発生頻度が明らかに増加し実害が拡大している)
+
+---
+
+### BL-157: BL-096の自動バックアップ（detector_auto）が、current_task_idキーの陳腐化により無関係な指摘を同一バケツへ混入させ、見せかけの再発でmajor/escalated化していた
+
+**状態:** `done`
+
+**経緯:** ユーザー指示「2233のログをレビュー、task_idの遷移が上手くいっていないようです」を受け`log/2026-08-03/2233`をレビュー。`current_task_id`が`task_1_1`のまま進まず、User AIが「task_1_2をやれ」とExpertへ指示したにもかかわらずBL-146のゲートに弾かれてExpertが混乱していた。ユーザーからの追加指示「プロンプトありログも読んで状況を追加で確認して」を受けて深掘りした結果、独立した2つのバグの組み合わせと判明した（もう1件はBL-158）。
+
+グラフ順序（`generate_user_utterance`→`user_detector`(`detector_node`)→`user_decision_extractor`(`decision_extractor_node`、`_resolve_task_transition`を呼ぶ）は確定済みのため、`detector_node`のBL-096バックアップ（`observations`が30字以上の場合に`f"detector_observation_{current_task_id}"`へ自動CREATE）が動く時点では、`current_task_id`はまだ遷移前の値のままである。実例：User AIが「task_1_2をやれ」と発言→`detector_node`（target_role="user"）がこの発言をレビューし、task_1_2の中身（中心部循環15分想定等）についてのobservationsを返す→current_task_idはまだ"task_1_1"のため、無関係のはずのtask_1_2についての指摘が`detector_observation_task_1_1`という同一バケツへ混入→occurrence_countが1→2に上昇→`_bump_issue_occurrence`の不変条件（D-079/D-080：occurrence_count>=2で機械的にmajor/escalated化）が発火→BL-125の`_get_blocking_issues_for_transition`が（正しく設計通り）遷移をブロック。しかし「再発」の実態は、無関係な2つの指摘が粗いバケツキーで衝突しただけであり、同じ懸念が本当に繰り返し見つかったわけではない。
+
+**既存記録との整合:** BL-134エントリには、過去に`detector_auto`起票行がoccurrence_count=11で機械的にmajor/escalated化した事例を「意図通り」と判断した記述がある。本修正はこの判断を`detector_auto`起票行に限定して覆すものであり、D-127として明示的に記録する（サイレントな上書きにしない）。D-079/D-080の原則（「同じtopicが繰り返し検出される＝未解決のまま何度も見つかっている」）は、LLMが明示的に`write_issue`で選んだ固有のtopic文字列には妥当するが、BL-096の汎用catch-allバケツ（「モデルの判断を上書きするものではなく、呼ばなかった場合の保険に留める」という設計意図）には当てはまらない。
+
+**対応内容：** `_bump_issue_occurrence`と`_read_issues_handler`の両方（DB書き込み経路と、read_issues結果への表示上書き経路）に`raised_by != 'detector_auto'`の条件を追加し、detector_auto起票行はoccurrence_countに関わらずseverity='minor'/status='open'のまま維持するようにした。他ロール（`detector`/`user`）の既存挙動は無変更。あわせてユーザー指示「今後このようなコード側の機械的・暗黙的動作のブラックボックスを可視化するために、すべての動作にprintによるでバックログを追加してください」を受け、再発カウント・昇格・抑制の各分岐にprintログを追加した。
+
+**相互作用:** `_get_blocking_issues_for_transition`は`severity='major' AND status='escalated'`のみを対象とするため、本修正後はdetector_auto起票行がこの条件に達しなくなり、BL-158（後述）のチェック対象からも自動的に除外される（両者は同じ関数を単一の判断源として参照）。BL-144/BL-145の滞留検知・タスク明示化機構はdetector_auto起票行に対しては到達不能になるが、これはBL-145がそもそも回避しようとしていた「detector_autoの汎用issueが停滞する」根本原因を本修正が解消した結果であり、想定通りの帰結（他ロール起票行には引き続き有効）。
+
+**基本設計:** Plan modeで実施（Plan agent1体、BL-158と合同設計）。
+
+新規テスト`tests/test_bl157_detector_auto_occurrence_exemption.py`（5件：CREATE/read_issues経由それぞれの抑制確認、他ロールの回帰確認、BL-125ブロック非該当の確認）追加。`python -m py_compile`合格、フルオフラインスイート643件Pass。
+
+**関連:** [BL-158](#bl-158-detectorの-user-レビューパスに未解決issueを残したままの前進を機械的に却下する仕組みを追加)、[BL-096](#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-134](#bl-134-expertがゴール文にない24時間365日監視前提を無根拠に確定値化しdetectorがmajorエスカレーションしたのに未解決のままtask進行を許してしまった)
+
+---
+
+### BL-158: Detectorの User レビューパスに、未解決issueを残したままの前進を機械的に却下する仕組みを追加
+
+**状態:** `done`
+
+**経緯:** BL-157と同じログ調査で発見。`generate_user_utterance`は既に`_get_forced_escalated_issues_text`（BL-136、run全体のescalated行を対象、task_idでの絞り込みなし）を注入し「今回の発言でRESOLVE/DEFERを必ず呼べ」とソフトな指示をしているが、実ログでUser AIはこれを無視して直接「task_1_2をやれ」と発言した。この発言は`call_detector`（target_role="user"）でレビューされるが、判定基準は「指示内容の論理破綻」「前タスクの成果物がacceptance_criteriaを満たすか」のみで、「現在のタスクに未解決のescalated issueが残ったまま前進しようとしていないか」は一切チェックしていなかった（実ログで`constraint_issue: "none"`のまま通過したことを確認済み）。
+
+ユーザーの原則：「根本的にはユーザーがタスクを次に進めてはいけませんし、detectorが弾くべきです」。ソフトなプロンプト指示は既に無視される実績があるため、LLMの指示追従に頼らない決定論的なPython側の機械的却下として実装した。
+
+**対応内容：** `write_issue(RESOLVE/DEFER)`が今回のターンで成功したかを追跡する新規フラグを新設（`_LAST_WRITE_AGREEMENT_SUCCEEDED`と同型のパターン：新規グローバル`_LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED`、アクセサ`get_last_write_issue_resolve_or_defer_succeeded()`、ツール実行ループでの成功記録、`LineageState`の新規フィールド`user_wrote_issue_resolution`、`generate_user_utterance_node`でのstateへのコピー）。`detector_node`（target_role=="user"のみ、BL-033ブロック直後）へ、BL-125の実ゲートと完全に同一の`_get_blocking_issues_for_transition`を単一の判断源として再利用する決定論的な却下ロジックを追加：ブロック対象issueが存在し、かつ今回のターンで`user_wrote_issue_resolution`が成立していない場合、`call_detector`のLLM判定に関わらず`constraint_issue`を機械的に`"major"`へ上書きする。
+
+**留意点：** この却下は「前進しようとしている発言」に限定せず、ブロック対象issueが残っている限り毎ターン発火する（BL-136の既存の強制文言も同様に無条件のため整合）。`route_after_user_detector`のリトライ上限（3回、超過でreflectionへ）があるため無限ループにはならない。フラグは「今回RESOLVE/DEFERのどれかが成功したか」という粗い真偽値であり、「ブロック中の複数issueのうちどれを解決したか」までは区別しない（最初の実装はこの粒度、必要なら後続で絞り込む）。
+
+**基本設計:** Plan modeで実施（Plan agent1体、BL-157と合同設計、`docs/design/decision_lineage.md`参照）。
+
+新規テスト`tests/test_bl158_detector_rejects_premature_advancement.py`（7件：機械的却下の発火、target_role=="assistant"への非影響、ブロック対象なし時の非発火、`user_wrote_issue_resolution=True`時の非発火、実際のDEFER成功による自然な解消、元コメントの保持、BL-157適用後のdetector_auto起票issueの非該当）追加。`python -m py_compile`合格、フルオフラインスイート643件Pass、BL-096/136/144/145/154関連98件も無退行。実ドライランでの効果確認は次回待ち。
+
+**関連:** [BL-157](#bl-157-bl-096の自動バックアップdetector_autoがcurrent_task_idキーの陳腐化により無関係な指摘を同一バケツへ混入させ見せかけの再発でmajorescalated化していた)、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-136](#bl-136-issue_logが起票されるが解決されない状態だった可視性強制力の非対称性)、[BL-148](#bl-148-orchestratorがcurrent_task_id計画成果物を一切参照できないままexpert選定focus_guidanceを決めていた)
 
 ---
 
