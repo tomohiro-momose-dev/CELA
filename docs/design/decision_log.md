@@ -1782,6 +1782,20 @@
 
 ---
 
+### D-124: Expertへ`write_issue`の直接アクセスを与えず、`decision_extractor_node`のDirective/Deferred自動抽出をissue_logへ橋渡しする（BL-154）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-03 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（issue_logスキーマ・BL-125判定基準の確認質問、「先送りはすべてissueにまとめたほうがよい？」への「お願いします」承認）、Claude Sonnet 5（調査・設計・実装、Plan agent 1体を併用） |
+| **決定理由** | BL-145完了後のQ&Aで、issue_log（write_issueツール）・agreementsのDirective/Deferred（decision_extractor_nodeの自動抽出）・plan_draftsの「先送り事項」という3つの並行した先送り追跡機構が互いを認識していないことが判明した。特にExpertは`write_issue`ツール自体を持たない（`WRITE_ISSUE_TOOL`は`call_detector`/`generate_user_utterance`のみ）ため、Expertが成果物内で宣言する先送りはagreements/plan_drafts経由でしか捕捉されず、BL-125の遷移ゲート・BL-144の滞留検知・BL-145のタスク明示化というissue_log依存のセーフティネットが一切効かない状態だった。Expertへ`write_issue`の直接アクセスを与える案は、BL-025のロール分離思想（Detectorの独立監査という趣旨とExpertの自己申告が混同される）に反するため採用せず、代わりに`decision_extractor_node`という既存のPython側自動処理が、既存の自動抽出と同時にissue_log側にも橋渡しする方式を採用した。 |
+| 決定内容 | `_check_issue_permission`へ`decision_extractor_auto`（CREATE専用、`detector_auto`と同型の内部専用ロール、`WRITE_ISSUE_TOOL`のスキーマは無変更でLLM経路からは到達不能）を追加。`_write_issue_impl`のCREATE分岐を拡張し、このロールのみ`defer_to_task_id`を作成時点で設定可能に（再発時は最新宣言が勝つ、他ロールは無変更）。`decision_extractor_node`のDirective/Deferred処理箇所（既存の`_append_deferred_note_to_plan`直後）へ、このロールでの`_write_issue_impl`呼び出しを追加。Expert/User双方の抽出ブランチに`target_role`によるゲーティングをせず一律適用する（BL-082がかつてUserブランチだけ先送り検出が欠けていた非対称バグの前例を踏まえた判断）。`_build_open_issue_pin_text`を拡張し`defer_to_task_id`設定済みのopen issueには対応予定task_idを表示する。BL-125/144/145は`raised_by`を一切参照しないため無変更で対応する。 |
+| 影響 | `cela_main.py`（`_check_issue_permission`、`_write_issue_impl`、`decision_extractor_node`、`_build_open_issue_pin_text`）。新規テスト`tests/test_bl154_decision_extractor_issue_log_bridge.py`（8件）追加。既存BL-082/096/125/136/139/144/145関連テストは無修正でPass。`python -m py_compile`合格、フルオフラインスイート630件Pass（1件failedは本BLと無関係の既存未コミット差分、issue_backlog.md BL-154参照）。留意点：この経路由来のissueは`defer_to_task_id`が誕生時から設定済みのため、escalated化後もBL-125のブロック判定には決して該当しない（手動DEFER済みissueと同じ既存仕様、新規の抜け穴ではない）。実ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-154](back_log/issue_backlog.md#bl-154-decision_extractorのdirectivedeferred自動抽出をissue_logへも橋渡しする)、[BL-096](back_log/issue_backlog.md#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)、[BL-082](back_log/issue_backlog.md#bl-082-task_plannerの計画をホワイトボード化し先送り事項をタスク間で永続的に申し送りできるようにする)、[BL-125](back_log/issue_backlog.md#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-145](back_log/issue_backlog.md#bl-145-エスカレーションissue申し送りissueをdetectorreflectorの正当性監査を経てタスクプランナー経由で明示的にタスク化する) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
