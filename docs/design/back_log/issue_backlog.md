@@ -185,6 +185,7 @@
 | BL-151 | 高 | `cela_main.py`（`_apply_text_edits`、`_revise_goal_tool_impl`） | `log/2026-08-03/1110`ドライラン中に発見。`revise_goal`のedits[0].old_textが、`generate_user_utterance`のプロンプト表示専用の絵文字装飾（「👉 {user_goal}」、実際の格納内容`_CURRENT_GOAL_TEXT`には含まれない）を含んでいたため、User AIが同じ誤った引用を最低9回（BL-056bの残り回数通知が発火する直前まで）再試行し続け、一度も自己修復できなかった。エラーメッセージが「一字一句正確な引用か確認してください」としか言わず実際の格納内容を一切見せていなかったことが根本原因。BL-086の中心機能（前提矛盾に気づいた発注者自身がゴールを是正する経路）が、まさにその想定シナリオで機能しなかった実インシデント。**実装完了（`done`）**: `_apply_text_edits`へ`content_label`パラメータを追加（デフォルト「現在のホワイトボード内容」、`revise_goal`からは「現在のゴール文」を指定）。`exact_count==0`（不一致）時のエラーへ、実際の格納内容の先頭400字スニペット（`_TEXT_EDIT_SNIPPET_MAX_CHARS`）を含めるようにし、同ターン内でモデルが実際の文言を見て自己修復できるようにした。あわせて同種の「表示専用装飾がツールの照合対象からずれている」箇所が他にないか調査し、`call_expert`（Expert自身のプロンプト、5319行目付近）・`call_reflection`（終了監査プロンプト、6367行目付近）・`call_orchestrator`（5055行目付近「Goal: 」プレフィックス）にも同型の装飾があるが、いずれもexact-text一致を要求するツール（`revise_goal`はuserロール専用でExpert/Orchestrator/Reflectionは呼べない）を持たない文脈であるため現状は機能的な罠になっていないことを確認した（将来ロール権限が拡張された場合の潜在リスクとして記録のみ、対応は不要と判断）。新規テスト`tests/test_bl151_apply_text_edits_error_snippet.py`（8件）追加。`python -m py_compile`合格。 | P1 |
 | BL-152 | 高 | `cela_main.py`（`call_detector`の`whiteboard_block`構築、`_verify_whiteboard_excerpt_handler`、`detector_node`の注釈挿入呼び出し） | `log/2026-08-03/1347`ドライラン中（BL-151修正後の再開ラン）に発見。`verify_whiteboard_excerpt`（BL-079）が、Detectorが実際に監査しようとしている成果物ではなく、**常に`state["current_task_id"]`のホワイトボードとだけ照合している**ことが判明。ExpertがBL-146のSUPERSEDE経路（他タスク改訂の正規手段、current_task_idゲートの対象外）でtask_1_3の成果物を書き込んだ際、`current_task_id`はBL-125のゲートによりまだtask_1_1のまま（正式な遷移未成立）だった。しかし`call_detector`の`whiteboard_block`（現在タスクの最新ホワイトボードとしてDetectorへ提示するR4文脈）・`_verify_whiteboard_excerpt_handler`（`_CURRENT_TASK_ID`/`_CURRENT_PHASE_ID`グローバル参照）・`detector_node`の`_annotate_whiteboard_with_detector_comment`呼び出し（実際の注釈挿入先）の3箇所すべてが無条件に`current_task_id`（task_1_1）を対象にしており、Detectorが`read_deliverable_file(task_id="task_1_3")`で正しく読んだtask_1_3の内容からどれだけ正確に引用しても`verify_whiteboard_excerpt`は常に不一致（task_1_1と照合しているため）になる。実測：わずか2ターンで`verify_whiteboard_excerpt`が96回呼ばれ79回（82%）失敗、1エピソードでは`"案A"`という2文字の引用すら失敗し続けMAX_TOOL_ITER=20を丸ごと消費（`ツールを外し、テキスト最終応答を強制`）、たまたま両タスクに共通する汎用語句`"ピーク需要"`がiter=19で偶然一致したためtarget_excerptとして採用された。この判定は最終的に`major`となり注釈挿入（`Whiteboard Annotated`ログ）まで進んでおり、task_1_3固有の批判コメント（乗合タクシー実現性・中古バス混在・山間部按分の恣意性等）が`current_task_id`基準でtask_1_1のホワイトボードへ誤って埋め込まれた可能性が高い（無関係な文書が汚染され、本来指摘すべきtask_1_3側には注釈が付かない）。修正の手掛かりとして、`expert_node`が`write_agreement`実行後に必ずセットする`state["expert_last_whiteboard_edit"]`（`{phase_id, task_id, version}`、今ターン実際に書き込まれた対象を正確に保持）が既に存在するが、`call_detector`/`detector_node`のどこからも参照されていない（現状はロールバック判定など別用途のみ）。**状態**: `open`（記録のみ、実装未着手。ユーザーがドライランを一時停止し起票を優先、他の点検と合わせて対応方針を検討中）。 | P1 |
 | BL-153 | 中 | `cela_main.py`（`_check_write_permission`、`call_facilitator`のツール一覧） | `log/2026-08-03/1347`ドライラン中に発見。Facilitatorが`write_agreement(status="Proposed", action_type="SUPERSEDE", entry_type="Deliverable")`でtask_1_3の成果物本体（3案比較の全文）を書き込んでいた。`_check_write_permission`の`ALLOWED_STATUS_BY_ROLE`（`"facilitator": {"Proposed"}`、BL-126 Stage D）は`entry_type`自体を制限しておらず、`status="Proposed"`でありさえすればFacilitatorは本来Expert専用のDeliverableも書き込めてしまう。ユーザー指摘：「ファシリテーターの意思決定を残す趣旨でwrite_agreementを使えるようにしていたが、ドキュメントを書き込むことは想定していなかった。指摘は成果物直接ではなくホワイトボードに書き込む方が良いかもしれない」。**状態**: `open`（記録のみ、実装未着手。別BLとして起票、対応はロールごとの`entry_type`制限表の新設が候補）。 | P2 |
+| BL-154 | 高 | `cela_main.py`（`_check_issue_permission`、`_write_issue_impl`、`decision_extractor_node`、`_build_open_issue_pin_text`） | BL-145完了後のQ&Aで、コードベースに3つの並行した「先送り事項」追跡機構（issue_log/agreements Directive-Deferred/plan_drafts）が互いを認識しておらず、BL-125の遷移ゲート・BL-144の滞留検知・BL-145のタスク明示化がいずれもissue_logのみを参照するため、Expertが成果物内で宣言した先送り（`decision_extractor_node`が自動抽出、Expert自身はwrite_issueツールを持たないためこれが唯一の捕捉経路）にはこれらのセーフティネットが一切効かないことが判明。**実装完了（`done`）**：Expertへの新規ツール付与はせず、`decision_extractor_node`がagreements Directive/Deferredの自動抽出と同時にissue_log側にも橋渡しするよう変更。新規内部ロール`decision_extractor_auto`（`detector_auto`と同型、CREATE専用、LLMツール呼び出し経路からは到達不能）を追加し、`_write_issue_impl`のCREATE分岐を拡張してこのロールのみ`defer_to_task_id`を作成時点で設定可能に（再発時は最新宣言が勝つ）。`target_role`によるゲーティングはせずExpert/User双方に一律適用（BL-082がUserブランチの非対称バグだった前例を踏まえた判断）。BL-125/144/145は`raised_by`を見ないため無変更で対応。新規テスト`tests/test_bl154_decision_extractor_issue_log_bridge.py`（8件）追加。`python -m py_compile`合格、フルオフラインスイート630件Pass（1件は無関係な既存の未コミット差分によるテスト不整合、詳細は経緯欄参照）。 | P1 |
 
 ---
 
@@ -4251,6 +4252,33 @@ DetectorはExpertの実際の提出内容を`read_deliverable_file(task_id="task
 **完了条件:** 未定（設計未着手のため）。
 
 **関連:** [BL-126](#bl-126-bl-086の前提エスカレーションはexpertのリアクティブな経路に限定されておりfacilitatoruser-aiがゴール制約自体を能動的に問い直すプロアクティブな創造的議論モードが未設計)、[BL-076](#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)
+
+---
+
+### BL-154: decision_extractorのDirective/Deferred自動抽出をissue_logへも橋渡しする
+
+**状態:** `done`
+
+**経緯:** BL-145完了後、ユーザーから「そもそもissueって書いたタスクIDと解決すべきタスクID両方ありましたっけ？」「detectorがタスク遷移をブロックするときはtask_id、last_seen_task_id、defer_to_task_idのどれと現在のタスクIDを比較している？」との質問を受け調査したところ、コードベースには互いを認識しない3つの並行した「先送り事項」追跡機構が存在することが判明した：
+
+1. **`issue_log`**（`write_issue`ツール、BL-096/136）：`detector`/`detector_auto`のみCREATE可、`user`のみRESOLVE/DEFER可。BL-125の遷移ゲート（`_get_blocking_issues_for_transition`、`last_seen_task_id`と`defer_to_task_id`空のみで判定）・BL-144の滞留検知・BL-145のタスク明示化はすべてこのテーブルだけを参照する。
+2. **`agreements`テーブルの`entry_type="Directive", status="Deferred"`**（BL-023/BL-082）：`decision_extractor_node`が全Expert/Userターン後に自動抽出する。`call_decision_extractor`のプロンプト（Expert/Userの両ブランチ）が「〇〇は次タスクで扱う」という宣言を検出し`defer_to_task_id`付きで記録する。**Expertは`write_issue`ツール自体を持たない**（`WRITE_ISSUE_TOOL`は`call_detector`と`generate_user_utterance`のみ）ため、これがExpert発の先送り宣言を捕捉する唯一の経路だった。
+3. **`plan_drafts`の「先送り事項」セクション**（BL-082、`_append_deferred_note_to_plan`）：上記2の抽出直後に自動追記され、申し送り先タスクのExpert/Detectorへ提示される。
+
+ユーザーが「先送りはすべてissueにまとめたほうがよい？」と相談し、Expertへ`write_issue`の直接アクセスを与える（BL-025のロール分離思想——Detectorの独立監査という趣旨と混同される）のではなく、`decision_extractor_node`が既存の自動抽出と同時にissue_log側へも橋渡しする方針で合意した。
+
+**実装内容（実施済み）：**
+1. `_check_issue_permission`の`ALLOWED_ISSUE_ACTIONS_BY_ROLE`へ`"decision_extractor_auto": {"CREATE"}`を追加（`detector_auto`と同型の内部専用ロール。`WRITE_ISSUE_TOOL`のJSONスキーマは無変更でLLMツール呼び出し経路からは到達不能）。
+2. `_write_issue_impl`のCREATE分岐を拡張し、`caller_role == "decision_extractor_auto"`の場合のみ`defer_to_task_id`を作成時点で設定可能に（他ロールは常に空文字、無変更）。同一topicが再発した場合、同ロールに限り`defer_to_task_id`を最新の宣言で上書きする（「最新の申し送り先が勝つ」、write_agreementのUPDATEと同じ思想）。
+3. `decision_extractor_node`のDirective/Deferred処理（既存の`_append_deferred_note_to_plan`呼び出し直後）に、`_write_issue_impl`（`decision_extractor_auto`ロール、`severity="minor"`、`defer_to_task_id`設定済み）を追加。`target_role`によるゲーティングはしない（Expert/User双方の抽出ブランチが同じ先送り検出指示を持ち、BL-082がかつてUserブランチの非対称バグだった前例を踏まえた判断）。
+4. `_build_open_issue_pin_text`（BL-136）を拡張し、`defer_to_task_id`が設定済みの`open`issueには対応予定task_idを表示するようにした（BL-145の`_build_planned_issue_pin_text`と同型のパターン）。
+5. BL-125/144/145のコード自体は無変更（`raised_by`を一切見ないため、この経路由来の行も既存ロジックでそのまま扱われることを確認済み）。
+
+**留意点（新規に判明した仕様、今後の参考として明記）：** この経路由来のissueは`defer_to_task_id`が誕生時点から設定されているため、（再発により`severity=major`/`status=escalated`へ昇格した後も）BL-125のブロック判定には決して該当しない——手動DEFER済みissueの既存の扱いと完全に一致する仕様であり新たな抜け穴ではないが、「Expertが同じ懸念を別タスクへ次々と自己先送りし続けても、遷移は一切ブロックされない」という挙動として記録しておく。
+
+新規テスト`tests/test_bl154_decision_extractor_issue_log_bridge.py`（8件: issue_log行の作成、plan_drafts併存の回帰確認、同一ターゲットでの再発エスカレーション、異なるターゲットへの再発時のdefer_to_task_id更新、`decision_extractor_auto`ロールの権限確認、申し送り先未解決時のスキップ、BL-125ゲートの非該当確認、pin textの表示確認）追加。`python -m py_compile`合格、フルオフラインスイート630件Pass（1件failedは本BLと無関係、経緯: `tests/test_bl093_think_tool_scratchpad.py::test_max_tool_iter_raised_to_20`が、本セッション開始前から存在した未コミットの`MAX_TOOL_ITER`変更（20→30、直近コミットHEADでは20のまま）により失敗している。この変更がいつ・誰によって行われたか未確認で、AGENTS.md §7「定数変更の厳格管理」対象のため本BLの範囲外とし、ユーザーへ別途確認を仰ぐ）。
+
+**関連:** [BL-096](#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)、[BL-082](#bl-082-task_plannerの計画をホワイトボード化し先送り事項をタスク間で永続的に申し送りできるようにする)、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-136](#bl-136-issue_logが起票されるが解決されない状態だった可視性強制力の非対称性)、[BL-144](#bl-144-reflection_nodeのbl-096機械的stagnant上書きがescalated-issueの単なる存在で無条件発火しreflection自身が健全な進捗と判定した回まで停滞扱いしていた)、[BL-145](#bl-145-エスカレーションissue申し送りissueをdetectorreflectorの正当性監査を経てタスクプランナー経由で明示的にタスク化する)
 
 ---
 
