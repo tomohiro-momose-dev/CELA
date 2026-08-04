@@ -1926,6 +1926,48 @@
 
 ---
 
+### D-135: `_build_agreements_context`のDeliverableアイコン判定を3分岐へ変更し、Rejectされた成果物が✅と表示されないようにする（BL-166）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-04 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（「1123のログをくまなくレビューして、他にバグがないかをクロールしてほしい」との指示を受けAIが発見・報告、続けて「3件とも起票の後直ちに修正する必要がありますね」の指示で即実装を承認） |
+| **決定理由** | ドライラン一時停止・再開を繰り返す過程（`log/2026-08-04/1123`→`1355`→`1435`）で、User AIがRejectされたまま一度も承認されていないtask_1_3を「Completed and approved (Ver.9)」と誤認し、未解決の労基法違反issueを残したまま次タスクへ進もうとしていた実害を確認。`cela.db`の直接クエリで該当agreements行が`status="Rejected"`のまま最新であることを確認した上でコードを追跡し、`_build_agreements_context`のDeliverable用アイコン判定`"📄" if status == "Proposed" else "✅"`が、Approved系だけでなくRejectedも無条件で✅にしてしまうことを特定した。Decision/Directive用の分岐には存在するRejected専用の保護（elseで⚠️に落とす）がDeliverable用だけ欠けていた。 |
+| 決定内容 | `RESOLVING_DELIVERABLE_STATUSES`を再利用し、Deliverableのアイコン判定を`status == "Proposed"`（📄）／`status in RESOLVING_DELIVERABLE_STATUSES`（✅）／それ以外（⚠️）の3分岐へ変更。ラベルも`status == "Rejected"`の場合`"[却下成果物]"`を返すよう追加。 |
+| 影響 | `cela_main.py`（`_build_agreements_context`関数内）。`_build_agreements_context`はUser AI・Expert・Detector・Orchestrator等ほぼ全ノードの決定事項DB表示に共通で使われるため、Rejectされた成果物がある全てのランに影響する変更。新規テスト`tests/test_bl166_rejected_deliverable_icon.py`（6件）追加。`python -m py_compile`合格、既存BL-062/096/136/144/145/163関連100件無退行、フルオフラインスイート689件Pass。実ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-166](back_log/issue_backlog.md#bl-166-_build_agreements_contextのアイコンラベル判定がrejectされた成果物を承認済みと表示してしまう)、[BL-062](back_log/issue_backlog.md#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落) |
+
+---
+
+### D-136: BL-145の滞留issue再構築フィルタとBL-136の強制解決プロンプトへ、defer_to_task_id受け皿タスクの完了判定を追加する（BL-167）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-04 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（BL-166と同じクロールで「タスク再構築でissue/タスク番号の依存関係が崩壊するのでは、旧ゴールの2台という数字が残ったままissueも触られていない」との指摘を受けAIが根本原因を特定・報告、「3件とも起票の後直ちに修正する必要がありますね」の指示で即実装を承認） |
+| **決定理由** | `log/2026-08-04/1435`で、Reflectionが3件のescalated issueを滞留と検出しstagnant化したにもかかわらず、Task Plannerへ実際に引き継がれたのは1件のみだったことを確認。コード追跡の結果、BL-145の`_formalizable_stale`フィルタが「`defer_to_task_id`が設定済み＝受け皿タスクが既にある」という前提で除外しており、その受け皿タスクが既に完了（Approved）しているかどうかを一切検証していなかったことが判明。受け皿タスクが完了してもissueが解決されないまま、`defer_to_task_id`が過去に一度設定された事実だけで恒久的に除外され続ける「永久迷子」状態を生んでいた。同型の欠陥がBL-136の`_get_forced_escalated_issues_text`（User AI向け毎ターン強制解決プロンプト）にも存在することも判明した。 |
+| 決定内容 | 新規ヘルパー`_is_task_completed(conn, run_id, task_id)`を追加し、`_formalizable_stale`フィルタと`_get_forced_escalated_issues_text`の両方に配線。受け皿タスクが既に完了済みなのにissueが未解決の場合は「受け皿は失効した」とみなし、再度タスク化・強制解決プロンプトの対象に含める。 |
+| 影響 | `cela_main.py`（新規ヘルパー1関数、既存フィルタ2箇所）。新規テスト`tests/test_bl167_defer_to_task_id_completed_target.py`（9件）追加。`python -m py_compile`合格、既存BL-062/096/136/144/145/163関連100件無退行、フルオフラインスイート689件Pass。実ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-167](back_log/issue_backlog.md#bl-167-reflection内のstagnant-issue滞留検知がdefer_to_task_idの受け皿タスク完了後もissueを永久に見落とし続ける)、[BL-145](back_log/issue_backlog.md#bl-145-エスカレーションissue申し送りissueをdetectorreflectorの正当性監査を経てタスクプランナー経由で明示的にタスク化する)、[BL-144](back_log/issue_backlog.md#bl-144-reflection_nodeのbl-096機械的stagnant上書きがescalated-issueの単なる存在で無条件発火しreflection自身が健全な進捗と判定した回まで停滞扱いしていた) |
+
+---
+
+### D-137: `revise_goal`成功時、BL-163が列挙する影響過去タスクをverified_factsのstale警告にも再利用する（BL-168）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-04 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（BL-167と同じクロールでAIが根本原因を特定・報告、「3件とも起票の後直ちに修正する必要がありますね」の指示で即実装を承認） |
+| **決定理由** | BL-167の実害（再構築後のtask_1_1がゴール改定前の車両単価のまま出力された）を追跡した結果、`read_verified_fact`が`max_vehicle_count='2'`等、ゴール改定前にtask_1_1が確定した値を無警告で返し続けていたことが原因と判明。`upsert_verified_fact`は`(run_id, variable_name)`のUPSERT方式で、再度upsertされない限り内容の新旧を問わず永久に「現在の確定値」として供給され続け、`agreements`テーブルのような「現在性」を判定する仕組みが`verified_facts`には存在しなかった。BL-163（ゴール改定時に承認済み過去タスクへ整合性再確認issueを起票する仕組み）は`agreements`のみを対象にしており、`verified_facts`という別の永続化経路は対象外だった。 |
+| 決定内容 | BL-163が既に計算している「ゴール改定によって影響を受ける過去タスクの`(phase_id, task_id)`一覧」（`_flagged`）をそのまま再利用し、`_revise_goal_tool_impl`のBL-163ブロック直後で、該当task_idを`source_task_id`に持つ`verified_facts`行の`reason`列へ「⚠️[BL-168: ゴール改定後未確認]」という警告を付記する（`value`自体は過去の事実として正しいため改変しない）。BL-163と同一箇所・同一トリガーに相乗りさせ、二重のロジックを避けた。 |
+| 影響 | `cela_main.py`（`_revise_goal_tool_impl`関数内）。新規テスト`tests/test_bl168_verified_facts_stale_after_goal_revision.py`（5件）追加。`python -m py_compile`合格、既存BL-062/096/136/144/145/163関連100件無退行、フルオフラインスイート689件Pass。実ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-168](back_log/issue_backlog.md#bl-168-verified_factsテーブルにゴール改定を反映するsupersede機構が一切ない)、[BL-163](back_log/issue_backlog.md#bl-163-revise_goal成功時既に承認済みの過去タスクへ新ゴールとの整合性要再確認issueを機械的に起票する)、[BL-167](back_log/issue_backlog.md#bl-167-reflection内のstagnant-issue滞留検知がdefer_to_task_idの受け皿タスク完了後もissueを永久に見落とし続ける) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
