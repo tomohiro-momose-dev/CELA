@@ -4634,7 +4634,7 @@ _formalizable_stale = [i for i in _stale_escalated if not i.get("defer_to_task_i
 
 ### BL-168: `verified_facts`テーブルにゴール改定を反映するsupersede機構が一切ない
 
-**状態:** `open`（記録のみ、BL-163の`_flagged`タスク列挙ロジックを再利用した拡張を予定）
+**状態:** `done`
 
 **経緯:** BL-167と同じ調査の流れで、なぜ再構築後のtask_1_1がゴール改定前の車両単価のまま出力されたのかを追跡した。
 
