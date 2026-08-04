@@ -4536,7 +4536,15 @@ task_1_3のホワイトボードはVer.3→Ver.5→Ver.7と全面改訂を繰り
 
 **BL-152との違い：** 症状（`verify_whiteboard_excerpt`の大量失敗によるMAX_TOOL_ITER浪費）はBL-152と同型だが、原因は別。BL-152は「誤ったtask_idのホワイトボードと照合していた」という参照先の取り違え。本BLは「参照先（現在の最新ホワイトボード）は正しくプロンプトに提示されているが、Detector自身が別ブロック（過去decisionの生reasoning）から古い引用を誤って拾ってしまう」というプロンプト構成・モデル側の誤読み合わせの問題。
 
-**対応の手掛かり（未実装・修正案検討中）：** ユーザー指示によりBL起票後に修正案を検討する。
+**ユーザーとの設計討議：** BL起票後、ユーザーから2点質問があった。(a) 「internal_thought_process除去でDetectorの監査能力の粒度が落ちないか」→`cela_main.py:5885-5903`の`thought_process_audit`ブロックが、まさに「ハルシネーション・事後正当化の検出」という目的のために**現在ターンのExpert/User AI自身の思考過程のみ**を専用に提示しており、これが本来の「思考ログを監査する」機構である。`recent_decitions`に含まれる`internal_thought_process`は過去のDetector自身の判定recordであり用途が異なる重複混入であって、除去による実質的な監査能力の低下はないと回答。(b) 「Detectorに見せるべき情報構造をゼロから設計するなら」→`call_detector`の既存構成を洗い出し、4層（Tier A: 監査対象そのもの＝`whiteboard_block`/`agreements_text`/`acceptance_criteria`、Tier B: 主張の裏付け証拠＝BL-033 python_repl記録、Tier C: 今回ターンの挙動監査＝`thought_process_audit`/`write_agreement_status_block`、Tier D: 継続性・参考情報＝`recent_decitions`）に整理した結果、Tier D以外は既にsupersede-aware・適切にスコープされており、修正が必要なのはTier Dのみと回答。ゼロベースでも大枠は現行構成に近く、大規模な情報構造の再設計は不要と判断した（詳細は`docs/design/decision_lineage.md`参照）。
+
+**実装内容（完了済み）：**
+1. `recent_decitions`（`cela_main.py:5812`付近）を`SELECT *`の生行から、`who`/`what`/`why`のみのキュレーション済み要約へ変更。`internal_thought_process`・`run_id`・`reason_missing`・`id`/`timestamp`等の生列を除外。
+2. 「Recent Decisions（参考程度）」節の直前（`cela_main.py:6204`付近）へ、「直近の決定事項は状況把握のための参考情報であり、ここに含まれる引用（whyの内容等）は執筆時点のホワイトボード内容である可能性があり、既に上書き・改訂されている場合があります。target_excerptやverify_whiteboard_excerptの根拠には、必ず下記【R4: 現在タスクの成果物・最新ホワイトボード】節の内容のみを使用してください」という出所限定の注意書きを追加。既存のBL-079指示（引用前にverify_whiteboard_excerptで検証）を、引用の出所を明示的に限定する形で補強。ブロックの並び順（BL-104のキャッシュ効率化原則）は無変更。
+
+`recent_decitions`は`call_detector`関数内でのみ定義・使用され他ノードでの再利用はないが、`call_detector`はDetector（Domain Review・数値監査の両パス）全ての共通経路であり、CELAの全監査呼び出しに影響する変更である。
+
+**テスト：** 新規`tests/test_bl164_recent_decisions_no_raw_reasoning_leak.py`（4件：`recent_decitions`が生データダンプでなくなっていることのソース確認、出所限定の注意書きが実際に埋め込まれていることのソース確認、`_query_and_parse_with_retry`をmonkeypatchして実際に`call_detector`を走らせRecent Decisions節のJSONペイロードから`internal_thought_process`キーが消え`who`/`what`/`why`は残ることを確認する実行時テスト、decisionsが0件でもクラッシュしないことの回帰確認）追加。`python -m py_compile`合格、既存Detector関連テスト（`test_bl091_write_agreement_status_and_bl079_excerpt_verify.py`・`test_bl093_think_tool_scratchpad.py`・`test_bl104_project_plan_toc_and_prompt_reorder.py`・`test_bl126_stage_b_goal_change_review_mode.py`・`test_bl162_goal_revision_old_text_bridge.py`、計102件）無退行、フルオフラインスイート669件Pass。実ドライランでの効果確認は次回待ち。
 
 **関連:** [BL-152](#bl-152-verify_whiteboard_excerptが今レビューすべき成果物ではなく常にcurrent_task_idのホワイトボードだけを見ていた)（`verify_whiteboard_excerpt`大量失敗という同型症状の前例、原因は別）、[BL-079](#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる)（`verify_whiteboard_excerpt`による引用前検証の仕組みそのもの）、[BL-093](#bl-093-ノード内スクラッチパッド-thinkツール理由づけの退避ツールループ内の可変todoissuenotesメモ)（MAX_TOOL_ITER到達時の出力途中切断リスクの既存の警告）、[BL-162](#bl-162-ゴール改定revise_goal直後のdetector-goal_change監査が旧ゴール文を取得する手段を持たず判定基準の1つを実質評価できない)（同一ログレビューセッションでの直前の発見）
 
