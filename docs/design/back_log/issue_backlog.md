@@ -4655,6 +4655,8 @@ _formalizable_stale = [i for i in _stale_escalated if not i.get("defer_to_task_i
 
 新規テスト`tests/test_bl168_verified_facts_stale_after_goal_revision.py`（5件：flaggedタスク由来のverified_factsへの警告付記、対象外タスク由来のfactsは無変更、verified_facts0件でのクラッシュ非発生、2回連続ゴール改定でも警告が重複しないこと、複数タスクが混在する場合にflagged対象のみ警告されること）追加。`python -m py_compile`合格、既存BL-062/096/136/144/145/163関連100件無退行、フルオフラインスイート689件Pass。実ドライランでの効果確認は次回待ち。
 
+**既知の遡及漏れ（対応しない、D-138）：** `log/2026-08-04/1548`で、修正デプロイ**前**に発生済みの`revise_goal`呼び出し（`log/2026-08-04/1123`、車両単価2,500万→500〜1,000万への改定）に由来する`verified_facts`（`max_vehicle_count='2'`等）が、修正後もマーカー無しのまま残っていることを確認した。BL-168の修正は`_revise_goal_tool_impl`内でしか発火しないため、チェックポイント再開（`revise_goal`を再実行しない）では遡及的に効かない。ユーザー判断により、この既存run限定の一過性事情としてバックフィルは行わず現状のまま許容する（[D-138](../decision_log.md#d-138-bl-168修正の遡及漏れ修正デプロイ前に発生済みのゴール改定は既存run限定の特殊事情としてバックフィルせず現状のまま許容する)）。
+
 **関連:** [BL-163](#bl-163-revise_goal成功時既に承認済みの過去タスクへ新ゴールとの整合性要再確認issueを機械的に起票する)（同じ「ゴール改定後の過去タスク」問題への対策、対象範囲が異なる）、[BL-167](#bl-167-reflection内のstagnant-issue滞留検知がdefer_to_task_idの受け皿タスク完了後もissueを永久に見落とし続ける)（同じ実害の別経路、同一クロールでの発見）、[BL-166](#bl-166-_build_agreements_contextのアイコンラベル判定がrejectされた成果物を承認済みと表示してしまう)（同一クロールセッションでの発見）
 
 ---
