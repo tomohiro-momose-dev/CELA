@@ -2002,6 +2002,18 @@
 | 影響 | `cela_main.py`（`run_ai_vs_ai_loop`・`build_graph`・CLI引数）、`requirements.txt`（新規、`langgraph-checkpoint-sqlite`追加）、`.gitignore`（`cela_checkpoints.db*`追加）、`tests/test_checkpoint_resume.py`（全面書き換え）、`tests/tools/db_checker.py`（run_id自動検出をDB経由へ）。詳細設計は`docs/design/back_log/BL-105/BL105_basic_design.md`参照。新規テスト6件、既存関連4テストファイル計85件無退行、フルオフラインスイート700件Pass。実ドライランでの効果確認は次回待ち。 |
 | 関連 BL | [BL-105](back_log/issue_backlog.md#bl-105-checkpointresume機構がentry_pointから全体再走行するため未応答のuser発言が二重に積まれるlanggraph本来のcheckpointertask未導入という設計ギャップ) |
 
+### D-140: Facilitatorの`escalated_issues_block`へ役割境界のガードレール文を追加する（BL-170）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-04 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（AIが`think`連発ログの意味を根本原因まで調査・報告、他11ノードへの横展開調査も経た上で「実装してください」の指示で承認） |
+| **決定理由** | ユーザーから「thinkを連発している時があるが意味があるのか」との質問を受け思考ログを調査した結果、`log/2026-08-04/1435/log_no_prompt.md:784-995`でFacilitatorが`think`を29回連続呼び出し（`MAX_TOOL_ITER=30`をほぼ空費）、実際にはpython_replを一度も呼ばず「Python REPLで計算します」という同一文を反復するだけの空回りに陥っていたことを発見。プロンプトダンプ（`log_with_prompt.md`）で根本原因を特定：Facilitatorの本来の役目（短い誘導メッセージを1つ書くこと）とツール権限（`python_repl`は意図的に不付与）に対し、`escalated_issues_block`（`cela_main.py:6901-6912`）がDetectorの具体的・数値満載の却下理由を「その解消を最優先事項として明確に提示してください」という強い指示文とともにそのまま埋め込んでおり、「これはあなた自身が解決するのではなく誘導メッセージの材料に過ぎない」という役割境界の明示が無かった。モデルはiter=1のthink argsの時点で既にExpertの仕事（財務モデル全面再構築・成果物提出）を自分の仕事だと誤認しており、実行不能な計画を宣言し続けていた。ユーザー指示によりFacilitator以外の全11ノードへ同型パターンの横展開調査をgeneral-purposeエージェントで実施したが、他ノードでは注入内容とツール権限が一致しており（Expertは同種の却下文を渡されるがpython_repl/write_agreement双方を保有）、プロンプト内のツール名申告文言（11箇所）と実際の`tools=[...]`の不一致もゼロ件だった。孤立した穴と判定し、Facilitator一箇所のみを修正することとした。 |
+| 決定内容 | `escalated_issues_block`へ、「これはあなたが書く誘導メッセージの材料（背景情報）であり、あなた自身が数値の再計算・成果物の作成を行う役目ではない。python_replのような検算ツールもDeliverable新規作成の権限も与えられていない」旨のガードレール文（`[BL-170]`マーカー付き）を追加する。escalated_issues_textが空の場合・`essence_dialogue_active=True`の継続対話モードはこのブロック自体を使わないため無影響。 |
+| 影響 | `cela_main.py`（`call_facilitator`内`escalated_issues_block`）。新規テスト`tests/test_bl170_facilitator_escalated_issues_guardrail.py`（3件）追加。`python -m py_compile`合格、既存`test_bl061_facilitator_reflection_note.py`・`test_bl126_stage_d_essence_dialogue.py`・`test_bl096_issue_log.py`計65件無退行。フルオフラインスイート703件中702件Pass（1件は`shift_id`のミリ秒タイムスタンプ衝突による既存の低頻度flakyテストで本修正と無関係、単体実行では5件Pass）。実ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-170](back_log/issue_backlog.md#bl-170-facilitatorのescalated_issues_blockに役割境界の明示が無くモデルがexpertの仕事数値検算成果物再提出を自分の仕事だと誤認して空回りする)、[BL-093](back_log/issue_backlog.md#bl-093-ノード内スクラッチパッド-thinkツール理由づけの退避ツールループ内の可変todoissuenotesメモ) |
+
 ---
 
 ## 未決定（pending）
