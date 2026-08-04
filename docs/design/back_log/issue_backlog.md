@@ -197,6 +197,9 @@
 | BL-163 | 中 | `cela_main.py`（`_revise_goal_tool_impl`、`ALLOWED_ISSUE_ACTIONS_BY_ROLE`） | BL-162の調査を受け、ユーザーから「ゴール承認後にタスクを1_1からやり直させた方が良いか、それとも後続タスクが気づいて修正してくれるのに期待するか」と設計相談。AIが、全面リスタートはコスト大かつCELAの既存アーキテクチャ（SUPERSEDE改訂・BL-096 issue管理・BL-144滞留検知・BL-145タスク明示化）と不整合であること、完全受け身は見落としリスクがあることを説明し、折衷案として「ゴール改定成功時に承認済み過去タスクへ整合性再確認issueを機械的に起票する」を提案、ユーザーが採用（「注記が最初に出てくれば、AIの混乱も少ないはず」）。AskUserQuestionで(a)issue重大度（minor/open vs major/escalated）、(b)「注記が最初に出る」の実現範囲（既存の起票の仕組みに乗せるだけ vs タスク限定サーフェシングの新規実装）の2点を確認したところ、ユーザーはいずれも推奨案（minor/open、既存の仕組みに乗せるだけ）を選択。EnterPlanModeでExplore agent1体（`_revise_goal_tool_impl`のstate非依存性、`_write_issue_impl`のCREATE分岐・内部自動起票ロールの既存パターン、完了済みタスクの列挙方法、既存pin機構のグローバルスコープを調査）を実行し承認を得て実装。**実装完了（`done`）**：`ALLOWED_ISSUE_ACTIONS_BY_ROLE`へ新規ロール`"revise_goal_auto": {"CREATE"}`を追加。`_revise_goal_tool_impl`の成功パス末尾（`db_append_decision`直後・`return`直前）へ、`get_agreements_from_db`を`reversed`で走査し`(phase_id, task_id)`ごとに最新の`entry_type="Deliverable"`行を1件だけ判定する`_find_active_deliverable_agreement`と同型のdedupロジックを追加、最新statusが`RESOLVING_DELIVERABLE_STATUSES`（Approved/Approved_with_Conditions/Implicitly_Accepted）に含まれる全タスクへ`_write_issue_impl`を直接呼び出し、topic=`goal_revision_consistency_check_<phase_id>_<task_id>`・severity="minor"のissueを機械的にCREATEする処理を追加した。既存の`_write_issue_impl`・pin builder（`_build_open_issue_pin_text`等）は無変更で、severity="minor"のため既存のUser AI向けopen issue一覧へ自然に乗り、BL-136の強制RESOLVE/DEFER文言・BL-125/158のタスク遷移ブロック（いずれもmajor/escalated対象）は発動しない。新規テスト`tests/test_bl163_revise_goal_auto_flags_past_tasks.py`（6件：承認済み2タスクへの起票、Rejectedのみのタスクの対象外確認、完了済みタスク0件でのクラッシュ非発生、複数UPDATE履歴があっても1回のみ起票、最新状態がSupersededへ変わった場合の対象外確認、`revise_goal_auto`ロールの権限登録確認）追加。`python -m py_compile`合格、既存BL-086/096/136/144/154関連101件無退行、フルオフラインスイート665件Pass。実ドライランでの効果確認は次回待ち。 | P2 |
 | BL-164 | 高 | `cela_main.py`（`recent_decitions`構築、`get_decisions_from_db`、Detector系プロンプトの`Recent Decisions（参考程度）`節） | BL-163完了後、ユーザー指示「1123のログの続きをレビュー」を継続。task_1_3の財務モデル監査で、`Detector`ノードが同一ターン内で`verify_whiteboard_excerpt`を29回中11回失敗させ続け、MAX_TOOL_ITER=30に到達し`⚠️ [Detector] 最終iteration（30）のためツールを外し、テキスト最終応答を強制します`が同一run内で2回発火（`log/2026-08-04/1123/log_no_prompt.md`行11484・14373）していることを確認。原因調査の結果、`recent_decitions = json.dumps(get_decisions_from_db(conn, run_id)[-2:], ...)`（`cela_main.py:5812`）が直近2件のdecisions行を`SELECT *`丸ごとJSON化してプロンプトの「Recent Decisions（参考程度）」節（`cela_main.py:6204`）へ埋め込んでおり、そこに含まれる`internal_thought_process`（前回Detectorの生の思考過程）に、既にExpertの再提出でsupersede済みのVer.3ホワイトボードの一字一句引用（「現実的複合リスク...296...ギリギリ」、実際は改訂後Ver.5/7で「3,436」等へ変わっていた）がそのまま残っていたことが根本原因と判明。新しいDetectorはこの「参考程度」ブロックから引用文字列を誤って採用し、実際に監査対象の最新ホワイトボードには存在しないテキストを`verify_whiteboard_excerpt`で検証し続けた（プロンプトダンプで`Recent Decisions`内のdecision `D-1785815485253`のinternal_thought_processに該当引用が verbatim に含まれ、同一の古い引用が2回目の別Detector監査でも再出現したことを確認済み）。CELAの「Detector却下→Expert修正→Detector再監査」という主要ループでは、却下判定時の`internal_thought_process`（古い引用付き）と直後の修正提出が、まさに再監査タイミングでの「直近2件」になりやすく、偶然ではなく構造的に再現しうる失敗モード。BL-152（`verify_whiteboard_excerpt`が誤ったtask_idと照合し続けた事例）と症状は同型だが、原因は別（BL-152はtask_id特定の誤り、本BLはプロンプトへの生reasoningテキスト混入）。**実装完了（`done`）**：`recent_decitions`を`SELECT *`の生行から`who`/`what`/`why`のみのキュレーション済み要約へ変更（`internal_thought_process`等の生列を除外）、「Recent Decisions（参考程度）」節の直前へ「target_excerpt/verify_whiteboard_excerptの根拠には必ずR4節の内容のみを使用してください」という出所限定の注意書きを追加した。ユーザーから「internal_thought_process除去で監査能力の粒度が落ちないか」「ゼロベースで見せるべき情報構造を設計するなら」の2点質問があり、`call_detector`の既存構成を4層（監査対象そのもの／今回の裏付け証拠／今回ターンの挙動監査／継続性・参考情報）に整理した上で、`thought_process_audit`（今回ターンのExpert/User AI自身の思考過程専用、既に正しくスコープ）との役割重複を確認し、修正対象は「継続性・参考情報」層（`recent_decitions`）のみで十分と回答、大規模な情報構造の再設計は不要と判断した（`docs/design/decision_lineage.md`参照）。新規テスト`tests/test_bl164_recent_decisions_no_raw_reasoning_leak.py`（4件：ソース確認2件＋実行時挙動確認2件、`_query_and_parse_with_retry`をmonkeypatchしてプロンプト文字列を捕捉し、Recent Decisions節のJSONペイロードから`internal_thought_process`が消え`who`/`what`/`why`は残ること、decisions0件でもクラッシュしないことを確認）追加。`python -m py_compile`合格、既存Detector関連テスト（BL-079/091/093/104/126/162）102件無退行、フルオフラインスイート669件Pass。実ドライランでの効果確認は次回待ち。 | P1 |
 | BL-165 | 低 | `cela_main.py`（`_write_agreement_impl`のCREATE分岐ログ、`cela_main.py:1982`） | BL-164の調査中に副次的に発見。`_write_agreement_impl`のDeliverable CREATE分岐（`cela_main.py:1982`）が、`apply_whiteboard_patch`の実際の戻り値`v`を無視し常に文字列`"Ver.1"`をログ出力している。同一イベントで`apply_whiteboard_patch`自身のログ（`cela_main.py:3994`）は正しく実際のバージョン番号（例：`Ver.5`）を出しており、同一の`write_agreement`呼び出しに対し「Ver.5」と「Ver.1」という矛盾するバージョン表示がログに並ぶ（`log/2026-08-04/1123/log_no_prompt.md`行10388-10389で確認）。機能的な実害（DB上のバージョン管理自体は正しい）はないが、ログを読む人間・エージェント双方を混乱させる（BL-164調査時に実際に一時混乱の原因になった）。**状態**: `open`（記録のみ、`print`の`"Ver.1"`を実際の`v`変数へ差し替えるだけの軽微な修正）。 | P3 |
+| BL-166 | 高 | `cela_main.py`（`_build_agreements_context`のアイコン・ラベル判定、`cela_main.py:4825-4848`） | 1123ログの続行クロール中（ユーザー指示「1123のログをくまなくレビューして、他にバグがないかをクロールしてほしい」）に発見。ドライランが一時停止・再開を繰り返す過程（`log/2026-08-04/1123`→`1355`→`1435`）で、User AIが直前ターンでBL-158により差し戻されたにもかかわらず、次ターンで「task_1_3（財務持続性モデル構築）はCompleted and approved (Ver.9)」と誤認し、未解決の労基法違反issueを残したままtask_1_4へ進もうとしていたことを`log/2026-08-04/1123/log_no_prompt.md`行16265以降で発見。実際にはtask_1_3は`status="Rejected"`のまま（`cela.db`のagreements行`AG-1785818709566`で直接確認、Approvedへの更新は存在しない）で、Ver.9はホワイトボードの実体としては財務モデルの再提出ではなく却下メモそのもの（`whiteboards/phase_1_task_1_3_V9.md`の中身がRejection文）だった。原因調査の結果、`_build_agreements_context`（`cela_main.py:4793`）のアイコン判定`icon = "📄" if status == "Proposed" else "✅"`（`cela_main.py:4826`）が、Deliverableの場合`status`が`"Proposed"`以外なら`"Approved"`も`"Approved_with_Conditions"`も`"Rejected"`も無条件で✅にしてしまうことが判明。ラベル側も`type_label = "[成果物]"`固定（`cela_main.py:4835-4836`）で、Decision/Directiveエントリには存在する却下時`[却下事項]`分岐（`cela_main.py:4843-4844`）がDeliverableには一切なく、Rejectされた成果物が「✅ [成果物]」として表示され続ける。`_build_agreements_context`はUser AI・Expert・Detector・Orchestratorなどほぼ全ノードの「決定事項DB」表示に共通で使われているため、Rejectされた成果物がある限り、以降のどのノードの目にも承認済みとして映り続ける構造的欠陥。BL-062（Detectorの却下が正しくDBへ反映されるか）は解消済みだったが、今回見つかったのは「DBへの反映（status="Rejected"）は正しく起きているのに、表示ロジックがそれを握りつぶす」という一段深い、別の欠陥。**状態**: `open`（記録のみ、修正方針は固まっており実装予定）。 | P0 |
+| BL-167 | 高 | `cela_main.py`（Reflection内のstagnant issue滞留検知、`_formalizable_stale`フィルタ、`cela_main.py:8654`） | BL-166と同じ調査の中、ユーザーから「タスク再構築でissue/タスク番号の依存関係が崩壊するのでは、旧ゴールの2台という数字が残ったままissueも触られていない」との指摘を受け、`log/2026-08-04/1435`（`1123`→`1355`→`1435`と再開を繰り返した末のドライラン）を調査。Reflectionが3件のescalated issue（「車両台数2台ではサービス要件を満たせない」「オペレーター常駐要件と研修費前提の矛盾」「オペレーター4名体制での労基法違反」）をユーザーノード3回通過での滞留として検出しdiscussion_statusを機械的にstagnant化（`log_no_prompt.md:756`）したにもかかわらず、実際にTask Plannerへタスク再構築の引き金として引き継がれたのは労基法違反の1件のみだった（`log_no_prompt.md:757, 1021-1022`）ことを確認。原因は`_formalizable_stale = [i for i in _stale_escalated if not i.get("defer_to_task_id")]`（`cela_main.py:8654`）というフィルタで、「車両台数2台...」issueは過去にtask_1_1で起票された際`defer_to_task_id="task_1_2"`が、「オペレーター常駐要件と研修費前提の矛盾」issueも`defer_to_task_id="task_4_1"`が既に設定されていたため除外されていた（`defer_to_task_id`が無い＝新規issueだった労基法違反issueのみが通過）。しかし**task_1_2は既にApproved済みで完了しており、二度と実行されない**——受け皿として指定されたタスクが完了しても、そのタスクが実際にissueを解決（`resolved`化）したかは一切検証されず、`defer_to_task_id`が一度でも設定された事実だけで恒久的にBL-145の再構築対象から除外され続ける「永久迷子」状態になる。実際、Task Plannerは労基法issueのみを渡されたため、再構築後のtask_1_1の説明・受入基準は「車両購入費（2,500万円/台）」「1億円÷2,500万円＝4台が理論上限」という**ゴール改定前**の車両単価のまま再出力された（`log_no_prompt.md:1174-1178`、BL-168とも関連）。**状態**: `open`（記録のみ、修正方針は固まっており実装予定）。 | P0 |
+| BL-168 | 高 | `cela_main.py`（`verified_facts`テーブル・`upsert_verified_fact`/`get_verified_facts_from_db`、`_revise_goal_tool_impl`） | BL-167と同じ調査の流れで、なぜ再構築後のtask_1_1がゴール改定前の車両単価のまま出力されたのかを追跡した結果、`log/2026-08-04/1435/log_no_prompt.md`行2394-2395でTask Plan Reviewerが`read_verified_fact(topic_keyword="車両")`を呼んだ際、`max_vehicle_count='2'`（台）・`procurement_scenarios`（全シナリオ「2台」）・`initial_cost_breakdown`（「車両費2500万円/台」）という、ゴール改定（BL-086、車両単価500〜1,000万円/台へ変更）**より前**にtask_1_1のExpertが確定した値が、無警告のまま「確定値」として返されていることを確認した。`upsert_verified_fact`（`cela_main.py:4483`）は`(run_id, variable_name)`をキーとしたUPSERT方式（`ON CONFLICT ... DO UPDATE`）で、該当変数が再度`upsert_verified_fact`されない限り、内容の新旧・前提の変化を問わず永久に「現在の確定値」として`read_verified_fact`から返り続ける。ゴール改定によってtask_1_1由来のこれらの値は前提から無効化されているにもかかわらず、それを示す仕組みが一切存在しないため、Task Planner・Task Plan Reviewer等あらゆる後続ノードが無警告でこの古い値を参照し続ける。実際にこれが原因で、再構築後のtask_1_1の説明・受入基準がゴール改定前の「車両購入費2,500万円/台」「4台が理論上限」のまま据え置かれた（BL-167参照、`log_no_prompt.md:1174-1178`）。BL-163（`_revise_goal_tool_impl`の成功パス末尾で、ゴール改定時に承認済み過去タスクへ整合性再確認issueを機械的に起票する仕組み）は`agreements`（成果物）のみを対象にしており、この`verified_facts`ストアは対象外だったため、BL-163実装後もこの穴は塞がれていなかった。**状態**: `open`（記録のみ、BL-163の`_flagged`タスク列挙ロジックを再利用した拡張を予定）。 | P0 |
 
 ---
 
@@ -4569,6 +4572,84 @@ print(f"  📋 [Whiteboard] write_agreement経由の成果物 '{topic}' をwhite
 **対応の手掛かり（未実装）：** `cela_main.py:1982`の`"Ver.1"`を、`apply_whiteboard_patch`の戻り値`v`（同関数内で既に取得済み）へ差し替えるだけで解消する見込み。
 
 **関連:** [BL-164](#bl-164-detectorへのrecent-decisions参考程度節が前回decisionの生reasoninginternal_thought_processを丸ごと埋め込んでおりsupersede済みホワイトボードの古い引用をdetectorが誤採用しmax_tool_iterを浪費する)（同じ調査の中で発見）
+
+---
+
+### BL-166: `_build_agreements_context`のアイコン・ラベル判定が、Rejectされた成果物を「✅承認済み」と表示してしまう
+
+**状態:** `open`（記録のみ、修正方針は固まっており実装予定）
+
+**経緯:** ユーザー指示「1123のログをくまなくレビューして、他にバグがないかをクロールしてほしい」を受けた継続クロール中に発見。ドライランが一時停止・再開を繰り返す過程（`log/2026-08-04/1123`→`1355`→`1435`、いずれも同一`run_id=1785806334-3666e80a`のCtrl+C再開）で、`log/2026-08-04/1123/log_no_prompt.md`行16265以降、User AIが「task_1_3（財務持続性モデル構築）はCompleted and approved (Ver.9)」と誤認し、未解決の労基法違反issueを残したままtask_1_4へ進もうとしていたことを発見した。
+
+**実態確認：** 実際にはtask_1_3は`status="Rejected"`のまま一度も承認されていない。`cela.db`を直接クエリし、該当agreements行（`AG-1785818709566`、topic="task_1_3 財務持続性モデル構築"）が`status="Rejected"`のまま最新であること、Approvedへの更新が一度も存在しないことを確認済み。Ver.9はホワイトボードの実体としては財務モデルの再提出ではなく却下メモそのもの（`whiteboards/phase_1_task_1_3_V9.md`の中身が「Rejecting task_1_3 Ver.8 due to...」という却下文）だった。
+
+**根本原因（コード確認済み）：** `_build_agreements_context`（`cela_main.py:4793`）のアイコン判定：
+
+```python
+elif entry_type == "Deliverable":
+    icon = "📄" if status == "Proposed" else "✅"
+```
+
+（`cela_main.py:4826`）が、Deliverableの場合`status`が`"Proposed"`以外なら`"Approved"`も`"Approved_with_Conditions"`も、そして**`"Rejected"`も**無条件で✅にしてしまう。ラベル側も`type_label = "[成果物]"`固定（`cela_main.py:4835-4836`）で、Decision/Directiveエントリには存在する却下時`[却下事項]`分岐（`cela_main.py:4843-4844`、`elif status == "Rejected": type_label = "[却下事項]"`）がDeliverableには一切ない。つまり同じ関数内でDecision/Directive用の分岐は正しく保護されている（Rejectedは`else: icon = "⚠️"`に落ちる）のに、Deliverable用の分岐だけこの保護が欠けている。
+
+`_build_agreements_context`（`_build_agreements_context_from_db`経由）はUser AI・Expert・Detector・Orchestratorなどほぼ全ノードの「決定事項DB」表示に共通で使われているため、Rejectされた成果物がある限り、以降のどのノードの目にも「✅ [成果物]」として映り続ける構造的欠陥。実際のcontent_previewは「Rejecting task_1_3 Ver.8 due to...」というテキストで始まるため完全に不可視というわけではないが、✅アイコンという強い視覚シグナルと矛盾する自己矛盾的な表示になっており、大量のDB内容を読む中で見落とされるリスクが高い。
+
+**BL-062との違い：** BL-062（`partial`実装済み）は「Detectorの却下判定が、DB上のstatusへ正しく反映されるか（SUPERSEDE/UPDATE運用指示の欠如）」という**書き込み側**の問題だった。今回発見したのは、status="Rejected"というDBへの反映自体は正しく起きているにもかかわらず、**表示ロジックがそれを握りつぶす**という一段深い、別の欠陥。
+
+**対応の手掛かり（未実装・方針確定済み）：** 既存の`RESOLVING_DELIVERABLE_STATUSES`（`cela_main.py:3860`、`{"Approved", "Approved_with_Conditions", "Implicitly_Accepted"}`）を再利用し、Deliverableのアイコン判定をProposed/成功系ステータス/その他（Rejected等）の3分岐に変更する。ラベルにもRejected時の専用表示を追加する。
+
+**関連:** [BL-062](#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（Rejectedの書き込み側を解消した前例、今回は表示側）、[BL-164](#bl-164-detectorへのrecent-decisions参考程度節が前回decisionの生reasoninginternal_thought_processを丸ごと埋め込んでおりsupersede済みホワイトボードの古い引用をdetectorが誤採用しmax_tool_iterを浪費する)（同一クロールセッションでの直前の発見）、[BL-167](#bl-167-reflection内のstagnant-issue滞留検知がdefer_to_task_idの受け皿タスク完了後もissueを永久に見落とし続ける)・[BL-168](#bl-168-verified_factsテーブルにゴール改定を反映するsupersede機構が一切ない)（同一クロールで連鎖的に発見した「旧ゴールの数値が残り続ける」問題群）
+
+---
+
+### BL-167: Reflection内のstagnant issue滞留検知が、defer_to_task_idの受け皿タスク完了後もissueを永久に見落とし続ける
+
+**状態:** `open`（記録のみ、修正方針は固まっており実装予定）
+
+**経緯:** BL-166と同じ調査の中、ユーザーから「タスクが再構築すると、issueなどのタスク番号の依存関係が崩壊する可能性があるし、タスク再構築後にどのタスクから再開されるかわからない。旧ゴールの2台という数字が残り、issueも触られていない状態が続いている」との指摘を受け、`log/2026-08-04/1435`（`1123`→`1355`→`1435`と再開を繰り返した末のドライラン）を調査した。
+
+**確認した事実：** Reflectionが3件のescalated issue（「車両台数2台ではサービス要件を満たせない」「オペレーター常駐要件と研修費前提の矛盾」「オペレーター4名体制での労基法違反」）をユーザーノード3回通過での滞留として検出し、discussion_statusを機械的にstagnant化した（`log_no_prompt.md:756`）。しかし実際にTask Plannerへタスク再構築の引き金として引き継がれたのは、労基法違反の1件のみだった（`log_no_prompt.md:757`の`issue_ids=['71be6b5b-3790-4eaa-ab7d-a95f7efcdd12']`、`log_no_prompt.md:1021-1022`のTask Plannerへのプロンプトにも1件しか含まれていないことを確認）。
+
+**根本原因（コード確認済み）：** `cela_main.py:8654`のフィルタ：
+
+```python
+_formalizable_stale = [i for i in _stale_escalated if not i.get("defer_to_task_id")]
+```
+
+は「既に`defer_to_task_id`が設定されている＝受け皿タスクが既にある」という前提で除外している（コメント: 「二重の受け皿を避けるため」）。しかし「車両台数2台...」issueは過去（task_1_1実行時）に`defer_to_task_id="task_1_2"`が、「オペレーター常駐要件と研修費前提の矛盾」issueも`defer_to_task_id="task_4_1"`が既に設定されていた（`cela.db`の初期issue起票時点のダンプで確認済み）。ところが**task_1_2は既にApproved済みで完了しており、二度と実行されない**。受け皿として指定されたタスクが実際に完了したかどうか、そのタスクが本当にissueを解決（`status="resolved"`化）したかどうかは一切検証されず、`defer_to_task_id`が過去に一度でも設定された事実だけで、恒久的にBL-145の再構築対象から除外され続ける「永久迷子」状態になる。労基法違反issueだけが`defer_to_task_id`未設定（比較的新しく起票されたため）だったために唯一通過し、他の2件は構造的に埋もれ続けている。
+
+**実害：** Task Plannerは労基法issueのみを渡されたため、再構築後のtask_1_1の説明・受入基準は「車両購入費（2,500万円/台）」「1億円÷2,500万円＝4台が理論上限」という**ゴール改定前**の車両単価のまま再出力された（`log_no_prompt.md:1174-1178`）。BL-168で判明した`verified_facts`の同型の欠陥と合わさり、旧ゴールの前提が延々と生き続ける構造になっている。
+
+**副次確認（タスクID安定性）：** 今回の再構築ではtask_1_1〜task_6_4のtask_idはすべて維持されていた（`log_no_prompt.md`の再出力プラン全体でIDの重複・欠落・変更なしを確認）。ただしこれはコードによる保証ではなく、Task Planner自身が「surgicalな変更のみ」と自己判断した結果であり、将来の別の再構築で維持される保証はない。
+
+**対応の手掛かり（未実装・方針確定済み）：** `defer_to_task_id`の受け皿タスクが`RESOLVING_DELIVERABLE_STATUSES`相当で既に完了しているかを判定する新規ヘルパーを追加し、完了済みなのにissueが未解決（`status`が`resolved`でない）の場合は「受け皿は失効した」とみなし`_formalizable_stale`へ再度含める。
+
+**関連:** [BL-145](#bl-145-エスカレーションissue申し送りissueをdetectorreflectorの正当性監査を経てタスクプランナー経由で明示的にタスク化する)（本フィルタの導入元）、[BL-144](#bl-144-reflection_nodeのbl-096機械的stagnant上書きがescalated-issueの単なる存在で無条件発火しreflection自身が健全な進捗と判定した回まで停滞扱いしていた)（滞留検知そのもの）、[BL-168](#bl-168-verified_factsテーブルにゴール改定を反映するsupersede機構が一切ない)（同じ実害の別経路）、[BL-166](#bl-166-_build_agreements_contextのアイコンラベル判定がrejectされた成果物を承認済みと表示してしまう)（同一クロールでの直前の発見）
+
+---
+
+### BL-168: `verified_facts`テーブルにゴール改定を反映するsupersede機構が一切ない
+
+**状態:** `open`（記録のみ、BL-163の`_flagged`タスク列挙ロジックを再利用した拡張を予定）
+
+**経緯:** BL-167と同じ調査の流れで、なぜ再構築後のtask_1_1がゴール改定前の車両単価のまま出力されたのかを追跡した。
+
+**確認した事実：** `log/2026-08-04/1435/log_no_prompt.md`行2394-2395で、Task Plan Reviewerが`read_verified_fact(topic_keyword="車両")`を呼んだ際、以下の値が無警告のまま「確定値」として返された：
+- `max_vehicle_count = '2'`（台）
+- `procurement_scenarios`: 全シナリオ「2台」
+- `initial_cost_breakdown`: 「車両費2500万円/台」
+
+いずれもゴール改定（BL-086、車両単価500〜1,000万円/台へ変更、車両台数5〜8台へ変更）**より前**に、task_1_1のExpertが確定した値である。
+
+**根本原因（コード確認済み）：** `upsert_verified_fact`（`cela_main.py:4483`）は`(run_id, variable_name)`をユニークキーとしたUPSERT方式（`INSERT ... ON CONFLICT(run_id, variable_name) DO UPDATE`）で、該当`variable_name`が再度`upsert_verified_fact`されない限り、内容の新旧・前提の変化を一切問わず永久に「現在の確定値」として`get_verified_facts_from_db`/`read_verified_fact`ツールから返り続ける。`agreements`テーブルの`status != "Superseded"`フィルタ（`_build_agreements_context`）のような「現在性」を判定する仕組みが、`verified_facts`には存在しない。task_1_1はゴール改定後に一度も再実行されていない（BL-167の通りTask Plannerが説明文・受入基準は書き換えたが、実際の成果物・確定値の再計算は行われていない）ため、`max_vehicle_count`等はゴール改定前の値のまま取り残されている。
+
+**実害：** これが原因で、再構築後のtask_1_1の説明・受入基準がゴール改定前の「車両購入費2,500万円/台」「4台が理論上限」のまま据え置かれた（BL-167参照、`log_no_prompt.md:1174-1178`）。Task Plan Reviewerを含む全ての後続ノードが、`read_verified_fact`経由でこの古い値を「確定済みの定数」（`upsert_verified_fact`のdocstring: 「下流タスクはこの値を再導出せず、確定済みの定数として参照する前提」）として無警告で参照し続けるリスクがある。
+
+**BL-163との関係：** BL-163（`_revise_goal_tool_impl`の成功パス末尾で、ゴール改定時に承認済み過去タスクへ整合性再確認issueを機械的に起票する仕組み）は`agreements`（成果物）のみを走査対象にしており、`verified_facts`ストアは対象外だった。BL-163実装当時はagreements側の対策で十分と判断していたが、今回`verified_facts`という**別の永続化経路**が同じ「ゴール改定で前提が変わったのに古い値が生き残る」問題を抱えていることが判明した。
+
+**対応の手掛かり（未実装・方針確定済み）：** BL-163が既に計算している「ゴール改定によって影響を受ける過去タスクの`(phase_id, task_id)`一覧」（`_flagged`）をそのまま再利用し、該当`task_id`を`source_task_id`に持つ`verified_facts`行の`reason`列へ「⚠️ゴール改定後未確認」という警告を付記する（`value`自体は改変しない、過去の事実としては正しいため）。BL-163の起票ロジックと同一箇所・同一トリガーに相乗りさせることで、二重のロジックを避ける。
+
+**関連:** [BL-163](#bl-163-revise_goal成功時既に承認済みの過去タスクへ新ゴールとの整合性要再確認issueを機械的に起票する)（同じ「ゴール改定後の過去タスク」問題への対策、対象範囲が異なる）、[BL-167](#bl-167-reflection内のstagnant-issue滞留検知がdefer_to_task_idの受け皿タスク完了後もissueを永久に見落とし続ける)（同じ実害の別経路、同一クロールでの発見）、[BL-166](#bl-166-_build_agreements_contextのアイコンラベル判定がrejectされた成果物を承認済みと表示してしまう)（同一クロールセッションでの発見）
 
 ---
 
