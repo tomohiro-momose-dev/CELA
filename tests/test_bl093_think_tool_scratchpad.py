@@ -28,8 +28,16 @@ def _reset_all():
 
 
 def test_think_tool_registered_in_dispatch():
+    """[BL-131/TOOL_DISPATCH state化] ハンドラは`_think_handler`への薄いラムダに変わった
+    （`(args, state=None)`で受けてargsのみ`_think_handler`へ委譲する）ため、直接の同一性
+    ではなく実際に委譲される挙動で検証する。"""
     assert "think" in cela_main.TOOL_DISPATCH
-    assert cela_main.TOOL_DISPATCH["think"] is cela_main._think_handler
+    _reset_all()
+    args = {"action": "dispatch-check", "summary": "dispatch経由の呼び出し確認"}
+    direct = cela_main._think_handler(dict(args))
+    _reset_all()
+    via_dispatch = cela_main.TOOL_DISPATCH["think"](dict(args))
+    assert direct == via_dispatch
 
 
 def test_think_handler_records_reasoning_with_mechanical_iteration_number():
@@ -59,19 +67,19 @@ def test_think_handler_accumulates_reasoning_across_multiple_calls():
     assert actions == ["1回目の検討", "2回目の検討"]
 
 
-def test_think_handler_todo_and_issues_require_open_closed_status_and_are_sticky():
-    """todo/issuesは変更がある時だけ送ればよく、省略時は前回状態を保持する。"""
+def test_think_handler_todo_and_scratch_concerns_require_open_closed_status_and_are_sticky():
+    """todo/scratch_concernsは変更がある時だけ送ればよく、省略時は前回状態を保持する。"""
     _reset_all()
     r1 = cela_main._think_handler({
         "action": "初期todoをリストアップ",
         "todo": [{"item": "往復距離の確認", "status": "open"}],
-        "issues": [{"item": "単位の食い違いに気づいた", "status": "open"}],
+        "scratch_concerns": [{"item": "単位の食い違いに気づいた", "status": "open"}],
     })
     assert r1["current_todo"] == [{"item": "往復距離の確認", "status": "open"}]
-    # todo/issuesを省略 → 前回状態がそのまま維持される
+    # todo/scratch_concernsを省略 → 前回状態がそのまま維持される
     r2 = cela_main._think_handler({"action": "何もアップデートしない検討"})
     assert r2["current_todo"] == [{"item": "往復距離の確認", "status": "open"}]
-    assert r2["current_issues"] == [{"item": "単位の食い違いに気づいた", "status": "open"}]
+    assert r2["current_scratch_concerns"] == [{"item": "単位の食い違いに気づいた", "status": "open"}]
     # todoを更新（closeへ変更）
     r3 = cela_main._think_handler({
         "action": "確認完了",
@@ -96,19 +104,51 @@ def test_reset_think_scratchpad_clears_all_state():
     cela_main._CURRENT_TOOL_LOOP_ITERATION = 5
     cela_main._think_handler({
         "action": "何か", "todo": [{"item": "x", "status": "open"}],
-        "issues": [{"item": "y", "status": "open"}], "notes": "z",
+        "scratch_concerns": [{"item": "y", "status": "open"}], "notes": "z",
     })
     cela_main._reset_think_scratchpad()
     assert cela_main._CURRENT_TOOL_LOOP_ITERATION == 0
     assert cela_main._THINK_REASONING_LOG == []
     assert cela_main._THINK_TODO == []
-    assert cela_main._THINK_ISSUES == []
+    assert cela_main._THINK_SCRATCH_CONCERNS == []
     assert cela_main._THINK_NOTES == []
 
 
-def test_max_tool_iter_raised_to_20():
+def test_think_tool_scratch_concerns_param_disambiguates_from_write_issue():
+    """[BL-140] `issues`という名前が`write_issue`（DBへ永続化されターンをまたいで見える）と
+    混同され、モデルがここへ懸念を書いて満足し`write_issue`を呼ばずに終わる（懸念がツール
+    ループ終了と同時に消える）実例が実ドライランで観測された。パラメータ名を`scratch_concerns`
+    へ改め、description内で明示的に`write_issue`と対比させたことを確認する。"""
+    props = cela_main.THINK_TOOL["function"]["parameters"]["properties"]
+    assert "issues" not in props
+    assert "scratch_concerns" in props
+    description = props["scratch_concerns"]["description"]
+    assert "write_issue" in description
+    assert "NOT" in description
+
+
+def test_call_detector_prompt_body_disambiguates_scratch_concerns_from_write_issue():
+    """[BL-140] ツールのJSONスキーマ説明だけでなく、call_detector（domain review）の
+    システムプロンプト本文（write_issueとthinkが並記される箇所）にも、scratch_concernsが
+    ターンをまたいで引き継がれない一時メモであることの明示的な注記があること。"""
+    src = inspect.getsource(cela_main.call_detector)
+    assert "BL-140" in src
+    assert "scratch_concerns" in src
+
+
+def test_generate_user_utterance_prompt_body_disambiguates_scratch_concerns_from_write_issue():
+    """[BL-140] generate_user_utterance（write_issue/read_issues/thinkが並記される箇所）にも
+    同様の注記があること。"""
+    src = inspect.getsource(cela_main.generate_user_utterance)
+    assert "BL-140" in src
+    assert "scratch_concerns" in src
+
+
+def test_max_tool_iter_raised_to_30():
+    """[BL-155] task_plan_reviewerによる差し戻し後、task_plannerが差戻しタスクを1件ずつ
+    把握し直す過程でiter=20（旧上限）に迫る実績がドライランで観測されたため、20→30へ引き上げ。"""
     src = inspect.getsource(cela_main._query_AI_live)
-    assert "MAX_TOOL_ITER = 20" in src
+    assert "MAX_TOOL_ITER = 30" in src
 
 
 def test_query_ai_live_stamps_mechanical_iteration_globally():
@@ -140,8 +180,11 @@ def test_call_task_plan_reviewer_wires_think_tool_and_instruction():
 
 # 「対象ノードは全ノードへ。ツール呼び出し回数というより、思考のやり方の環境の整備なので」
 # というユーザー指示により、当初の3ノード限定から全LLM呼び出し関数へ拡張した。
-# tools=None（単一応答パス）だった4関数もtools=[THINK_TOOL]へ変更しツールループパスに
-# 切り替わっている点が、既存tools付与ノードへの追加と異なる（構造的な変化）。
+# [BL-109] call_orchestrator/call_decision_extractor/call_reflection/call_facilitatorは
+# 一度tools=[THINK_TOOL]へ変更したが、いずれも複数ツールを組み合わせて検討する必要のない
+# 単発判定・抽出タスクであり、thinkツールが解決する「複数iterをまたぐreasoning引き継ぎ」問題
+# 自体が発生しないため、tools=Noneの単一応答パスへ差し戻した（ネイティブのreasoning_effort_level
+# はlabel名を明示追加して維持）。このリストからは除外する。
 _ALL_THINK_WIRED_FUNCS = [
     "call_expert",
     "generate_user_utterance",
@@ -149,10 +192,6 @@ _ALL_THINK_WIRED_FUNCS = [
     "call_reviewer",
     "call_integrator",
     "call_resource_arbiter",
-    "call_orchestrator",
-    "call_decision_extractor",
-    "call_reflection",
-    "call_facilitator",
 ]
 
 
@@ -176,13 +215,62 @@ def test_call_detector_domain_review_pass_also_wires_think_tool():
     assert "THINK_TOOL" in nearby
 
 
-def test_previously_tools_none_functions_no_longer_pass_tools_none():
-    """call_orchestrator/call_decision_extractor/call_reflection/call_facilitatorは
-    tools=Noneの単一応答パスからツールループパス（tools=[THINK_TOOL]）へ切り替わった。
+def test_bl109_single_shot_judgment_nodes_reverted_to_tools_none():
+    """[BL-109] call_decision_extractor/call_reflectionは複数ツールを組み合わせて
+    検討する必要のない単発判定・抽出タスクであり、thinkツールが解決する「複数iterをまたぐ
+    reasoning引き継ぎ」問題自体が発生しないため、tools=[THINK_TOOL]のツールループパスから
+    単一応答パス（tools=None、query_AIのtools引数省略）へ差し戻した。
+    [BL-126 Stage D] call_facilitatorはこの後、本質対話（Essence Dialogue）でescalate_premise_
+    concern/write_agreement(EssenceProposal)を自ら呼べる必要が生じたため、この一覧から除外し
+    ツールループ化した（BL-109の対象外へ変更、design.md §2/§13.2参照）。
+    [BL-148] call_orchestratorも同様に、current_task_id/計画/成果物を能動的に確認する必要が
+    生じたためこの一覧から除外し、読み取り専用ツールを持つツールループ化した
+    （test_bl148_call_orchestrator_is_tool_loop_capable参照）。
     """
-    for func_name in ["call_orchestrator", "call_decision_extractor", "call_reflection", "call_facilitator"]:
+    for func_name in ["call_decision_extractor", "call_reflection"]:
         src = inspect.getsource(getattr(cela_main, func_name))
-        assert "tools=[THINK_TOOL]" in src, f"{func_name} should now pass tools=[THINK_TOOL]"
+        assert "THINK_TOOL" not in src, f"{func_name} should no longer reference THINK_TOOL"
+
+
+def test_bl126_stage_d_call_facilitator_is_tool_loop_capable():
+    """[BL-126 Stage D] call_facilitatorはTHINK_TOOL/ESCALATE_PREMISE_CONCERN_TOOL/
+    WRITE_AGREEMENT_TOOLを持つツールループパスへ変更されたこと（BL-109からの意図的な差し戻し）。"""
+    src = inspect.getsource(cela_main.call_facilitator)
+    assert "THINK_TOOL" in src
+    assert "ESCALATE_PREMISE_CONCERN_TOOL" in src
+    assert "WRITE_AGREEMENT_TOOL" in src
+
+
+def test_bl148_call_orchestrator_is_tool_loop_capable():
+    """[BL-148] call_orchestratorはcurrent_task_id/計画/成果物を能動的に確認できるよう、
+    読み取り専用ツール（read_project_plan/read_deliverable_file/read_verified_fact/think）を
+    持つツールループパスへ変更された（BL-109からの意図的な差し戻し）。専門家選定メタデータの
+    生成以外の役割は持たず状態も変更しないため、write_agreement等の書き込み系ツールは
+    意図的に持たないことをレグレッションガードとして固定する。"""
+    src = inspect.getsource(cela_main.call_orchestrator)
+    assert "THINK_TOOL" in src
+    assert "READ_PROJECT_PLAN_TOOL" in src
+    assert "READ_DELIVERABLE_FILE_TOOL" in src
+    assert "READ_VERIFIED_FACT_TOOL" in src
+    assert "WRITE_AGREEMENT_TOOL" not in src
+    assert "ESCALATE_PREMISE_CONCERN_TOOL" not in src
+
+
+def test_bl109_reasoning_effort_level_preserved_for_reverted_nodes():
+    """[BL-109] orchestrator/facilitatorはtools=None化前、reasoning_effort_levelを
+    `elif tools is not None`経由（tools付与ノード向けのフォールバック）でしか得ていなかった
+    ため、tools=None化のサイレントな副作用でreasoningが無効化されないよう、明示的な
+    label分岐（`elif tools is not None`より前）へ追加されていること。具体的な効果レベルの
+    値・他ラベルとのグルーピングはチューニング対象のため固定文字列では検証しない。
+    """
+    src = inspect.getsource(cela_main._query_AI_live)
+    fallback_idx = src.index('elif tools is not None:')
+    for label in ("orchestrator", "facilitator"):
+        label_idx = src.index(f'"{label}"')
+        assert label_idx < fallback_idx, (
+            f'"{label}" should be explicitly matched before the `elif tools is not None` '
+            "fallback, not rely on it"
+        )
 
 
 # [BL-093 追記修正2] log/2026-07-26/1713で、モデルがpython_repl等を呼ぶ判断時にTHINK_TOOL側の
@@ -242,6 +330,9 @@ _NODE_TOOL_NAME_REMINDERS = {
     "call_task_plan_reviewer": [
         "python_repl", "read_verified_fact", "read_deliverable_file", "diff_plan_draft_versions",
         "write_agreement",
+    ],
+    "call_orchestrator": [
+        "read_project_plan", "read_deliverable_file", "read_verified_fact",
     ],
 }
 

@@ -33,10 +33,12 @@ def test_bl087_task_planner_prompt_warns_against_ambiguous_ratio_vs_length_wordi
 
 
 def test_bl087_task_planner_prompt_references_the_12km_15_percent_failure_example():
-    """再発防止のため、実際に起きた15%/12km区間の誤読事例がNG例として埋め込まれていること。"""
+    """再発防止のため、実際に起きた15%/12km区間の誤読事例がNG例として埋め込まれていること。
+    [BL-116] 具体的なバス交通ドメインの数値（旧: 「12km区間」）はドメイン非依存の表現へ
+    一般化されたため、一般化後の表現（「〈12単位〉相当」）で検証する。"""
     src = inspect.getsource(cela_main.call_task_planner)
     assert "15%" in src
-    assert "12km区間" in src
+    assert "〈12単位〉相当" in src
 
 
 def test_bl087_generate_user_utterance_does_not_unconditionally_demand_resubmission():

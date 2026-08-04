@@ -34,18 +34,22 @@ def test_call_detector_has_anti_repetition_instruction():
 
 
 def test_call_resource_arbiter_has_anti_repetition_instruction():
+    """[BL-115] 文面は共有ヘルパー_verification_throttle_warning()へ集約されたため、
+    呼び出し式そのものを存在確認のマーカーとする。"""
     src = inspect.getsource(cela_main.call_resource_arbiter)
-    assert "同じ検証・計算を繰り返さない" in src
+    assert "_verification_throttle_warning(" in src
 
 
 def test_call_integrator_has_anti_repetition_instruction():
+    """[BL-115] 文面は共有ヘルパー_verification_throttle_warning()へ集約された。"""
     src = inspect.getsource(cela_main.call_integrator)
-    assert "同じ検証・計算を繰り返さない" in src
+    assert "_verification_throttle_warning(" in src
 
 
 def test_call_reviewer_has_anti_repetition_instruction():
+    """[BL-115] 文面は共有ヘルパー_verification_throttle_warning()へ集約された。"""
     src = inspect.getsource(cela_main.call_reviewer)
-    assert "同じ検証・計算を繰り返さない" in src
+    assert "_verification_throttle_warning(" in src
 
 
 def test_generate_user_utterance_has_anti_repetition_instruction():
@@ -54,8 +58,9 @@ def test_generate_user_utterance_has_anti_repetition_instruction():
 
 
 def test_call_goal_essence_analyst_has_anti_repetition_instruction():
+    """[BL-115] 文面は共有ヘルパー_verification_throttle_warning()へ集約された。"""
     src = inspect.getsource(cela_main.call_goal_essence_analyst)
-    assert "同じ検証・計算を繰り返さない" in src
+    assert "_verification_throttle_warning(" in src
 
 
 def test_call_task_plan_reviewer_has_anti_repetition_instruction_and_single_block_rule():

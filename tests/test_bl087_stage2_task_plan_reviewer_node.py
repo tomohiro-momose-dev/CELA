@@ -126,7 +126,7 @@ def test_call_task_planner_injects_reviewer_feedback_into_prompt(monkeypatch):
     埋め込まれ、実際にqueryされたcontentへ反映されること。"""
     captured = {}
 
-    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None):
+    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None, state=None):
         captured["prompt"] = messages[0]["content"]
         return "[]"
 
@@ -143,7 +143,7 @@ def test_call_task_plan_reviewer_is_given_python_repl_tool(monkeypatch):
     call_task_plan_reviewerにもpython_replツールを与えること。"""
     captured = {}
 
-    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None):
+    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None, state=None):
         captured["tools"] = tools
         return "{}"
 
@@ -161,7 +161,7 @@ def test_call_task_planner_is_given_python_repl_tool(monkeypatch):
     python_replで検証できるようツールを付与すること。"""
     captured = {}
 
-    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None):
+    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None, state=None):
         captured["tools"] = tools
         return "[]"
 
@@ -178,7 +178,7 @@ def test_call_task_planner_without_feedback_omits_rejection_block(monkeypatch):
     """reviewer_feedbackを渡さない通常時は、差し戻しブロック自体がプロンプトに出ないこと。"""
     captured = {}
 
-    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None):
+    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None, state=None):
         captured["prompt"] = messages[0]["content"]
         return "[]"
 
@@ -214,10 +214,12 @@ def test_reviewer_prompt_rebalances_structural_issues_over_numeric_precision():
 
 def test_reviewer_prompt_forbids_fabricating_values_absent_from_goal_text():
     """ゴール文自体が与えていない絶対値を無理に確定させる差し戻しをしないよう、
-    実際にドライランで観測された「総ルート長80km」捏造の実例がNG例として
-    埋め込まれていること（Stage 1aでtask_1_3の実例を埋め込んだのと同じパターン）。"""
+    実際にドライランで観測された数値捏造の実例がNG例として埋め込まれていること
+    （Stage 1aでtask_1_3の実例を埋め込んだのと同じパターン）。[BL-116] 具体的な
+    バス交通ドメインの数値（旧: 「総ルート長80km」）はドメイン非依存の表現へ
+    一般化されたため、一般化後の表現（「総量100単位」）で検証する。"""
     src = inspect.getsource(cela_main.call_task_plan_reviewer)
-    assert "80km" in src
+    assert "総量100単位" in src
     assert "でっち上げ" in src
 
 

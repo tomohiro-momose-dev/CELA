@@ -1,19 +1,25 @@
 """
 BL-093/D-074: thinkツールを呼ぶかどうかをモデルの任意判断に委ねると、大半のiterationで
-結局reasoningが引き継がれないことが判明した（ユーザー指摘）。そこで「ツール呼び出しを
+結局reasoningが引き継がれないことが判明した（ユーザー指摘）ため、当初は「ツール呼び出しを
 含む全iterationはthinkを非空summary付きで併用すること」を`_query_AI_live`側で機械的に
-強制し（違反時はツール呼び出しを一切実行せず差し戻す）、直近N iter分の生reasoningと、
-それより古いiterのthink summaryを組み合わせた自動ダイジェストメッセージをloop_messagesへ
-差し替えていく。この一連の挙動は`_query_AI_live`の内部ループそのものを検証する必要があり、
-既存テストが行っている`query_AI`/`_query_and_parse_with_retry`レベルのモンキーパッチでは
-到達できないため、OpenAIのstreamingレスポンスを模したフェイククライアントで直接検証する。
+強制していた（違反時はツール呼び出しを一切実行せず差し戻す）。
 
-参照: docs/design/issue_backlog.md BL-093、docs/design/decision_log.md D-074。
+[BL-108/BL-110] その後、ネイティブのreasoning（delta.reasoning）が think の呼び出しに関わらず
+毎iter無条件にdigestへ蓄積されるようになり、思考ログの引き継ぎ自体はthink無しでも成立するように
+なったため、機械的強制（差し戻し）は撤廃し、thinkツール自体は任意呼び出しとして残した。
+
+この一連の挙動は`_query_AI_live`の内部ループそのものを検証する必要があり、既存テストが行っている
+`query_AI`/`_query_and_parse_with_retry`レベルのモンキーパッチでは到達できないため、OpenAIの
+streamingレスポンスを模したフェイククライアントで直接検証する。
+
+参照: docs/design/issue_backlog.md BL-093/BL-108/BL-110、docs/design/decision_log.md D-074。
 """
 
 import json
 import os
 import sys
+
+import httpx
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -98,18 +104,18 @@ def _run(iterations):
     )
 
 
-def test_tool_call_without_think_is_rejected_and_not_executed():
-    """thinkを伴わないpython_repl呼び出しは実行されず、エラーが差し戻されること。"""
+def test_bl110_tool_call_without_think_now_executes_normally():
+    """[BL-110] thinkを伴わないpython_repl呼び出しも、差し戻されずそのまま実行されること
+    （BL-108でネイティブreasoningが毎iter無条件にdigestへ蓄積されるようになり、think併用の
+    機械的強制が不要になったためユーザー指示で撤廃した）。"""
     iterations = [
-        # iter1: python_replのみ呼ぶ（thinkなし）→ 拒否されるはず
-        [_tool_call_chunk(0, "call_1", "python_repl", {"code": "1/0"})],
-        # iter2: 最終応答（拒否メッセージを見てモデルが諦めて終了したと仮定）
+        [_tool_call_chunk(0, "call_1", "python_repl", {"code": "1/0"})],  # thinkなし
         [_final_text_chunk("done")],
     ]
     result = _run(iterations)
     assert result == "done"
-    # 拒否されていればpython_replは一度も実行されないため、_LAST_PYTHON_CALLSは空のまま
-    assert cela_main._LAST_PYTHON_CALLS == []
+    # 差し戻されず実行されているため、_LAST_PYTHON_CALLSに記録が残る
+    assert any("1/0" in c["code"] for c in cela_main._LAST_PYTHON_CALLS)
 
 
 def test_tool_call_with_think_and_summary_is_executed_normally():
@@ -127,18 +133,16 @@ def test_tool_call_with_think_and_summary_is_executed_normally():
     assert any("1+1" in c["code"] for c in cela_main._LAST_PYTHON_CALLS)
 
 
-def test_standalone_think_without_summary_is_also_rejected():
-    """他ツールを伴わないthink単独呼び出しでも、summaryが空なら拒否されること
-    （thinkもツールである以上、summary欠落は次の次のiterationでダイジェストの穴になるため）。"""
+def test_bl110_standalone_think_without_summary_still_executes():
+    """[BL-110] think単独呼び出しでsummaryが空でも、差し戻されず_think_handlerに到達し
+    reasoning_logへ記録されること（summary必須の機械的強制は撤廃済み）。"""
     iterations = [
         [_tool_call_chunk(0, "call_1", "think", {"action": "何か考える"})],  # summary無し
         [_final_text_chunk("done")],
     ]
     result = _run(iterations)
     assert result == "done"
-    # 拒否されているので、reasoning_logに記録されるべきではない
-    # (このiterationのthink呼び出し自体は_think_handlerに到達しない)
-    assert cela_main._THINK_REASONING_LOG == []
+    assert cela_main._THINK_REASONING_LOG[-1]["action"] == "何か考える"
 
 
 def test_standalone_think_with_summary_is_accepted():
@@ -152,9 +156,9 @@ def test_standalone_think_with_summary_is_accepted():
     assert cela_main._THINK_REASONING_LOG[0]["summary"] == "考えた結果をまとめた"
 
 
-def test_auto_reasoning_digest_uses_verbatim_for_recent_and_summary_for_older():
-    """直近_AUTO_REASONING_VERBATIM_ITERS件は生reasoningのまま、それより古い分は
-    thinkのsummaryに基づくダイジェストが構築されること。"""
+def test_auto_reasoning_digest_accumulates_without_summarizing():
+    """[BL-108] 要約はせず、全iterationの生reasoningがそのまま蓄積されること
+    （thinkのsummary自体はreasoning_logへの記録として引き続き必須）。"""
     iterations = [
         [_reasoning_chunk("iter1の生reasoning"),
          _tool_call_chunk(0, "call_1", "think", {"action": "iter1", "summary": "iter1のまとめ"})],
@@ -174,7 +178,7 @@ def test_auto_reasoning_digest_uses_verbatim_for_recent_and_summary_for_older():
     # iter4の直前（最後にAPIへ送られるmessages）を見る必要があるが、_query_AI_liveは
     # loop_messagesを外部に返さないため、代わりにcreate()に渡されたkwargsを検査する。
     # _FakeCompletions.createは呼び出しごとのkwargsを保存していないため、ここでは
-    # digest挿入位置(index=1)のロジックがエラーなく完走したことと、既存のreasoning_log/
+    # digest末尾追記（BL-106）のロジックがエラーなく完走したことと、既存のreasoning_log/
     # summaryが正しく蓄積されていることを確認する（ダイジェスト文字列そのものの内容検証は
     # 別テストでcreate_kwargsをキャプチャして行う）。
     assert [e["summary"] for e in cela_main._THINK_REASONING_LOG] == [
@@ -210,11 +214,98 @@ def test_auto_reasoning_digest_content_captured_via_create_kwargs():
     )
     # iter4への送信メッセージ（4回目のcreate呼び出し = index 3）を見る
     messages_before_iter4 = captured_messages_per_call[3]
-    digest_msg = messages_before_iter4[1]
-    assert digest_msg["role"] == "system"
-    # 直近2iter(_AUTO_REASONING_VERBATIM_ITERS=2)分は生reasoningそのまま
-    assert "iter2の生reasoning内容" in digest_msg["content"]
-    assert "iter3の生reasoning内容" in digest_msg["content"]
-    # iter1は窓の外なのでsummaryベースになっている（生reasoningの原文は含まれない）
-    assert "iter1の生reasoning内容" not in digest_msg["content"]
-    assert "iter1要約" in digest_msg["content"]
+    # [BL-111] 全iter分を1メッセージに再結合する（BL-108）のをやめ、iterationごとに独立した
+    # 新規systemメッセージを末尾に追記するだけ（真の単調増加）にしたため、末尾メッセージには
+    # 直近iter（iter3）の生reasoningのみが入り、iter1/iter2は末尾より手前の別メッセージとして
+    # 個別に残っている。
+    last_msg = messages_before_iter4[-1]
+    assert last_msg["role"] == "system"
+    assert "iter3の生reasoning内容" in last_msg["content"]
+    assert "iter1の生reasoning内容" not in last_msg["content"]
+    assert "iter2の生reasoning内容" not in last_msg["content"]
+    all_content = "\n".join(m.get("content", "") or "" for m in messages_before_iter4)
+    assert "iter1の生reasoning内容" in all_content
+    assert "iter2の生reasoning内容" in all_content
+
+
+def test_bl111_consecutive_requests_are_a_strict_prefix_of_each_other():
+    """[BL-111] プレフィックスキャッシュが機能する必須条件は「一度追加したメッセージを
+    二度と変更・削除・移動しない」こと。iterNへのリクエストが、iterN+1へのリクエストの
+    厳密な先頭部分（プレフィックス）になっていることを直接検証する
+    （BL-108時点ではdigestの再構築・付け替えによりこれが破れていた：Gemini指摘）。
+    """
+    captured_messages_per_call = []
+
+    class _CapturingCompletions(_FakeCompletions):
+        def create(self, **kwargs):
+            captured_messages_per_call.append([dict(m) for m in kwargs["messages"]])
+            return super().create(**kwargs)
+
+    iterations = [
+        [_reasoning_chunk("iter1の思考"),
+         _tool_call_chunk(0, "call_1", "think", {"action": "iter1", "summary": "iter1要約"})],
+        [_reasoning_chunk("iter2の思考"),
+         _tool_call_chunk(0, "call_2", "think", {"action": "iter2", "summary": "iter2要約"})],
+        [_reasoning_chunk("iter3の思考"),
+         _tool_call_chunk(0, "call_3", "think", {"action": "iter3", "summary": "iter3要約"})],
+        [_final_text_chunk("done")],
+    ]
+    client = _FakeClient(iterations)
+    client.chat.completions = _CapturingCompletions(iterations)
+    cela_main._reset_think_scratchpad()
+    cela_main._query_AI_live(
+        messages=[{"role": "system", "content": "system prompt"}, {"role": "user", "content": "do the task"}],
+        client=client, model="fake-model", label="TestLoop",
+        tools=[cela_main.THINK_TOOL],
+    )
+    # iter1〜iter4への各送信メッセージが、直後のリクエストの厳密な先頭部分になっていること。
+    for i in range(len(captured_messages_per_call) - 1):
+        shorter = captured_messages_per_call[i]
+        longer = captured_messages_per_call[i + 1]
+        assert len(longer) > len(shorter), f"call {i+1} should have grown over call {i}"
+        assert longer[:len(shorter)] == shorter, (
+            f"call {i} の全メッセージが call {i+1} の先頭部分と厳密に一致していない "
+            "（プレフィックスキャッシュが壊れる変更）"
+        )
+
+
+def test_bl122_api_error_mid_loop_resumes_same_iteration_without_discarding_progress():
+    """[BL-122] ツールループの途中（iteration 2）でAPIエラーが発生し外側のリトライが
+    発生しても、iteration 1で蓄積した進捗（loop_messages/reasoning/think記録）が
+    破棄されず、iteration 2から（1からではなく）再開されることを検証する。
+    従来は`for attempt`のtryブロック内でloop_messages等が再初期化されていたため、
+    リトライのたびにiteration=1から丸ごとやり直されていた。
+    """
+    call_log: list[str] = []
+
+    class _FlakyCompletions(_FakeCompletions):
+        def create(self, **kwargs):
+            call_log.append("create")
+            # 2回目のcreate()呼び出し（iteration2の最初の試行）でAPIエラーを模擬する。
+            if len(call_log) == 2:
+                raise httpx.TimeoutException("simulated transient API error")
+            return super().create(**kwargs)
+
+    iterations = [
+        [_reasoning_chunk("iter1の思考"),
+         _tool_call_chunk(0, "call_1", "think", {"action": "iter1", "summary": "iter1のまとめ"})],
+        [_reasoning_chunk("iter2の思考"),
+         _tool_call_chunk(0, "call_2", "think", {"action": "iter2", "summary": "iter2のまとめ"})],
+        [_final_text_chunk("done")],
+    ]
+    client = _FakeClient(iterations)
+    client.chat.completions = _FlakyCompletions(iterations)
+    cela_main._reset_think_scratchpad()
+    result = cela_main._query_AI_live(
+        messages=[{"role": "system", "content": "system prompt"}, {"role": "user", "content": "do the task"}],
+        client=client, model="fake-model", label="TestLoop",
+        tools=[cela_main.THINK_TOOL],
+    )
+    assert result == "done"
+    # create()は4回呼ばれたはず: iter1成功、iter2失敗（リトライ）、iter2再試行成功、iter3成功。
+    assert len(call_log) == 4
+    # iteration 1で記録されたthink要約が、iteration 2のAPIエラー・リトライを経ても
+    # 失われずに残っていること（従来はここが空リストにリセットされていた）。
+    assert [e["summary"] for e in cela_main._THINK_REASONING_LOG] == [
+        "iter1のまとめ", "iter2のまとめ",
+    ]

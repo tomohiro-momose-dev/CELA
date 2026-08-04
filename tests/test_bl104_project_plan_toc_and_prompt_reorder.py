@@ -338,28 +338,17 @@ def test_call_resource_arbiter_static_instructions_precede_goal_and_overrun():
 # call_reflection: BL-093の説明を固定ブロックへ移動（最小限の安全な変更のみ）
 # ---------------------------------------------------------------------------
 
-def test_call_reflection_bl093_mentioned_exactly_once_near_top():
-    """call_reflectionは「上記の」という位置的参照が多段に連鎖しているため全面的な並び替えは
-    行わず、自己完結しているBL-093の説明のみ先頭の固定ブロックへ移動している。重複して
-    残っていないこと、かつunresolved_textより前にあることを確認する。
-    """
-    src = inspect.getsource(cela_main.call_reflection)
-    assert src.count("【BL-093】必要であれば、thinkツールで検討過程を書き残しても構いません。") == 1
-    bl093_idx = src.index("【BL-093】必要であれば、thinkツールで検討過程を書き残しても構いません。")
-    unresolved_idx = src.index("■ 未解決のまま残っている検討中の項目")
-    assert bl093_idx < unresolved_idx
+# [BL-109] call_reflection/call_facilitatorはtools=[THINK_TOOL]をtools=None（単一応答パス）へ
+# 差し戻したのに伴い「【BL-093】必要であれば、thinkツールで検討過程を書き残しても構いません。」の
+# 文言自体を両関数から削除したため、その位置関係を検証していた
+# test_call_reflection_bl093_mentioned_exactly_once_near_top / test_call_facilitator_bl093_precedes_reflection_block
+# は前提が消滅し廃止した。unresolved_textとの相対位置に関する制約は元々BL-093文言側にのみ
+# あったものなので、削除に伴い検証対象自体がなくなっている。
 
 
 # ---------------------------------------------------------------------------
 # call_facilitator: プロンプト並び替え
 # ---------------------------------------------------------------------------
-
-def test_call_facilitator_bl093_precedes_reflection_block():
-    src = inspect.getsource(cela_main.call_facilitator)
-    bl093_idx = src.index("【BL-093】必要であれば、thinkツールで検討過程を書き残しても構いません。")
-    reflection_block_idx = src.index("{reflection_block}")
-    assert bl093_idx < reflection_block_idx
-
 
 def test_call_facilitator_called_reason_reference_still_precedes_reflection_block():
     """「※あなたが呼ばれた理由（下記）は」はreflection_blockへの前方参照のため、
@@ -376,8 +365,10 @@ def test_call_facilitator_called_reason_reference_still_precedes_reflection_bloc
 # ---------------------------------------------------------------------------
 
 def test_call_integrator_static_instructions_precede_goal_and_merged_text():
+    """[BL-115] 検証回数抑制注意書きは共有ヘルパー_verification_throttle_warning()へ
+    集約されたため、呼び出し式そのものを静的ブロックの位置マーカーとして使う。"""
     src = inspect.getsource(cela_main.call_integrator)
-    static_idx = src.index("【同じ検証・計算を繰り返さない（重要）】")
+    static_idx = src.index("_verification_throttle_warning()")
     goal_idx = src.index("■ 絶対目標: {goal}")
     merged_idx = src.index("{merged_text}")
     assert static_idx < goal_idx < merged_idx
@@ -415,3 +406,27 @@ def test_call_task_plan_reviewer_bl092_uekara_reference_stays_after_ambiguity_bl
     ambiguity_idx = src.index("【重要: 曖昧さの指摘とゴール文にない数値の捏造要求を混同しない】")
     bl092_reference_idx = src.index("上記の通り数値の捏造要求はしないこと")
     assert ambiguity_idx < bl092_reference_idx
+
+
+# ---------------------------------------------------------------------------
+# [BL-116] generate_user_utterance: ゴミ引用符混入バグの再発防止
+# ---------------------------------------------------------------------------
+
+def test_generate_user_utterance_first_turn_block_has_no_stray_quote_artifacts():
+    """[BL-116] triple-quoted f-string内で各行が誤って個別に閉じられているかのように
+    書かれ、`\\n`直後のリテラルな引用符（例: `...です。\\n"`）がプロンプト本文へそのまま
+    混入していたバグ（2026-07-30発見・修正）の再発防止。修正前はこの断片の直後に
+    孤立した`"`が続いていた。
+    """
+    src = inspect.getsource(cela_main.generate_user_utterance)
+    assert 'あなたは目標を達成するための優秀な【プロジェクトオーナー（発注者）】です。\\n"' not in src
+    assert 'あなたは目標を達成するための優秀な【プロジェクトオーナー（発注者）】です。\\n' in src
+
+
+def test_generate_user_utterance_decisions_timeline_block_has_no_stray_quote_artifacts():
+    """[BL-116] 決定事項・タイムラインブロック（system_prompt += (f\"\"\"...\"\"\")）でも
+    同種のゴミ引用符混入が発生していた箇所の再発防止。
+    """
+    src = inspect.getsource(cela_main.generate_user_utterance)
+    assert '【直近の各役割の行動、評価、その理由リスト】"\\n' not in src
+    assert '{timeline_str}"\\n\\n' not in src

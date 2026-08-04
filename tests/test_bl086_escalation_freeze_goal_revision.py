@@ -213,6 +213,30 @@ def test_bl086_revise_goal_accept_updates_escalation_and_goal_shift_event(db_con
     decisions = cela_main.get_decisions_from_db(conn, run_id)
     assert any(d["who"] == "user" and escalation_id in d["what"] for d in decisions)
 
+    # [BL-126 Stage A] revise_goalの既存の反応的経路にも、goal_draftsへの版管理が
+    # 先行して適用されていること（whiteboard_drafts/plan_draftsと同型のバージョニング）。
+    draft = cela_main.get_latest_goal_draft(conn, run_id)
+    assert draft is not None
+    assert draft["version"] == 1
+    assert draft["content"] == result["new_goal_text"]
+
+
+def test_bl126_stage_a_apply_goal_patch_and_get_latest_goal_draft_roundtrip(db_conn):
+    """get_latest_whiteboard/get_latest_plan_draftと同型のバージョニング動作を単体で確認する。"""
+    conn, run_id = db_conn
+    assert cela_main.get_latest_goal_draft(conn, run_id) is None
+
+    v1 = cela_main.apply_goal_patch(conn, run_id, "初版のゴール文", author_role="user", edit_summary="初版")
+    assert v1 == 1
+    draft = cela_main.get_latest_goal_draft(conn, run_id)
+    assert draft == {"version": 1, "content": "初版のゴール文"}
+
+    v2 = cela_main.apply_goal_patch(conn, run_id, "初版のゴール文\n\n## [ANNOTATION v2] 追記", author_role="user", edit_summary="改版")
+    assert v2 == 2
+    draft = cela_main.get_latest_goal_draft(conn, run_id)
+    assert draft["version"] == 2
+    assert draft["content"] == "初版のゴール文\n\n## [ANNOTATION v2] 追記"
+
 
 def test_bl086_revise_goal_with_freeze_agreement_id_freezes_and_blocks_supersede(db_conn):
     conn, run_id = db_conn

@@ -26,12 +26,30 @@ BL-089: _safe_json_parseが複数の```json...```フェンスブロックを取�
 
 import os
 import sys
+import time
+import uuid
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cela_main  # noqa: E402
+
+
+@pytest.fixture()
+def db_conn(tmp_path):
+    db_path = str(tmp_path / "test_bl089_reflection.db")
+    conn = cela_main.get_db_connection(db_path)
+    cela_main.init_db(conn)
+    cela_main._DB_CONN = conn
+    run_id = f"test-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    cela_main._CURRENT_RUN_ID = run_id
+    try:
+        yield conn, run_id
+    finally:
+        conn.close()
+        cela_main._DB_CONN = None
+        cela_main._CURRENT_RUN_ID = ""
 
 
 def test_safe_json_parse_prefers_last_of_multiple_fenced_blocks():
@@ -70,7 +88,7 @@ def test_call_task_plan_reviewer_retries_on_parse_failure_then_succeeds(monkeypa
     """1回目がパース不能な応答でも、層2リトライで2回目の正常な応答を拾えること。"""
     calls = {"n": 0}
 
-    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None):
+    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None, state=None):
         calls["n"] += 1
         if calls["n"] == 1:
             return "壊れた応答（JSONではない）"
@@ -87,7 +105,7 @@ def test_call_task_plan_reviewer_fails_closed_to_major_after_exhausting_retries(
     """[BL-089] 全リトライを使い切ってもパース不能な場合、"none"（フェイルオープン）
     ではなく"major"（フェイルクローズ）を返すこと。安全ゲートが誤って縮退計画を
     承認してしまう事態（`1814`ログで実際に発生）を防ぐ。"""
-    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None):
+    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None, state=None):
         return "常に壊れた応答"
 
     monkeypatch.setattr(cela_main, "query_AI", fake_query_ai)
@@ -100,7 +118,7 @@ def test_call_task_planner_retries_on_parse_failure_then_succeeds(monkeypatch):
     """call_task_plannerも層2リトライで単発のパース失敗を吸収できること。"""
     calls = {"n": 0}
 
-    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None):
+    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None, state=None):
         calls["n"] += 1
         if calls["n"] == 1:
             return "壊れた応答"
@@ -117,7 +135,7 @@ def test_call_task_planner_falls_back_to_degenerate_plan_after_exhausting_retrie
     """全リトライを使い切った場合は、従来通りfallback_phase（縮退計画）を返すこと
     （task_plan_reviewer_nodeが後段でこれを検知しmajor判定する前提のため、
     call_task_planner自体はfail-closedにする必要はない）。"""
-    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None):
+    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None, state=None):
         return "常に壊れた応答"
 
     monkeypatch.setattr(cela_main, "query_AI", fake_query_ai)
@@ -131,7 +149,7 @@ def test_call_goal_essence_analyst_retries_on_parse_failure_then_succeeds(monkey
     """call_goal_essence_analystも層2リトライで単発のパース失敗を吸収できること。"""
     calls = {"n": 0}
 
-    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None):
+    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None, state=None):
         calls["n"] += 1
         if calls["n"] == 1:
             return "壊れた応答"
@@ -142,3 +160,49 @@ def test_call_goal_essence_analyst_retries_on_parse_failure_then_succeeds(monkey
 
     assert calls["n"] == 2
     assert result == {"true_essence": "本質", "feasibility_notes": "問題なし"}
+
+
+def _base_reflection_state(run_id: str) -> dict:
+    return {
+        "run_id": run_id,
+        "goal": "テスト目標",
+        "chat_history": [],
+        "constraint_issue_log": [],
+        "round_count": 3,
+        "reflection_interval": 3,
+        "risk_register": [],
+    }
+
+
+def test_call_reflection_retries_on_parse_failure_then_succeeds(db_conn, monkeypatch):
+    """[BL-120] call_reflectionも層2リトライで単発のパース失敗を吸収できること
+    （従来は単発query_AI+_safe_json_parseで、1回の崩れが即座にstagnant判定に直結していた）。"""
+    conn, run_id = db_conn
+    calls = {"n": 0}
+
+    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None, state=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "壊れた応答（JSONではない）"
+        return '{"still_aligned": true, "discussion_status": "continuing", "note": "順調です"}'
+
+    monkeypatch.setattr(cela_main, "query_AI", fake_query_ai)
+    result = cela_main.call_reflection(_base_reflection_state(run_id), config={})
+
+    assert calls["n"] == 2
+    assert result["discussion_status"] == "continuing"
+
+
+def test_call_reflection_fails_closed_to_stagnant_after_exhausting_retries(db_conn, monkeypatch):
+    """[BL-120] 全リトライを使い切ってもパース不能な場合は、従来通りstagnantへ
+    フェイルクローズすること（stagnant自体は安全側の判定として妥当。真の修正点は、
+    1回の一時的なパース崩れだけで即座にこれへ落ちなくなったことの方）。"""
+    conn, run_id = db_conn
+
+    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None, state=None):
+        return "常に壊れた応答"
+
+    monkeypatch.setattr(cela_main, "query_AI", fake_query_ai)
+    result = cela_main.call_reflection(_base_reflection_state(run_id), config={})
+
+    assert result["discussion_status"] == "stagnant"

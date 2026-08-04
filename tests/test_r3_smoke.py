@@ -198,12 +198,14 @@ def test_r3a_t6_integrator_and_arbiter_have_read_and_write_tools():
 
 def test_r3a_t7_dispatch_passes_full_args_dict_not_code_string():
     """R3a-T7（致命的①の回帰確認）: TOOL_DISPATCHのハンドラがargs辞書全体を受け取る
-    形になっており、_query_AI_liveが `handler(args)` を呼んでいること
-    （旧: `handler(args.get("code", ""))` ではないこと）。"""
+    形になっており、_query_AI_liveが `handler(args, state)` を呼んでいること
+    （旧: `handler(args.get("code", ""))` ではないこと）。
+    [BL-131/TOOL_DISPATCH state化] state受け渡し対応により`handler(args)`から
+    `handler(args, state)`に変更されたため、期待文字列も更新。"""
     import inspect
     src = inspect.getsource(cela_main._query_AI_live)
-    assert "result = handler(args)" in src, (
-        "ディスパッチが handler(args) を呼んでいません（致命的①の回帰）"
+    assert "result = handler(args, state)" in src, (
+        "ディスパッチが handler(args, state) を呼んでいません（BL-131/state化の回帰）"
     )
     assert 'result = handler(args.get("code", ""))' not in src, (
         "ディスパッチが handler(args.get(\"code\", \"\")) に戻っています（致命的①の回帰）"
@@ -432,11 +434,14 @@ def test_r3b_t12_deliverable_create_via_write_agreement_saves_file(db_conn):
     cela_main._CURRENT_TASK_ID = "task_x"
 
     long_content = "X" * 500
+    # [BL-131] task_id実在チェック導入により、正式なphasesに無いtask_idは
+    # pending_task_ids経由で許可する必要がある（本テストの主眼はホワイトボード保存の
+    # 挙動であり、task_id検証自体は対象外のためpending_task_idsで通す）。
     result = cela_main.TOOL_DISPATCH["write_agreement"]({
         "action_type": "CREATE", "status": "Proposed", "topic": "R3bテスト成果物T12",
         "decision_what": long_content, "reason_why": "r", "entry_type": "Deliverable",
         "phase_id": "phase_1",
-    })
+    }, {"pending_task_ids": ["task_x"]})
     assert result["success"] is True
 
     rows = conn.execute(
@@ -458,18 +463,20 @@ def test_r3b_t13_deliverable_update_protects_existing_file_path(db_conn):
     cela_main._CURRENT_CALLER_ROLE = "expert"
     cela_main._CURRENT_TASK_ID = "task_x"
 
+    # [BL-131] task_id実在チェック導入により、pending_task_ids経由で許可する。
+    state_for_dispatch = {"pending_task_ids": ["task_x"]}
     create_result = cela_main.TOOL_DISPATCH["write_agreement"]({
         "action_type": "CREATE", "status": "Proposed", "topic": "R3bテスト成果物T13",
         "decision_what": "Y" * 500, "reason_why": "r", "entry_type": "Deliverable",
         "phase_id": "phase_1",
-    })
+    }, state_for_dispatch)
     assert create_result["success"] is True
 
     update_result = cela_main.TOOL_DISPATCH["write_agreement"]({
         "action_type": "UPDATE", "status": "Proposed", "topic": "R3bテスト成果物T13",
         "target_topic": "R3bテスト成果物T13", "phase_id": "phase_1",
         "decision_what": "軽微な修正のみです", "reason_why": "r", "entry_type": "Deliverable",
-    })
+    }, state_for_dispatch)
     assert update_result["success"] is True
 
     rows = conn.execute(
@@ -488,12 +495,16 @@ def test_r3b_t13_deliverable_update_protects_existing_file_path(db_conn):
 # BL-039: decision_extractorが出力するtask_idの表記ゆれ（ドット vs アンダースコア）
 # ===========================================================================
 
-def test_bl039_task_transition_normalizes_dot_notation_task_id():
+def test_bl039_task_transition_normalizes_dot_notation_task_id(db_conn):
     """BL-039: LLMがadvances_to_task_idを`task_1.1`のようなドット表記で返しても、
     task_planner確定済みのアンダースコア表記（`task_1_1`）に正規化して遷移が成立すること。
-    修正前は単純一致比較のみで、この表記ゆれにより全ての遷移要求が拒否されていた。"""
+    修正前は単純一致比較のみで、この表記ゆれにより全ての遷移要求が拒否されていた。
+    [BL-125] _resolve_task_transitionがissue_logを問い合わせるようになったため、
+    DB接続とrun_idが必要（db_conn fixtureを使用）。"""
+    _conn, run_id = db_conn
     phase_1 = {"phase_id": "phase_1", "tasks": [{"task_id": "task_1_1"}, {"task_id": "task_1_2"}]}
-    state = {"phases": [phase_1], "current_phase": phase_1, "current_task_id": "task_1_1"}
+    state = {"phases": [phase_1], "current_phase": phase_1, "current_task_id": "task_1_1", "run_id": run_id,
+              "task_transition_blocked_issue_topics": []}
 
     cela_main._resolve_task_transition(state, {"advances_to_phase_id": None, "advances_to_task_id": "task_1.2"})
 
@@ -502,10 +513,12 @@ def test_bl039_task_transition_normalizes_dot_notation_task_id():
     )
 
 
-def test_bl039_task_transition_still_rejects_truly_unknown_task_id():
+def test_bl039_task_transition_still_rejects_truly_unknown_task_id(db_conn):
     """BL-039の正規化がフェイルクローズを弱めていないこと（存在しないIDは正規化後も拒否）。"""
+    _conn, run_id = db_conn
     phase_1 = {"phase_id": "phase_1", "tasks": [{"task_id": "task_1_1"}]}
-    state = {"phases": [phase_1], "current_phase": phase_1, "current_task_id": "task_1_1"}
+    state = {"phases": [phase_1], "current_phase": phase_1, "current_task_id": "task_1_1", "run_id": run_id,
+              "task_transition_blocked_issue_topics": []}
 
     cela_main._resolve_task_transition(state, {"advances_to_phase_id": None, "advances_to_task_id": "task_9.9"})
 
@@ -526,20 +539,26 @@ def test_bl040_read_deliverable_file_lookup_by_task_id(db_conn):
 
     before = set(os.listdir("log/deliverables")) if os.path.isdir("log/deliverables") else set()
     try:
+        # [BL-131] task_id実在チェック導入により、pending_task_ids経由で許可する。
         create_result = cela_main.TOOL_DISPATCH["write_agreement"]({
             "action_type": "CREATE", "status": "Proposed", "topic": "BL040テスト成果物",
             "decision_what": "Z" * 500, "reason_why": "r", "entry_type": "Deliverable",
-        })
+        }, {"pending_task_ids": ["task_1_1"]})
         assert create_result["success"] is True
 
-        by_task_id = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"task_id": "task_1_1"})
+        # [BL-147] task_id指定時は計画への実在チェックが先に走るため、state経由でpending_task_idsを渡す。
+        read_state = {"pending_task_ids": ["task_1_1"]}
+        by_task_id = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"task_id": "task_1_1"}, read_state)
         assert isinstance(by_task_id, str) and by_task_id.startswith("Z" * 10)
 
         by_topic = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"topic_keyword": "BL040"})
         assert isinstance(by_topic, str) and by_topic.startswith("Z" * 10)
 
-        not_found = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"task_id": "task_nonexistent"})
-        assert isinstance(not_found, dict) and not_found["status"] == "not_found"
+        # [BL-147] 計画にもpending_task_idsにも実在しないtask_idは、成果物の有無を見る前に
+        # 「計画に存在しない」エラーで拒否されるようになった（従来はnot_foundとして素通りしていた）。
+        not_found = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"task_id": "task_nonexistent"}, read_state)
+        assert isinstance(not_found, dict) and not_found["status"] == "error"
+        assert "task_nonexistent" in not_found["message"]
     finally:
         after = set(os.listdir("log/deliverables")) if os.path.isdir("log/deliverables") else set()
         for fn in after - before:

@@ -78,7 +78,7 @@ def test_call_goal_essence_analyst_is_given_python_repl_tool(monkeypatch):
     リスクが後続の全タスクに伝播する。call_goal_essence_analystにもpython_replを与えること。"""
     captured = {}
 
-    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None):
+    def fake_query_ai(messages, client, model, label, tools=None, light_system_prompt=None, state=None):
         captured["tools"] = tools
         return "{}"
 
@@ -109,7 +109,7 @@ def test_goal_essence_node_saves_result_and_sets_flag(db_conn, monkeypatch):
     conn, run_id = db_conn
     monkeypatch.setattr(
         cela_main, "call_goal_essence_analyst",
-        lambda goal: {"true_essence": "本質テキスト", "feasibility_notes": "懸念あり"},
+        lambda goal, state=None: {"true_essence": "本質テキスト", "feasibility_notes": "懸念あり"},
     )
 
     state = {"run_id": run_id, "goal": "テスト目標"}

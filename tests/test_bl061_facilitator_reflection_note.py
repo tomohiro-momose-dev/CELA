@@ -68,7 +68,7 @@ def test_bl061_call_facilitator_prompt_includes_reflection_note(monkeypatch):
     実際に含まれること（従来は完全に欠落していた）。"""
     captured = {}
 
-    def fake_query_AI(messages, client, model, label="Unknown Node", tools=None):
+    def fake_query_AI(messages, client, model, label="Unknown Node", tools=None, light_system_prompt=None, state=None):
         captured["messages"] = messages
         return "ダミーのファシリテーター応答"
 
@@ -86,7 +86,7 @@ def test_bl061_call_facilitator_handles_empty_reflection_note(monkeypatch):
     フォールバック文言が使われること。"""
     captured = {}
 
-    def fake_query_AI(messages, client, model, label="Unknown Node", tools=None):
+    def fake_query_AI(messages, client, model, label="Unknown Node", tools=None, light_system_prompt=None, state=None):
         captured["messages"] = messages
         return "ダミー応答"
 

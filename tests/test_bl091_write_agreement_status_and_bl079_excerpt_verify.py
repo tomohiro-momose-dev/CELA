@@ -122,7 +122,9 @@ def test_verify_whiteboard_excerpt_handler_empty_excerpt():
 
 def test_verify_whiteboard_excerpt_tool_registered_in_dispatch_and_detector_tools():
     assert "verify_whiteboard_excerpt" in cela_main.TOOL_DISPATCH
-    assert cela_main.TOOL_DISPATCH["verify_whiteboard_excerpt"] is cela_main._verify_whiteboard_excerpt_handler
+    direct = cela_main._verify_whiteboard_excerpt_handler({"excerpt": ""})
+    via_dispatch = cela_main.TOOL_DISPATCH["verify_whiteboard_excerpt"]({"excerpt": ""})
+    assert direct == via_dispatch
     src = inspect.getsource(cela_main.call_detector)
     assert "VERIFY_WHITEBOARD_EXCERPT_TOOL" in src
 

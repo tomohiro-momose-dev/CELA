@@ -49,7 +49,7 @@ def test_bl080_supersede_deliverable_with_long_content_writes_to_whiteboard(db_c
     新しいバージョンとして保存されること（read_deliverable_fileが読める状態になること）。"""
     conn, run_id = db_conn
     long_content_v1 = "# task_1_1 予算内訳書\n\nオペレーター3名体制。\n" + ("初版の本文。" * 60)
-    err = cela_main._commit_agreement_from_tool(
+    err, _ = cela_main._commit_agreement_from_tool(
         {
             "action_type": "CREATE", "entry_type": "Deliverable", "status": "Proposed",
             "topic": "task_1_1 予算内訳書", "decision_what": long_content_v1,
@@ -60,7 +60,7 @@ def test_bl080_supersede_deliverable_with_long_content_writes_to_whiteboard(db_c
     assert err is None
 
     long_content_v2 = "# task_1_1 予算内訳書（修正版）\n\nオペレーター4名体制。\n" + ("修正版の本文。" * 60)
-    err = cela_main._commit_agreement_from_tool(
+    err, _ = cela_main._commit_agreement_from_tool(
         {
             "action_type": "SUPERSEDE", "entry_type": "Deliverable", "status": "Proposed",
             "target_topic": "task_1_1 予算内訳書", "topic": "task_1_1 予算内訳書（修正版）",
@@ -99,7 +99,7 @@ def test_bl080_supersede_with_short_reason_does_not_touch_whiteboard(db_conn):
         conn, run_id, caller_role="expert", task_id="task_1_1",
     )
 
-    err = cela_main._commit_agreement_from_tool(
+    err, _ = cela_main._commit_agreement_from_tool(
         {
             "action_type": "SUPERSEDE", "entry_type": "Deliverable", "status": "Rejected",
             "target_topic": "task_1_1 予算内訳書", "topic": "task_1_1 予算内訳書",

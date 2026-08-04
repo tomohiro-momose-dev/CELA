@@ -29,6 +29,11 @@ def db_conn(tmp_path):
     cela_main._DB_CONN = conn
     run_id = f"test-{int(time.time())}-{uuid.uuid4().hex[:8]}"
     cela_main._CURRENT_RUN_ID = run_id
+    # [BL-131] write_agreementのtask_id実在チェックが、stateを渡さない旧来の
+    # グローバル経由呼び出し（本ファイルの一貫した書き方）でも通るようにする。
+    cela_main._CURRENT_PHASES = [
+        {"phase_id": "phase_1", "tasks": [{"task_id": "task_1_1"}, {"task_id": "task_1_2"}]},
+    ]
     try:
         yield conn, run_id
     finally:
@@ -37,6 +42,7 @@ def db_conn(tmp_path):
         cela_main._CURRENT_RUN_ID = ""
         cela_main._CURRENT_CALLER_ROLE = ""
         cela_main._CURRENT_TASK_ID = ""
+        cela_main._CURRENT_PHASES = []
 
 
 # ===========================================================================
@@ -107,6 +113,28 @@ def test_apply_text_edits_multiple_edits_applied_in_sequence():
     ])
     assert err is None
     assert new_content == "A: 10\nB: 2\nC: 30"
+
+
+def test_apply_text_edits_non_dict_edit_item_returns_error_without_crashing():
+    """本番ドライランで、LLMが`edits`に{old_text,new_text}辞書ではなく生文字列を
+    返したため`e.get("old_text", "")`が`AttributeError: 'str' object has no
+    attribute 'get'`で未捕捉クラッシュし、run_ai_vs_ai_loop全体が停止した事故の再発防止。
+    非dict要素はクラッシュではなくエラー文字列としてツール呼び出し元へ返し、
+    ツールループ内で自己修正できるようにする。"""
+    content = "車両台数は4台とする。"
+    new_content, err = cela_main._apply_text_edits(content, ["車両台数は3台とする。"])
+    assert new_content is None
+    assert err is not None and "edits[0]" in err and "str" in err
+
+
+def test_apply_text_edits_non_dict_edit_item_among_valid_ones_returns_error():
+    content = "A: 1\nB: 2"
+    new_content, err = cela_main._apply_text_edits(content, [
+        {"old_text": "A: 1", "new_text": "A: 10"},
+        "B: 2",
+    ])
+    assert new_content is None
+    assert err is not None and "edits[1]" in err
 
 
 # ===========================================================================

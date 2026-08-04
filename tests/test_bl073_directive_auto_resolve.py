@@ -84,7 +84,7 @@ def test_bl073_commit_agreement_from_tool_resolves_directive_on_deliverable_appr
         "depends_on": [], "resource_claims": {},
     }, conn, run_id)
 
-    err = cela_main._commit_agreement_from_tool(
+    err, _ = cela_main._commit_agreement_from_tool(
         {
             "action_type": "UPDATE", "entry_type": "Deliverable", "status": "Approved",
             "target_topic": "task_2_1 成果物", "topic": "task_2_1 成果物",

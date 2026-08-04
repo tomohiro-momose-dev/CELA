@@ -135,7 +135,9 @@ def test_diff_no_actual_change_reports_identical(db_conn):
 
 def test_tool_registered_in_dispatch():
     assert "diff_plan_draft_versions" in cela_main.TOOL_DISPATCH
-    assert cela_main.TOOL_DISPATCH["diff_plan_draft_versions"] is cela_main._diff_plan_draft_versions_handler
+    direct = cela_main._diff_plan_draft_versions_handler({})
+    via_dispatch = cela_main.TOOL_DISPATCH["diff_plan_draft_versions"]({})
+    assert direct == via_dispatch
 
 
 def test_call_task_plan_reviewer_wires_diff_tool_and_instruction():

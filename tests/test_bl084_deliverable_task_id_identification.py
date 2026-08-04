@@ -51,7 +51,7 @@ def test_bl084_update_edits_succeeds_despite_topic_drift_without_target_topic(db
     ホワイトボードが見つかり、editsが正しく適用されること。"""
     conn, run_id = db_conn
     v1 = "# task_2_4 最大待ち時間シミュレーション\n\n" + ("本文。" * 60) + "\n連続超過7.1%という記載。"
-    err = cela_main._commit_agreement_from_tool(
+    err, _ = cela_main._commit_agreement_from_tool(
         {
             "action_type": "CREATE", "entry_type": "Deliverable", "status": "Proposed",
             "topic": "task_2_4 最大待ち時間シミュレーション（確率論的リスク反映版）",
@@ -63,7 +63,7 @@ def test_bl084_update_edits_succeeds_despite_topic_drift_without_target_topic(db
     assert err is None
 
     # target_topic省略・topicは前回と異なる文字列（実ログと同じドリフトパターン）
-    err = cela_main._commit_agreement_from_tool(
+    err, _ = cela_main._commit_agreement_from_tool(
         {
             "action_type": "UPDATE", "entry_type": "Deliverable", "status": "Proposed",
             "topic": "task_2_4 結論部の数値整合性修正",
@@ -125,7 +125,7 @@ def test_bl084_supersede_finds_target_by_task_id_despite_topic_drift(db_conn):
     )
 
     v2 = "# task_2_4（全面改訂）\n\n" + ("改訂本文。" * 60)
-    err = cela_main._commit_agreement_from_tool(
+    err, _ = cela_main._commit_agreement_from_tool(
         {
             "action_type": "SUPERSEDE", "entry_type": "Deliverable", "status": "Proposed",
             "topic": "task_2_4 まったく違う言い回し",  # target_topic省略
@@ -160,7 +160,7 @@ def test_bl084_non_deliverable_entry_types_still_use_topic_based_matching(db_con
         conn, run_id, caller_role="expert", task_id="task_1_1",
     )
     # topicが変わっているためtarget_topic省略時は既存行と一致しない（従来通りの挙動）
-    err = cela_main._commit_agreement_from_tool(
+    err, _ = cela_main._commit_agreement_from_tool(
         {
             "action_type": "UPDATE", "entry_type": "Decision", "status": "Proposed",
             "topic": "予算上限の再検討", "decision_what": "3200万円",
