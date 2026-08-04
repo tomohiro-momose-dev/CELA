@@ -1898,6 +1898,20 @@
 
 ---
 
+### D-133: `revise_goal`成功時、承認済みの過去タスクへ「新ゴールとの整合性要再確認」issueを機械的に起票する（BL-163）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-04 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（BL-162の調査を受けた設計相談「ゴール承認後にタスクを1_1からやり直させた方が良いか」に対し、AIが全面リスタート／完全受け身双方の欠点を説明した上で折衷案（機械的issue起票）を提案し、ユーザーが「これでいきましょう。注記が最初に出てくれば、AIの混乱も少ないはずです」と採用。AskUserQuestionでissue重大度（minor/open採用）・実現範囲（既存の起票の仕組みに乗せるだけ採用）の2点を確認） |
+| **決定理由** | ゴール改定（`revise_goal`、BL-086）後、それ以前に承認済みだった過去タスクの成果物は旧ゴールの前提のまま放置される。全面リスタートは、矛盾していたのは特定の前提・数値だけであるにもかかわらずコストが大きく、CELAの既存アーキテクチャ（SUPERSEDE改訂、BL-096 issue管理、BL-144滞留検知、BL-145タスク明示化）が「前進しながら必要な箇所だけ修正する」設計思想であることとも不整合。一方、後続タスクが偶然気づくことへ期待する完全受け身な設計は見落としリスクがある。折衷案として、ゴール改定成功時に承認済み過去タスクへ機械的に整合性再確認issueを起票し、既存の解決フロー（RESOLVE/DEFER、BL-144滞留検知）に確実に乗せることとした。 |
+| 決定内容 | `ALLOWED_ISSUE_ACTIONS_BY_ROLE`へ新規ロール`"revise_goal_auto": {"CREATE"}`を追加。`_revise_goal_tool_impl`の成功パス末尾で、`get_agreements_from_db`を`_find_active_deliverable_agreement`（BL-084）と同型のdedupロジックで走査し、最新statusが`RESOLVING_DELIVERABLE_STATUSES`（Approved/Approved_with_Conditions/Implicitly_Accepted）に含まれる全`(phase_id, task_id)`へ、topic=`goal_revision_consistency_check_<phase_id>_<task_id>`・severity="minor"のissueを`_write_issue_impl`で直接起票する。既存のpin builder（`_build_open_issue_pin_text`等）は無変更で、severity="minor"のため既存のUser AI向けopen issue一覧へ自然に乗り、BL-136の強制RESOLVE/DEFER文言・BL-125/158のタスク遷移ブロック（いずれもmajor/escalated対象）は発動しない。タスク限定サーフェシング（そのtask_idに触れた瞬間だけ注入する新規機構）は既存CELAに前例がなく大規模になるため、今回は既存の起票の仕組みに乗せるだけに留めた（将来必要になれば別BL）。 |
+| 影響 | `cela_main.py`（`ALLOWED_ISSUE_ACTIONS_BY_ROLE`・`_revise_goal_tool_impl`の2箇所）。新規テスト`tests/test_bl163_revise_goal_auto_flags_past_tasks.py`（6件）追加。`python -m py_compile`合格、既存BL-086/096/136/144/154関連101件無退行、フルオフラインスイート665件Pass。実ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-163](back_log/issue_backlog.md#bl-163-revise_goal成功時既に承認済みの過去タスクへ新ゴールとの整合性要再確認issueを機械的に起票する)、[BL-162](back_log/issue_backlog.md#bl-162-ゴール改定revise_goal直後のdetector-goal_change監査が旧ゴール文を取得する手段を持たず判定基準の1つを実質評価できない)、[BL-086](back_log/issue_backlog.md#bl-086-前提エスカレーション経路-freeze復活-ゴール改定goalshifteventの実消費化) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
