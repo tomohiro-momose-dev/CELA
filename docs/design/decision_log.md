@@ -1990,20 +1990,21 @@
 | 影響 | `cela_main.py`（`_check_write_permission`関数内）。新規テスト`tests/test_bl169_user_deliverable_create_forbidden.py`（9件）追加。既存`test_bl146_write_agreement_current_task_gate.py`・`test_r4_smoke.py`の一部テストが、userロールでDeliverable CREATEを行うテスト用ショートカットに依存していたため、テスト意図を変えない形で修正（前者はaction_typeをUPDATEへ、後者はexpert CREATE→user UPDATE承認の2段階へ）。`python -m py_compile`合格、既存BL-062/084/095/126/127/131/146関連80件無退行、フルオフラインスイート698件Pass。実ドライランでの効果確認は次回待ち。 |
 | 関連 BL | [BL-169](back_log/issue_backlog.md#bl-169-write_agreementの権限チェックがstatusのみを見ておりuserがexpertを介さず成果物deliverableを自作自己提出できてしまう)、[BL-166](back_log/issue_backlog.md#bl-166-_build_agreements_contextのアイコンラベル判定がrejectされた成果物を承認済みと表示してしまう)、[BL-167](back_log/issue_backlog.md#bl-167-reflection内のstagnant-issue滞留検知がdefer_to_task_idの受け皿タスク完了後もissueを永久に見落とし続ける)、[BL-168](back_log/issue_backlog.md#bl-168-verified_factsテーブルにゴール改定を反映するsupersede機構が一切ない) |
 
----
-
-## 未決定（pending）
-
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `pending` |
-| 論点 | `run_ai_vs_ai_loop`の自前JSON checkpoint（`_save_checkpoint`/`_load_checkpoint`、`--resume <path>`）は、`--resume`時に必ずグラフのentry_point（`goal_essence`）から全体を再走行する。`goal_essence`/`task_planner`/`task_plan_reviewer`は`_done`フラグでスキップされるが、`generate_user_utterance_node`には再入場ガードが無く、無条件にuser発言をchat_historyへ追記するため、前回の一時停止がUser発言追記直後・Expert応答前だった場合、resume時にuser発言が二重に積まれる（`role連続を検出`警告、`log/2026-07-27/2044`で確認）。ユーザーから「本来はLangGraphのcheckpointerを使えば真の一時停止が利くのでは」との指摘があり、Context7で現行のLangGraph公式ドキュメント（`/websites/langchain_oss_python_langgraph`）を確認したところ、`compile(checkpointer=...)` + `thread_id`ベースの再開はentry_pointからの全体再走行ではなく中断ノードの続きから再開することを確認した。ただしノード単位のcheckpointは、ノード内部（Expert/Detectorの`_query_AI_live`ツールループ）の途中でのCtrl+Cには対応できず、そのノードは最初から再実行される。公式ドキュメントにも"Do not create new records before an `interrupt` call. Re-running the node upon resume will create duplicate records, leading to data inconsistencies."と明記されており、これがユーザーの懸念（「ツールで登録しようとしたら既にDBにあった、という混乱」）の根本原因。真に解消するには`@task`デコレータでノード内部の個々の呼び出しを個別checkpoint対象にする必要がある。 |
-| 候補 | A. Tier 0のみ（`generate_user_utterance_node`等への再入場ガード追加）で最小限の対症療法に留める / B. Tier 1（LangGraph本来の`checkpointer`+`thread_id`ベースの再開へ移行し自前JSON checkpoint/`--resume <path>` CLIを置き換え）まで実施 / C. Tier 1に加えTier 2（`_query_AI_live`のツールループ内の各呼び出しを`@task`化）まで実施し、ノード内部途中の再開にも対応 |
-| **決定理由** | **（決定時に必須、まだ未決定）** |
-| 決定内容 | **（未記入）** |
+| 日付 | 2026-08-04 |
+| 状態 | `decided`（Tier 1実装完了、Tier 2は将来課題として見送り） |
+| 決定者 | t-momose（当初`pending`のまま放置されていたが、本日「そろそろLangGraphの正式なチェックポイントを実装したい」と要望があり再着手・決定） |
+| **決定理由** | 論点自体はBL-105起票時（`pending`）から変わらず：自前JSON checkpointは`--resume`時に必ずグラフのentry_point（`goal_essence`）から全体を再走行するため、`generate_user_utterance_node`の再入場ガード欠如と相まってラウンド途中の一時停止でuser発言が二重に積まれる。`log/2026-08-04/1123→1355→1435→1546→1548`という同一runが5つの異なる`log/`ディレクトリへ跨ってCtrl+C/`--resume`を繰り返した実例を追跡する中で再燃し、ユーザーから実装着手の要望があった。着手前にユーザーへ「将来ヒューマンインザループ（HITL）実装を見据えるとTier1/Tier2どちらが良いか」を確認され、`interrupt()`ベースのHITLはTier1（`checkpointer`導入）があれば動作するが、"Do not create new records before an `interrupt` call. Re-running the node upon resume will create duplicate records"という公式ドキュメントの制約により、`interrupt()`呼び出し前に副作用（DB書き込み等）があると再開時に重複実行される。CELAの意味のある意思決定点（`write_agreement`/`revise_goal`/`escalate_premise_concern`）はほぼ全てExpert/User AI/Facilitatorのツールループ内部で発生するため、実用的なHITLゲートを後で入れるにはTier2相当の対応が最終的には必要になり得るが、**`@task`への分解粒度は具体的なゲート設計（どのツール呼び出しの前で人間に止まってほしいか）に強く依存するため、HITL要件が無い現時点で汎用的に分解すると過剰設計になるリスクが高い**と回答。ユーザーが「Tier1だけで」と回答し、候補Bを採択した。 |
+| 決定内容 | 候補B（Tier 1: LangGraph本来の`checkpointer`（`SqliteSaver`）+ `thread_id`（==`run_id`）ベースの再開へ移行し、自前JSON checkpoint/`--resume <path>` CLIを置き換え）を採用する。候補C（Tier 2、`_query_AI_live`のツールループ内の各呼び出しを`@task`化しノード内部途中の再開にも対応）は、将来ヒューマンインザループ機能を具体的に設計するタイミングで、そのゲートが実際にどのツール呼び出しの前に必要かに応じて改めて着手する。 |
+| 影響 | `cela_main.py`（`run_ai_vs_ai_loop`・`build_graph`・CLI引数）、`requirements.txt`（新規、`langgraph-checkpoint-sqlite`追加）、`.gitignore`（`cela_checkpoints.db*`追加）、`tests/test_checkpoint_resume.py`（全面書き換え）、`tests/tools/db_checker.py`（run_id自動検出をDB経由へ）。詳細設計は`docs/design/back_log/BL-105/BL105_basic_design.md`参照。新規テスト6件、既存関連4テストファイル計85件無退行、フルオフラインスイート700件Pass。実ドライランでの効果確認は次回待ち。 |
 | 関連 BL | [BL-105](back_log/issue_backlog.md#bl-105-checkpointresume機構がentry_pointから全体再走行するため未応答のuser発言が二重に積まれるlanggraph本来のcheckpointertask未導入という設計ギャップ) |
+
+---
+
+## 未決定（pending）
 
 ---
 
