@@ -4596,7 +4596,9 @@ elif entry_type == "Deliverable":
 
 **BL-062との違い：** BL-062（`partial`実装済み）は「Detectorの却下判定が、DB上のstatusへ正しく反映されるか（SUPERSEDE/UPDATE運用指示の欠如）」という**書き込み側**の問題だった。今回発見したのは、status="Rejected"というDBへの反映自体は正しく起きているにもかかわらず、**表示ロジックがそれを握りつぶす**という一段深い、別の欠陥。
 
-**対応の手掛かり（未実装・方針確定済み）：** 既存の`RESOLVING_DELIVERABLE_STATUSES`（`cela_main.py:3860`、`{"Approved", "Approved_with_Conditions", "Implicitly_Accepted"}`）を再利用し、Deliverableのアイコン判定をProposed/成功系ステータス/その他（Rejected等）の3分岐に変更する。ラベルにもRejected時の専用表示を追加する。
+**対応内容（実施済み）：** 既存の`RESOLVING_DELIVERABLE_STATUSES`（`{"Approved", "Approved_with_Conditions", "Implicitly_Accepted"}`）を再利用し、Deliverableのアイコン判定を`status == "Proposed"`（📄）／`status in RESOLVING_DELIVERABLE_STATUSES`（✅）／それ以外（⚠️）の3分岐へ変更した。ラベルも`status == "Rejected"`の場合`"[却下成果物]"`を返すよう追加した。
+
+新規テスト`tests/test_bl166_rejected_deliverable_icon.py`（6件：Approved/Approved_with_Conditions/Implicitly_Acceptedが引き続き✅になること、Proposedが引き続き📄になること、Rejectedが✅ではなく⚠️[却下成果物]になること、正常な合意事項と混在しても各行が正しく区別されること）追加。`python -m py_compile`合格、既存BL-062/096/136/144/145/163関連100件無退行、フルオフラインスイート689件Pass。実ドライランでの効果確認は次回待ち。
 
 **関連:** [BL-062](#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（Rejectedの書き込み側を解消した前例、今回は表示側）、[BL-164](#bl-164-detectorへのrecent-decisions参考程度節が前回decisionの生reasoninginternal_thought_processを丸ごと埋め込んでおりsupersede済みホワイトボードの古い引用をdetectorが誤採用しmax_tool_iterを浪費する)（同一クロールセッションでの直前の発見）、[BL-167](#bl-167-reflection内のstagnant-issue滞留検知がdefer_to_task_idの受け皿タスク完了後もissueを永久に見落とし続ける)・[BL-168](#bl-168-verified_factsテーブルにゴール改定を反映するsupersede機構が一切ない)（同一クロールで連鎖的に発見した「旧ゴールの数値が残り続ける」問題群）
 
