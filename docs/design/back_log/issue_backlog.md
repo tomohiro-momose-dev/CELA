@@ -3381,6 +3381,20 @@ Detectorには特に「Agentの数値がゴール文の直接記載か、AI自�
 
 **完了条件（Tierを選定した後に確定）:** 未定。まずはユーザーとの設計相談でどのTierまで踏み込むかを決定してから、詳細設計書（`docs/design/back_log/BL-105/`）を作成する。
 
+**実装完了（`done`）：** ユーザーから改めて「そろそろLangGraphの正式なチェックポイントを実装したい」との要望があり、`log/2026-08-04/1123→1355→1435→1546→1548`という同一runが5つの異なる`log/`ディレクトリへ跨って何度もCtrl+C/`--resume`を繰り返した実例を踏まえ着手。ユーザーへ「将来ヒューマンインザループ（HITL）実装を見据えるとTier1のみで足りるか」を確認され、`interrupt()`ベースのHITLはTier1（`checkpointer`）があれば動作するが、副作用を`interrupt()`呼び出し前に起こすと再開時に重複実行される制約があり、CELAの意味のある意思決定点（`write_agreement`/`revise_goal`等）はほぼ全てツールループ内部で発生するため、具体的なゲート設計が固まるまでTier2（`@task`分解）は見送るのが過剰設計を避けられると回答し、**Tier 1のみを実装する方針で合意**（詳細はdecision_lineage.md参照）。
+
+Plan Mode（Explore不使用、既存コード調査＋LangGraph公式ドキュメントの再確認＋Plan agent 1体による検証を実施）で設計を作成し、`docs/design/back_log/BL-105/BL105_basic_design.md`として保存、ユーザー承認（ExitPlanMode）を経て実装：
+- 新規依存`langgraph-checkpoint-sqlite`（`requirements.txt`新規作成）を追加・インストール。
+- `_save_checkpoint`/`_load_checkpoint`（自前JSON checkpoint、`cela_main.py:206-224`）を削除。`CELA_CHECKPOINT_DB_PATH = "cela_checkpoints.db"`（リポジトリ直下、run跨ぎで単一ファイル、`thread_id == run_id`で一意に引ける）を新設。
+- `build_graph(checkpointer: BaseCheckpointSaver | None = None)`へシグネチャ変更、`graph.compile(checkpointer=checkpointer)`。既存4箇所のトポロジー確認専用テスト呼び出し（引数無し）は後方互換。
+- `run_ai_vs_ai_loop`を全面書き換え：`resume_run_id`（旧`resume_from`から改名）がある場合、`app.get_state(runtime_config)`で直近スナップショットを取得し、`snapshot.next`が非空（ラウンド途中で中断）なら最初の`app.stream()`入力を`None`にして「中断した直後のノードから」再開する。`snapshot.next`が空（ラウンド境界で中断）なら通常のフルstate投入。2回目以降のターンは既存通りフルstateを再投入（`goal: Annotated[str, _take_latest]`が上書き方式であることをコード確認済みのため、同一`thread_id`への繰り返し投入でも`chat_history`等が二重蓄積しないことを検証済み）。手動`_save_checkpoint`呼び出しは削除（checkpointerがノード完了ごとに自動永続化）。起動バナーに`run_id`を常時表示するよう追加。
+- CLI `--resume`を`CHECKPOINT_JSON`（ファイルパス）から`RUN_ID`（run_id文字列）へ変更。
+- `.gitignore`に`cela_checkpoints.db*`を追加（cela.db本体とは異なり、純粋な一時停止・再開用の一過性データのため）。
+- `tests/test_checkpoint_resume.py`を全面書き換え：旧JSON checkpointの3テストを削除、CELAの実グラフとは独立した最小の合成グラフ（ノードA/B＋条件分岐ループ＋END）で「`None`入力再開が中断直後のノードから続き、完了済みノードを再実行しないこと」（核心の回帰テスト）・「同一`thread_id`への毎ターンフルstate再投入でリスト系フィールドが二重蓄積しないこと」・`build_graph()`の後方互換・`run_ai_vs_ai_loop`のresume分岐ロジック（存在しないrun_idでのエラー終了、新規runでは`get_state`を呼ばないこと）を新規追加（6件）。既存のノード冪等性テスト1件は無変更で維持。
+- `tests/tools/db_checker.py`の`extract_run_id_from_checkpoint`（廃止）を`extract_latest_run_id_from_db`（`decisions`テーブルから最新run_id取得）へ置き換え。
+
+`python -m py_compile`合格、`tests/test_checkpoint_resume.py`（6件）・既存関連4テストファイル（BL-087 Stage2/Stage3-4、BL-126 Stage D、BL-130）計85件無退行、フルオフラインスイート700件Pass。実ドライランでの効果確認（Ctrl+C→`--resume`でのuser発言重複解消）は次回の長時間ドライラン待ち。設計詳細は`docs/design/back_log/BL-105/BL105_basic_design.md`参照。
+
 ---
 
 ### BL-106: `_query_AI_live`の自動reasoningダイジェストがtool呼び出し履歴より手前（index 1）に居座り、毎iterプレフィックスキャッシュを破壊していた
