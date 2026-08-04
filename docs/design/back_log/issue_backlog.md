@@ -3394,7 +3394,7 @@ Plan Mode（Explore不使用、既存コード調査＋LangGraph公式ドキュ�
 - `tests/test_checkpoint_resume.py`を全面書き換え：旧JSON checkpointの3テストを削除、CELAの実グラフとは独立した最小の合成グラフ（ノードA/B＋条件分岐ループ＋END）で「`None`入力再開が中断直後のノードから続き、完了済みノードを再実行しないこと」（核心の回帰テスト）・「同一`thread_id`への毎ターンフルstate再投入でリスト系フィールドが二重蓄積しないこと」・`build_graph()`の後方互換・`run_ai_vs_ai_loop`のresume分岐ロジック（存在しないrun_idでのエラー終了、新規runでは`get_state`を呼ばないこと）を新規追加（6件）。既存のノード冪等性テスト1件は無変更で維持。
 - `tests/tools/db_checker.py`の`extract_run_id_from_checkpoint`（廃止）を`extract_latest_run_id_from_db`（`decisions`テーブルから最新run_id取得）へ置き換え。
 
-`python -m py_compile`合格、`tests/test_checkpoint_resume.py`（6件）・既存関連4テストファイル（BL-087 Stage2/Stage3-4、BL-126 Stage D、BL-130）計85件無退行、フルオフラインスイート700件Pass。実ドライランでの効果確認（Ctrl+C→`--resume`でのuser発言重複解消）は次回の長時間ドライラン待ち。設計詳細は`docs/design/back_log/BL-105/BL105_basic_design.md`参照。
+`python -m py_compile`合格、`tests/test_checkpoint_resume.py`（6件）・既存関連4テストファイル（BL-087 Stage2/Stage3-4、BL-126 Stage D、BL-130）計85件無退行、フルオフラインスイート700件Pass。**実ドライランでの効果確認：完了**（ユーザーが実ドライランで一時停止・`--resume`再開を行い「チェックポイントちゃんと動作しています」と確認、2026-08-04）。設計詳細は`docs/design/back_log/BL-105/BL105_basic_design.md`参照。
 
 ---
 
