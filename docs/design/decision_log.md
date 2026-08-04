@@ -1912,6 +1912,20 @@
 
 ---
 
+### D-134: Detectorの「Recent Decisions（参考程度）」節を、生reasoning（`internal_thought_process`）込みの生データから`who`/`what`/`why`のみのキュレーション済み要約へ変更し、出所限定の注意書きを追加する（BL-164）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-04 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（ログレビュー継続で発見したBL-164の修正案をAIが提示、ユーザーから「internal_thought_process除去で監査能力の粒度が落ちないか」「ゼロベースで見せるべき情報構造を設計するなら」の2点質問を受けPlan Modeで討議、承認） |
+| **決定理由** | `log/2026-08-04/1123`のtask_1_3監査で、`Detector`が`verify_whiteboard_excerpt`を29回中11回失敗させ続けMAX_TOOL_ITER=30へ2回到達する実害を確認。原因は`recent_decitions`（直近2件のdecisions行）が`SELECT *`の生データ（`internal_thought_process`列込み）をそのままプロンプトへ埋め込んでおり、既にsupersede済みのホワイトボード版への一字一句引用が`internal_thought_process`内に残ったまま次のDetectorへ渡り、最新内容と誤認されたため。ユーザーの質問に対しては、`thought_process_audit`（今回ターンのExpert/User AI自身の思考過程を専用に監査する既存ブロック）が「思考ログ監査」の本来の役割を既に担っており、`recent_decitions`側の`internal_thought_process`は用途外の重複混入であることを確認。`call_detector`の全体構成を4層に整理した結果、修正が必要なのは「継続性・参考情報」層（`recent_decitions`）のみで、ゼロベースでの大規模な情報構造再設計は不要と判断した。 |
+| 決定内容 | `recent_decitions`（`cela_main.py:5812`）を`who`/`what`/`why`のみのキュレーション済み要約へ変更（`internal_thought_process`等の生列を除外）。「Recent Decisions（参考程度）」節の直前（`cela_main.py:6204`）へ、target_excerpt/verify_whiteboard_excerptの根拠にはR4節（現在タスクの最新ホワイトボード）の内容のみを使用するよう明示する注意書きを追加。既存のBL-079指示を、引用の出所を限定する形で補強。ブロックの並び順（BL-104のキャッシュ効率化原則）は無変更。 |
+| 影響 | `cela_main.py`（`call_detector`関数内の2箇所）。`recent_decitions`は同関数内でのみ定義・使用されるが、`call_detector`はDetector（Domain Review・数値監査の両パス）全ての共通経路のため全監査呼び出しに影響する変更。新規テスト`tests/test_bl164_recent_decisions_no_raw_reasoning_leak.py`（4件）追加。`python -m py_compile`合格、既存Detector関連テスト（BL-079/091/093/104/126/162）102件無退行、フルオフラインスイート669件Pass。実ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-164](back_log/issue_backlog.md#bl-164-detectorへのrecent-decisions参考程度節が前回decisionの生reasoninginternal_thought_processを丸ごと埋め込んでおりsupersede済みホワイトボードの古い引用をdetectorが誤採用しmax_tool_iterを浪費する)、[BL-152](back_log/issue_backlog.md#bl-152-verify_whiteboard_excerptが今レビューすべき成果物ではなく常にcurrent_task_idのホワイトボードだけを見ていた)、[BL-079](back_log/issue_backlog.md#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
