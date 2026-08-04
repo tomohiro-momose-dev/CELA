@@ -4624,7 +4624,9 @@ _formalizable_stale = [i for i in _stale_escalated if not i.get("defer_to_task_i
 
 **副次確認（タスクID安定性）：** 今回の再構築ではtask_1_1〜task_6_4のtask_idはすべて維持されていた（`log_no_prompt.md`の再出力プラン全体でIDの重複・欠落・変更なしを確認）。ただしこれはコードによる保証ではなく、Task Planner自身が「surgicalな変更のみ」と自己判断した結果であり、将来の別の再構築で維持される保証はない。
 
-**対応の手掛かり（未実装・方針確定済み）：** `defer_to_task_id`の受け皿タスクが`RESOLVING_DELIVERABLE_STATUSES`相当で既に完了しているかを判定する新規ヘルパーを追加し、完了済みなのにissueが未解決（`status`が`resolved`でない）の場合は「受け皿は失効した」とみなし`_formalizable_stale`へ再度含める。
+**対応内容（実施済み）：** 新規ヘルパー`_is_task_completed(conn, run_id, task_id)`（受け皿タスクの最新Deliverableが`RESOLVING_DELIVERABLE_STATUSES`かを判定）を追加し、`_formalizable_stale`フィルタを「`defer_to_task_id`が無い、または受け皿タスクが既に完了済み」へ変更した。調査の過程で、同型の欠陥を`_get_forced_escalated_issues_text`（BL-136のUser AI向け毎ターン強制解決プロンプト）も抱えていることが判明したため、同じヘルパーをこちらにも配線し、受け皿タスクが完了済みなのに未解決のissueは再度提示されるようにした（同一クロールで見つかった同種のバグのためBL-167のスコープ内で一括対応）。
+
+新規テスト`tests/test_bl167_defer_to_task_id_completed_target.py`（9件：`_is_task_completed`単体4件（Deliverable無し／Approved有り／Rejectedのみ／最新statusを見る回帰確認）、`reflection_node`の`_formalizable_stale`で受け皿未完了時は従来通り除外され続けること・受け皿完了後は再度対象化されること、`_get_forced_escalated_issues_text`で同様の2件）追加。`python -m py_compile`合格、既存BL-062/096/136/144/145/163関連100件無退行、フルオフラインスイート689件Pass。実ドライランでの効果確認は次回待ち。
 
 **関連:** [BL-145](#bl-145-エスカレーションissue申し送りissueをdetectorreflectorの正当性監査を経てタスクプランナー経由で明示的にタスク化する)（本フィルタの導入元）、[BL-144](#bl-144-reflection_nodeのbl-096機械的stagnant上書きがescalated-issueの単なる存在で無条件発火しreflection自身が健全な進捗と判定した回まで停滞扱いしていた)（滞留検知そのもの）、[BL-168](#bl-168-verified_factsテーブルにゴール改定を反映するsupersede機構が一切ない)（同じ実害の別経路）、[BL-166](#bl-166-_build_agreements_contextのアイコンラベル判定がrejectされた成果物を承認済みと表示してしまう)（同一クロールでの直前の発見）
 
