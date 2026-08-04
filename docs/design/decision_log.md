@@ -2014,6 +2014,18 @@
 | 影響 | `cela_main.py`（`call_facilitator`内`escalated_issues_block`）。新規テスト`tests/test_bl170_facilitator_escalated_issues_guardrail.py`（3件）追加。`python -m py_compile`合格、既存`test_bl061_facilitator_reflection_note.py`・`test_bl126_stage_d_essence_dialogue.py`・`test_bl096_issue_log.py`計65件無退行。フルオフラインスイート703件中702件Pass（1件は`shift_id`のミリ秒タイムスタンプ衝突による既存の低頻度flakyテストで本修正と無関係、単体実行では5件Pass）。実ドライランでの効果確認は次回待ち。 |
 | 関連 BL | [BL-170](back_log/issue_backlog.md#bl-170-facilitatorのescalated_issues_blockに役割境界の明示が無くモデルがexpertの仕事数値検算成果物再提出を自分の仕事だと誤認して空回りする)、[BL-093](back_log/issue_backlog.md#bl-093-ノード内スクラッチパッド-thinkツール理由づけの退避ツールループ内の可変todoissuenotesメモ) |
 
+### D-141: OpenRouter無料枠の日次上限エラーを検知したら、リトライせずCtrl+Cと同じ経路で即座に一時停止する（BL-171）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-05 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（`log/2026-08-04/2344`を確認し「無料枠を使い果たした時に無理やりリトライし続けて、進行が滅茶苦茶になってしまっている」「このエラーになった時に自動一次停止するようにしてくれませんか」と報告・要望） |
+| **決定理由** | `log_no_prompt.md`行13808以降で、OpenRouter無料枠の日次上限エラー（`Error code: 429 - Rate limit exceeded: free-models-per-day-high-balance.`、`X-RateLimit-Reset`は翌日固定のタイムスタンプ）に対し、既存の一時的APIエラー向けリトライ機構（層1: 指数バックオフ、層2: JSON解析失敗リトライ）がそのまま適用され、数時間分にわたり同一の429が延々と繰り返されていることを確認。日次上限は待ち時間程度のリトライでは絶対に解消しないため、全リトライを使い切った末に`_query_AI_live`が返すプレースホルダ文字列がJSON解析に失敗し続け、最終的に「層2リトライを使い切ってもJSON判定を取得できませんでした。フェイルクローズ(major)します」という**実際のドメイン監査を伴わない偽のmajor判定**がDetector等から機械的に返り続けていた。これが以降のルーティング（差し戻し・reflection等）を汚染し、ドライランの進行を実質的に破壊していた。 |
+| 決定内容 | 新規例外`DailyQuotaExhaustedError`を定義し、`_query_AI_live`のAPIエラーexcept節で`isinstance(e, RateLimitError) and "per-day" in str(e)`を満たす場合はリトライを一切行わず即座に送出する。`run_ai_vs_ai_loop`側で、既存の`except KeyboardInterrupt:`と並べてこの例外を捕捉し、Ctrl+Cと全く同じ一時停止経路（LangGraph checkpointerは完了済みノードまで既に自動保存済み、`--resume <run_id>`で再開）へ合流させる。他の一時的なAPIエラー（接続断・タイムアウト・"per-day"を含まないRateLimitError等）の既存リトライ経路は無変更のまま維持する。 |
+| 影響 | `cela_main.py`（`DailyQuotaExhaustedError`新規定義、`_query_AI_live`のexcept節、`run_ai_vs_ai_loop`の`app.stream()`周りのtry/except）。新規テスト`tests/test_bl171_daily_quota_pause.py`（3件）追加。`python -m py_compile`合格、既存BL-072/083/143/141/160関連28件・`test_checkpoint_resume.py`無退行、フルオフラインスイート706件Pass。実ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-171](back_log/issue_backlog.md#bl-171-openrouter無料枠の日次上限エラーが他の一時的apiエラーと同じリトライ経路に乗り無意味なリトライと偽のフェイルクローズmajorを延々と繰り返して進行を破壊する)、[BL-009](back_log/issue_backlog.md#bl-009-r2-ツールループのリトライ粒度層1層2の粗さを許容する)、[BL-105](back_log/issue_backlog.md#bl-105-checkpointresume機構がentry_pointから全体再走行するため未応答のuser発言が二重に積まれるlanggraph本来のcheckpointertask未導入という設計ギャップ) |
+
 ---
 
 ## 未決定（pending）
