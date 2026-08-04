@@ -1870,6 +1870,20 @@
 
 ---
 
+### D-131: `write_agreement`の`phase_id`に、`task_id`と同型の現在フェーズへのフォールバックを追加する（BL-161）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-04 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（ログレビュー指示「1018のログをレビュー、エキスパートがホワイトボードのeditに苦戦しています」を受けAIが根本原因を特定・報告、続けて「分かりました。まず修正し、後にドキュメント整備してください」の指示で即実装を承認） |
+| **決定理由** | `log/2026-08-04/1018`で、Expertの`write_agreement`(UPDATE, edits)呼び出しが11回連続で「old_textが見つかりません」失敗となり、MAX_TOOL_ITERの約半分を空費する実害が発生した。原因は`_commit_agreement_from_tool`の`phase_id = args.get("phase_id", "")`にフォールバックが一切なく、Expertがphase_idを省略すると`_find_active_deliverable_agreement`が既存Deliverableを発見できず`old_content=""`のまま`_apply_text_edits`が必ず0件一致で失敗する構造だったため。`task_id`には既にBL-146由来の同型フォールバック（`_effective_current_task_id_from`/`_task_id_from`）があり、`phase_id`用の`_phase_id_from(state)`も既に定義済みだったが、`write_agreement`のTOOL_DISPATCH配線がそれを呼んでいなかっただけの配線漏れであり、修正箇所・リスクともに小さいと判断し、ユーザー指示通りPlan Modeを経ずに直接実装した。 |
+| 決定内容 | `_commit_agreement_from_tool`・`_write_agreement_impl`双方へ`phase_id: str = ""`引数を追加し、`phase_id = args.get("phase_id") or phase_id`（`tid`と同じパターン）へ変更。フォールバック発動時にprint通知を追加（BL-159の可視化方針を踏襲）。TOOL_DISPATCH配線（`write_agreement`）へ`phase_id=_phase_id_from(state)`を追加。CREATE/UPDATE/SUPERSEDEいずれも同一の`phase_id`変数を共有するため1箇所の修正で全action_typeに一律適用される。 |
+| 影響 | `cela_main.py`（`_commit_agreement_from_tool`・`_write_agreement_impl`・TOOL_DISPATCH配線の3箇所）。新規テスト`tests/test_bl161_write_agreement_phase_id_fallback.py`（4件）追加。`python -m py_compile`合格、関連既存テスト（BL-084/131/146/151）30件無退行、フルオフラインスイート655件Pass。実ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-161](back_log/issue_backlog.md#bl-161-write_agreementのphase_idにフォールバックが一切なくexpertが省略するとeditsホワイトボード差分更新が必ず0件一致で失敗し続ける)、[BL-146](back_log/issue_backlog.md#bl-146-write_agreementがbl-125のタスク遷移ゲートcurrent_task_idを内容レベルで迂回できブロック中の他タスクへ実際にdeliverableを書き込めていた) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
