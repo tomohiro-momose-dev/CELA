@@ -4651,7 +4651,9 @@ _formalizable_stale = [i for i in _stale_escalated if not i.get("defer_to_task_i
 
 **BL-163との関係：** BL-163（`_revise_goal_tool_impl`の成功パス末尾で、ゴール改定時に承認済み過去タスクへ整合性再確認issueを機械的に起票する仕組み）は`agreements`（成果物）のみを走査対象にしており、`verified_facts`ストアは対象外だった。BL-163実装当時はagreements側の対策で十分と判断していたが、今回`verified_facts`という**別の永続化経路**が同じ「ゴール改定で前提が変わったのに古い値が生き残る」問題を抱えていることが判明した。
 
-**対応の手掛かり（未実装・方針確定済み）：** BL-163が既に計算している「ゴール改定によって影響を受ける過去タスクの`(phase_id, task_id)`一覧」（`_flagged`）をそのまま再利用し、該当`task_id`を`source_task_id`に持つ`verified_facts`行の`reason`列へ「⚠️ゴール改定後未確認」という警告を付記する（`value`自体は改変しない、過去の事実としては正しいため）。BL-163の起票ロジックと同一箇所・同一トリガーに相乗りさせることで、二重のロジックを避ける。
+**対応内容（実施済み）：** BL-163が既に計算している「ゴール改定によって影響を受ける過去タスクの`(phase_id, task_id)`一覧」（`_flagged`）をそのまま再利用し、`_revise_goal_tool_impl`のBL-163ブロック直後に、該当`task_id`を`source_task_id`に持つ`verified_facts`行を検索して`reason`列の先頭へ`"⚠️[BL-168: ゴール改定後未確認] ..."`という警告を付記する処理を追加した（`value`自体は改変しない、過去の事実としては正しいため）。既にこのマーカーで始まる行は再度マーキングしない（同一runで複数回ゴール改定された場合の重複防止）。BL-163の起票ロジックと同一箇所・同一トリガーに相乗りさせることで、二重のロジックを避けた。
+
+新規テスト`tests/test_bl168_verified_facts_stale_after_goal_revision.py`（5件：flaggedタスク由来のverified_factsへの警告付記、対象外タスク由来のfactsは無変更、verified_facts0件でのクラッシュ非発生、2回連続ゴール改定でも警告が重複しないこと、複数タスクが混在する場合にflagged対象のみ警告されること）追加。`python -m py_compile`合格、既存BL-062/096/136/144/145/163関連100件無退行、フルオフラインスイート689件Pass。実ドライランでの効果確認は次回待ち。
 
 **関連:** [BL-163](#bl-163-revise_goal成功時既に承認済みの過去タスクへ新ゴールとの整合性要再確認issueを機械的に起票する)（同じ「ゴール改定後の過去タスク」問題への対策、対象範囲が異なる）、[BL-167](#bl-167-reflection内のstagnant-issue滞留検知がdefer_to_task_idの受け皿タスク完了後もissueを永久に見落とし続ける)（同じ実害の別経路、同一クロールでの発見）、[BL-166](#bl-166-_build_agreements_contextのアイコンラベル判定がrejectされた成果物を承認済みと表示してしまう)（同一クロールセッションでの発見）
 
