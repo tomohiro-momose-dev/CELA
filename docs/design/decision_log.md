@@ -1884,6 +1884,20 @@
 
 ---
 
+### D-132: `revise_goal`の`old_goal_text`をstateへ橋渡しし、Detectorのgoal_change監査プロンプトへ直接埋め込む（BL-162）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-04 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（ログレビュー指示「ログレビューを続行、ゴールが書き換えられましたが、次のdetectorがちょっと困っています」を受けAIが根本原因を特定・報告、続けて「修正してください」の指示で即実装を承認） |
+| **決定理由** | `log/2026-08-04/1123`で、ゴール改定（`revise_goal`、BL-086）直後の`review_mode="goal_change"`監査（BL-126 Stage B）において、Detectorが判定基準1「旧文が置換ではなく追記として保持されているか」を確認しようと`read_verified_fact`/`read_deliverable_file`を計5回試すも全て`not_found`となり、「旧ゴール文が不明のため包含関係は確認不可」と自ら申告する空振りが発生した。原因は`generate_user_utterance_node`が`_LAST_GOAL_REVISION`ブリッジから`new_goal_text`のみを`state["goal"]`へ反映し`old_goal_text`を捨てていたためで、Detectorの持つツールはいずれも「現在の」状態しか読めず旧ゴール文の取得経路が原理的に存在しなかった。BL-160/BL-161と同型の「橋渡し変数の配線漏れ」であり、修正箇所・リスクともに小さいと判断し、ユーザー指示通りPlan Modeを経ずに直接実装した。 |
+| 決定内容 | `LineageState`へ`goal_revision_old_text: str`を追加。`generate_user_utterance_node`が`_goal_revision.get("old_goal_text") or ""`を`state["goal_revision_old_text"]`へ橋渡し。`call_detector`のgoal_change用`domain_role_instruction`へ、旧文（`state.get("goal_revision_old_text", "")`）と新文（既存の`goal`変数）を直接埋め込み、Detectorがツール呼び出しなしに比較できるようにした。 |
+| 影響 | `cela_main.py`（`LineageState`定義・`generate_user_utterance_node`・`call_detector`の3箇所）。新規テスト`tests/test_bl162_goal_revision_old_text_bridge.py`（4件）追加。`python -m py_compile`合格、既存`tests/test_bl126_stage_b_goal_change_review_mode.py`（6件）無退行、フルオフラインスイート659件Pass。実ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-162](back_log/issue_backlog.md#bl-162-ゴール改定revise_goal直後のdetector-goal_change監査が旧ゴール文を取得する手段を持たず判定基準の1つを実質評価できない)、[BL-160](back_log/issue_backlog.md#bl-160-_query_ai_liveが最終回答がreasoningチャンネルへ出力されcontentが空になったケースを空応答としてサイレントに握りつぶし1ターン分のdecisiondirectivedeliverable抽出タスク遷移シグナルが丸ごと失われる)、[BL-161](back_log/issue_backlog.md#bl-161-write_agreementのphase_idにフォールバックが一切なくexpertが省略するとeditsホワイトボード差分更新が必ず0件一致で失敗し続ける) |
+
+---
+
 ## 未決定（pending）
 
 ### D-086: checkpoint/resume機構をLangGraph本来のcheckpointer/`@task`ベースへ移行するか（BL-105）
