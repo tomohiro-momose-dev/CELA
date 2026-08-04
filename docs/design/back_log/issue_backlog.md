@@ -195,6 +195,8 @@
 | BL-161 | 高 | `cela_main.py`（`_commit_agreement_from_tool`、`_write_agreement_impl`、`write_agreement`のTOOL_DISPATCH配線） | ユーザー指示「1018のログをレビュー、エキスパートがホワイトボードのeditに苦戦しています」を受け`log/2026-08-04/1018`をExplore agentでレビュー。Expertの`write_agreement`(UPDATE, edits)呼び出しが11回連続で「old_textが現在のホワイトボード内容に見つかりませんでした」失敗となり、MAX_TOOL_ITER=30のうち半分近く（iter=2〜15）を空費、最終的にeditsを諦めてSUPERSEDE相当の全文書き直しに切り替える実害を確認。コード調査の結果、`_commit_agreement_from_tool`の`phase_id = args.get("phase_id", "")`（フォールバックなし）が`tid = args.get("task_id") or task_id`（呼び出し元task_idへフォールバック）と非対称であることが根本原因と判明。Expertの呼び出しに`phase_id`（`task_id`も）キー自体が無く、`_find_active_deliverable_agreement`が`phase_id=""`と一致する既存Deliverableを見つけられず`target=None`・`old_content=""`のまま`_apply_text_edits("", edits)`が呼ばれ、必ず0件一致で失敗し続けていた。BL-151のエラースニペット（実際の格納内容の先頭部分を見せて自己修復させる機能）も空文字を表示するのみで機能していなかった（真因が別にあったため）。`task_id`には既に`_effective_current_task_id_from`/`_task_id_from`という同型のフォールバックが存在し、`phase_id`にも全く同型の`_phase_id_from(state)`（BL-146時点で他用途向けに新設済み）が既に定義されていたが、`write_agreement`のTOOL_DISPATCH配線が一度も呼んでいなかっただけの配線漏れだった。**実装完了（`done`）**：`_commit_agreement_from_tool`・`_write_agreement_impl`双方に`phase_id: str = ""`引数を追加し`phase_id = args.get("phase_id") or phase_id`のフォールバックへ変更（tidと同じパターン）、フォールバック発動時にprint通知を追加。TOOL_DISPATCH配線へ`phase_id=_phase_id_from(state)`を追加。新規テスト`tests/test_bl161_write_agreement_phase_id_fallback.py`（4件：UPDATE(edits)でのフォールバック成功、フォールバック元情報が無い場合の従来通りの失敗回帰、args明示指定時の優先順位回帰、CREATEでのフォールバック確認）追加。`python -m py_compile`合格、関連既存テスト（BL-084/131/146/151）30件無退行、フルオフラインスイート655件Pass。副次所見として、Detector自動注釈がMarkdownテーブルセルを複数行に分割し将来の一字一句引用をさらに脆くする整形上の問題も発見したが、今回の11連続失敗の直接原因ではなかったため別途記録のみに留める（後続BL候補）。実ドライランでの効果確認は次回待ち。 | P0 |
 | BL-162 | 中 | `cela_main.py`（`generate_user_utterance_node`、`call_detector`のgoal_change分岐、`LineageState`） | ユーザー指示「ログレビューを続行、ゴールが書き換えられましたが、次のdetectorがちょっと困っています」を受け`log/2026-08-04/1123`の続きをExplore agentでレビュー。`revise_goal`によるゴール改定（BL-086、予算・待ち時間保証等の構造的矛盾を受けフェーズ分割方式へ改定、改定自体は成功）直後の`review_mode="goal_change"`監査（BL-126 Stage B）で、Detectorが判定基準1「旧文が置換ではなく追記として保持されているか」を確認しようと`read_verified_fact`/`read_deliverable_file`をキーワードを変えて計5回試すも全て`not_found`、最終的に「旧ゴール文が不明のため包含関係は確認不可」と自ら申告する空振りを確認（MAX_TOOL_ITER超過やクラッシュには至らず`constraint_issue: "none"`で継続、実害は軽微だが判定基準を実質評価できていない）。コード調査の結果、`generate_user_utterance_node`（`cela_main.py:7437`付近）が`_LAST_GOAL_REVISION`ブリッジから`new_goal_text`のみを`state["goal"]`へ反映し、`old_goal_text`はどこにも保存せずその場で捨てていたことが根本原因と判明。Detectorが持つツール（read_verified_fact/read_deliverable_file/read_issues）はいずれも「現在の」状態しか読めないため、旧ゴール文を取得する経路が原理的に存在しなかった。**実装完了（`done`）**：`LineageState`へ新規フィールド`goal_revision_old_text: str`を追加。`generate_user_utterance_node`が`_goal_revision.get("old_goal_text") or ""`を`state["goal_revision_old_text"]`へ橋渡しするよう変更。`call_detector`のgoal_change用`domain_role_instruction`へ、`state.get("goal_revision_old_text", "")`（取得不可時は明示的なフォールバック文言）を旧文・新文（`goal`変数、既存のSystem Goal再掲と同一値）として直接埋め込み、Detectorがツール呼び出しなしに両者を直接比較できるようにした。新規テスト`tests/test_bl162_goal_revision_old_text_bridge.py`（4件：橋渡し成功、goal改定なし時に橋渡しされないこと、old_goal_textがNoneの場合に空文字へフォールバックすること、call_detectorのgoal_change分岐が実際にold_goal_textを埋め込んでいることのソース確認）追加。`python -m py_compile`合格、既存`tests/test_bl126_stage_b_goal_change_review_mode.py`（6件）無退行、フルオフラインスイート659件Pass。ユーザー指示「修正してください」に従いPlan Modeを経ずBL-161と同様の判断で直接実装、ドキュメントは事後整備。実ドライランでの効果確認は次回待ち。 | P1 |
 | BL-163 | 中 | `cela_main.py`（`_revise_goal_tool_impl`、`ALLOWED_ISSUE_ACTIONS_BY_ROLE`） | BL-162の調査を受け、ユーザーから「ゴール承認後にタスクを1_1からやり直させた方が良いか、それとも後続タスクが気づいて修正してくれるのに期待するか」と設計相談。AIが、全面リスタートはコスト大かつCELAの既存アーキテクチャ（SUPERSEDE改訂・BL-096 issue管理・BL-144滞留検知・BL-145タスク明示化）と不整合であること、完全受け身は見落としリスクがあることを説明し、折衷案として「ゴール改定成功時に承認済み過去タスクへ整合性再確認issueを機械的に起票する」を提案、ユーザーが採用（「注記が最初に出てくれば、AIの混乱も少ないはず」）。AskUserQuestionで(a)issue重大度（minor/open vs major/escalated）、(b)「注記が最初に出る」の実現範囲（既存の起票の仕組みに乗せるだけ vs タスク限定サーフェシングの新規実装）の2点を確認したところ、ユーザーはいずれも推奨案（minor/open、既存の仕組みに乗せるだけ）を選択。EnterPlanModeでExplore agent1体（`_revise_goal_tool_impl`のstate非依存性、`_write_issue_impl`のCREATE分岐・内部自動起票ロールの既存パターン、完了済みタスクの列挙方法、既存pin機構のグローバルスコープを調査）を実行し承認を得て実装。**実装完了（`done`）**：`ALLOWED_ISSUE_ACTIONS_BY_ROLE`へ新規ロール`"revise_goal_auto": {"CREATE"}`を追加。`_revise_goal_tool_impl`の成功パス末尾（`db_append_decision`直後・`return`直前）へ、`get_agreements_from_db`を`reversed`で走査し`(phase_id, task_id)`ごとに最新の`entry_type="Deliverable"`行を1件だけ判定する`_find_active_deliverable_agreement`と同型のdedupロジックを追加、最新statusが`RESOLVING_DELIVERABLE_STATUSES`（Approved/Approved_with_Conditions/Implicitly_Accepted）に含まれる全タスクへ`_write_issue_impl`を直接呼び出し、topic=`goal_revision_consistency_check_<phase_id>_<task_id>`・severity="minor"のissueを機械的にCREATEする処理を追加した。既存の`_write_issue_impl`・pin builder（`_build_open_issue_pin_text`等）は無変更で、severity="minor"のため既存のUser AI向けopen issue一覧へ自然に乗り、BL-136の強制RESOLVE/DEFER文言・BL-125/158のタスク遷移ブロック（いずれもmajor/escalated対象）は発動しない。新規テスト`tests/test_bl163_revise_goal_auto_flags_past_tasks.py`（6件：承認済み2タスクへの起票、Rejectedのみのタスクの対象外確認、完了済みタスク0件でのクラッシュ非発生、複数UPDATE履歴があっても1回のみ起票、最新状態がSupersededへ変わった場合の対象外確認、`revise_goal_auto`ロールの権限登録確認）追加。`python -m py_compile`合格、既存BL-086/096/136/144/154関連101件無退行、フルオフラインスイート665件Pass。実ドライランでの効果確認は次回待ち。 | P2 |
+| BL-164 | 高 | `cela_main.py`（`recent_decitions`構築、`get_decisions_from_db`、Detector系プロンプトの`Recent Decisions（参考程度）`節） | BL-163完了後、ユーザー指示「1123のログの続きをレビュー」を継続。task_1_3の財務モデル監査で、`Detector`ノードが同一ターン内で`verify_whiteboard_excerpt`を29回中11回失敗させ続け、MAX_TOOL_ITER=30に到達し`⚠️ [Detector] 最終iteration（30）のためツールを外し、テキスト最終応答を強制します`が同一run内で2回発火（`log/2026-08-04/1123/log_no_prompt.md`行11484・14373）していることを確認。原因調査の結果、`recent_decitions = json.dumps(get_decisions_from_db(conn, run_id)[-2:], ...)`（`cela_main.py:5812`）が直近2件のdecisions行を`SELECT *`丸ごとJSON化してプロンプトの「Recent Decisions（参考程度）」節（`cela_main.py:6204`）へ埋め込んでおり、そこに含まれる`internal_thought_process`（前回Detectorの生の思考過程）に、既にExpertの再提出でsupersede済みのVer.3ホワイトボードの一字一句引用（「現実的複合リスク...296...ギリギリ」、実際は改訂後Ver.5/7で「3,436」等へ変わっていた）がそのまま残っていたことが根本原因と判明。新しいDetectorはこの「参考程度」ブロックから引用文字列を誤って採用し、実際に監査対象の最新ホワイトボードには存在しないテキストを`verify_whiteboard_excerpt`で検証し続けた（プロンプトダンプで`Recent Decisions`内のdecision `D-1785815485253`のinternal_thought_processに該当引用が verbatim に含まれ、同一の古い引用が2回目の別Detector監査でも再出現したことを確認済み）。CELAの「Detector却下→Expert修正→Detector再監査」という主要ループでは、却下判定時の`internal_thought_process`（古い引用付き）と直後の修正提出が、まさに再監査タイミングでの「直近2件」になりやすく、偶然ではなく構造的に再現しうる失敗モード。BL-152（`verify_whiteboard_excerpt`が誤ったtask_idと照合し続けた事例）と症状は同型だが、原因は別（BL-152はtask_id特定の誤り、本BLはプロンプトへの生reasoningテキスト混入）。**状態**: `open`（記録のみ、修正案検討中）。 | P1 |
+| BL-165 | 低 | `cela_main.py`（`_write_agreement_impl`のCREATE分岐ログ、`cela_main.py:1982`） | BL-164の調査中に副次的に発見。`_write_agreement_impl`のDeliverable CREATE分岐（`cela_main.py:1982`）が、`apply_whiteboard_patch`の実際の戻り値`v`を無視し常に文字列`"Ver.1"`をログ出力している。同一イベントで`apply_whiteboard_patch`自身のログ（`cela_main.py:3994`）は正しく実際のバージョン番号（例：`Ver.5`）を出しており、同一の`write_agreement`呼び出しに対し「Ver.5」と「Ver.1」という矛盾するバージョン表示がログに並ぶ（`log/2026-08-04/1123/log_no_prompt.md`行10388-10389で確認）。機能的な実害（DB上のバージョン管理自体は正しい）はないが、ログを読む人間・エージェント双方を混乱させる（BL-164調査時に実際に一時混乱の原因になった）。**状態**: `open`（記録のみ、`print`の`"Ver.1"`を実際の`v`変数へ差し替えるだけの軽微な修正）。 | P3 |
 
 ---
 
@@ -4511,6 +4513,54 @@ AIは以下を整理して回答した：全面リスタートは、矛盾して
 **基本設計:** Plan modeで実施（Explore agent1体、AskUserQuestionでの2択確認込み、`docs/design/decision_lineage.md`参照）。
 
 **関連:** [BL-162](#bl-162-ゴール改定revise_goal直後のdetector-goal_change監査が旧ゴール文を取得する手段を持たず判定基準の1つを実質評価できない)（本BLの発端となった調査）、[BL-086](#bl-086-前提エスカレーション経路-freeze復活-ゴール改定goalshifteventの実消費化)（revise_goal/GoalShiftEventそのものの導入経緯）、[BL-096](#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)（issue_log機構そのもの）、[BL-144](#bl-144-reflection_nodeのbl-096機械的stagnant上書きがescalated-issueの単なる存在で無条件発火しreflection自身が健全な進捗と判定した回まで停滞扱いしていた)（滞留検知）、[BL-154](#bl-154-decision_extractorのdirectivedeferred自動抽出をissue_logへも橋渡しする)（内部自動起票ロールの直近の前例）
+
+---
+
+### BL-164: Detectorへの「Recent Decisions（参考程度）」節が、前回decisionの生reasoning（`internal_thought_process`）を丸ごと埋め込んでおり、supersede済みホワイトボードの古い引用をDetectorが誤採用しMAX_TOOL_ITERを浪費する
+
+**状態:** `open`（記録のみ、修正案検討中）
+
+**経緯:** BL-163完了後、ユーザー指示「1123のログの続きをレビュー」を継続。`log/2026-08-04/1123`のtask_1_3（財務持続性モデル構築）監査フェーズで、`Detector`ノードが同一ターン内で`verify_whiteboard_excerpt`を計29回中11回（38%）失敗させ続け、MAX_TOOL_ITER=30に到達し「⚠️ [Detector] 最終iteration（30）のためツールを外し、テキスト最終応答を強制します」が**同一run内で2回**発火（`log/2026-08-04/1123/log_no_prompt.md`行11484・14373）していることを発見した。
+
+**根本原因（コード・プロンプトダンプ双方で確認済み）：** `recent_decitions = json.dumps(get_decisions_from_db(conn, run_id)[-2:], ensure_ascii=False)`（`cela_main.py:5812`）が、直近2件の`decisions`テーブル行を`get_decisions_from_db`の`SELECT *`結果のまま（`internal_thought_process`列を含む）JSON化し、プロンプトの「Recent Decisions（参考程度）」節（`cela_main.py:6204`）へ埋め込んでいる。
+
+task_1_3のホワイトボードはVer.3→Ver.5→Ver.7と全面改訂を繰り返しており（「現実的複合リスク」行の実質赤字が296万円→3,436万円へ桁ごと変化）、監査対象の`Detector`呼び出し時点で「直近2件」に選ばれたのは：
+1. `D-1785815485253`：**直前のDetector自身が、Ver.3ホワイトボードをmajor判定で却下した際の判定record**。その`internal_thought_process`（生の思考過程、数千字規模）に、Ver.3の一字一句引用「`| **現実的複合リスク** | 需要 −20% + 電気代 +30% + 冬季 10 日 + タクシー +25% | **296** | **✅（ギリギリ）** |`」がverbatimで残っていた。
+2. `D-1785816289859`：Expertの再提出イベント（要約のみ、全文は含まれない）。
+
+新しいDetectorはこの「参考程度」ブロックから引用文字列を誤って`target_excerpt`候補として採用し、実際に監査対象となっている最新ホワイトボード（Ver.5/7、296ではなく3,436に更新済み）には存在しないテキストを`verify_whiteboard_excerpt`で検証し続けた。プロンプトダンプ（`log_with_prompt.md`行30106）で該当引用が`internal_thought_process`内にverbatimで含まれることを直接確認済み。同一の古い引用（「253」「296」）は、後続の**別のDetector監査（2回目、no_prompt行12477-14405）でも再出現**しており、偶然の一度きりの事故ではないことを確認した。
+
+**なぜ構造的に再現しやすいか：** CELAの主要な品質担保ループは「Detector却下（major判定・古い版への引用付き）→Expert修正→Detector再監査」であり、`[-2:]`という設計は、まさにこの再監査タイミングの直前2件として「却下判定（＝supersede直前版への引用を含むinternal_thought_process）＋直後の修正提出」を拾いやすい。つまり最も重要な「修正が実際に効いたか」を検証するタイミングでこそ、最も汚染されやすい。
+
+**実測された被害規模：** 1回目のDetector監査ループ（no_prompt行10579-11519）で29回中11回（iter=11,12,14,15,16,18,21,23,24,26,28）が`verify_whiteboard_excerpt`失敗、2回目（no_prompt行12477-14405）でも同型の失敗パターンを確認。両方とも最終的にMAX_TOOL_ITER=30へ到達し、ツールなしの強制テキスト応答（BL-093が警告する「出力が途中で切れるリスク」に該当する状況）に追い込まれた。今回はJSON自体は出力できたが、より複雑な監査では出力途中切断の実害に発展しうる。
+
+**BL-152との違い：** 症状（`verify_whiteboard_excerpt`の大量失敗によるMAX_TOOL_ITER浪費）はBL-152と同型だが、原因は別。BL-152は「誤ったtask_idのホワイトボードと照合していた」という参照先の取り違え。本BLは「参照先（現在の最新ホワイトボード）は正しくプロンプトに提示されているが、Detector自身が別ブロック（過去decisionの生reasoning）から古い引用を誤って拾ってしまう」というプロンプト構成・モデル側の誤読み合わせの問題。
+
+**対応の手掛かり（未実装・修正案検討中）：** ユーザー指示によりBL起票後に修正案を検討する。
+
+**関連:** [BL-152](#bl-152-verify_whiteboard_excerptが今レビューすべき成果物ではなく常にcurrent_task_idのホワイトボードだけを見ていた)（`verify_whiteboard_excerpt`大量失敗という同型症状の前例、原因は別）、[BL-079](#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる)（`verify_whiteboard_excerpt`による引用前検証の仕組みそのもの）、[BL-093](#bl-093-ノード内スクラッチパッド-thinkツール理由づけの退避ツールループ内の可変todoissuenotesメモ)（MAX_TOOL_ITER到達時の出力途中切断リスクの既存の警告）、[BL-162](#bl-162-ゴール改定revise_goal直後のdetector-goal_change監査が旧ゴール文を取得する手段を持たず判定基準の1つを実質評価できない)（同一ログレビューセッションでの直前の発見）
+
+---
+
+### BL-165: `write_agreement`のCREATE分岐ログが、実際のホワイトボードバージョン番号を無視し常に`"Ver.1"`と誤表示する
+
+**状態:** `open`（記録のみ、`print`文言の軽微な修正で対応可能）
+
+**経緯:** BL-164の調査中に副次的に発見。`_write_agreement_impl`のDeliverable CREATE分岐（`cela_main.py:1982`）：
+
+```python
+print(f"  📋 [Whiteboard] write_agreement経由の成果物 '{topic}' をwhiteboard_drafts Ver.1として保存しました（phase={phase_id}, task={tid}）。")
+```
+
+が、直前で`apply_whiteboard_patch`から受け取った実際のバージョン番号`v`（`_LAST_WHITEBOARD_EDIT = {"phase_id": phase_id, "task_id": tid, "version": v}`で正しく保持されている）を使わず、文字列`"Ver.1"`をハードコードしている。同一イベントで`apply_whiteboard_patch`自身のログ（`cela_main.py:3994`、`f"...task_id={task_id}をVer.{new_version}に更新しました..."`）は正しく実際のバージョン番号を出している。
+
+実際のログ（`log/2026-08-04/1123/log_no_prompt.md`行10388-10389）で、同一のwrite_agreement呼び出しに対し「`task_id=task_1_3をVer.5に更新しました`」と「`'task_1_3 財務持続性モデル構築' をwhiteboard_drafts Ver.1として保存しました`」という矛盾する版数表示が並んで出力されていることを確認した。
+
+**影響：** DB上の実際のバージョン管理（`whiteboard_drafts`テーブル・`_LAST_WHITEBOARD_EDIT`）自体は正しく、機能的な実害はない。ただしログを読む人間・エージェント双方を混乱させる（BL-164の調査時、この矛盾表示が一時的な調査の混乱要因になった）。
+
+**対応の手掛かり（未実装）：** `cela_main.py:1982`の`"Ver.1"`を、`apply_whiteboard_patch`の戻り値`v`（同関数内で既に取得済み）へ差し替えるだけで解消する見込み。
+
+**関連:** [BL-164](#bl-164-detectorへのrecent-decisions参考程度節が前回decisionの生reasoninginternal_thought_processを丸ごと埋め込んでおりsupersede済みホワイトボードの古い引用をdetectorが誤採用しmax_tool_iterを浪費する)（同じ調査の中で発見）
 
 ---
 
