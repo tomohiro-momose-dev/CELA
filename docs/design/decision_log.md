@@ -2026,6 +2026,18 @@
 | 影響 | `cela_main.py`（`DailyQuotaExhaustedError`新規定義、`_query_AI_live`のexcept節、`run_ai_vs_ai_loop`の`app.stream()`周りのtry/except）。新規テスト`tests/test_bl171_daily_quota_pause.py`（3件）追加。`python -m py_compile`合格、既存BL-072/083/143/141/160関連28件・`test_checkpoint_resume.py`無退行、フルオフラインスイート706件Pass。実ドライランでの効果確認は次回待ち。 |
 | 関連 BL | [BL-171](back_log/issue_backlog.md#bl-171-openrouter無料枠の日次上限エラーが他の一時的apiエラーと同じリトライ経路に乗り無意味なリトライと偽のフェイルクローズmajorを延々と繰り返して進行を破壊する)、[BL-009](back_log/issue_backlog.md#bl-009-r2-ツールループのリトライ粒度層1層2の粗さを許容する)、[BL-105](back_log/issue_backlog.md#bl-105-checkpointresume機構がentry_pointから全体再走行するため未応答のuser発言が二重に積まれるlanggraph本来のcheckpointertask未導入という設計ギャップ) |
 
+### D-142: `write_agreement`の権限チェックを「entry_typeの区別」から「承認対象のDeliverable実在確認」へ一般化する（BL-172）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-05 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（`log/2026-08-04/2316`を自ら精読し「ユーザーAIが自分でタスクを始めて1_1完了を宣言してしまっていました」と根本原因を特定した上で、AIの一般化案提示に対し「埋めてください」と実装を承認） |
+| **決定理由** | ユーザーの「ホワイトボードや成果物のmdが生成されない」という報告を受け調査した結果、`log/2026-08-04/2316/log_no_prompt.md:751-761`で、User AIがBL-169（entry_type="Deliverable"のCREATE拒否）でブロックされた直後、全く同じ内容のまま`entry_type`だけ`"Decision"`に変えて再送し成功していたことを確認。ホワイトボード書き出し（`apply_whiteboard_patch`）はentry_type="Deliverable"の時にしか発火しないため、この回避策ではホワイトボード.mdが一切生成されないままタスクだけがApproved扱いになっていた。BL-169は「Deliverableとして自作する」経路のみを塞いでおり、「userがExpertの仕事を代行して完了を宣言する」という根本行動自体は防げていなかったため、entry_type単位の判定では同種の回避策が今後も再発しうると判断した。 |
+| 決定内容 | `_check_write_permission`に`conn`/`run_id`/`task_id`/`phase_id`を任意引数として追加し（`conn`未指定時は新チェックをスキップし完全な後方互換を維持）、「`caller_role=="user"`が`action_type=="CREATE"`かつ`status`が承認系（`RESOLVING_DELIVERABLE_STATUSES`）の場合、entry_typeを問わず、対象`task_id`にExpert作成のDeliverable（既存の`_find_active_deliverable_agreement`、BL-084）が実在するかを確認し、無ければ拒否する」という分岐へ一般化する。正当なUser承認は常に「既存Deliverableのstatus変更（UPDATE）」の形を取るため、CREATEで承認系statusのエントリを新規に持ち込む正規の使い方はentry_typeを問わず存在せず、既存の正当な利用（Expert作成後のUser承認等）は影響を受けない。 |
+| 影響 | `cela_main.py`（`_check_write_permission`のシグネチャ拡張・新分岐、`_write_agreement_impl`の呼び出し箇所）。新規テスト`tests/test_bl172_user_approval_requires_existing_deliverable.py`（6件）追加。実装過程で発覚した既存2ファイル3テスト（`test_bl146_write_agreement_current_task_gate.py`・`test_r3_smoke.py`、いずれも実在しないtask_idへ承認系statusでCREATEするテスト用ショートカットに依存）を、各テストの検証意図を保ったまま修正。`python -m py_compile`合格、既存BL-084/146/161/169関連46件・`test_r3_smoke.py`51件無退行、フルオフラインスイート712件中711件Pass（1件は`goal_shift_events.shift_id`のミリ秒タイムスタンプ衝突による既知のflakyテストで本修正と無関係、BL-173として別途記録）。実ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-172](back_log/issue_backlog.md#bl-172-bl-169のentry_typedeliverable限定ブロックをuserがentry_typedecisionへの付け替えで回避しホワイトボードmdが一切生成されなくなる)、[BL-169](back_log/issue_backlog.md#bl-169-write_agreementの権限チェックがstatusのみを見ておりuserがexpertを介さず成果物deliverableを自作自己提出できてしまう)、[BL-084](back_log/issue_backlog.md#bl-084-entry_typedeliverableのupdatesupersedeがtopic文字列ドリフトでeditsを0件0件失敗させ続けていたbl-074の未着手項目の再発) |
+
 ---
 
 ## 未決定（pending）
