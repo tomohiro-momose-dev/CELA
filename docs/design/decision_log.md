@@ -1978,6 +1978,18 @@
 | 影響 | コード変更なし。ドキュメントのみ。 |
 | 関連 BL | [BL-168](back_log/issue_backlog.md#bl-168-verified_factsテーブルにゴール改定を反映するsupersede機構が一切ない) |
 
+### D-139: `write_agreement`の権限チェックへ、role×entry_type×action_typeの制限を追加し、UserによるDeliverableの自作自演を禁止する（BL-169）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-04 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（AIが`log/2026-08-04/1548`をhaltまで追跡し根本原因を報告、「そうしましょう」の指示で実装を承認） |
+| **決定理由** | `1548`ログで、task_1_3の最終リトライ中にUser AIが`write_agreement(entry_type="Deliverable", action_type="CREATE", status="Proposed", ...)`を自ら呼び出し、財務モデル成果物を丸ごと執筆・提出した上で受入基準を自己採点し次タスクへ一方的に移行する事象を発見。`_check_write_permission`（`cela_main.py:1859`）がstatusのみで判定しておりrole×entry_typeの制限が存在せず、`user`ロールが本来Expertの役目であるDeliverableの新規作成を行うことを何も止めていなかったことがコード確認で判明。今回はDetectorのドメインレビューが物理的輸送力の矛盾を`major`判定で捕捉したため実害は限定的だったが、Detectorが見逃せば「Userが自分で書いた成果物をUserが自分で承認する」自作自演がノーチェックで通り得る構造的な穴であり、Reflectionが実際に"User is approving defective deliverables (collusion)"と判定してstagnant→haltに至った一因でもあった。 |
+| 決定内容 | `_check_write_permission`に、`caller_role=="user"`かつ`entry_type=="Deliverable"`かつ`action_type=="CREATE"`の組み合わせを拒否する分岐を追加する。既存Deliverableへのstatus変更（承認・却下等、UPDATE/SUPERSEDE）は従来通り許可し、Expertによる新規作成にも影響しない。 |
+| 影響 | `cela_main.py`（`_check_write_permission`関数内）。新規テスト`tests/test_bl169_user_deliverable_create_forbidden.py`（9件）追加。既存`test_bl146_write_agreement_current_task_gate.py`・`test_r4_smoke.py`の一部テストが、userロールでDeliverable CREATEを行うテスト用ショートカットに依存していたため、テスト意図を変えない形で修正（前者はaction_typeをUPDATEへ、後者はexpert CREATE→user UPDATE承認の2段階へ）。`python -m py_compile`合格、既存BL-062/084/095/126/127/131/146関連80件無退行、フルオフラインスイート698件Pass。実ドライランでの効果確認は次回待ち。 |
+| 関連 BL | [BL-169](back_log/issue_backlog.md#bl-169-write_agreementの権限チェックがstatusのみを見ておりuserがexpertを介さず成果物deliverableを自作自己提出できてしまう)、[BL-166](back_log/issue_backlog.md#bl-166-_build_agreements_contextのアイコンラベル判定がrejectされた成果物を承認済みと表示してしまう)、[BL-167](back_log/issue_backlog.md#bl-167-reflection内のstagnant-issue滞留検知がdefer_to_task_idの受け皿タスク完了後もissueを永久に見落とし続ける)、[BL-168](back_log/issue_backlog.md#bl-168-verified_factsテーブルにゴール改定を反映するsupersede機構が一切ない) |
+
 ---
 
 ## 未決定（pending）
