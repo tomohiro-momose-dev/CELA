@@ -4518,7 +4518,7 @@ AIは以下を整理して回答した：全面リスタートは、矛盾して
 
 ### BL-164: Detectorへの「Recent Decisions（参考程度）」節が、前回decisionの生reasoning（`internal_thought_process`）を丸ごと埋め込んでおり、supersede済みホワイトボードの古い引用をDetectorが誤採用しMAX_TOOL_ITERを浪費する
 
-**状態:** `open`（記録のみ、修正案検討中）
+**状態:** `done`
 
 **経緯:** BL-163完了後、ユーザー指示「1123のログの続きをレビュー」を継続。`log/2026-08-04/1123`のtask_1_3（財務持続性モデル構築）監査フェーズで、`Detector`ノードが同一ターン内で`verify_whiteboard_excerpt`を計29回中11回（38%）失敗させ続け、MAX_TOOL_ITER=30に到達し「⚠️ [Detector] 最終iteration（30）のためツールを外し、テキスト最終応答を強制します」が**同一run内で2回**発火（`log/2026-08-04/1123/log_no_prompt.md`行11484・14373）していることを発見した。
 
