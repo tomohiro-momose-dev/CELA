@@ -2,3 +2,8 @@
 __pycache__/
 *.pyc
 log/
+.clinerules/
+.claude/
+.pytest_cache/
+.vscode/
+cela_checkpoints.db*
