@@ -5183,11 +5183,18 @@ Plan ModeでExploreエージェント1体を実行し、既存ツール基盤を
 
 詳細は`BL184_basic_design.md`の「独立レビューによる修正履歴」節、および`decision_lineage.md` 論点139を参照。
 
+**`web_tools.py`実装完了・検索Providerの変更（2026-08-07）**：
+
+ユーザー指示「BL-184のweb_tools.pyの作成お願いします」を受け実装着手。`WebSearchProvider` Protocol、SSRF検証（`validate_url_for_fetch`）、`<script>`/`<style>`除去込みのHTML→テキスト変換（`_HtmlTextExtractor`）、キャッシュ管理（`cache_file_path`/`write_cache`/`strip_cache_header`）、3ツールのハンドラ（`web_search_handler`/`web_fetch_handler`/`read_reference_file_handler`）を新規`web_tools.py`として実装。実装前にAGENTS.md §9に従い、Bashツールで実際に`html.duckduckgo.com/html/`へアクセスして実レスポンスの構造（`result__a`/`result__snippet`クラス名、`//duckduckgo.com/l/?uddg=<url-encoded target>`というリダイレクト形式）を確認した上で`_DdgHtmlParser`を実装した。
+
+実装完了後、cela_main.pyへの配線前にライブ疎通確認（ユニットテストのモックだけに頼らない検証）を行ったところ、DuckDuckGoのBot対策チャレンジ（HTTP 202、`anomaly-modal`の画像認証）が数回の疎通確認だけで即座に発動し、5秒後の再試行でも解除されないことを実測で確認した。ユーザーへ報告したところ、ユーザーが当初Chromium/ChromeDriverによるブラウザ自動化（Google検索）を提案したが、AIが依存重量・Google ToS上のリスク・`MAX_TOOL_ITER`圧迫の懸念を説明し、代替として提示したBrave Search API（正式API、無料枠あり）へユーザーが切り替えを決定。`BraveSearchProvider`を追加し、`get_search_provider()`の既定値を`brave`へ変更（`DuckDuckGoSearchProvider`はコードとして温存し`CELA_WEB_SEARCH_PROVIDER=duckduckgo`で選択可能、Bot対策チャレンジ検知による明示エラー化も追加）。Brave APIの仕様は`docs/refs/brave_search/api_notes.md`へキャッシュ済み。新規テスト`tests/test_bl184_web_tools.py`41件（Provider抽象化・DDGパーサ・SSRF検証・DNSリバインディング関連拒否ケース・HTML抽出・キャッシュ・3ハンドラの呼び出し回数上限/パス脱出拒否/keyword逆引き等）全通過、`python -m py_compile`合格。実ネットワーク呼び出しは一切行わない。詳細は`BL184_basic_design.md`の「初期実装プロバイダの変更（2026-08-07）」節、`decision_log.md` D-157、`decision_lineage.md` 論点142を参照。
+
+**利用にはBrave Search APIキーの取得・環境変数`CELA_BRAVE_SEARCH_API_KEY`への設定がユーザー側で別途必要**（実ドライラン実施前の残作業）。
+
 **残タスク（未着手）:**
 
-- 残る未確定事項（上記3・4）の確認後、実装（`web_tools.py`新規モジュールへのツール追加・`cela_main.py`への`TOOL_DISPATCH`登録、`.gitignore`への`web_cache/`追加。`requirements.txt`変更は不要）。
-- 新規テスト`tests/test_bl184_web_search_file_io.py`（Fake Provider差し替え、SSRF拒否・DNSリバインディング拒否、キャッシュヒット時のAPI呼び出しスキップ、呼び出し回数上限、パス脱出拒否、`read_reference_file`のkeyword逆引き等、実ネットワーク呼び出しなし）。
-- 実装完了後、`decision_log.md`へD-153、`decision_lineage.md`へ論点136として詳細な決定理由・経緯を記録（現時点では設計段階のため概要のみ本節に記載）。
+- 残る未確定事項（呼び出し回数上限の具体値、Expert/Detector以外への展開要否）の確認後、`cela_main.py`側の配線（新規ツールスキーマ定数`WEB_SEARCH_TOOL`/`WEB_FETCH_TOOL`/`READ_REFERENCE_FILE_TOOL`、`TOOL_DISPATCH`登録、`call_expert`/`call_detector`の`tools=[...]`への追加、`LineageState`への`web_search_call_count`/`web_fetch_call_count`フィールド追加、`AppConfig`への`max_web_search_calls`/`max_web_fetch_calls`追加、`.gitignore`への`web_cache/`追加）。
+- Brave Search APIキーをユーザーが取得・設定した上での実ドライラン動作確認。
 
 ---
 
