@@ -5141,7 +5141,7 @@ Expertはこれをメカニカルに検知したものの（「あれ、タス�
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（`web_tools.py`実装完了・テスト41件全通過、`cela_main.py`への配線は未着手） |
+| 状態 | `open`（`web_tools.py`実装完了・`cela_main.py`への配線完了・テスト全通過、Brave APIキー設定後の実ドライラン確認待ち） |
 | 優先度 | P2 |
 | 関連 | [BL-041](#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)（`confidence`の`confirmed`/`provisional` enum設計思想、本BLでは変更せず`citations`活用で対応）、[BL-105](#bl-105-checkpointresume機構がentry_pointから全体再走行するため未応答のuser発言が二重に積まれるlanggraph本来のcheckpointertask未導入という設計ギャップ)（D-086、新規依存パッケージ追加の先例）、`python_repl`（`_run_python_repl`/`_PythonReplSession`、サンドボックス方式の参考実装）、`read_deliverable_file`（`cela_main.py:1221-1226`、resolve-and-containパス検証パターンの参考実装） |
 
