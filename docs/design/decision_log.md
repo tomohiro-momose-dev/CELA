@@ -2218,6 +2218,20 @@
 
 ---
 
+### D-156: `read_verified_fact`の検索精度改善は、embeddingベースのRAGではなくトークン分割OR検索＋difflib近似候補フォールバックの段階的アプローチを採用する（BL-187）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-06 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（「read_verified_factで探したいものが見つからない時が散見されます。rag検索を導入して、意味検索をしてはどうか？」と提案。AIが規模感・依存追加コストを踏まえた段階的アプローチを提案し、ユーザーが「トークン分割OR検索＋近似候補フォールバックを実装して」と承認） |
+| **決定理由** | `get_verified_facts_from_db`の`topic`検索は`variable_name LIKE '%keyword%' OR reason LIKE '%keyword%'`というフレーズ全体一致のみで、AIが渡す`topic_keyword`の言い回し・語順が保存済みの文言と噛み合わないと`not_found`になる構造的弱点があった。embeddingベースのRAG（ベクトル検索）は根本解決になり得るが、1run内の`verified_facts`件数は数十件程度に留まり、新規の埋め込みAPI呼び出し・ベクトルDB相当の依存追加はAGENTS.mdの依存追加最小化方針に対しオーバーエンジニアリングと判断した。まず新規依存ゼロで実現できるトークン分割OR検索（言い回しの違いの多くを吸収）と`difflib`（標準ライブラリ）による近似候補フォールバックで様子を見て、実ドライランで依然として意味的なギャップ（同義語・言い換え）が埋もれ続ける場合に改めてembedding方式（SQLite内にembeddingを保存しPythonでコサイン類似度計算、新規のベクトルDBは導入しない案）を検討する段階的アプローチを採用した。 |
+| 決定内容 | `_read_verified_fact_handler`に3段階のフォールバックを実装：①既存のフレーズ全体一致、②`_tokenize_topic_keyword`で分割したトークンによる`get_verified_facts_from_db_any_token`のOR検索（`variable_name`指定時は対象外）、③`suggest_similar_verified_facts`による`difflib.get_close_matches`ベースの`did_you_mean`候補提示。 |
+| 影響 | `cela_main.py`の`get_verified_facts_from_db`（変更なし、既存関数は温存）、新規`_tokenize_topic_keyword`/`get_verified_facts_from_db_any_token`/`suggest_similar_verified_facts`、`_read_verified_fact_handler`。新規テスト`tests/test_bl187_verified_fact_fuzzy_search.py`13件追加、既存BL-093/094/095/104/148/162/167/168/169/186関連238件と合わせて無退行確認。`python -m py_compile`合格。 |
+| 関連 BL | [BL-187](back_log/issue_backlog.md#bl-187-read_verified_factのtopic_keyword検索をトークン分割or検索と近似候補フォールバックで緩和する)、[BL-053](back_log/issue_backlog.md#bl-053-get_verified_facts_from_dbのtopic_keyword検索がvariable_name列しか見ておらず日本語キーワードで構造的にほぼ一致しない) |
+
+---
+
 ## 未決定（pending）
 
 ---
