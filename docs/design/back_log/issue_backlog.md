@@ -218,6 +218,7 @@
 | BL-184 | 中 | `cela_main.py`（新規ツール群、`TOOL_DISPATCH`拡張。分割検討中の`web_tools.py`） | ユーザーが08-05〜08-06分の全ドライランログ・成果物を監査依頼（「ゴールと制約は物理的に困難なはずだが、捏造や単純化や先送りなど、議論の品質と量が十分であるか確認してください」）。監査の結果、CELAが完全にクローズドな世界（ゴール文＋内部相互参照のみ）で動作しており、現実の地理・費用相場等を一切検証できないことが、task_1_3の「15%×12km→L≥80km」矛盾の見落としやtask_6_1の「片道12km→7-10km」再設定の推測依存など複数の弱点の根本要因の一つと判明。ユーザーが改善方針として「web検索・ファイルIOの実装」を提案し、AIが設計。Plan ModeでExploreエージェント1体（既存`TOOL_DISPATCH`パターン・role非ゲート方式・`read_deliverable_file`のresolve-and-containパターン・`python_repl`のサンドボックス方式・`verified_facts`の`confidence`enum制約・依存追加の先例＝D-086を調査）を実行。検索プロバイダについてユーザーへ確認したところ「まだ決めない、Provider抽象化して提案」→その後「Tavilyも良いがクエリ量が読めないため、まずAPIキー不要のDuckDuckGoにする」との判断があり、DuckDuckGoを自前HTTP+自前HTMLパース（`requests`のみ、`ddgs`等の追加依存なし）で実装する方針へ確定。`web_search`（検索結果一覧）/`web_fetch`（本文取得＋`web_cache/`への自動キャッシュ）/`read_reference_file`（キャッシュの読み取り専用参照、`read_deliverable_file`と同じresolve-and-containパターン）の3ツール構成としたのは、Claude Code自身のWebSearch/WebFetch/Readの分離、および既存の`read_project_plan`→`read_deliverable_file`という「一覧→詳細」パターンを踏襲したもの。`verified_facts`の`confidence` enum（`confirmed`/`provisional`）はAGENTS.md §7の重要定数変更に該当するため変更せず、既存の`citations`フィールドをそのまま活用してURLトレーサビリティを持たせる設計とした。SSRF対策（private/loopback IPレンジ拒否）・run単位の呼び出し回数上限・DuckDuckGoスクレイピングのリスク（非公式・ページ構造変更で壊れる可能性・レート制限リスク）も明記。基本設計を`docs/design/back_log/BL-184/BL184_basic_design.md`として原文保存。**状態: `open`（設計完了、実装未着手）**。実装着手前に4点の確認事項が残る（詳細はBL-184詳細節参照）：①検索Providerの最終確定＝DuckDuckGo確定済み、②`web_tools.py`への分割可否、③呼び出し回数上限・スロットリング間隔の具体値、④Expert/Detector以外のノードへの展開要否。 | P2 |
 | BL-185 | 高 | `cela_main.py`（`generate_user_utterance`、単発呼び出しパス） | ユーザーが「detctorの差戻を無視して、プロジェクト完了を連呼している」と報告。調査の結果、実ドライラン`log/2026-08-06/1149`で、Detectorがmajor判定（労基法違反疑い＋予備費ゼロ）で差し戻した直後のUser AIの最初の思考が、差し戻された事実に一切触れず、削除されたはずの「前回の完了宣言」を一字一句そのまま繰り返していたことを確認。原因はBL-178でcall_expertに実装済みの構造的欠陥と全く同型で、`generate_user_utterance`の差し戻し通知が`system_prompt`の中盤（🚨最終盤の超重要指示・エスカレーション再開通知・タスク遷移ブロック通知より前）に配置される一方、`messages`配列は`[system, ...chat_history]`という構造上`chat_history_window=4`件の直近会話（Expertの長大な完了報告等）が常に物理的に後ろへ来るため、差し戻し通知が埋もれて機能していなかった。詳細は[BL-185詳細](#bl-185-generate_user_utteranceuser-aiのsystem_promptを視座は上から下文脈は過去から現在の順に再構成し差し戻し通知が完了宣言に埋もれ無視される事故を防ぐ)を参照。ユーザーが「OKです。差戻以外の通常パスも`_build_escalation_resume_notice`/`_build_task_transition_blocked_notice`など、意識してほしいことは末尾に置きましょう。キャッシュヒットは悪くなるかもしれませんが、それよりも行動の統制の方が大事です」と指示。**実装完了（`done`）**：BL-178と同型の3分割構成（`system_prompt_leading`→`chat_history`→`system_prompt_trailing`）へ再構成。`system_prompt_trailing`内の順序は「決定事項DB・スコープ等の状況説明」→「エスカレーション再開通知（BL-096）」→「タスク遷移ブロック通知（BL-125）」→「🚨最終盤の超重要指示」→「差し戻し通知（最後）」とし、エスカレーション/遷移通知は差し戻し以外の通常の単発呼び出しパス（初回ターン・本質対話応答・Expert相談応答・終盤宣言ターン）でも常にtrailing側（chat_historyより後ろ）に配置されるようにした。あわせて🚨最終盤の超重要指示・差し戻し通知の両方に、互いを参照する優先順位の注記（「差し戻しがあれば完了宣言より優先」「最終盤指示より差し戻し対応を優先」）を追加し、両方向から矛盾を防止。新規テスト`tests/test_bl185_user_ai_prompt_reorder.py`10件（ソース順序確認6件、実行時のmessages構造確認3件、非退行確認1件）を追加、既存BL-178/104/142/143/096/176関連124件と合わせて無退行を確認。 | P0 |
 | BL-186 | 高 | `cela_main.py`（`_revise_goal_tool_impl`、ツール実行ブリッジ、`generate_user_utterance_node`） | ゴール改定（`revise_goal`、BL-086）成功時、BL-163/BL-168が承認済み過去タスクへ`severity="minor"`のissueを起票し`verified_facts`へ警告を付記するが、`minor`issueはBL-136/BL-145の強制解決ルート（major/escalated専用）に乗らず`read_issues`はpull型ツールのためどのプロンプトにも自動注入されない。実ドライラン`log/2026-08-06/1432`で、ゴール改定によりphase1-5の過去タスク13件が整合性未確認のままflagされたが、ランが既にphase6/task_6_1（計画上の最終タスク）にあり通常のタスク遷移ではphase1-5へ戻る経路が無いため放置リスクをユーザーへ報告。ユーザーと「タスク遷移で過去タスクへ戻る新ルート」か「ゴール改定時にBL-145と同型の配線でtask_plannerへ強制的に過去タスク再検証を引き継ぐ」かを相談し、後者を採用（ユーザー承認: 「お願いします」）。詳細は[BL-186詳細](#bl-186-ゴール改定時にtask_plannerへ強制的に過去タスク再検証を引き継ぐ)を参照。**実装完了（`done`）**：`_revise_goal_tool_impl`がBL-163の`_flagged`と起票issue_idから`plan_revision_reason`/`plan_revision_issue_ids`を組み立てて返し、`_LAST_GOAL_REVISION`ブリッジ経由で`generate_user_utterance_node`が`state["plan_revision_reason"]`へ反映（他要因セット済みなら上書きしないガード付き、BL-145と同型）。`task_planner_node`/`call_task_planner`は無改修（既存のrevision_reason消費ロジックをそのまま再利用）。新規テスト`tests/test_bl186_goal_revision_forces_replan.py`6件、既存BL-086/087/095/096/101/126/136/145/163/168/185関連197件と合わせて無退行を確認。 | P1 |
+| BL-187 | 中 | `cela_main.py`（`get_verified_facts_from_db`, `_read_verified_fact_handler`） | ユーザーが「read_verified_factで探したいものが見つからない時が散見されます。ragを導入して意味検索をしてはどうか」と提案。調査の結果、`topic_keyword`検索は`variable_name LIKE '%keyword%' OR reason LIKE '%keyword%'`というフレーズ全体一致のみで、AIが渡すキーワードの言い回し・語順が保存済みの文言と一字一句噛み合わないと`not_found`になる構造的な弱点を確認。1run内のverified_facts件数は数十件程度でありembeddingベースのRAG導入はオーバーエンジニアリングと判断し、新規依存なしの段階的改善（①トークン分割OR検索、②difflibによる近似候補フォールバック）を提案、ユーザーが承認。詳細は[BL-187詳細](#bl-187-read_verified_factのtopic_keyword検索をトークン分割or検索と近似候補フォールバックで緩和する)を参照。**実装完了（`done`）**：フレーズ全体一致→トークンOR検索→`difflib.get_close_matches`による`did_you_mean`候補提示、の3段階フォールバックを実装。`variable_name`指定時（一意識別子）はトークン緩和の対象外。新規テスト`tests/test_bl187_verified_fact_fuzzy_search.py`13件、既存BL-093/094/095/104/148/162/167/168/169/186関連238件と合わせて無退行を確認。 | P2 |
 
 ---
 
@@ -5262,6 +5263,31 @@ declared project completion in the previous turn.
 - `generate_user_utterance_node`で、既存の`_goal_revision`反映ブロック（`state["goal"]`更新箇所）の直後に、`state.get("plan_revision_reason")`が未設定の場合のみ`plan_revision_reason`/`plan_revision_issue_ids`をstateへセットするガード付き分岐を追加（BL-145の同型ガードを踏襲、他要因との衝突を回避）。
 - `task_planner_node`/`call_task_planner`は無改修。既存の`revision_reason`/`existing_phases`/`revision_issue_ids`消費ロジック（BL-126 Stage C・BL-145）がそのまま機能し、次ターンの`goal_essence`→`task_planner`再入場時に自動的に再発火して新規phase/taskを追加、`_mark_issue_planned`でissue_logを`open`→`planned`へ遷移させる。
 - 新規テスト`tests/test_bl186_goal_revision_forces_replan.py`6件：`_revise_goal_tool_impl`（`TOOL_DISPATCH["revise_goal"]`経由）が過去タスクを検知した場合に`plan_revision_reason`/`plan_revision_issue_ids`を正しく返すこと3件、`generate_user_utterance_node`が`_LAST_GOAL_REVISION`ブリッジからstateへ反映すること・既存の`plan_revision_reason`を上書きしないガードが機能すること・ゴール改定が無い場合は何もしないこと3件。既存BL-086/087/095/096/101/126/136/145/163/168/185関連197件と合わせて無退行を確認。`python -m py_compile`合格。
+
+---
+
+### BL-187: `read_verified_fact`の`topic_keyword`検索をトークン分割OR検索と近似候補フォールバックで緩和する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（実装完了） |
+| 優先度 | P2 |
+| 関連 | [BL-053](#bl-053-get_verified_facts_from_dbのtopic_keyword検索がvariable_name列しか見ておらず日本語キーワードで構造的にほぼ一致しない)（`topic_keyword`によるLIKE検索の初出、variable_name/reason両方を検索対象にした経緯）、[BL-096](#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)（`read_issues`のkeyword検索と同型の「見つからない時にどう振る舞うか」という設計課題）、[BL-184](#bl-184-web_searchweb_fetchread_reference_file-ツールの新設現実世界の地理数値をグラウンディングする)（`read_reference_file`のkeyword逆引き仕様検討時にも同種の検索精度課題を議論） |
+
+**内容:**
+
+ユーザーが「read_verified_factで探したいものが見つからない時が散見されます。ragを導入して意味検索をしてはどうか」と提案。調査の結果、`get_verified_facts_from_db`の`topic`検索（`cela_main.py:4740`付近）は`variable_name LIKE '%keyword%' OR reason LIKE '%keyword%'`という**フレーズ全体一致**のみで、AIが渡す`topic_keyword`の言い回し・語順が保存済みの`variable_name`（英語スネークケース）・`reason`（日本語説明文）と一字一句噛み合わないと`not_found`になる構造的な弱点を確認した。
+
+**検討したアプローチ**：AIから、embeddingベースのRAG（ベクトル検索）は、1run内の`verified_facts`件数が数十件程度に留まる規模感に対してオーバーエンジニアリングであり、新規の埋め込みAPI呼び出し・依存追加（AGENTS.md依存追加最小化方針）が必要になる点も踏まえ、まず新規依存ゼロで実現できる段階的改善（①トークン分割OR検索、②`difflib`による近似候補フォールバック）を提案。ユーザーが承認（「トークン分割OR検索＋近似候補フォールバックを実装して」）。
+
+**実装完了（`done`）**：
+
+`_read_verified_fact_handler`に3段階のフォールバックを実装:
+1. 既存の`get_verified_facts_from_db(topic=...)`によるフレーズ全体一致（変更なし）。
+2. フレーズ全体一致が0件の場合、`_tokenize_topic_keyword`（空白・`・`/`、`/`,`/`，`/`/`/`／`/`|`/`｜`で分割、1文字トークンは除外）で`topic_keyword`を分割し、2語以上あれば`get_verified_facts_from_db_any_token`（各トークンを`OR`で連結したLIKE検索）を試みる。`variable_name`指定時（一意識別子）はこの緩和の対象外とし、曖昧化させない。
+3. それでも0件の場合、`suggest_similar_verified_facts`が、このrunの全`variable_name`（`_`分割語）・全`reason`（同トークナイザ）から語彙を構築し、`difflib.get_close_matches`（cutoff=0.5）でクエリと近似する語を検索、該当する`variable_name`を`did_you_mean`候補として`not_found`レスポンスへ含める。
+
+新規テスト`tests/test_bl187_verified_fact_fuzzy_search.py`13件（トークナイザ3件、トークンOR検索2件、近似候補提示3件、ハンドラの3段階フォールバック統合5件：フレーズ一致の非退行・トークンOR緩和・did_you_mean提示・variable_name指定時は緩和対象外・真のnot_foundでdid_you_mean空リスト）を追加。既存BL-093/094/095/104/148/162/167/168/169/186関連238件と合わせて無退行を確認。`python -m py_compile`合格。実ドライランでの効果確認は次回以降。
 
 ---
 
