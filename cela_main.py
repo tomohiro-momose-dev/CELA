@@ -1143,8 +1143,21 @@ def _read_verified_fact_handler(args: dict) -> dict | list:
         variable_names=[variable_name] if variable_name else None,
         topic=topic_keyword,
     )
+    # [BL-187] フレーズ全体一致がnot_foundだった場合、トークン分割OR検索へ緩和する
+    # （variable_name指定時は対象外。variable_nameは一意識別子であり曖昧化させない）。
+    if not results and topic_keyword and not variable_name:
+        tokens = _tokenize_topic_keyword(topic_keyword)
+        if len(tokens) > 1:
+            results = get_verified_facts_from_db_any_token(conn, run_id, tokens)
+            if results:
+                print(f"  🔎 [BL-187] read_verified_fact: フレーズ全体一致は無かったが、"
+                      f"トークン分割OR検索で{len(results)}件ヒットしました（tokens={tokens}）。")
     if not results:
-        return {"status": "not_found", "message": "該当する確定値が見つかりませんでした。"}
+        suggestions = suggest_similar_verified_facts(conn, run_id, variable_name or topic_keyword or "")
+        message = "該当する確定値が見つかりませんでした。"
+        if suggestions:
+            message += f" もしかして次のvariable_nameではありませんか: {', '.join(suggestions)}"
+        return {"status": "not_found", "message": message, "did_you_mean": suggestions}
     return results
 
 
@@ -4761,6 +4774,74 @@ def get_verified_facts_from_db(conn: sqlite3.Connection, run_id: str,
             (run_id,)
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# [BL-187] topic_keywordの語順・言い回しが保存済みの文言と完全一致しないと
+# get_verified_facts_from_db(topic=...)のLIKE検索がnot_foundになる問題への対応。
+# 空白・日本語区切り記号でトークン分割し、まず既存のフレーズ全体一致を試みた後、
+# ヒットしなければ「いずれかのトークンを含む」というOR検索へ緩和する。
+_TOPIC_TOKEN_SPLIT_RE = re.compile(r"[\s・、,，/／|｜]+")
+
+
+def _tokenize_topic_keyword(text: str) -> list[str]:
+    """[BL-187] topic_keywordを検索用トークンへ分割する。1文字トークン（助詞の混入等で
+    ノイズになりやすい）は除外する。"""
+    if not text:
+        return []
+    return [t for t in _TOPIC_TOKEN_SPLIT_RE.split(text) if len(t) >= 2]
+
+
+def get_verified_facts_from_db_any_token(conn: sqlite3.Connection, run_id: str,
+                                          tokens: list[str]) -> list[dict]:
+    """[BL-187] トークンのいずれかがvariable_name/reasonに含まれる行をOR検索する。
+    get_verified_facts_from_db(topic=...)のフレーズ全体一致がnot_foundだった場合の
+    第2段階として使う。"""
+    if not tokens:
+        return []
+    conditions = []
+    params: list[str] = [run_id]
+    for t in tokens:
+        conditions.append("(variable_name LIKE ? OR reason LIKE ?)")
+        like_pattern = f"%{t}%"
+        params.extend([like_pattern, like_pattern])
+    rows = conn.execute(
+        f"SELECT * FROM verified_facts WHERE run_id=? AND ({' OR '.join(conditions)})",
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def suggest_similar_verified_facts(conn: sqlite3.Connection, run_id: str, query: str,
+                                    limit: int = 3) -> list[str]:
+    """[BL-187] トークンOR検索でも見つからない場合の最終フォールバック。このrunの
+    variable_name（`_`分割語）とreason（トピック分割と同じトークナイザ）から語彙を作り、
+    difflib.get_close_matches で近似一致するvariable_nameを提示する（新規依存なし、
+    embeddingベースのRAGは今回導入しない——AGENTS.md依存追加最小化方針、規模もrunあたり
+    数十件程度でオーバーエンジニアリングになるため）。
+    """
+    if not query:
+        return []
+    rows = conn.execute(
+        "SELECT variable_name, reason FROM verified_facts WHERE run_id=?", (run_id,)
+    ).fetchall()
+    if not rows:
+        return []
+    word_to_vars: dict[str, set[str]] = {}
+    for r in rows:
+        vname = r["variable_name"]
+        words = set(w for w in vname.split("_") if w) | set(_tokenize_topic_keyword(r["reason"] or ""))
+        for w in words:
+            word_to_vars.setdefault(w, set()).add(vname)
+    query_tokens = _tokenize_topic_keyword(query) or [query]
+    matched_vars: list[str] = []
+    for qt in query_tokens:
+        close = difflib.get_close_matches(qt, word_to_vars.keys(), n=limit, cutoff=0.5)
+        for c in close:
+            for v in sorted(word_to_vars[c]):
+                if v not in matched_vars:
+                    matched_vars.append(v)
+    return matched_vars[:limit]
+
 
 # ---------------------------------------------------------------------------
 # 1. 状態定義
