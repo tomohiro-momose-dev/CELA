@@ -72,9 +72,14 @@ BL-184（web_search/web_fetch/read_reference_fileのcela_main.py配線）完了�
   反映されていなかった」事故）と同型の失敗パターンを最初から回避する**ための必須対応。
 - 壊れたJSON（想定外の生データ）が入っていてもクラッシュしないようtry/exceptで防御。
 
-### 5. ツール説明文（`WEB_SEARCH_TOOL`/`WEB_FETCH_TOOL`）
+### 5. ツール説明文（`WEB_SEARCH_TOOL`/`WEB_FETCH_TOOL`/`READ_REFERENCE_FILE_TOOL`）
 
 - 一次ソース優先・最新性・批判的評価の指示を追記（BL-184実装時点の説明文を拡張）。
+- **追記（ユーザー指摘、初回実装時に漏れていた）**: 「必要な情報はweb_searchで能動的に探しに
+  行く（記憶からの推測で済ませない）」「新規のweb_search/web_fetch呼び出しの前に、
+  `read_reference_file`のkeyword検索でこのrun内の既存キャッシュ（call limitを消費しない）を
+  先に確認する」というガイドラインを`WEB_SEARCH_TOOL`/`READ_REFERENCE_FILE_TOOL`の説明文へ
+  追加した。
 - 各ノードの巨大なシステムプロンプト文字列（call_expert/call_task_planner/
   call_task_plan_reviewer/generate_user_utterance）を個別に書き換えるのではなく、
   **ツールスキーマの説明文に一元化**した。理由: これらのツールはfunction-calling仕様上、
