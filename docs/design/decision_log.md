@@ -2244,6 +2244,32 @@
 | 影響 | `web_tools.py`（`BraveSearchProvider`追加、`get_search_provider()`既定値変更、`DuckDuckGoSearchProvider`へのチャレンジ検知追加）。API仕様調査メモを`docs/refs/brave_search/api_notes.md`（AGENTS.md §9準拠、source URL・取得日付き）へキャッシュ、`docs/refs/duckduckgo/html_endpoint_notes.md`へ実測結果を追記。新規テスト5件追加（`tests/test_bl184_web_tools.py`、Brave成功/APIキー未設定/レスポンス欠落フィールド、DuckDuckGoチャレンジ検知）、既存36件と合わせて41件全通過。`python -m py_compile`合格。**利用にはBrave Search APIキーの取得・環境変数設定がユーザー側で別途必要**（実ドライラン実施前の残作業）。 |
 | 関連 BL | [BL-184](back_log/issue_backlog.md#bl-184-web_searchweb_fetchread_reference_file-ツールの新設現実世界の地理数値をグラウンディングする) |
 
+### D-158: BL-184のcela_main.py配線パラメータ（呼び出し回数上限・アタッチ範囲）を確定する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | BL-184の`web_tools.py`実装完了後、`cela_main.py`への配線に残っていた2つの未確定事項（`max_web_search_calls`/`max_web_fetch_calls`の具体値、Expert/Detector以外への展開要否）をユーザーへ確認した。 |
+| **決定理由** | ユーザーが「呼び出し回数上限はひとまず30回」「task_planner/task_plan_reviewer/Expert/Detector/reflector/facilitatorで試してみて、必要ならUserや他にも拡張」と回答したため、この値で配線を確定した。上限30はMAX_TOOL_ITER=30（BL-155、単一query_AI呼び出し内のツール往復上限）と揃えた覚えやすい数値であり、run全体累積の上限としては妥当な初期値としてユーザーが選択したもの。ノード拡張は、task_planner/task_plan_reviewerが計画時点で現実性を検証できる方が上流での手戻りを減らせること、reflector/facilitatorも滞留issueの根拠（citations由来URL）を自ら検証できる方が良いこと、をユーザーが判断した。アタッチする具体的なツール種別（全3ツールか`read_reference_file`のみか）はAIが「事実収集・執筆役（task_planner/task_plan_reviewer/Expert）には全3ツール、監査・進行管理役（Detector両パス/Reflection/Facilitator）には`read_reference_file`のみ」という当初BL-184設計の区別原則をノード拡張後も維持する形で決定し、ユーザーの指示（各ノードで「試してみる」）の範囲内の実装判断として扱った。 |
+| 決定内容 | `AppConfig`/`LineageState`の`max_web_search_calls`/`max_web_fetch_calls`を各30に設定。`call_task_planner`/`call_task_plan_reviewer`/`call_expert`は`WEB_SEARCH_TOOL`/`WEB_FETCH_TOOL`/`READ_REFERENCE_FILE_TOOL`の3つ全てをアタッチ。`call_detector`（ドメイン監査パス・数値監査パス両方）/`call_reflection`/`call_facilitator`には`READ_REFERENCE_FILE_TOOL`のみをアタッチ（新規の外部通信・追加コストを発生させない）。`call_reflection`は本決定に伴いBL-109以来の`tools=None`（単発判定）から`read_reference_file`単体のツールループへ変更した。`call_orchestrator`/`generate_user_utterance`（User AI）は当面スコープ外のまま。 |
+| 影響 | `cela_main.py`（`WEB_SEARCH_TOOL`/`WEB_FETCH_TOOL`/`READ_REFERENCE_FILE_TOOL`スキーマ追加、`TOOL_DISPATCH`登録、`LineageState`/`AppConfig`拡張、6ノードの`tools=[...]`更新）、`.gitignore`（`web_cache/`追加）。`tests/test_bl184_web_tools.py`41件再通過、`python -m py_compile`合格を確認。実ドライラン確認はBrave Search APIキー設定後（ユーザー側対応）に別途実施。 |
+| 関連 BL | [BL-184](back_log/issue_backlog.md#bl-184-web_searchweb_fetchread_reference_file-ツールの新設現実世界の地理数値をグラウンディングする) |
+
+---
+
+### D-159: BL-188のcitations強制力とスキーマ適用範囲を確定する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | ユーザーから「数字だけでなく全ての情報にソースを明示させたい。一次ソース・最新情報を優先し、web検索結果は批判的に評価させたい」との要望があり、調査の結果`verified_facts.citations`が実質未実装（topic文字列が機械的に入るだけ）であることが判明した。実装にあたり2つの分岐（citations未記載の強制力、citations欄の適用範囲）をAskUserQuestionで確認した。 |
+| **決定理由** | 強制力について、ユーザーは「プロンプト誘導のみ（推奨・まず様子見）」を選択した。理由はBL-042（Detectorのconstraint_issue硬直判定でツールループが同じ論点を延々再検討しトークンを浪費した過去事故）と同型のリスクを避けるため——citations欄をDetectorのminor/major判定に機械的に組み込むと、同じ硬直リスクを新たに持ち込むことになる。まずはプロンプト誘導とデータの可視化（表示反映）だけで実効性を見て、弱ければ後からDetector監査へ格上げする段階的アプローチとした。適用範囲について、ユーザーは「agreementsテーブル（Decision/Deliverable本体）にも新規citations列を追加」を選択した。confirmed_variables限定の小さな修正では、数値以外の一般的なDecision/Deliverableの主張にはソースを持たせられず、要望の「数字だけでなく全ての情報」を満たせないため。 |
+| 決定内容 | `agreements`テーブルへ`citations TEXT DEFAULT '[]'`列を追加。`WRITE_AGREEMENT_TOOL`にトップレベル`citations`パラメータと`confirmed_variables[].citations`サブフィールドを追加し、LLMが実際に引用元（type: web/goal_text/prior_agreement/expert_calculation/user_input/document, detail: 文字列）を渡せるようにした。未指定時は`confirmed_variables`側は従来のtopic文字列フォールバックを維持し、強制はしない。Detectorの判定ロジックへの機械的組み込みは行わない。ツール説明文（`WRITE_AGREEMENT_TOOL`/`WEB_SEARCH_TOOL`/`WEB_FETCH_TOOL`）へ一次ソース優先・最新性優先・web検索結果の批判的評価を促す指示を追記し、各ノードの個別プロンプトではなくツールスキーマ側に一元化した（function-calling仕様上、対象ノードへ毎回必ず提示されるため保守性が高い）。 |
+| 影響 | `cela_main.py`（`agreements`テーブルスキーマ・`_ensure_agreements_citations_column`マイグレーション・`WRITE_AGREEMENT_TOOL`スキーマ・`_commit_agreement_from_tool`・`_write_agreement_impl`・`_build_agreements_context`・`WEB_SEARCH_TOOL`/`WEB_FETCH_TOOL`説明文）。新規テスト`tests/test_bl188_citations.py`9件、既存オフライン全スイートと合わせて無退行を確認。 |
+| 関連 BL | [BL-188](back_log/issue_backlog.md#bl-188-全ての情報にソースcitationsを明示させる)、[BL-184](back_log/issue_backlog.md#bl-184-web_searchweb_fetchread_reference_file-ツールの新設現実世界の地理数値をグラウンディングする) |
+
+---
+
 ---
 
 ## 未決定（pending）
