@@ -5334,7 +5334,7 @@ AskUserQuestionで2つの設計分岐を確認：①citations未記載の強制�
 - `WEB_SEARCH_TOOL`/`WEB_FETCH_TOOL`の説明文にも一次ソース優先・批判的評価の指示を追記。各ノードの巨大なシステムプロンプトを個別に書き換えるのではなく、function-calling仕様上毎回必ず提示されるツール説明文に一元化した（保守性・一貫性のため）。
 - 基本設計を`docs/design/back_log/BL-188/BL188_basic_design.md`として原文保存。
 
-**実装中のインシデント**：`agreements.citations`列追加の実装直後、Edit操作が「ファイルが外部で変更されている」と警告し、実際にその2箇所（CREATE TABLE定義とマイグレーション関数・その呼び出し登録）のみがファイルから消失していることが判明した（原因不明、`.clinerules/hooks__/PostToolUse.ps1`はCline用の無効化済みフックでありClaude Code側の`.claude/settings.json`にはhooks設定が存在しないため直接の原因である可能性は低いと判断）。この状態のままオフライン全テストスイートを実行し69件が失敗したが、これは実装バグではなく上記の消失によるもの（`agreements`テーブルに`citations`列が存在しないままINSERT文が実行されていた）と特定し、該当2箇所を再適用・`grep`によるマーカー総数の突合で全体整合性を再確認した上で、全テストスイートを再実行し無退行を確認した。
+**実装中のインシデント**：`agreements.citations`列追加の実装直後、Edit操作が「ファイルが外部で変更されている」と警告し、実際にその2箇所（CREATE TABLE定義とマイグレーション関数・その呼び出し登録）のみがファイルから消失していることが判明した（原因はユーザー側の別プロセスによる`cela_main.py`への同時ファイル操作）。この状態のままオフライン全テストスイートを実行し69件が失敗したが、これは実装バグではなく上記の消失によるもの（`agreements`テーブルに`citations`列が存在しないままINSERT文が実行されていた）と特定し、該当2箇所を再適用・`grep`によるマーカー総数の突合で全体整合性を再確認した上で、全テストスイートを再実行し無退行を確認した。
 
 新規テスト`tests/test_bl188_citations.py`9件（スキーママイグレーション2件、`_write_agreement_impl`のトップレベルcitations永続化2件、confirmed_variables citations優先/フォールバック2件、`_build_agreements_context`表示3件）追加。`tests/test_r3_smoke.py`/`test_r4_smoke.py`/`test_r5_thought_log_freeze_goalshift.py`/`test_bl184_web_tools.py`を含む関連テスト群131件、既存オフライン全スイートと合わせて無退行を確認。`python -m py_compile`合格。
 
