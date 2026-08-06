@@ -30,8 +30,16 @@ class WebSearchProvider(Protocol):
         """[{'title': str, 'url': str, 'snippet': str}, ...] を返す。失敗時は例外。"""
 ```
 
-- `_get_search_provider()`が環境変数（例: `CELA_WEB_SEARCH_PROVIDER=duckduckgo|tavily|google_cse|brave`）を見て実装を選択する薄いファクトリ関数。抽象化自体は維持し、将来Providerを切り替え可能にする。
-- **初期実装はDuckDuckGoを選定**（ユーザー判断: クエリ量が読めない段階でAPIキー必須・従量課金のTavily等より先に、無料・APIキー不要のDuckDuckGoで様子を見る）。
+- `get_search_provider()`が環境変数`CELA_WEB_SEARCH_PROVIDER`（既定: `brave`）を見て実装を選択する薄いファクトリ関数。抽象化自体は維持し、Providerを切り替え可能にする。
+- **初期実装はDuckDuckGoを選定していたが、実装完了後の実測でBraveへ変更した**（詳細は次項「初期実装プロバイダの変更（2026-08-07）」参照）。DuckDuckGo実装自体はコードとして残し、`CELA_WEB_SEARCH_PROVIDER=duckduckgo`で引き続き選択可能。
+
+### 初期実装プロバイダの変更（2026-08-07）: DuckDuckGo → Brave Search API
+
+`web_tools.py`実装完了後、実際に`html.duckduckgo.com/html/`へ疎通確認したところ、**数回のリクエストだけで即座にBot対策の画像認証チャレンジ**（HTTP 202、`anomaly-modal`／"Unfortunately, bots use DuckDuckGo too."）が返るようになり、5秒後の再試行でも解除されなかった（実測結果は`docs/refs/duckduckgo/html_endpoint_notes.md`の追記を参照）。設計時に想定していた「レート制限・一時ブロックのリスク」は理論上の懸念に留まらず、即時的かつ高頻度に発生する実害であることが判明した。
+
+ユーザーへ報告した上で、(a) 検知して明示エラー化しこのまま進める、(b) 他の無料/低コストProviderへ切り替える、(c) Chromium/ChromeDriverによるブラウザ自動化でGoogle検索を叩く、(d) 今回はweb_search機能を保留する、の4案を提示した。ユーザーが当初(c)を提案したが、AIから「依存関係が一気に重くなる（ブラウザバイナリ100MB超）、Google検索はDuckDuckGo以上に自動化を敵視しておりToS上・技術上のリスクが高い、ブラウザ起動コストが`MAX_TOOL_ITER`を圧迫しかねない」という懸念を説明したところ、ユーザーが**Brave Search API（正式API、無料枠あり）への切り替え**を選択した。
+
+**実装済み**：`BraveSearchProvider`（`https://api.search.brave.com/res/v1/web/search`、ヘッダ`X-Subscription-Token`でAPIキー認証、`web.results[].{title,url,description}`を`{title,url,snippet}`へマッピング）を追加し、`get_search_provider()`の既定値を`brave`へ変更。APIキーは環境変数`CELA_BRAVE_SEARCH_API_KEY`から読み、未設定時は`WebSearchConfigError`で明示エラーを返す。`DuckDuckGoSearchProvider`側にも、Bot対策チャレンジページを検知した場合に空の結果リストではなく明示エラーを返す防御（実測で判明したリスクへの対処）を追加した。API仕様の調査メモは`docs/refs/brave_search/api_notes.md`にsource URL・取得日付きでキャッシュ済み（AGENTS.md §9準拠）。
 
 ### DuckDuckGoの実装方式と注意点
 DuckDuckGoには公式の検索APIが存在しない（Instant Answer APIは通常のWeb検索結果を返さないため今回の用途には不適）。現実的な選択肢は2つ:
