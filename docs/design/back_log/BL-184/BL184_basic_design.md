@@ -125,7 +125,7 @@ DuckDuckGoには公式の検索APIが存在しない（Instant Answer APIは通�
 
 ## 未確定・要ユーザー判断事項（実装着手前に確認）
 
-1. **検索Provider = DuckDuckGo（自前HTTP+自前パース方式、`httpx`のGETリクエスト）で確定**（ユーザー判断済み）。ただし非公式スクレイピングである旨のリスクは上記の通り認識済み。
+1. **検索Provider = Brave Search API（正式API、`httpx`のGETリクエスト＋`X-Subscription-Token`認証）で確定**（2026-08-07、ユーザー判断。当初はDuckDuckGoを選定したが実測でBot対策チャレンジに即ブロックされたため変更、詳細は「初期実装プロバイダの変更」節参照）。**利用にはBrave Search APIキーの取得・環境変数`CELA_BRAVE_SEARCH_API_KEY`への設定が必要**（実ドライラン前にユーザー側で対応要）。DuckDuckGo実装は`CELA_WEB_SEARCH_PROVIDER=duckduckgo`で引き続き選択可能。
 2. **`web_tools.py`への分割は既定方針として確定**（独立レビューでの推奨を受け、当初の「要ユーザー確認」から方針転換。新規追加分のみを切り出し、既存コードの構成は変更しない）。
 3. `max_web_search_calls`/`max_web_fetch_calls`の具体的な上限値、およびDuckDuckGoスロットリング間隔（既定案: 検索20回/run、取得20回/run、リクエスト間隔1秒以上）。
 4. `call_orchestrator`等、Expert/Detector以外への展開が必要かどうか（今回は対象外としたが、追加要望があれば設計に含める）。
