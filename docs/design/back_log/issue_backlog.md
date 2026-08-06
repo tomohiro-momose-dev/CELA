@@ -5191,10 +5191,20 @@ Plan ModeでExploreエージェント1体を実行し、既存ツール基盤を
 
 **利用にはBrave Search APIキーの取得・環境変数`CELA_BRAVE_SEARCH_API_KEY`への設定がユーザー側で別途必要**（実ドライラン実施前の残作業）。
 
+**`cela_main.py`配線完了（2026-08-07）**：
+
+ユーザーが残る未確定事項に回答（Brave APIキーは取得済み・環境変数設定はユーザー側で対応、呼び出し回数上限は各30回/run、アタッチ範囲はtask_planner/task_plan_reviewer/Expert/Detector/reflector/facilitatorへ拡張）したことを受け、`cela_main.py`側の配線を実装した：
+- `WEB_SEARCH_TOOL`/`WEB_FETCH_TOOL`/`READ_REFERENCE_FILE_TOOL`スキーマ定数を追加し、`TOOL_DISPATCH`へ`web_tools.web_search_handler`/`web_fetch_handler`/`read_reference_file_handler`を登録。
+- `LineageState`へ`web_search_call_count`/`web_fetch_call_count`（run単位の累積カウンタ）と`max_web_search_calls`/`max_web_fetch_calls`（`AppConfig`からrun開始時にコピーする上限値、`max_turns`/`reflection_interval`と同型のパターン）を追加。TOOL_DISPATCHの統一シグネチャが`(args, state)`の2引数のみのため、`web_tools`側の`config`引数にも`state`をそのまま渡し、新たなconfig運搬経路を増やさなかった。
+- `AppConfig`へ`max_web_search_calls`/`max_web_fetch_calls`（既定値30）を追加。
+- アタッチ設計は「事実収集・執筆役」と「監査・進行管理役」を区別する当初方針をノード拡張後も維持：`call_task_planner`/`call_task_plan_reviewer`/`call_expert`には3ツール全てを、`call_detector`（ドメイン監査パス・数値監査パス両方）/`call_reflection`/`call_facilitator`には`read_reference_file`のみをアタッチした（新規の外部通信・追加コストを発生させず、既に取得済みの証跡・citations由来URLとの整合性検証に限定する趣旨）。`call_reflection`はBL-109以来`tools=None`（単発判定）だったが、この目的のためだけに`read_reference_file`単体のツールループへ変更した。
+- `.gitignore`へ`web_cache/`を追加。
+- `tests/test_bl184_web_tools.py`41件全通過を再確認、`python -m py_compile cela_main.py web_tools.py`合格。
+
 **残タスク（未着手）:**
 
-- 残る未確定事項（呼び出し回数上限の具体値、Expert/Detector以外への展開要否）の確認後、`cela_main.py`側の配線（新規ツールスキーマ定数`WEB_SEARCH_TOOL`/`WEB_FETCH_TOOL`/`READ_REFERENCE_FILE_TOOL`、`TOOL_DISPATCH`登録、`call_expert`/`call_detector`の`tools=[...]`への追加、`LineageState`への`web_search_call_count`/`web_fetch_call_count`フィールド追加、`AppConfig`への`max_web_search_calls`/`max_web_fetch_calls`追加、`.gitignore`への`web_cache/`追加）。
-- Brave Search APIキーをユーザーが取得・設定した上での実ドライラン動作確認。
+- Brave Search APIキーをユーザーが環境変数`CELA_BRAVE_SEARCH_API_KEY`へ設定した上での実ドライラン動作確認（6ノードそれぞれでのツール呼び出し・呼び出し上限到達時の挙動含む）。
+- 呼び出し回数上限（30/30）が実際のドライランで過不足ないかの実測に基づく再調整要否の確認。
 
 ---
 
