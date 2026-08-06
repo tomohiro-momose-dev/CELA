@@ -104,9 +104,8 @@ BL-184（web_search/web_fetch/read_reference_fileのcela_main.py配線）完了�
 `_ensure_agreements_citations_column`関数・その呼び出し登録）を行った直後、Edit操作が
 「ファイルが最後に読み込んだ時点から外部で変更されている」という警告を返し、実際にこの2箇所の
 変更のみが後続の確認時点でファイルから消失していることが判明した（他の同時期の変更は全て
-残存していた）。原因は特定できていない（`.clinerules/hooks__/PostToolUse.ps1`は無効化された
-Cline用フックであり、Claude Code側の`.claude/settings.json`にはhooks設定自体が存在しないため、
-既知のdocs自動コミットフックが直接の原因である可能性は低いと考えられる）。該当2箇所を再適用し、
-`grep`によるマーカー総数の突合（`WEB_SEARCH_TOOL`/`WEB_FETCH_TOOL`/`READ_REFERENCE_FILE_TOOL`の
-出現数が定義1件+アタッチ先ノード数と一致することを確認等）とテスト実行で全体の整合性を再確認した。
-原因不明の消失が今後も起こりうる前提で、大きな編集作業の後には内容の再グレップ確認を徹底する。
+残存していた）。原因はユーザー側の別プロセスによる`cela_main.py`への同時ファイル操作（競合書き込み）
+と判明した。該当2箇所を再適用し、`grep`によるマーカー総数の突合（`WEB_SEARCH_TOOL`/
+`WEB_FETCH_TOOL`/`READ_REFERENCE_FILE_TOOL`の出現数が定義1件+アタッチ先ノード数と一致することを
+確認等）とテスト実行で全体の整合性を再確認した。同一ファイルへの同時編集が今後も起こりうる前提で、
+大きな編集作業の後には内容の再グレップ確認を徹底する。
