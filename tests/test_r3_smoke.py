@@ -273,9 +273,13 @@ def test_r3b_t3_escalation_roles_can_write_rejected(db_conn, role):
 
 @pytest.mark.parametrize("status", ["Proposed", "Approved", "Approved_with_Conditions", "Rejected", "Implicitly_Accepted"])
 def test_r3b_t4_user_ai_can_write_all_statuses(db_conn, status):
-    """R3b-T4: User AIは全statusを書き込めること。"""
+    """R3b-T4: User AIは全statusを書き込めること（ALLOWED_STATUS_BY_ROLEの許可表そのものの
+    確認であり、特定タスクへの承認の正当性は問わない）。
+    [BL-172] task_idを敢えて紐付けない（従来の"task_x"は実在しないtask_idだったため、
+    承認系statusでのCREATE時にExpert作成のDeliverable実在を要求する別のチェック(BL-172)に
+    引っかかり、本テストが検証したい許可表そのものの挙動と無関係な理由で失敗する）。"""
     cela_main._CURRENT_CALLER_ROLE = "user"
-    cela_main._CURRENT_TASK_ID = "task_x"
+    cela_main._CURRENT_TASK_ID = ""
     result = cela_main.TOOL_DISPATCH["write_agreement"]({
         "action_type": "CREATE", "status": status, "topic": f"t4-{status}",
         "decision_what": "d", "reason_why": "r", "entry_type": "Decision",
@@ -500,11 +504,21 @@ def test_bl039_task_transition_normalizes_dot_notation_task_id(db_conn):
     task_planner確定済みのアンダースコア表記（`task_1_1`）に正規化して遷移が成立すること。
     修正前は単純一致比較のみで、この表記ゆれにより全ての遷移要求が拒否されていた。
     [BL-125] _resolve_task_transitionがissue_logを問い合わせるようになったため、
-    DB接続とrun_idが必要（db_conn fixtureを使用）。"""
+    DB接続とrun_idが必要（db_conn fixtureを使用）。
+    [BL-176] _resolve_task_transitionが離脱先task_idの承認成立も検証するようになったため、
+    task_1_1にApproved相当のDeliverableを用意する。"""
     _conn, run_id = db_conn
     phase_1 = {"phase_id": "phase_1", "tasks": [{"task_id": "task_1_1"}, {"task_id": "task_1_2"}]}
     state = {"phases": [phase_1], "current_phase": phase_1, "current_task_id": "task_1_1", "run_id": run_id,
               "task_transition_blocked_issue_topics": []}
+    _conn.execute(
+        "INSERT INTO agreements (id, action_type, status, topic, decision_what, reason_why, proposed_by, "
+        "entry_type, phase_id, task_id, depends_on, resource_claims, timestamp, evidence, is_frozen, "
+        "internal_thought_process, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("AG-TEST-BL039", "CREATE", "Approved", "task_1_1の成果物", "X" * 300, "r", "expert", "Deliverable",
+         "phase_1", "task_1_1", "[]", "{}", time.time(), "", 0, None, run_id),
+    )
+    _conn.commit()
 
     cela_main._resolve_task_transition(state, {"advances_to_phase_id": None, "advances_to_task_id": "task_1.2"})
 

@@ -111,13 +111,16 @@ def test_first_task_write_is_accepted_when_current_task_id_is_still_empty(db_con
 
 
 def test_gate_applies_regardless_of_caller_role(db_conn):
+    """[BL-169] userはentry_type='Deliverable'をaction_type='CREATE'では新規作成できなくなった
+    （その組み合わせは別のより早い権限チェックで拒否される）ため、ここではUPDATEを使って
+    「ロールを問わずcurrent_task_idゲートが適用される」ことを検証する。"""
     conn, run_id = db_conn
     cela_main._CURRENT_CALLER_ROLE = "user"
     state = {"run_id": run_id, "phases": _PHASES, "current_task_id": "task_1_1",
              "current_phase": _PHASES[0]}
     result = cela_main.TOOL_DISPATCH["write_agreement"](
         {
-            "action_type": "CREATE", "status": "Proposed", "topic": "task_1_2の成果物(user)",
+            "action_type": "UPDATE", "status": "Approved", "topic": "task_1_2の成果物(user)",
             "decision_what": "X" * 500, "reason_why": "r", "entry_type": "Deliverable",
             "phase_id": "phase_1", "task_id": "task_1_2",
         },
@@ -128,14 +131,17 @@ def test_gate_applies_regardless_of_caller_role(db_conn):
 
 
 def test_decision_entry_type_is_exempt_from_the_gate(db_conn):
-    """entry_type='Decision'はBL-131のtask_id実在チェック同様、このゲートの対象外。"""
+    """entry_type='Decision'はBL-131のtask_id実在チェック同様、このゲートの対象外。
+    [BL-172] statusは意図的に"Proposed"を使う（"Approved"だと、対象task_idにExpert作成の
+    Deliverableが実在するかを見る別の権限チェック(BL-172)に引っかかり、本テストが検証したい
+    BL-146ゲートの挙動と無関係な理由で失敗するため）。"""
     conn, run_id = db_conn
     cela_main._CURRENT_CALLER_ROLE = "user"
     state = {"run_id": run_id, "phases": _PHASES, "current_task_id": "task_1_1",
              "current_phase": _PHASES[0]}
     result = cela_main.TOOL_DISPATCH["write_agreement"](
         {
-            "action_type": "CREATE", "status": "Approved", "topic": "全体方針の決定",
+            "action_type": "CREATE", "status": "Proposed", "topic": "全体方針の決定",
             "decision_what": "X" * 500, "reason_why": "r", "entry_type": "Decision",
         },
         state,

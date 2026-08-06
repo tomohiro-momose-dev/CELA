@@ -46,6 +46,20 @@ def _phases():
     ]
 
 
+def _insert_approved_deliverable(conn, run_id, task_id, seq=1):
+    """[BL-176] _resolve_task_transitionは離脱先task_idにApproved相当のDeliverableが
+    無いと遷移をブロックするため、遷移元task_idの承認成立をテスト側で用意する。"""
+    agreement_id = f"AG-TEST-{seq:06d}"
+    conn.execute(
+        "INSERT INTO agreements (id, action_type, status, topic, decision_what, reason_why, proposed_by, "
+        "entry_type, phase_id, task_id, depends_on, resource_claims, timestamp, evidence, is_frozen, "
+        "internal_thought_process, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (agreement_id, "CREATE", "Approved", f"{task_id}の成果物", "X" * 300, "r", "expert", "Deliverable",
+         "phase_1", task_id, "[]", "{}", time.time(), "", 0, None, run_id),
+    )
+    conn.commit()
+
+
 def _base_state(run_id, phases):
     return {
         "run_id": run_id,
@@ -129,6 +143,7 @@ def test_decision_extractor_does_not_override_explicit_transition(db_conn, monke
     _conn, run_id = db_conn
     phases = _phases()
     state = _base_state(run_id, phases)
+    _insert_approved_deliverable(_conn, run_id, "task_1_2")  # [BL-176] 離脱先の承認成立を用意
 
     def _fake_call_decision_extractor(chat_history, existing_topics, target_role, owns_variables=None, valid_task_ids=None):
         return (

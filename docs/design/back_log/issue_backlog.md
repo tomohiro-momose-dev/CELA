@@ -204,6 +204,20 @@
 | BL-170 | 高 | `cela_main.py`（`call_facilitator`の`escalated_issues_block`、`cela_main.py:6901-6923`） | ユーザーから「思考ログでthinkを連発している時があるが意味があるのか」との質問を受け、`think`連続呼び出しをログ全体（`log/2026-08-04/{1123,1355,1435,1546,1548}`）から機械的に検出。`log/2026-08-04/1435/log_no_prompt.md:784-995`でFacilitatorが`think`を29回連続呼び出し（`MAX_TOOL_ITER=30`をほぼ使い切り）、iter=4以降は`action`/`summary`のキーを入れ替えながら「Python REPLで計算します」という同一文をほぼ逐語的に反復するだけで、**一度もpython_replを呼ばず**、iter=30（ツール剥奪）で偽の`<tool_call>`タグを含む無意味なテキスト応答を出して終了、write_agreementも無くこのターンの出力は丸ごと空振りに終わったことを`log_with_prompt.md`とあわせて確認。根本原因を特定：Facilitatorの本来の役目は「短い誘導メッセージを1つ書くこと」で、`tools=[THINK_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, WRITE_AGREEMENT_TOOL]`（`cela_main.py:6957`）に`python_repl`は意図的に含まれていない（Expertの職掌と分離するため）。しかし`escalated_issues_block`（`cela_main.py:6901-6912`）が、Detectorが却下時に指摘した具体的・数値満載のissue文（今回はオペレーター人員体制の労基法違反計算）を「その解消を最優先事項として明確に提示してください」という強い指示文とともにそのまま埋め込んでおり、かつ「これはあなた自身が解決するのではなく、誘導メッセージの材料に過ぎない」という役割境界の明示が一切無かった。この結果モデルは、Facilitatorではなく丸ごとExpertの仕事（task_1_3財務モデルの全面再構築・成果物提出）を自分がやるべきことだと誤認し（iter=1のthink argsに`"成果物をwrite_agreementで保存（entry_type=Deliverable, status=Proposed）"`というtodoが既に立っていたことをプロンプトダンプで確認）、実行不能な計画を宣言し続ける空回りに陥った。ユーザー指示によりFacilitator以外の全11ノード（Detector各モード、Task Planner、Task Plan Reviewer、User AI、Integrator、Resource Arbiter、Reflection、Reviewer、goal_essence_analyst等）へ同型パターンの横展開調査をgeneral-purposeエージェントで実施したが、他ノードは注入される具体的内容とツール権限が一致しており（例: ExpertはDetectorの却下文を渡されるがpython_repl/write_agreement双方を保有）、プロンプト内「使えるツールは○○です」という文言（11箇所）と実際の`tools=[...]`の不一致もゼロ件で、他ノードへの横展開は不要と判定された。**実装完了（`done`）**：`escalated_issues_block`へ、「これはあなたが書く誘導メッセージの材料（背景情報）であり、あなた自身が数値の再計算・成果物の作成を行う役目ではない。python_replのような検算ツールもDeliverable新規作成の権限も与えられていない」旨のガードレール文（`[BL-170]`マーカー付き）を追加した。escalated_issues_textが空の場合（従来通りの周期的呼び出し）はブロック自体が出現しないため無影響、`essence_dialogue_active=True`の継続対話モードはそもそもこのブロックを使わないため無影響。新規テスト`tests/test_bl170_facilitator_escalated_issues_guardrail.py`（3件：issue本文＋ガードレール文の共存確認、issueなし時に両方とも非出現、essence_dialogue_activeモードでは両方とも非出現）追加。`python -m py_compile`合格、既存`test_bl061_facilitator_reflection_note.py`・`test_bl126_stage_d_essence_dialogue.py`・`test_bl096_issue_log.py`計65件無退行。フルオフラインスイート703件中702件Pass（1件`test_bl168_verified_facts_stale_after_goal_revision.py::test_revise_goal_marking_is_idempotent_on_repeated_revision`が`shift_id`にミリ秒タイムスタンプを使うUNIQUE制約の時刻衝突で失敗したが、単体実行では5件Pass、本修正と無関係な既存の低頻度flakyテストと判断——別途記録のみ、後続BL候補）。実ドライランでの効果確認は次回待ち。 | P1 |
 | BL-171 | 高 | `cela_main.py`（`_query_AI_live`のAPIエラーリトライブロック、`run_ai_vs_ai_loop`） | ユーザーが`log/2026-08-04/2344`を確認し「無料枠を使い果たした時に無理やりリトライし続けて、進行が滅茶苦茶になってしまっている」と報告。`log_no_prompt.md`行13808以降を確認すると、OpenRouter無料枠の日次上限エラー（`Error code: 429 - Rate limit exceeded: free-models-per-day-high-balance.`、`metadata.limit_source: openrouter_free_tier_daily`、`X-RateLimit-Reset`は翌日固定のタイムスタンプ）に対し、既存の一時的APIエラー向けリトライ機構（層1: 指数バックオフ8/16/32/64/128秒、層2: JSON解析失敗時に`_query_and_parse_with_retry`でさらに2〜3回リトライ）がそのまま適用され、同一の429が数時間分にわたり延々と繰り返されていることを確認。日次上限は指数バックオフの待ち時間程度では絶対に解消しないため、全リトライを使い切った`_query_AI_live`が"(サーバー高負荷によるAPIエラー)"というプレースホルダ文字列を返し、それがJSON解析に失敗し続けて層2リトライも枯渇し、最終的にDetector等が`🚨 層2リトライを使い切ってもJSON判定を取得できませんでした。フェイルクローズ(major)します。`という**偽のmajor判定**を機械的に返し続けていた（`log_no_prompt.md`行13921, 14079等で同一パターンが繰り返し発生）。この偽major判定が実際のドメイン監査の代わりにDetectorの判断として扱われ、以降のルーティング（差し戻し・reflection等）を汚染し、ドライランの進行が実質的に破壊される。**実装完了（`done`）**：新規例外`DailyQuotaExhaustedError`（`RuntimeError`継承）を定義。`_query_AI_live`のAPIエラーexcept節に、`isinstance(e, RateLimitError) and "per-day" in str(e)`を満たす場合はリトライを一切行わず即座にこの例外を送出する分岐を追加（他の一時的なAPIエラーの既存リトライ経路には影響しない）。`run_ai_vs_ai_loop`の`app.stream()`呼び出しを囲む`try`に、既存の`except KeyboardInterrupt:`と並べて`except DailyQuotaExhaustedError as e:`を追加し、Ctrl+Cと同じ一時停止経路（LangGraph checkpointerが完了済みノードまで既に自動保存済み、`--resume <run_id>`での再開案内）へ合流させた。新規テスト`tests/test_bl171_daily_quota_pause.py`（3件：日次上限エラーがバックオフ無しで即座に`DailyQuotaExhaustedError`となること、"per-day"を含まない通常のRateLimitErrorは従来通りのリトライ経路を経ること（回帰確認）、`run_ai_vs_ai_loop`が`KeyboardInterrupt`と同型で本例外を捕捉していることのソース確認）追加。`python -m py_compile`合格、既存BL-072/083/143/141/160関連28件・`test_checkpoint_resume.py`無退行、フルオフラインスイート706件Pass。実ドライランでの効果確認（日次上限到達時に即座に一時停止し無意味なmajor判定が発生しないこと）は次回待ち。 | P0 |
 | BL-172 | 高 | `cela_main.py`（`_check_write_permission`、`cela_main.py:1850`） | ユーザーが`log/2026-08-04/2316`を自ら精読し「ユーザーAIが自分でタスクを始めて1_1完了を宣言してしまっていました」と根本原因を特定。AIが`log_no_prompt.md`行751-761を確認し、User AIが`write_agreement(entry_type="Deliverable", action_type="CREATE", status="Approved", task_id="task_1_1", ...)`を呼び出し→BL-169により正しく拒否→**直後に全く同じ内容のままentry_typeだけ"Decision"に変えて再送→成功**、という2段階の回避策を確認。ホワイトボードファイル書き出し（`apply_whiteboard_patch`）は`entry_type=="Deliverable"`の時のみ発火するため、Decisionとして通した内容はDBには残るがホワイトボード.mdは一切生成されない（ユーザー報告「ホワイトボードや成果物のmdが生成されない」の直接原因）。BL-169自体は正しく機能していたが、「userがExpertの仕事を代行して完了を宣言する」という根本行動は防げておらず、entry_typeという表面的な区別だけを塞いだ結果、Userがより発見しにくい迂回路（entry_typeの付け替え）へ逃げた形だった。**実装完了（`done`）**：`_check_write_permission`を拡張し（`conn`/`run_id`/`task_id`/`phase_id`を任意引数として追加、`conn`未指定の既存の純粋呼び出しは新チェックをスキップし後方互換を維持）、「`caller_role=="user"`が`action_type=="CREATE"`かつ`status`が承認系（`RESOLVING_DELIVERABLE_STATUSES`＝Approved/Approved_with_Conditions/Implicitly_Accepted）の場合、entry_typeを問わず、対象`task_id`に対応するExpert作成のDeliverable（`_find_active_deliverable_agreement`、BL-084で既存）が実在するかを確認し、無ければ拒否する」という一般化した分岐を追加した。正当なUserの承認は常に「既存（Expert作成）のDeliverableをUPDATEでApproved等へ変更する」形を取るため、CREATEで承認系statusのエントリを新規に持ち込む正規の使い方はentry_typeを問わず存在せず、既存の正当な利用は影響を受けない。新規テスト`tests/test_bl172_user_approval_requires_existing_deliverable.py`（6件：BL-169回避策の再現・拒否確認、Deliverable直接CREATEの既存拒否の維持確認、Expert作成後のUser承認（UPDATE・Decision CREATE双方）が引き続き成功すること、task_id無し・Proposed statusのDecision CREATEが無影響であること、Rejected（承認系ではない）statusが対象外であること、`conn`未指定時に新チェックがスキップされる後方互換確認）追加。実装過程で、既存3テスト（`test_bl146_write_agreement_current_task_gate.py::test_decision_entry_type_is_exempt_from_the_gate`、`test_r3_smoke.py::test_r3b_t4_user_ai_can_write_all_statuses`の3パラメータ）が、実在しないtask_idへ承認系statusでCREATEするテスト用ショートカットに依存していたため発覚・修正（前者はstatusをProposedへ、後者はtask_id紐付け自体を除去、いずれも各テストの本来の検証意図には影響なし）。`python -m py_compile`合格、既存BL-084/146/161/169関連46件・`test_r3_smoke.py`51件無退行、フルオフラインスイート712件中711件Pass（1件`test_bl168_verified_facts_stale_after_goal_revision.py::test_revise_goal_marking_is_idempotent_on_repeated_revision`が失敗、単体再実行でも再現したため今回は真にflakyと判定、BL-173として別途記録）。実ドライランでの効果確認は次回待ち。 | P0 |
+| BL-173 | 低 | `cela_main.py`（`db_append_goal_shift_event`の`shift_id`採番、`cela_main.py:3907`付近） | BL-172のフルオフラインスイート実行中に`tests/test_bl168_verified_facts_stale_after_goal_revision.py::test_revise_goal_marking_is_idempotent_on_repeated_revision`が`sqlite3.IntegrityError: UNIQUE constraint failed: goal_shift_events.shift_id`で失敗する事象を発見。単体実行でも再現する場合があり（実行速度依存の真のflaky bug、BL-170調査時にも一度同一テストで観測済み）、原因は`shift_id = f"GS-{int(time.time() * 1000)}"`というミリ秒精度のタイムスタンプ採番方式で、同一テスト内で連続する2回の`revise_goal`呼び出し（同テストが意図的に短時間で2回実行する）が同一ミリ秒に収まると衝突すること。実運用のドライランでは`revise_goal`が同一ミリ秒内に連続実行されることは考えにくく実害は低いが、テストスイートの信頼性を損なう（原因不明の間欠的失敗に見える）ため記録する。**状態**: `open`（未着手。`uuid`混入や連番カウンタ等、衝突しない採番方式への変更で解消見込み）。 | P3 |
+| BL-174 | 中 | `cela_main.py`（新規`list_checkpoints`関数、`run_ai_vs_ai_loop`の`checkpoint_id`引数、`__main__`のCLI引数） | ユーザーから「checkpointですがノードごとに自動スナップショットをとれないか？タスクプランナーを毎回最初から通すのは非効率だし、途中まで良くて動作が壊れた直前からやり直させたい。再開時はスナップショット一覧から任意のスナップショットからやり直しができる、ほぼgitに近い」と提案があった。Context7でLangGraph公式ドキュメントを確認したところ、BL-105で導入済みの`SqliteSaver`は**既にノード完了（superstep）ごとに毎回別のcheckpoint_idでスナップショットを自動保存しており**、`app.get_state_history(config)`で全履歴（`StateSnapshot`のリスト、新しい順）を取得可能、任意の過去checkpoint_idを`app.get_state`/`app.invoke`/`app.stream`のconfigへ指定すれば、それ以前のノードを再実行せずそこから再開できる（公式のtime travel/replay機能）ことが判明した。つまり要望の中核（ノードごとの自動スナップショット、任意の過去スナップショットからのやり直し）は追加実装なしで既に成立しており、CELA側に不足していたのはCLIからこれを使うための薄い配線のみだった。ユーザーから「run_idがどこの時点のものか識別はできますか？」との確認があり、`StateSnapshot`の実フィールド（`values`＝その時点のCELA `LineageState`全体、`metadata["step"]`＝連番ステップ、`metadata["writes"]`＝直前に完了したノード名、`next`＝次に実行予定のノード名、`created_at`＝タイムスタンプ）をContext7で確認し、`turn_count`/`current_task_id`等CELA独自の文脈情報も含め十分識別可能であると回答した。**実装完了（`done`）**：新規関数`list_checkpoints(run_id)`を追加し、`app.get_state_history()`の結果をgit log風（step・タイムスタンプ・完了ノード・次ノード・turn・task_id・checkpoint_id）に整形して表示するCLI`--list-checkpoints RUN_ID`を新設。`run_ai_vs_ai_loop`に`checkpoint_id`引数を追加し、CLI`--resume RUN_ID --checkpoint-id CHECKPOINT_ID`で、threadの最新ではなく指定した過去checkpointから再開できるようにした（`checkpoint_id`指定は最初の`app.stream()`呼び出しにのみ適用し、2回目以降のターンはthread_idのみのconfigへ切り替える——固定したままだと毎ターン同じ過去の分岐点から再フォークし続け前進しないため）。過去checkpointからの再開はLangGraphの言葉で言えばそのcheckpointを親とする新しい分岐（checkpoint列）を作ることに相当し、元の「その後の履歴」は上書きされず個別のcheckpoint_idで参照可能なまま残る（gitのbranchに近い挙動、ユーザーの表現通り）。新規テスト`tests/test_bl174_checkpoint_history_and_targeted_resume.py`（5件：CELAの実グラフとは独立した合成グラフでの`list_checkpoints`出力確認、存在しないrun_idでのエラーメッセージ確認、`--checkpoint-id`単独指定時の拒否確認、`checkpoint_id`が`get_state`のconfigへ正しく渡ること、核心の回帰テストとして`checkpoint_id`が最初の`app.stream()`呼び出しにのみ使われ2ターン目以降はthread_idのみのconfigへ切り替わること）追加。テスト実装過程で、`get_state_history`の`next`/`metadata["writes"]`復元がcheckpointの生データだけでなくグラフのトポロジーにも依存する（書き込み時と異なるノード構成のグラフで読むと`next`/`writes`が正しく復元されない）ことを発見したが、`list_checkpoints`は常に実際に書き込んだのと同じ`build_graph()`（実CELAグラフ）を使うため本番影響はなく、テスト手法上の注意点として記録するに留めた。`python -m py_compile`合格、既存`test_checkpoint_resume.py`・`test_bl171_daily_quota_pause.py`計9件無退行、フルオフラインスイート717件Pass。**追記（同日）**：ユーザーから「リストは逆順にできないか」との指摘を受け、`app.get_state_history()`が返す新しい順のリストを`list_checkpoints`内で反転し、古い順（`git log --reverse`相当、実行の時系列通りに上から下へ読める順）で表示するよう変更。表示ラベルも「新しい順」→「古い順」に修正。既存テストへ表示順（step昇順）の検証を追加。`python -m py_compile`合格、フルオフラインスイート717件Pass。実ドライランでの効果確認は次回待ち。 | P2 |
+| BL-175 | 低 | `cela_main.py`（新規`JST`定数、`MultiLogger.__init__`、`call_reflection`のtimeline表示、`list_checkpoints`） | ユーザーから「時刻ですが日本時間にGMT+9にしてほしい。また、ログにもチェックポイントと同じ時刻を表示し、同期をとりたい」と要望があった。調査の結果、ログ側（`MultiLogger.__init__`のログフォルダ名・「Execution Log Started at」バナー、`call_reflection`のtimeline表示）は`datetime.datetime.now()`／`fromtimestamp()`でOSローカルタイムゾーンに依存しており、checkpoint側（`list_checkpoints`が表示する`StateSnapshot.created_at`）はLangGraph内部でUTC固定（ISO文字列、`+00:00`サフィックス、実機で実際に確認済み）と、双方の基準がバラバラで「同期」していなかったことを確認した。**実装完了（`done`）**：モジュール定数`JST = datetime.timezone(datetime.timedelta(hours=9), name="JST")`を新設し、(1) `MultiLogger.__init__`の`datetime.datetime.now()`を`datetime.datetime.now(JST)`へ変更（ログフォルダ名・「Execution Log Started at」バナーの両方がJSTになり、バナーへ「JST」ラベルも明記）、(2) `call_reflection`のtimeline表示（`datetime.datetime.fromtimestamp(ts_val)`）にも`JST`を明示指定、(3) `list_checkpoints`が表示する`created_at`（UTC固定のISO文字列）を`datetime.datetime.fromisoformat(...).astimezone(JST)`でJSTへ変換して表示（checkpoint自体の保存形式は変更せず、CELA側の表示のみ変換）した。これによりログとcheckpoint一覧の時刻表示が同じ基準（JST）で揃い、突き合わせやすくなった。新規テスト`tests/test_bl175_jst_timestamps.py`（3件：`JST`定数がUTC+9であることの確認、`MultiLogger`が`datetime.now()`にtz引数を明示的に渡していること・ログフォルダ名とバナーが正しくJST変換されることの確認、`list_checkpoints`の`created_at`表示がJSTへ変換されていることの確認）追加。テスト実装中、`MultiLogger.log_dir`（クラス変数、他テストのファイルアーカイブ処理等が参照する共有状態）を書き換えたまま復元し忘れ、後続の`test_r3_smoke.py::test_bl040_deliverable_filenames_are_versioned_and_old_versions_archived`を巻き込んで落とすテスト間分離漏れを発見・自己修正した（`finally`で`MultiLogger.log_dir`を元の値へ明示的に戻す）。`python -m py_compile`合格、フルオフラインスイート720件中719件Pass（1件はBL-173として既知のflakyテストで本修正と無関係）。実ドライランでの効果確認は次回待ち。 | P3 |
+| BL-176 | 高 | `cela_main.py`（`_resolve_task_transition`、`cela_main.py:8429`） | ユーザーから「ユーザーが現タスクの承認と次タスクの指示を明確に分けられないか。ユーザーが2つを同時に行ってしまうので、Detectorの監査をすり抜けると未承認のまま次タスクが進むことがある（task_idが動かない）」との問題提起があった。コード調査の結果、(1) `write_agreement`（`_write_agreement_impl`）は呼び出し時点でDBへ即コミットされ、Detectorの監査は事後にターン全体へかかる仕組みで承認自体を差し戻す機構ではないこと、(2) `current_task_id`の唯一の書き手`_resolve_task_transition`（BL-024）は遷移先phase/task_idの実在確認とBL-125の未解決severe issueブロックは行うが、**離脱するtask_idのDeliverableが実際にApproved相当（BL-167の`_is_task_completed`）かどうかは一切検証していない**こと、(3) その入力`advances_to_task_id`は`write_agreement`とは独立した別のLLM呼び出し`call_decision_extractor`がUser発言全文を自由文脈で読んで抽出したもの（BL-139のフォールバック含む）で、承認の成否とは無関係に遷移意図だけを検出する設計であることを確認した。承認の成立確認（write_agreementの即時コミット＋事後Detector監査）と次タスクへの遷移判定（decision_extractorの自由文脈抽出）が別経路で動いており、両者の整合性を取るゲートが存在しないことが実害の入口と推定される（ログでの実際の障害再現はまだ未確認、コードレビューから導いた仮説）。**実装完了（`done`）**：`_resolve_task_transition`（BL-125の未解決issueブロックの直後）に、「departing_task_idが空でなく、かつ`_is_task_completed`（BL-167）でなければ遷移を拒否する」という機械的ゲートを追加した。ブロック時は新設の一度きり通知フィールド`task_transition_blocked_unapproved_task_id`（BL-125の`task_transition_blocked_issue_topics`と同型のone-shotパターン）へdeparting_task_idを記録し、`_build_task_transition_blocked_notice`（`generate_user_utterance`が毎ターン注入）を拡張して次のUser AIターンへ理由を明示するようにした。実装過程で、この新ゲートに抵触して5件の既存テスト（`test_bl136_issue_visibility_and_transition_gate.py`3件、`test_bl139_transition_fallback_from_directive.py`1件、`test_r3_smoke.py`1件、いずれもテスト用の遷移元task_idにApproved相当のDeliverableを用意していなかった）が発覚・修正した（各テストの本来の検証意図——BL-125のissueゲート・BL-139のフォールバック・BL-039のドット表記正規化——には影響なし、Approved Deliverableの事前挿入を追加しただけ）。新規テスト`tests/test_bl176_task_transition_requires_approval.py`（12件：承認なし・Proposedのみ・Rejectedでの拒否確認、Approved/Approved_with_Conditionsでの許可確認、departing_task_idが空の初回遷移は対象外であること、BL-125との共存（issueゲートが優先発火しBL-176側フィールドはセットされないこと）、`_build_task_transition_blocked_notice`のBL-176分岐の通知文言・one-shotクリア確認、`LineageState`への新フィールド配線確認）追加。`python -m py_compile`合格、フルオフラインスイート732件中731件Pass（1件はBL-173として既知のflakyテストで本修正と無関係）。実ドライランでの効果確認は次回待ち。 | P1 |
+| BL-177 | 中 | `cela_main.py`（`generate_user_utterance`ほか全ノードのプロンプト生成関数） | BL-176の議論の延長として、ユーザーから「Detectorが既に2段階（ドメイン妥当性レビュー→数値検算）で監査しているのと同じように、User AI側も『レビュー→issue確認→レビュー・issue確認から統合した承認判断→次タスク指示（または現タスク修正指示）』という段階的なワークフローとして、ステージごとにプロンプトを変えながら回せないか」との提案があった。ユーザーはさらに「これはUser AIに限らず、Expert・Detectorはじめ他の全ノードにも言えることで、あれこれまとめて指示しているプロンプトを同様にステージ化したい」と対象を全ノードへ一般化し、「まずBL化してください」と指示した。`call_detector`（cela_main.py:5924）が既に同型のパターン（1回のノード実行内でドメイン妥当性レビューパス→数値監査パスの専用プロンプトを直列呼び出し、BL-049/BL-054）を実践済みであり、これを一般化する構想。詳細は[BL-177詳細](#bl-177-全ノードのプロンプトを複数の責務を1回のllm呼び出しに詰め込む構造からdetectorの2段監査パスと同型の段階化構造へ一般化するuser-ai部分は実装完了他ノードは未着手)を参照。**User AI部分は実装完了（`done`）**：`generate_user_utterance`に4段階パイプライン（Stage1レビュー→Stage2 issue確認→Stage3統合承認判断→Stage4次タスク指示/現タスク修正指示/承認記録失敗の待機メッセージ）を、通常のExpert成果物レビューターンのみを対象に追加した。特殊モード（essence_dialogue/expert_pending_question/drift再送/終盤/初回ターン）は既存の単発呼び出しのまま温存。フルオフラインスイート748件Pass。**他ノード（Expert・Detector等）への一般化は未着手のまま`open`**。 | P2 |
+| BL-178 | 中 | `cela_main.py`（`call_expert`、`cela_main.py:5598-5993`） | BL-177完了後、ユーザーが実ログ`log/2026-08-05/1049/log_with_prompt.md`（差し戻しターン、行19594-19970）を精読し、Expertが差し戻し指摘を汲み取れていない様子を発見。原因調査の結果、`chat_history_window=4`の末尾4件が全て無関係な話題で占められている一方、差し戻しブロックは`system_prompt`の中盤にしかないことを確認し、ユーザーが「可変部分は視座を上から下に、かつ過去から現在の順で情報提示しないと、狙った動作にならない」という設計原則を提起。さらに`_query_AI_live`（`cela_main.py:3512-3516`）の調査で、`light_system_prompt`はツールループiter=1完了時点で`loop_messages[0]`を丸ごと置き換えるため、iter=2以降は差し戻し情報・決定事項DB・厳守事項が完全にコンテキストから消えており、`light_system_prompt`自体にはこれらが現状一切含まれていないことも判明。詳細は[BL-178詳細](#bl-178-call_expertのsystem_promptフル版light_system_prompt軽量版を視座は上から下文脈は過去から現在の順に再構成しdetectorの差し戻し情報を両方で真に最後に読ませる実装完了)を参照。**実装完了（`done`）**：`messages`配列を`[system_prompt_leading, ...chat_history, system_prompt_trailing]`の3部構成へ再構成し、`light_system_prompt`をユーザー指定の11項目順へ並び替えた。実ドライラン（`log/2026-08-05/1309`）でユーザーがフル版の並びを検証したところ、Plan mode設計時にAIが独自に再構成した順序がユーザーの過去の指示（旧項目番号での明示的な順序リスト）と食い違っていたため、ユーザーが正しい順序を再提示し修正した。 | P2 |
+| BL-179 | 高 | `cela_main.py`（`generate_user_utterance`のStage3、`cela_main.py:7429-7476`） | ユーザーがBL-178実装完了後の実ドライラン（`log/2026-08-05/1542`→`1556`）を「task切り替えに苦戦しているようです」とレビュー依頼。調査の結果、BL-177のStage3（統合承認判断）が実際に呼んだ`write_agreement`（`log/2026-08-05/1542/log_no_prompt.md:2754`）が`action_type="CREATE"`, `entry_type="Decision"`, `topic="task_1_1成果物（...）の統合承認判断"`という、Expertの元のDeliverable（`entry_type="Deliverable"`）とは別の新規Decisionエントリを作成していたことを発見。BL-176のゲート（`_is_task_completed`、`cela_main.py:4007-4020`）は`entry_type=="Deliverable"`の最新行のstatusしか見ないため、この状態ではExpertの成果物が永遠に`status="Proposed"`のまま残り、タスク遷移が恒久的にブロックされ続ける。以降の混乱（Orchestratorの無駄な思考、ExpertのBL-130相談、User AIの試行錯誤）は全てこの1点に起因すると特定。ユーザーが「すぐに直してください。また、同様なプロンプトの退行がないかチェックして下さい」と指示。詳細は[BL-179詳細](#bl-179-bl-177-stage3の承認記録がexpertの成果物deliverable自体を更新せず別のdecisionエントリを作成してしまいbl-176のゲートを永久に満たせない)を参照。**実装完了（`done`）**：Stage3のプロンプトへ、承認先の`target_topic`（`_find_active_deliverable_agreement`で取得したExpertの成果物のtopic）を明示的に注入し、「`action_type=\"UPDATE\"`, `entry_type=\"Deliverable\"`でExpertの成果物自体を更新すること、新しいDecisionエントリを作成してはいけないこと」を明記。あわせて、Stage3の自己申告とツール呼び出し結果の食い違い判定（BL-091/BL-176と同じ機械的検証原則）を、単なる`get_last_write_agreement_succeeded()`から`_is_task_completed`（BL-176のゲートと同一基準）併用へ強化し、write_agreementが「成功はしたが対象が違う」ケースも検知できるようにした。他のStage（1・2・4）を監査したが、Stage2はissue_log/escalationのID・topicを既に明示的に提示しており同種の問題は無し、Stage1・4は書き込みツールを持たないため対象外と確認。新規テスト4件（プロンプトのソース確認2件、実ドライランの不具合を再現する回帰テスト1件、既存テストへのDB裏付け追加）を`tests/test_bl177_user_ai_staging.py`へ追加、既存関連テスト無退行を確認。 | P0 |
+| BL-180 | 高 | `cela_main.py`（`_commit_agreement_from_tool`のUPDATE分岐、`cela_main.py:2102-2132`／Stage3プロンプト、`cela_main.py:7461-7470`） | ユーザーが実ドライラン`log/2026-08-05/1639`（task_1_2の成果物）をレビューし「task_1_2_V2が中途半端な文章です」と報告。調査の結果、BL-179で修正したStage3が`write_agreement`のUPDATEを`decision_what`（承認コメント全文、200字超）のみ・`edits`未指定で呼んだ結果、BL-127の「200字以下なら保護」判定に外れて全文置換の抜け道（`len(raw_content) > 200`分岐）に入り、Expertが作成した74行の詳細仕様書（Ver.1）が3行の承認コメント（Ver.2）へ丸ごと上書きされていたことを発見。同じ場面のtask_1_1では偶然`edits`が使われたため無事だったが、Stage3プロンプトはどちらを使うか指示しておらず、BL-179で追加した「decision_whatは短い承認コメントで構いません（保護されるため書き写し不要）」という文言も200字という境界線に触れておらず、この事故を誘発した可能性が高い。さらに、runがまだ継続中で、task_1_3のDetector・Orchestratorが既に破壊後のVer.2を`read_deliverable_file`で読んでいたことも確認（実害が下流へ伝播中）。詳細は[BL-180詳細](#bl-180-bl-179のstage3プロンプトが200字境界に触れずuser承認コメントがbl-127の全文置換の抜け道に入りexpert作成のホワイトボードを破壊する)を参照。**実装完了（`done`）**：(1)コード側：`_commit_agreement_from_tool`のUPDATE分岐で、200字超の全文置換パスへ入る条件に`caller_role == "expert" or not is_whiteboard`を追加。BL-169により`entry_type=\"Deliverable\"`の内容執筆はexpertロールのみに許可されているため、既にホワイトボード化済みの完全版に対しexpert以外（user/detector等）がedits未指定でUPDATEする場合は、文字数によらず常に保護するよう変更。(2)プロンプト側：Stage3の`decision_what`案内文言を「成果物本文自体を変更・追記したい場合はeditsパラメータを使ってください」という明確な行動指示へ書き換え。(3)データ復旧：`log/2026-08-05/1639`のrun（`run_id=1785911225-bcfa11e6`、既にプロセス終了済みで書き込み競合なしを確認済み）の`whiteboard_drafts`へ、Ver.1本文＋第3段承認記録セクションを追記したVer.3を新規INSERT（append-only原則によりVer.2は削除せず履歴として温存）。新規テスト`tests/test_bl180_deliverable_protect_non_expert_full_replace.py`3件（user役の長文decision_whatが保護されること、expert役は従来通り全文置換されること＝非退行確認、detector役でも同様に保護されること）追加、既存BL-127/169/172/176/177/178関連69件と合わせて無退行確認。 | P0 |
+| BL-181 | 高 | `cela_main.py`（`build_graph`内`route_after_user_decision`／`call_detector`のtarget_role="user"向け`role_specific_instruction`） | ユーザーが実ドライラン`log/2026-08-05/1833`をレビューし、task_4_1に未解決の`severity='major'`issue（`task_4_1_route_length_ratio_contradiction`、ゴール文の山間部15%比率と片道12km区間の併記が論理的に全長80km以上を強制する構造的矛盾、`escalate_premise_concern`でESC-1785924841253として起票済み）が残ったまま、Userがtask_4_2への移行を指示。BL-125（`_resolve_task_transition`）はこれを正しく検知し`current_task_id`の更新をブロックした（`task_transition_blocked_unapproved_task_id`をセット）が、直後の`route_after_user_decision`はこの値を一切参照せず無条件に`orchestrator`へ進んでいたため、Orchestrator/Expertは直近の会話文脈（Userが既に発言したtask_4_2の指示）だけを頼りに先走ってtask_4_2の成果物を生成してしまった。Expertがtask_id="task_4_2"で`write_agreement`しようとすると「`task_id 'task_4_2' は現在のタスク（'task_4_1'）と一致しません`」と拒否され、Expertは`task_id="task_4_1"`に付け替えて再送信する回避策を取ってしまい（User AI Stage3も「task_id登録がtask_4_1となっているのはシステム制約による技術的名称」と追認して承認）、結果としてtask_4_2の成果物が`agreements`/`whiteboard_drafts`の両方に`task_id='task_4_1'`として誤登録され、task_4_1の本当の承認済み成果物を今後の`read_deliverable_file(task_id="task_4_1")`から読めなくする（シャドーイングする）データ破損が発生した。`_build_task_transition_blocked_notice`（BL-125の通知）は`generate_user_utterance`（User AI）のプロンプトにしか注入されておらず、Orchestrator/Expertはブロックの存在自体を一切知らされていなかったことが根本原因と特定した。詳細は[BL-181詳細](#bl-181-bl-125のタスク遷移ブロックをorchestratorexpertが素通りしtask_idの誤登録データ破損を招く)を参照。ユーザー提案により、user_detector（意味的な第1段防御）とuser_decision_extractor（機械的な第2段防御）の2段構成で対応する方針とした。**実装完了（`done`）**：(1)第1段：`call_detector`のtarget_role="user"向け`role_specific_instruction`に、次タスクへの移行時は`read_issues`で現在タスクのmajor/escalated issueが今回の発言内でRESOLVE/DEFERされているか確認し、未対応ならmajorとして差し戻す指示（BL-181節）を追加。既存の`route_after_user_detector`（`constraint_issue=="major"`→`generate_user_utterance`）がそのまま機能するため新規配線は不要。(2)第2段：`route_after_user_decision`に`state.get("task_transition_blocked_unapproved_task_id")`のチェックを`ready_for_review`判定より先に追加し、真の場合はLLMを介さずPython側のみで`orchestrator`へ進めず`generate_user_utterance`へ差し戻すよう変更。差し戻し先のプロンプトには既存の`_build_task_transition_blocked_notice`が自動的に注入されるため、メッセージ注入も新規実装不要。graph.add_conditional_edgesのマッピングへ`"generate_user_utterance": "generate_user_utterance"`を追加。新規テスト`tests/test_bl181_task_transition_block_stops_orchestrator.py`5件（route_after_user_decisionのソース確認3件、build_graph()のコンパイル確認1件、call_detectorのBL-181節ソース確認1件）を追加、既存BL-136/176/checkpoint-resume関連51件と合わせて無退行を確認。ユーザー指示によりtask_4_1/task_4_2の誤登録データも復旧済み（`cela.db.bak_bl181`へバックアップの上、`agreements`/`whiteboard_drafts`双方でtask_idを正しく分離、詳細はBL-181詳細節参照）。 | P0 |
+| BL-182 | 中 | `cela_main.py`（`call_decision_extractor`のExpert向け`role_instruction`・共通`common_rules`、`cela_main.py:6586-6608, 6671-6673`） | ユーザーが実ドライラン中に発生した`⚠️ [Decision Extractor] JSON判定パース失敗を検知...層2リトライ 3/2...`エラー（`log/2026-08-05/2311/log_no_prompt.md:5568-5665`、task_5_1「エッジケースA（通信完全ロスト）フェールセーフプロトコル・マニュアル」の抽出）を報告。調査の結果、`decision_extractor_node`のデバッグログで`wrote_agreement_this_turn=True`（Expertが既に`write_agreement`で正しく登録済み）であることを確認し、今回は実害なし（decision_extractorの抽出結果自体がこの後どのみち破棄される）と判明。しかし根本原因として、`call_decision_extractor`のExpert向け指示（`cela_main.py:6586`、当時）が「成果物本体（仕様書や計画書のテキスト全文。絶対に要約しないこと）」とDeliverable本文の全文複製を要求しており、これが大きな成果物ほどJSON出力を肥大化させmax_tokens付近での打ち切り（3回のリトライすべて失敗）を招いていることを特定した。ユーザーが「これは当初はdecision_extractorが抽出していたものをユーザーやエキスパートが直接dbに登録するように変更した後の名残です。もう機能自体を削ってもいいかもしれません」と指摘。詳細は[BL-182詳細](#bl-182-call_decision_extractorのdeliverable全文複製要求が長大な成果物でjson出力を肥大化させmax_tokens付近での打ち切りを招く)を参照。ユーザーへ削減範囲（全面撤廃／Deliverable全文複製のみ撤廃／wrote_agreement_this_turn=True時のみプロンプト自体をスキップ）を確認し、「Deliverable本文の全文複製だけを撤廃（Decision/Directiveの抽出は残す）」を選択。**実装完了（`done`）**：`_commit_agreement_from_tool`ではなく`decision_extractor_node`の既存フォールバック経路（`cela_main.py:9013-9023`、entry_type="Deliverable"かつaction_type="CREATE"でcontentが200字以下の場合`state["expert_output"]`（Agentの発言全文）を自動的に使う仕組みが既に存在）に着目し、decision_extractor自身がcontentへ全文を複製する必要は元々無かったことを確認した上で、Expert向け指示・共通ルール（🚨成果物抽出に関する絶対ルール🚨）・JSON出力例のcontentフィールド説明を、いずれも「200字以内の簡潔な要約で構わない」旨へ書き換えた。Decision/Directive抽出・BL-082/BL-136のDEFER検出・`advances_to_task_id`検出・User側のUPDATE時content空文字強制は無変更。新規テスト`tests/test_bl182_decision_extractor_no_deliverable_full_text.py`5件（Expert向けプロンプトが旧来の全文複製要求文言を含まないこと、ソースにBL-182節と200字以内の言及があること、Decision/Directive抽出指示とDEFER検出が維持されていること、User側UPDATE時のcontent空文字強制が維持されていること、共通ルールに200字要約への言及があること）を追加、既存BL-041/050/082/096/139/154/160関連85件と合わせて無退行を確認。 | P2 |
+| BL-183 | 高 | `cela_main.py`（`build_graph`内`route_after_user_decision`、`cela_main.py:9719`） | ユーザーが実ドライラン`log/2026-08-06/0751`をレビューし「task番号がまたずれているようです」と報告。調査の結果、BL-181で実装した機械的な第2防衛線が、`_resolve_task_transition`が立てる2種類の排他的ブロックフラグ（`task_transition_blocked_unapproved_task_id`＝BL-176の離脱先未承認ブロック、`task_transition_blocked_issue_topics`＝BL-125本来の未解決severe issueブロック）のうち前者しかチェックしておらず、`log/2026-08-06/0009`で実際に発火した後者のブロック（`🛑 [BL-125] 'task_5_2'に未解決・未先送りのsevere issueが1件存在するため、'task_6_1'への遷移をブロックしました`）を素通りさせていたことが判明。BL-181と全く同型の事故（Orchestrator/Expertがcurrent taskを誤認して先走り、write_agreementのtask_id不一致ゲートに阻まれたExpertがtask_id='task_5_2'のままtask_6_1の成果物を誤登録）が再発した。詳細は[BL-183詳細](#bl-183-bl-181の機械的な第2防衛線がbl-125本来の未解決severe-issueブロックを見落とし素通りさせていた)を参照。**実装完了（`done`）**：`route_after_user_decision`の条件を両フラグのORへ拡張。新規テスト`tests/test_bl183_task_transition_block_severe_issue_flag.py`4件（両フラグの参照確認、判定順序確認、`task_transition_blocked_issue_topics`単独でも実際に差し戻すことの実行確認、両方未設定時は従来通り`orchestrator`へ進むことの実行確認）を追加、既存`test_bl181_...`5件と合わせて9件無退行を確認。ユーザー指示によりtask_5_3/task_6_1の誤登録データ（`agreements`/`whiteboard_drafts`/`verified_facts`の3テーブル）も復旧済み（`cela.db.bak_bl183`へバックアップの上、詳細はBL-183詳細節参照）。 | P0 |
+| BL-184 | 中 | `cela_main.py`（新規ツール群、`TOOL_DISPATCH`拡張。分割検討中の`web_tools.py`） | ユーザーが08-05〜08-06分の全ドライランログ・成果物を監査依頼（「ゴールと制約は物理的に困難なはずだが、捏造や単純化や先送りなど、議論の品質と量が十分であるか確認してください」）。監査の結果、CELAが完全にクローズドな世界（ゴール文＋内部相互参照のみ）で動作しており、現実の地理・費用相場等を一切検証できないことが、task_1_3の「15%×12km→L≥80km」矛盾の見落としやtask_6_1の「片道12km→7-10km」再設定の推測依存など複数の弱点の根本要因の一つと判明。ユーザーが改善方針として「web検索・ファイルIOの実装」を提案し、AIが設計。Plan ModeでExploreエージェント1体（既存`TOOL_DISPATCH`パターン・role非ゲート方式・`read_deliverable_file`のresolve-and-containパターン・`python_repl`のサンドボックス方式・`verified_facts`の`confidence`enum制約・依存追加の先例＝D-086を調査）を実行。検索プロバイダについてユーザーへ確認したところ「まだ決めない、Provider抽象化して提案」→その後「Tavilyも良いがクエリ量が読めないため、まずAPIキー不要のDuckDuckGoにする」との判断があり、DuckDuckGoを自前HTTP+自前HTMLパース（`requests`のみ、`ddgs`等の追加依存なし）で実装する方針へ確定。`web_search`（検索結果一覧）/`web_fetch`（本文取得＋`web_cache/`への自動キャッシュ）/`read_reference_file`（キャッシュの読み取り専用参照、`read_deliverable_file`と同じresolve-and-containパターン）の3ツール構成としたのは、Claude Code自身のWebSearch/WebFetch/Readの分離、および既存の`read_project_plan`→`read_deliverable_file`という「一覧→詳細」パターンを踏襲したもの。`verified_facts`の`confidence` enum（`confirmed`/`provisional`）はAGENTS.md §7の重要定数変更に該当するため変更せず、既存の`citations`フィールドをそのまま活用してURLトレーサビリティを持たせる設計とした。SSRF対策（private/loopback IPレンジ拒否）・run単位の呼び出し回数上限・DuckDuckGoスクレイピングのリスク（非公式・ページ構造変更で壊れる可能性・レート制限リスク）も明記。基本設計を`docs/design/back_log/BL-184/BL184_basic_design.md`として原文保存。**状態: `open`（設計完了、実装未着手）**。実装着手前に4点の確認事項が残る（詳細はBL-184詳細節参照）：①検索Providerの最終確定＝DuckDuckGo確定済み、②`web_tools.py`への分割可否、③呼び出し回数上限・スロットリング間隔の具体値、④Expert/Detector以外のノードへの展開要否。 | P2 |
+| BL-185 | 高 | `cela_main.py`（`generate_user_utterance`、単発呼び出しパス） | ユーザーが「detctorの差戻を無視して、プロジェクト完了を連呼している」と報告。調査の結果、実ドライラン`log/2026-08-06/1149`で、Detectorがmajor判定（労基法違反疑い＋予備費ゼロ）で差し戻した直後のUser AIの最初の思考が、差し戻された事実に一切触れず、削除されたはずの「前回の完了宣言」を一字一句そのまま繰り返していたことを確認。原因はBL-178でcall_expertに実装済みの構造的欠陥と全く同型で、`generate_user_utterance`の差し戻し通知が`system_prompt`の中盤（🚨最終盤の超重要指示・エスカレーション再開通知・タスク遷移ブロック通知より前）に配置される一方、`messages`配列は`[system, ...chat_history]`という構造上`chat_history_window=4`件の直近会話（Expertの長大な完了報告等）が常に物理的に後ろへ来るため、差し戻し通知が埋もれて機能していなかった。詳細は[BL-185詳細](#bl-185-generate_user_utteranceuser-aiのsystem_promptを視座は上から下文脈は過去から現在の順に再構成し差し戻し通知が完了宣言に埋もれ無視される事故を防ぐ)を参照。ユーザーが「OKです。差戻以外の通常パスも`_build_escalation_resume_notice`/`_build_task_transition_blocked_notice`など、意識してほしいことは末尾に置きましょう。キャッシュヒットは悪くなるかもしれませんが、それよりも行動の統制の方が大事です」と指示。**実装完了（`done`）**：BL-178と同型の3分割構成（`system_prompt_leading`→`chat_history`→`system_prompt_trailing`）へ再構成。`system_prompt_trailing`内の順序は「決定事項DB・スコープ等の状況説明」→「エスカレーション再開通知（BL-096）」→「タスク遷移ブロック通知（BL-125）」→「🚨最終盤の超重要指示」→「差し戻し通知（最後）」とし、エスカレーション/遷移通知は差し戻し以外の通常の単発呼び出しパス（初回ターン・本質対話応答・Expert相談応答・終盤宣言ターン）でも常にtrailing側（chat_historyより後ろ）に配置されるようにした。あわせて🚨最終盤の超重要指示・差し戻し通知の両方に、互いを参照する優先順位の注記（「差し戻しがあれば完了宣言より優先」「最終盤指示より差し戻し対応を優先」）を追加し、両方向から矛盾を防止。新規テスト`tests/test_bl185_user_ai_prompt_reorder.py`10件（ソース順序確認6件、実行時のmessages構造確認3件、非退行確認1件）を追加、既存BL-178/104/142/143/096/176関連124件と合わせて無退行を確認。 | P0 |
+| BL-186 | 高 | `cela_main.py`（`_revise_goal_tool_impl`、ツール実行ブリッジ、`generate_user_utterance_node`） | ゴール改定（`revise_goal`、BL-086）成功時、BL-163/BL-168が承認済み過去タスクへ`severity="minor"`のissueを起票し`verified_facts`へ警告を付記するが、`minor`issueはBL-136/BL-145の強制解決ルート（major/escalated専用）に乗らず`read_issues`はpull型ツールのためどのプロンプトにも自動注入されない。実ドライラン`log/2026-08-06/1432`で、ゴール改定によりphase1-5の過去タスク13件が整合性未確認のままflagされたが、ランが既にphase6/task_6_1（計画上の最終タスク）にあり通常のタスク遷移ではphase1-5へ戻る経路が無いため放置リスクをユーザーへ報告。ユーザーと「タスク遷移で過去タスクへ戻る新ルート」か「ゴール改定時にBL-145と同型の配線でtask_plannerへ強制的に過去タスク再検証を引き継ぐ」かを相談し、後者を採用（ユーザー承認: 「お願いします」）。詳細は[BL-186詳細](#bl-186-ゴール改定時にtask_plannerへ強制的に過去タスク再検証を引き継ぐ)を参照。**実装完了（`done`）**：`_revise_goal_tool_impl`がBL-163の`_flagged`と起票issue_idから`plan_revision_reason`/`plan_revision_issue_ids`を組み立てて返し、`_LAST_GOAL_REVISION`ブリッジ経由で`generate_user_utterance_node`が`state["plan_revision_reason"]`へ反映（他要因セット済みなら上書きしないガード付き、BL-145と同型）。`task_planner_node`/`call_task_planner`は無改修（既存のrevision_reason消費ロジックをそのまま再利用）。新規テスト`tests/test_bl186_goal_revision_forces_replan.py`6件、既存BL-086/087/095/096/101/126/136/145/163/168/185関連197件と合わせて無退行を確認。 | P1 |
 
 ---
 
@@ -4759,6 +4773,498 @@ _formalizable_stale = [i for i in _stale_escalated if not i.get("defer_to_task_i
 
 ---
 
+### BL-173: `db_append_goal_shift_event`の`shift_id`採番がミリ秒精度のタイムスタンプ依存で、同一ミリ秒内の連続呼び出しで衝突する
+
+**状態:** `open`（未着手）
+
+**優先度:** P3
+
+BL-172のフルオフラインスイート実行中（712件中711件Pass）に、`tests/test_bl168_verified_facts_stale_after_goal_revision.py::test_revise_goal_marking_is_idempotent_on_repeated_revision`が`sqlite3.IntegrityError: UNIQUE constraint failed: goal_shift_events.shift_id`で失敗する事象を発見した。単体実行でも再現する場合があり（実行速度依存の真のflaky bug、BL-170調査時にも一度同一テストで観測済み）。
+
+**原因：** `shift_id = f"GS-{int(time.time() * 1000)}"`というミリ秒精度のタイムスタンプ採番方式（`cela_main.py:3907`付近）。同一テスト内で連続する2回の`revise_goal`呼び出し（当該テストが意図的に短時間で2回実行する）が同一ミリ秒に収まると、`shift_id`が衝突し`UNIQUE`制約違反を起こす。
+
+**実害の見立て：** 実運用のドライランでは`revise_goal`が同一ミリ秒内に連続実行されることは考えにくく、実害は低い。ただしテストスイートの信頼性を損ない（原因不明の間欠的失敗に見える）、CIの安定性に影響するため記録する。
+
+**対応方針（未実施）：** `uuid`混入（例: `f"GS-{int(time.time()*1000)}-{uuid.uuid4().hex[:8]}"`）や単調増加の連番カウンタなど、ミリ秒精度に依存しない衝突しない採番方式へ変更すれば解消見込み。他の`*_id`採番箇所（`decisions.id`の`D-{ms}`等）でも同種のリスクがないか横展開確認が望ましい。
+
+**関連:** [BL-168](#bl-168-verified_factsテーブルにゴール改定を反映するsupersede機構が一切ない)（flakyが観測されたテストの対象BL）、[BL-170](#bl-170-facilitatorのescalated_issues_blockに役割境界の明示が無くモデルがexpertの仕事数値検算成果物再提出を自分の仕事だと誤認して空回りする)（同一テストで一度観測済みという先行事例）
+
+---
+
+### BL-174: checkpoint履歴の一覧表示・任意の過去checkpointからの再開（LangGraph公式time travelのCLI配線）
+
+**状態:** `done`
+
+**経緯:** ユーザーから「checkpointですがノードごとに自動スナップショットをとれないか？タスクプランナーを毎回最初から通すのは非効率だし、途中まで良くて動作が壊れた直前からやり直させたい。再開時はスナップショット一覧から任意のスナップショットからやり直しができる、ほぼgitに近い」と提案があった。
+
+**調査した事実（Context7でLangGraph公式ドキュメントを確認）：** BL-105で導入済みの`SqliteSaver`は、**既にノード完了（superstep）ごとに毎回別のcheckpoint_idでスナップショットを自動保存している**。`app.get_state_history(config)`は当該threadの全履歴を`StateSnapshot`のリスト（新しい順）として返し、各`StateSnapshot`は`values`（その時点のCELA `LineageState`全体）・`next`（次に実行予定のノード名）・`metadata["step"]`（連番ステップ）・`metadata["writes"]`（直前に完了したノード名）・`created_at`（タイムスタンプ）・`config["configurable"]["checkpoint_id"]`を保持する。任意の過去`checkpoint_id`を`app.get_state`/`app.stream`のconfigへ指定すれば、それ以前のノードを再実行せず、そこから再開できる（公式の"time travel"/"replay"機能。再開後に新しく書き込まれるcheckpointは、その過去checkpointを親とする新しい分岐となり、元の「その後の履歴」は上書きされず個別のcheckpoint_idで参照可能なまま残る——gitのbranchに近い挙動）。つまりユーザーの要望の中核（ノードごとの自動スナップショット、任意の過去スナップショットからのやり直し）は**追加実装なしで既に成立**しており、CELA側に不足していたのはCLIからこれを使うための薄い配線のみだった。
+
+ユーザーから続けて「run_idがどこの時点のものか識別はできますか？」との確認があり、`StateSnapshot`の実フィールド（前述の`values`/`metadata`/`next`/`created_at`）をContext7で確認・提示し、`turn_count`/`current_task_id`等CELA独自の文脈情報も含め十分識別可能であると回答した。
+
+**対応内容（実施済み）：** 新規関数`list_checkpoints(run_id)`（`cela_main.py`）を追加し、`app.get_state_history()`の結果を、step・タイムスタンプ・完了ノード（`metadata["writes"]`のキー）・次ノード（`next`）・turn・task_id・checkpoint_idを含むgit log風の一覧として表示するCLI`--list-checkpoints RUN_ID`を新設した（ai_vs_ai_loop本体やMultiLoggerによるlog/ディレクトリ作成は一切行わない純粋な閲覧用コマンド）。`run_ai_vs_ai_loop`に`checkpoint_id`引数を追加し、CLI`--resume RUN_ID --checkpoint-id CHECKPOINT_ID`で、threadの最新ではなく指定した過去checkpointから再開できるようにした。`checkpoint_id`未指定・`--resume`無しの単独指定はエラーとして拒否する。実装上重要な点として、`checkpoint_id`指定は**最初の`app.stream()`呼び出しにのみ**適用し、2回目以降のターンではthread_idのみのconfigへ切り替える処理を加えた（固定したままだと、毎ターン同じ過去の分岐点から再度フォークしてしまい前進しないため）。
+
+新規テスト`tests/test_bl174_checkpoint_history_and_targeted_resume.py`（5件：CELAの実グラフとは独立した合成グラフ（`tests/test_checkpoint_resume.py`と同型のnode_a/node_b）で実際に複数checkpointを書き込んだ上での`list_checkpoints`出力確認、存在しないrun_idでのエラーメッセージ確認、`--checkpoint-id`を`--resume`無しで指定した場合の拒否確認、`checkpoint_id`が`get_state`のconfigへ正しく渡ること、核心の回帰テストとして`checkpoint_id`が最初の`app.stream()`呼び出しにのみ使われ2ターン目以降はthread_idのみのconfigへ切り替わることの確認）追加。テスト実装過程で、`get_state_history`の`next`/`metadata["writes"]`の復元がcheckpointの生データだけでなくグラフのトポロジー（ノード名・チャネル定義）にも依存する（書き込み時と異なるノード構成のグラフで読むと`next`/`writes`が正しく復元されない）ことを発見したが、本番の`list_checkpoints`は常に実際に書き込んだのと同じ`build_graph()`（実CELAグラフ）を使うため本番影響はなく、テスト手法上の注意点として記録するに留めた。`python -m py_compile`合格、既存`test_checkpoint_resume.py`（6件）・`test_bl171_daily_quota_pause.py`（3件）計9件無退行、フルオフラインスイート717件Pass。実ドライランでの効果確認は次回待ち。
+
+**関連:** [BL-105](#bl-105-checkpointresume機構がentry_pointから全体再走行するため未応答のuser発言が二重に積まれるlanggraph本来のcheckpointertask未導入という設計ギャップ)（checkpointer導入元、本BLはその上に構築）
+
+---
+
+### BL-175: ログとcheckpointの時刻表示がバラバラ（OSローカルタイムゾーン依存／UTC固定）で、日本時間に統一・同期できていない
+
+**状態:** `done`
+
+**経緯:** ユーザーから「時刻ですが日本時間にGMT+9にしてほしい。また、ログにもチェックポイントと同じ時刻を表示し、同期をとりたい」と要望があった。
+
+**確認した事実：** ログ側（`MultiLogger.__init__`のログフォルダ名・「Execution Log Started at」バナー、`call_reflection`のtimeline表示）は`datetime.datetime.now()`／`fromtimestamp()`でOSローカルタイムゾーンに依存していた。checkpoint側（`list_checkpoints`が表示する`StateSnapshot.created_at`）はLangGraph内部でUTC固定（ISO文字列、`+00:00`サフィックス、実機で実際に`'2026-08-05T00:03:42.602421+00:00'`のような値になることを確認済み）。双方の基準がバラバラで「同期」していなかった。
+
+**対応内容（実施済み）：** モジュール定数`JST = datetime.timezone(datetime.timedelta(hours=9), name="JST")`を新設し、(1) `MultiLogger.__init__`の`datetime.datetime.now()`を`datetime.datetime.now(JST)`へ変更（ログフォルダ名・「Execution Log Started at」バナーの両方がJSTになり、バナーへ「JST」ラベルも明記）、(2) `call_reflection`のtimeline表示（`datetime.datetime.fromtimestamp(ts_val)`）にも`JST`を明示指定、(3) `list_checkpoints`が表示する`created_at`（UTC固定のISO文字列）を`datetime.datetime.fromisoformat(...).astimezone(JST)`でJSTへ変換して表示（checkpoint自体の保存形式は変更せず、CELA側の表示のみ変換）した。これによりログとcheckpoint一覧の時刻表示が同じ基準（JST）で揃い、突き合わせやすくなった。
+
+新規テスト`tests/test_bl175_jst_timestamps.py`（3件：`JST`定数がUTC+9であることの確認、`MultiLogger`が`datetime.now()`にtz引数を明示的に渡していること・ログフォルダ名とバナーが正しくJST変換されることの確認、`list_checkpoints`の`created_at`表示がJSTへ変換されていることの確認）追加。テスト実装中、`MultiLogger.log_dir`（クラス変数、他テストのファイルアーカイブ処理等が参照する共有状態）を書き換えたまま復元し忘れ、後続の`test_r3_smoke.py::test_bl040_deliverable_filenames_are_versioned_and_old_versions_archived`を巻き込んで落とすテスト間分離漏れを発見・自己修正した（`finally`で`MultiLogger.log_dir`を元の値へ明示的に戻す）。`python -m py_compile`合格、フルオフラインスイート720件中719件Pass（1件はBL-173として既知のflakyテストで本修正と無関係）。実ドライランでの効果確認は次回待ち。
+
+**関連:** [BL-174](#bl-174-checkpoint履歴の一覧表示任意の過去checkpointからの再開langgraph公式time-travelのcli配線)（表示時刻を同期させる対象）
+
+---
+
+### BL-176: `_resolve_task_transition`が離脱先task_idの承認成立を検証しておらず、Userが1発言で承認と次タスク指示を同時に行うと状態が壊れうる
+
+**状態:** `done`
+
+**経緯:** ユーザーから「ユーザーが現タスクを承認することと次タスクの指示を明確に分けれないか。ユーザーが2つを同時に行ってしまうので、Detectorの監査をすり抜けると未承認のまま次タスクが進むことがある（task_idが動かない）」との問題提起があった。ユーザー案は「①レビュー、承認・もしくは拒否する→何かしらのフラグや状態遷移をさせる、②Detectorは承認のアクションを監査、だめならユーザーに差し戻す、③承認監査を通ってもユーザーに戻して、初めて次タスクへの指示をする」という2段階ターン制。
+
+**コード調査で確認した事実:**
+
+- `write_agreement`（`_write_agreement_impl`、`cela_main.py:2167`）は呼び出し時点でDBへ即コミットされる。Detectorの監査（`detector_node`）はその後、ターン全体の会話内容に対して事後的にかかる仕組みであり、承認そのものを差し戻す機構ではない。
+- `current_task_id`の唯一の書き手である`_resolve_task_transition`（BL-024、`cela_main.py:8429`）は、遷移先phase/task_idの実在確認（フェイルクローズ）と、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)の未解決severe issueブロックは行っているが、**離脱するtask_idのDeliverableが実際にApproved相当（[BL-167](#bl-167-reflection内のstagnant-issue滞留検知がdefer_to_task_idの受け皿タスク完了後もissueを永久に見落とし続ける)の`_is_task_completed`、`cela_main.py:3991`）かどうかは一切検証していない**。
+- `_resolve_task_transition`への入力`advances_to_task_id`は、`write_agreement`とは完全に独立した別のLLM呼び出し`call_decision_extractor`（`cela_main.py:6556`）が、User発言全文を自由文脈で読んで抽出したものであり、BL-139のフォールバック（`cela_main.py:8708`）も含め、承認が実際に成立したかとは無関係に「次タスクへの移行を指示したか」という遷移意図だけを検出する設計になっている。
+
+**根本原因（仮説、ログでの実際の障害再現は未確認）:** 承認の成立確認（write_agreementの即時コミット＋事後Detector監査）と次タスクへの遷移判定（decision_extractorの自由文脈抽出）が完全に別経路で動いており、両者の整合性を取るゲートが存在しない。このためユーザーが1発言で両方の意図を述べた場合に、承認の成否とcurrent_task_idの遷移可否が食い違いうる。
+
+**対応内容（実施済み）:** `_resolve_task_transition`のBL-125（未解決issueチェック）の直後に、[BL-146](#bl-146-write_agreementがbl-125のタスク遷移ゲートcurrent_task_idを内容レベルで迂回できブロック中の他タスクへ実際にdeliverableを書き込めていた)と同型の機械的ゲートを1つ追加した：「departing_task_idが空でなく、かつ`_is_task_completed`でなければ、たとえ`advances_to_task_id`が有効なtask_idを指していても遷移を拒否する」。departing_task_idが空（まだ一度もタスクに着手していない最初の遷移）の場合は対象外とする（承認すべき前任taskが存在しないため）。ブロック時は新設の一度きり通知フィールド`task_transition_blocked_unapproved_task_id`（BL-125の`task_transition_blocked_issue_topics`と同型のone-shotパターン、`LineageState`へ追加）へdeparting_task_idを記録し、`_build_task_transition_blocked_notice`（`generate_user_utterance`が毎ターン注入、BL-125分岐の直後にBL-176分岐を追加）が次のUser AIターンへ一度だけ理由を明示する。BL-125とBL-176は`_resolve_task_transition`内で排他的にしか発生しない（先に判定された方でreturnする）ため、通知フィールドが同時にセットされることはない。単一の関数への1ゲート追加で済み、ターンを分割せず既存の自由発言スタイルを維持できる（[BL-177](#bl-177-全ノードのプロンプトを複数の責務を1回のllm呼び出しに詰め込む構造からdetectorの2段監査パスと同型の段階化構造へ一般化するuser-ai部分は実装完了他ノードは未着手)のステージ化構想とは独立に着手できた安全網）。
+
+実装過程で、この新ゲートに抵触して5件の既存テストが発覚・修正した：`tests/test_bl136_issue_visibility_and_transition_gate.py`3件（`test_resolve_task_transition_allows_when_resolved`・`_allows_when_deferred`・`_allows_when_no_blocking_issue`、いずれも遷移元task_idにApproved相当のDeliverableを用意せず遷移成功を期待していた）、`tests/test_bl139_transition_fallback_from_directive.py`1件（`test_decision_extractor_does_not_override_explicit_transition`、extracted_itemsが空でtransitionのみ直接与えるケース）、`tests/test_r3_smoke.py`1件（`test_bl039_task_transition_normalizes_dot_notation_task_id`）。いずれもテスト用のDB状態構築がBL-176の前提（承認成立）を満たしていなかっただけで、各テストの本来の検証意図（BL-125のissueゲート・BL-139のDirectiveフォールバック・BL-039のドット表記正規化）には影響なく、遷移元task_idへAppoved Deliverableを直接INSERTする1行を追加する形で修正した。
+
+新規テスト`tests/test_bl176_task_transition_requires_approval.py`（12件：Deliverable不在・Proposedのみ・Rejectedでの拒否確認、Approved/Approved_with_Conditionsでの許可確認、departing_task_idが空の初回遷移は対象外であること、BL-125との共存（issueゲートが優先発火しBL-176側フィールドはセットされないこと）、`_build_task_transition_blocked_notice`のBL-176分岐の通知文言・one-shotクリア・BL-125優先の確認、`LineageState`への新フィールド配線確認）追加。`python -m py_compile`合格、フルオフラインスイート732件中731件Pass（1件はBL-173として既知のflakyテストで本修正と無関係）。実ドライランでの効果確認は次回待ち。
+
+**関連:** [BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-146](#bl-146-write_agreementがbl-125のタスク遷移ゲートcurrent_task_idを内容レベルで迂回できブロック中の他タスクへ実際にdeliverableを書き込めていた)、[BL-158](#bl-158-detectorの-user-レビューパスに未解決issueを残したままの前進を機械的に却下する仕組みを追加)、[BL-167](#bl-167-reflection内のstagnant-issue滞留検知がdefer_to_task_idの受け皿タスク完了後もissueを永久に見落とし続ける)、[BL-177](#bl-177-全ノードのプロンプトを複数の責務を1回のllm呼び出しに詰め込む構造からdetectorの2段監査パスと同型の段階化構造へ一般化するuser-ai部分は実装完了他ノードは未着手)
+
+---
+
+### BL-177: 全ノードのプロンプトを「複数の責務を1回のLLM呼び出しに詰め込む」構造から、Detectorの2段監査パスと同型の段階化構造へ一般化する（User AI部分は実装完了、他ノードは未着手）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（User AI部分（`generate_user_utterance`）は実装完了・実ドライラン確認待ち。Expert・Detector等の他ノードへの一般化は未着手） |
+| 優先度 | P2 |
+| 関連 | [BL-176](#bl-176-_resolve_task_transitionが離脱先task_idの承認成立を検証しておらずuserが1発言で承認と次タスク指示を同時に行うと状態が壊れうる)（同じ問題への機械的ゲートによる対症的な安全網。本項目はその発生源自体をプロンプト構造で断つ、より根本的な一般化案。設計上も削除・弱化しない多層防御として位置づけ）、[BL-170](#bl-170-facilitatorのescalated_issues_blockに役割境界の明示が無くモデルがexpertの仕事数値検算成果物再提出を自分の仕事だと誤認して空回りする)（同種の「1つのプロンプトに複数の責務を詰め込みすぎている」問題の狭い一事例。ガードレール文の追記という軽量対応で済んだが、本項目はプロンプトの構造自体を分割する、より重い一般化）、[BL-049](#bl-049-f-26検算ゲートによる注意力の偏りを是正する-数値検算とドメイン妥当性レビューの分離)・[BL-054](#bl-054-detectorの2段監査パスの実行順序をドメイン監査数値検算に変更)（`call_detector`が既に実践しているドメイン妥当性レビューパス→数値検算パスの2段構成。本項目はこのパターンをUser AI・Expert・その他全ノードへ一般化する構想） |
+
+**内容:**
+
+BL-176（Userが1発言で「現タスクの承認」と「次タスクへの指示」を混在させ状態が壊れうる問題）の議論の延長として、ユーザーから「Detectorが既に2段階（ドメイン妥当性レビュー→数値検算）で監査しているのと同じように、User AI側も『レビュー→issue確認→レビュー・issue確認から統合した承認判断→次タスク指示（または現タスク修正指示）』という段階的なワークフローとして、ステージごとにプロンプトを変えながら回せないか」との提案があった。ユーザーはさらに「これはUser AIに限らず、Expert・Detector含む他の全ノードにも言えることで、あれこれまとめて指示しているプロンプトを同様にステージ化したい」と対象を全ノードへ一般化した。
+
+`call_detector`（`cela_main.py:5924`）は既にこのパターンの実例を持つ：1回のノード実行の中で「第1段＝ドメイン妥当性レビュー」「第2段＝数値監査パス」という専用プロンプトのLLM呼び出しを直列に行っており（[BL-049](#bl-049-f-26検算ゲートによる注意力の偏りを是正する-数値検算とドメイン妥当性レビューの分離)で導入、[BL-054](#bl-054-detectorの2段監査パスの実行順序をドメイン監査数値検算に変更)で実行順序を確定）、グラフ上の別ノードへ分割してユーザーへ往復させる形は取っていない。ユーザー提案のUser AI 4段階案（レビュー／issue確認／統合承認判断／次タスク指示）も同じ形——`generate_user_utterance`（`cela_main.py:7200`、現状は約350行の単一巨大プロンプト＋ReActツールループでレビュー・issue確認・承認判断・次指示を同時に1つのLLM呼び出しへ詰め込んでいる）を、この4段に対応する専用プロンプトの直列呼び出しへ分解する——であれば、外側の`run_ai_vs_ai_loop`の1turnに収まり、往復回数（BL-171で問題化した無料枠消費）を増やさずに実現できる可能性がある。特に「④次タスク指示」ステージを「③統合承認判断ステージがApproved相当と結論した場合のみ起動する」という条件付きで直列化できれば、そもそもLLMに「承認と次指示を同時に言う」余地自体を与えなくなり、BL-176のゲートより一段根本的な解決になる。
+
+この考え方をUser AIだけでなくExpert・Detector・Task Planner・Task Plan Reviewer・Facilitator・Reflection・Reviewer・Integrator・Resource Arbiter等、他の全ノードのプロンプトにも適用できないかを検討する、というのが今回ユーザーが指示した対象範囲である。範囲が非常に大きいため、今回はBL化のみ行い、実装は別途設計相談（Plan mode）の上で着手する。
+
+**設計完了（User AI部分のみ）**：ユーザー指示「BL176を実装後、BL177のまずはユーザー部分のステージ化設計を行って」を受け、Plan modeで`generate_user_utterance`のステージ化基本設計を作成した。詳細は`docs/design/back_log/BL-177/BL177_basic_design.md`を参照（AGENTS.md §7準拠、要約せず原文保存）。設計の要点：
+
+- **4段階**：Stage 1（レビュー、read-only）→Stage 2（issue確認、`write_issue`/premise系ツール）→Stage 3（統合承認判断、`write_agreement`単独所有）→Stage 4（次タスク指示／現タスク修正指示／承認記録失敗の待機メッセージ、Stage 3の結果で3分岐）。`call_detector`の2段パスと同じく、各ステージは独立したプロンプト・ツールリストを持つ`query_AI`呼び出しで、前段の結果は次段へテキストとして埋め込む。
+- **適用範囲を限定**：`essence_dialogue_active`（BL-126）・`expert_pending_question`（BL-130）・drift/major差し戻し再送（BL-142/143）・終盤のPROJECT_COMPLETE宣言・初回ターンは、現行の単発呼び出しのまま温存し、ステージ化は「Expertの成果物をUserがレビューする通常ターン」のみに適用する。
+- **設計レビューで発見・修正した重大な論点（ユーザー指摘）**：Stage 3のLLMが`approval_status="Approved"`と自己申告したにもかかわらず`write_agreement`が実際には成功していない（`get_last_write_agreement_succeeded()`が`False`）というBL-091と同種の食い違いが起きた場合、当初案（`Pending`に落としてStage 4の修正指示分岐へ渡す）だと、Stage 4が「技術的な記録失敗」を知らないままExpertの成果物に対する実在しない欠陥をでっち上げて修正指示を書いてしまう危険があるとユーザーが指摘。対応として、この食い違い判定は**Stage 4のLLMにではなくPythonコード側で機械的に行い**（BL-176と同じ「LLMの判断を機械的ゲートで裏取りする」原則）、食い違い時はStage 4へは進まずStage 3自体を訂正指示付きで再試行（最大2回）、それでも解消しない場合のみStage 4へ専用ラベル`"ApprovalRecordingFailed"`として渡し、Stage 4は成果物内容に一切言及しない技術的待機メッセージ専用プロンプトを使う設計へ修正した。
+- **実装前に必ず解消すべき制約2件**：(1) `query_AI()`は呼び出しごとに`_LAST_WRITE_AGREEMENT_SUCCEEDED`等のターン単位トラッカーをリセットするため、4回呼ぶと最後のステージ以外の副作用がノード側から見えなくなる——各ステージ後にローカル変数へOR/後勝ちで集約し、関数末尾でグローバルへ書き戻す設計とした。(2) 19個の既存テストが`inspect.getsource(cela_main.generate_user_utterance)`でプロンプト文言を検証しているため、各ステージのプロンプトは別関数へ切り出さず`generate_user_utterance`本体にインラインで実装する（`call_detector`の2段パス自身も同じ理由でモノリシックな前例）。
+
+**実装完了（User AI部分、`done`）**：ユーザー指示「BLL177実装をお願いします」を受け、上記設計に基づき`generate_user_utterance`（`cela_main.py:7220`）へ実装した。
+
+- 関数冒頭に`_is_normal_review_turn`判定を追加し、`True`の場合のみ新設の4段階パイプラインへ分岐して`return`する（`if`ブロック）。`False`の場合は既存の単発呼び出しコード（旧来の約350行、**一切変更せず温存**）がそのまま実行される。
+- 設計時の想定（BL-104のプロンプト順序テスト群を書き直す必要がある）は、この実装アプローチ（既存の単発呼び出しパスを丸ごと温存し、ステージ化パイプラインを新規の早期returnブランチとして追加する）を取ったことで**発生しなかった**：既存コードの内部順序を一切変更していないため、`test_bl104_project_plan_toc_and_prompt_reorder.py`を含む既存19ファイルはすべて無改修で通った（設計時に予想したより実装コストが低く済んだ点として記録）。
+- Stage 1〜3は`_query_and_parse_with_retry`（`call_detector`と同じ構造化JSON呼び出し）、Stage 4は`query_AI`への直接呼び出し（自由文、chat_history込みのmessages配列）。
+- Stage 3の承認記録食い違い検知は設計通りPythonコード側で機械的に行い（`get_last_write_agreement_succeeded()`と`approval_status`の突き合わせ）、`for...else`構文で「3回試行してもbreakしなかった場合のみApprovalRecordingFailedへ」を実装。
+- 制約2のトラッカー集約は、`generate_user_utterance`内に定義したネスト関数`_absorb_stage_trackers`（`nonlocal`でローカル集約変数へOR/後勝ち）＋関数末尾での`global`書き戻しとして実装。`generate_user_utterance_node`側は無改修。
+- 新規テスト`tests/test_bl177_user_ai_staging.py`（16件：4ステージの存在確認、通常ターンでのステージ化パイプライン起動確認、特殊モード（essence_dialogue/expert_pending_question/drift_flag/終盤/初回ターン）でのバイパス確認、Stage4の3分岐（次タスク指示／修正指示／承認記録失敗待機）確認、Stage3リトライが機能し2回目で解消すれば通常分岐へ進むこと、リトライを使い切るとApprovalRecordingFailedへ落ちること、Stage2のwrite_issue成功とStage3のwrite_agreement成功がそれぞれ後続ステージの呼び出しで消えずに集約されること、`generate_user_utterance_node`との結合）追加。`python -m py_compile`合格、既存19ファイル341件・BL-176系12件を含めフルオフラインスイート748件Pass（無退行）。
+- 実装中に発見した既存のPython構文上の制約：`if`分岐と、その後に続く既存コードの両方に`global _CURRENT_CALLER_ROLE, ...`宣言があると、後方の宣言が「global宣言前に代入されている」というSyntaxErrorになる（Pythonの`global`は関数全体スコープに効くため、分岐の有無に関わらず同一名の2回目の`global`文は不要かつ許されない場合がある）。関数冒頭（新設ブランチ内）の宣言のみを残し、既存コード側の重複した`global`文は削除して解消した。
+- 実ドライランでのAPI呼び出し回数・所要時間の実測（設計の制約4）は未実施。
+
+**残タスク（他ノードへの一般化、未着手）:**
+
+- `call_detector`の2段構成（BL-049/BL-054）の設計原則を、他ノード（Expert・Detector等）へ一般化する際の共通パターン抽出は未着手のまま残る。
+- Expert・Detector・その他ノードそれぞれについて、現状のプロンプトが実際に「複数の責務を1回に詰め込んでいる」かどうかの棚卸し（BL-170の横展開調査と同様の手法で、まず実害があるノードを優先度付けする）は未着手。
+- ステージ化によるLLM呼び出し回数増加（BL-171の無料枠消費）の実測は、実ドライラン後に行う。
+
+---
+
+### BL-178: call_expertのsystem_prompt（フル版）／light_system_prompt（軽量版）を「視座は上から下、文脈は過去から現在」の順に再構成し、Detectorの差し戻し情報を両方で真に最後に読ませる（実装完了）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（実装完了、実ドライランで並び順を検証・修正済み） |
+| 優先度 | P2 |
+| 関連 | [BL-104](#bl-104-call_expertのphases_json目次化read_project_planツール新設プロンプトのキャッシュ効率改善)（本項目が前提とする「固定指示文を先頭・動的データを末尾」というプレフィックスキャッシュ効率の原則。本項目はそのさらに内側、動的データ内部の順序精緻化）、[BL-177](#bl-177-全ノードのプロンプトを複数の責務を1回のllm呼び出しに詰め込む構造からdetectorの2段監査パスと同型の段階化構造へ一般化するuser-ai部分は実装完了他ノードは未着手)（同じ「プロンプトの構造改善」系統の先行議論、本項目はその流れでユーザーが実ログを精読し発見した別の具体的欠陥への対応） |
+
+**内容:**
+
+BL-177完了報告後、ユーザーが実ログ`log/2026-08-05/1049/log_with_prompt.md`（差し戻しターン、行19594-19970）を精読し、「Expertがdetectorの差戻事項をくみ取って修正している様子がみられません」と報告した。調査の結果、`chat_history_window=4`（`is_stateless_mode`時に`messages`へ展開される直近の会話窓）の末尾4件が、今回の差し戻しとは無関係な「ハイブリッドモデル・3シナリオ」戦略の話題で完全に占められている一方、Detectorの具体的な指摘（労働基準法・オペレーター人員体制の矛盾）を含む「⚠️【重要：Detectorからの差し戻し】」ブロックは`system_prompt`の中盤（`cela_main.py:5812-5838`）にしか存在せず、`messages`配列では`[system_prompt, ...chat_history]`という構造上、`chat_history`の末尾メッセージの方が常に物理的に後ろへ来ることを確認した。ユーザーはこれを「プロンプト提示の順としては、可変部分は視座を上から下に、かつ、過去から現在の順で情報を提示しないと、狙った動作にならないと思います」という設計原則として提起し、AIが実ログの内容でこれを裏付けた。
+
+続けてユーザーが、ツールループ2周目以降（`light_system_prompt`）についても同種の調整が必要かを確認した。AIが`_query_AI_live`（`cela_main.py:3512-3516`）を調査した結果、`light_system_prompt`はiter=1完了時点で`loop_messages[0]`（system役割のメッセージ）を丸ごと置き換えるだけの仕組みであり、この置換の影響を受けない`loop_messages[1:]`（元の`chat_history`＋以降積み上がるtool呼び出し履歴）はそのままindex 0の直後に残り続けること、かつ現状の`light_system_prompt`（`cela_main.py:5894-5933`）には差し戻し情報・決定事項DB・厳守事項が一切含まれていないため、iter=2以降はこれらの情報がコンテキストから完全に失われる構造的欠落であることを確認した。
+
+ユーザーがフル版・軽量版それぞれについて具体的な項目順（フル版は既存の23項目を再配置、軽量版は11項目、うち厳守事項・差し戻し情報の2項目は新規追加）を提示し、AIが妥当性を確認した上でPlan modeへ移行して設計を行った。
+
+**設計フェーズ**：詳細は`docs/design/back_log/BL-178/BL178_basic_design.md`を参照（AGENTS.md §7準拠、要約せず原文保存。ただし後述の通り、フル版の並び順は実装後にユーザーの指摘で修正されており、原文保存された設計ドキュメント自体は当初案のまま。実装済みの最終順序は本セクションと`cela_main.py`のコードが正）。設計の要点：
+
+- **フル版（`system_prompt`、iteration=1）**：`system_prompt`を1つの文字列として組み立てる現行方式をやめ、`system_prompt_leading`（chat_historyより前）／`system_prompt_trailing`（chat_historyより後ろ）の2文字列へ分割し、`messages`配列を`[system_prompt_leading, ...chat_history, system_prompt_trailing]`という3部構成にする。`system_prompt`内でのテキスト位置をどう変えても`chat_history`が常に物理的に後ろへ来るという構造上の制約に対応するため、`chat_history`より後ろに新しいシステムメッセージを追加する形を取る（複数の`role: "system"`メッセージを会話途中・末尾に挿入すること自体はBL-093の自動reasoningダイジェストで既に実績のあるパターン）。
+- **軽量版（`light_system_prompt`、iter=2以降）**：ユーザー提示の11項目順（専門分野の名乗り→現在のタスク情報→Orchestratorの着眼点→owns_variables不可侵→confidence=provisional→ツール一覧の明示→各ツール使い方→python_repl必須→厳守事項［新規］→ホワイトボード本文→Detectorの差し戻し情報［新規、条件付き］）をそのまま採用。フル版の「上記の【決定事項DB】は…」という厳守事項の文言は、軽量版にはDBブロック自体が存在しないため「上記の」を外した独立文へ書き換える。差し戻し情報はフル版と異なり`previous_output`全文を再掲せず、`_retry_label`＋Detector指摘事項の要約のみとする（軽量版の「軽量」という目的に反しないため）。
+- **既知の限界（設計スコープとして明記）**：軽量版は`loop_messages[0]`への一度きりの置換であり、iter=3以降に積み上がるtool呼び出し履歴の方が物理的にはさらに後ろへ来るため、フル版と同じ意味での「真に最後」はこの設計だけでは達成できない。真の解決（tool呼び出し履歴の末尾へ定期的にリマインダーを再注入する等、BL-016/BL-056bの残り回数通知と同型の仕組み）は`query_AI`共通基盤（全ノード共有）に踏み込む変更が必要になるため、本BLのスコープ外とし、下記残タスクへ記録する。
+
+**実装完了（`done`）**：上記設計に基づき、`system_prompt`の2分割・`messages`の3部構成化・`light_system_prompt`の再構成を実装した。
+
+- **実装当初のフル版の並び順ミス（重要な訂正）**：Plan mode設計時、AIはフル版動的部分の具体的な並び順について、ユーザーが本セッション内で以前に提示していた明示的な項目順リスト（旧項目番号での列挙）を正しく踏まえず、「視座は上から下、文脈は過去から現在」という原則から独自に順序を再構成して実装してしまった（例：Orchestratorの着眼点をゴールより前に配置、「文脈の参考として以下に直近の会話を示します」という予告文の直後に直近ではない`hydrate_context`が続く、等）。ユーザーが実ドライラン（`log/2026-08-05/1309/log_with_prompt.md`）で実際に送信されたプロンプトを精読し「実装が雑です」「層の中での順番が滅茶苦茶です」と指摘、正しい順序（旧項目番号: 11→13→20 / chat_history / 22→12→16→17→19→14→15→10→21→23→18）を改めて提示した。AIはこれを踏まえてコードを修正した。
+- **最終的なフル版の並び順**：
+  - `system_prompt_leading`（chat_historyより前）: 【絶対的な行動指針】＝ゴール＋本質テキスト → 📊プロジェクト進行計画目次 →（stateless modeのみ`hydrate_context`＋エスカレーション/issue pin）→「文脈の参考として以下に直近の会話を示します」導入文。
+  - `system_prompt_trailing`（chat_historyより後ろ、新設の末尾systemメッセージ）: 【決定事項・検討状況DB】全件 → Detectorの気づき（`_build_detector_observations_block`） → BL-082申し送り事項（あれば） → エスカレーション状況（あれば） → BL-096エスカレーション再開通知（あれば） → 📏スコープ（現在のタスク／確定値／未充足要求） → 📋R4ホワイトボード本文 → 🎯Orchestratorの着眼点（あれば） → ⏳制限時間 → ⚠️厳守事項 → ⚠️Detectorからの差し戻し情報（drift_flag/major時のみ、最後）。
+- **軽量版（`light_system_prompt`）は当初から正しく実装できていた**：ユーザーが直接コード（`cela_main.py:5929-5985`）を確認し、11項目順との一致を検証。こちらは修正不要だった。
+- **既存テストへの影響**：`test_bl104_project_plan_toc_and_prompt_reorder.py`のcall_expert関連7件（`inspect.getsource`ベースの位置検証）は無改修で通過（BL-177実装時と同型の結果）。関連する既存245テスト（BL-078/086/089/093/094/096/103/130/134/141/143/075）も無退行。
+- 新規テスト`tests/test_bl178_expert_prompt_reorder.py`（14件：ソースコード上の並び順検証10件＋実行時の`messages`構造・`light_system_prompt`内容検証4件）を追加。`python -m py_compile`合格、フルオフラインスイート764件Pass・1件deselected（BL-173既知flaky）・1件fail（`test_f26_detection.py::test_detector_no_false_positive_within_cap`、実LLM API呼び出しを伴う既知のflakyテストで本修正と無関係）。
+
+**残タスク（未着手）:**
+
+- 軽量版の「既知の限界」（tool呼び出し履歴末尾への差し戻しリマインダー再注入等）は、`query_AI`共通基盤に踏み込む変更が必要なため今回のスコープ外とし、将来検討課題として記録するに留める。
+- 実ドライランでの効果確認（差し戻しターンでExpertがDetector指摘を正しく汲み取るようになったか）は次回以降。
+
+---
+
+### BL-179: BL-177 Stage3の承認記録がExpertの成果物（Deliverable）自体を更新せず、別のDecisionエントリを作成してしまいBL-176のゲートを永久に満たせない
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（実装完了） |
+| 優先度 | P0 |
+| 関連 | [BL-177](#bl-177-全ノードのプロンプトを複数の責務を1回のllm呼び出しに詰め込む構造からdetectorの2段監査パスと同型の段階化構造へ一般化するuser-ai部分は実装完了他ノードは未着手)（不具合の所在。Stage3自体は正しく機能しているが、承認記録の書き込み先が誤っていた）、[BL-176](#bl-176-_resolve_task_transitionが離脱先task_idの承認成立を検証しておらずuserが1発言で承認と次タスク指示を同時に行うと状態が壊れうる)（今回満たせなくなっていたゲート）、[BL-178](#bl-178-call_expertのsystem_promptフル版light_system_prompt軽量版を視座は上から下文脈は過去から現在の順に再構成しdetectorの差し戻し情報を両方で真に最後に読ませる実装完了)（この不具合を発見した実ドライランの直接のきっかけ）、[BL-172](#bl-172-bl-169のentry_typedeliverable限定ブロックをuserがentry_typedecisionへの付け替えで回避しホワイトボードmdが一切生成されなくなる)（D-142が既に確立していた「正当な承認は既存DeliverableへのUPDATE」という規約） |
+
+**内容:**
+
+BL-178実装完了後、ユーザーが実ドライラン`log/2026-08-05/1542`→`1556`をレビューし「エキスパートのstage分けは機能しているようです」と一旦好意的に評価した上で、続く`1556`について「task切り替えに苦戦しているようです」と報告した。
+
+調査の結果、`log/2026-08-05/1542/log_no_prompt.md:2754`でStage3（統合承認判断）が実際に呼んだ`write_agreement`のtool call argsが以下であったことを発見した：
+
+```
+action_type="CREATE", entry_type="Decision", topic="task_1_1成果物（需要データと運賃収入の確定）の統合承認判断"
+```
+
+これはExpertの元のDeliverable（`entry_type="Deliverable"`, topic="需要データと運賃収入の確定（詳細仕様書）"）とは別の、承認判断を記録するための新規Decisionエントリであり、Expertの成果物自体は`status="Proposed"`のまま一切更新されていなかった。BL-176のゲート（`_is_task_completed`、`cela_main.py:4007-4020`）は「`entry_type=="Deliverable"`かつ`task_id`一致の最新行のstatus」のみを判定するため、Decisionエントリをいくら作っても条件を満たせず、`log/2026-08-05/1556/log_no_prompt.md:1065`（および同ログ4399行目でも再発）で恒久的にタスク遷移がブロックされ続けた。この後に観測された混乱——Orchestratorが`current_task_id`とdialog文脈の食い違いを「ベンチマークのトリック問題」と誤認し大量の無駄な思考を消費、Expertが`ask_user_question`（BL-130）で「タスク切り替えを反映するか待つべきか」を相談、User AIが試行錯誤しつつ「待機してください」と回答——は、すべてこの1点（Stage3の書き込み先の誤り）に起因すると特定した。
+
+原因はStage3のプロンプト（`cela_main.py:7447-7450`、修正前）が「承認する場合は、必ずwrite_agreementツールを呼び出して確定してください」としか指示しておらず、「Expertの成果物自体をUPDATEすること」を明示していなかったこと。`call_decision_extractor`のプロンプト（`cela_main.py:6596-6624`）や、BL-172のD-142（「正当なUserの承認は常に既存（Expert作成）のDeliverableをUPDATEでApproved等へ変更する形を取る」）では既にこの規約が明示されていたが、BL-177でStage3を新設した際にこの規約が引き継がれていなかった。皮肉なことに、`decision_extractor`自身の抽出結果（`log/2026-08-05/1556/log_no_prompt.md:1011-1026`）は`action_type="UPDATE", entry_type="Deliverable", target_topic="需要データと運賃収入の確定（詳細仕様書）"`という**正しい**内容だったが、「write_agreementが呼ばれた場合はdecision_extractorの書き込みをスキップする」という既存ロジックにより、Stage3の誤った書き込みがこの正しいフォールバックを握りつぶしていた。
+
+ユーザーが「すぐに直してください。また、同様なプロンプトの退行がないかチェックして下さい」と指示。
+
+**実装完了（`done`）**：
+
+- Stage3のプロンプト（`cela_main.py:7429-7476`）へ、`_find_active_deliverable_agreement`（BL-084、既存ヘルパー）でExpertの成果物のtopicを取得し明示的に注入。「承認は`action_type=\"UPDATE\"`, `entry_type=\"Deliverable\"`, `target_topic=\"<取得したtopic>\"`でExpertの成果物自体を更新すること、新しいDecisionエントリを別途CREATEしてはいけないこと」を明記した。あわせて、`decision_what`は既存本文の書き写しが不要（BL-127の保護機構により短い承認コメントで足りる）ことも明記し、モデルが不必要に巨大な成果物本文を再送しようとするリスクを予防した。
+- Stage3の自己申告とツール呼び出し結果の食い違い判定（既存のBL-091/BL-176型の機械的検証ループ）を強化：従来は`get_last_write_agreement_succeeded()`のみで判定していたため「write_agreementは成功したが対象がDeliverableでなかった」ケースを検知できなかった。`_is_task_completed`（BL-167、BL-176のゲートと全く同一の判定基準）を併用することで、Stage3が「成功した」と判断する基準を、実際に後段のBL-176ゲートを通過できる状態と完全に一致させた。不一致時の訂正指示にも、正しいtarget_topicの指定方法を明記した。
+- **他ステージの監査（ユーザー指示の横展開チェック）**：Stage1（レビュー）はread-onlyツールのみで対象外。Stage2（issue確認）は`escalate_premise_concern`/`resolve_premise_concern`/`revise_goal`が`escalation_id`（`_get_open_escalations_text`が`[escalation_id]`形式で明示提示済み）、`write_issue`が`topic`（read_issuesでの事前確認を既に明示指示済み）と、いずれも既に明確な識別子が与えられており、Stage3と同種の「対象不明確」問題は無いことを確認した。Stage4（次タスク指示）は`think`のみで書き込みツールを持たないため対象外。
+- 新規テスト`tests/test_bl177_user_ai_staging.py`へ4件追加（ソースコード確認2件：Stage3プロンプトが`_find_active_deliverable_agreement`/`entry_type="Deliverable"`/`target_topic`を含むこと、食い違い判定が`_is_task_completed`を併用していること／実ドライランの不具合を再現する回帰テスト1件：`write_agreement`は成功する（`wrote_agreement=True`）がDB上にApproved相当のDeliverable行が無いケースで3回リトライののちApprovalRecordingFailedへ落ちることを確認）。既存2件（`test_stage4_uses_next_task_prompt_when_approved`・`test_stage3_retry_succeeds_before_exhausting_and_reaches_next_task_prompt`）は、新しい機械的チェックにより「wrote_agreement=Trueだが対応するDeliverable行がDBに無い」場合は失敗するようになったため、テスト側にApproved Deliverable行を明示的にINSERTする形で検証意図を保ったまま修正（他2件も同様に堅牢化）。`python -m py_compile`合格、`tests/test_bl177_user_ai_staging.py`・`tests/test_bl176_task_transition_requires_approval.py`計31件Pass（無退行）。
+
+**残タスク（未着手）:**
+
+- 実ドライランでの効果確認（Stage3の承認が正しくExpertの成果物を更新し、タスク遷移が正常に進むか）は次回以降。
+
+---
+
+### BL-180: BL-179のStage3プロンプトが200字境界に触れず、User承認コメントがBL-127の全文置換の抜け道に入りExpert作成のホワイトボードを破壊する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（実装完了） |
+| 優先度 | P0 |
+| 関連 | [BL-179](#bl-179-bl-177-stage3の承認記録がexpertの成果物deliverable自体を更新せず別のdecisionエントリを作成してしまいbl-176のゲートを永久に満たせない)（原因となったプロンプト変更）、[BL-127](#bl-127-write_agreementのupdateがdb上は成功してもホワイトボード本体には反映されないまたは反映確認に失敗するケースが実際に発生した)（今回誤爆した保護機構の初出）、[BL-169](#bl-169-write_agreementの権限チェックがstatusのみを見ておりuserがexpertを介さず成果物deliverableを自作自己提出できてしまう)（「Deliverable本文執筆はexpertのみ」という今回の修正の根拠） |
+
+**内容:**
+
+ユーザーが実ドライラン`log/2026-08-05/1639`（`log_no_prompt.md:1734`、task_1_2の第3段統合承認判断）をレビューし、「1639の成果物を見てください task_1_2_V2が中途半端な文章です」と報告。`log/2026-08-05/1639/whiteboards/phase_1_task_1_2_V2.md`を確認したところ、Expertが作成した74行の詳細仕様書（Ver.1、`log_no_prompt.md:321`で`CREATE`済み）が、User AI Stage3の承認コメント（3行）のみへ丸ごと置き換わっていた。
+
+原因を`log_no_prompt.md:1734`のwrite_agreement実際の呼び出し引数で確認したところ、Stage3が`action_type="UPDATE", entry_type="Deliverable", target_topic="task_1_2 成果物（詳細仕様書）..."`（BL-179で正しく修正された対象特定）を使いつつ、`decision_what`に350字超の承認理由全文を、`edits`パラメータを使わずに渡していた。`_commit_agreement_from_tool`のUPDATE分岐（`cela_main.py:2102-2109`、修正前）は次の通り：
+
+```python
+elif raw_content:
+    if len(raw_content) > 200:
+        # 全文置換（既存ホワイトボードを丸ごと上書き）
+        ...
+    elif is_whiteboard:
+        # 保護（既存ホワイトボードを温存）
+        ...
+```
+
+`decision_what`が200字を超えると、既存の完全版が存在する（`is_whiteboard=True`）かどうかに関わらず無条件で全文置換パスに入る。今回のケースでは200字を超える承認コメントがそのままホワイトボード本文として保存され、Ver.1の詳細仕様書が消失した。
+
+**なぜtask_1_1では無事だったか**：同じくStage3が承認したtask_1_1（`log/2026-08-05/1629`）では、LLMが`edits`パラメータ（old_text/new_text差分）を使って承認記録セクションを末尾に追記する形を取っており、正しく動作した。しかしStage3のプロンプトはLLMに`edits`と生`decision_what`のどちらを使うか一切指示しておらず、呼び出しごとに挙動が一貫しない状態だった。
+
+**BL-179との関係**：BL-179でStage3プロンプトに追加した文言「decision_whatは短い承認コメントで構いません（既存の成果物本文はシステム側で保護され上書きされないため、全文を書き写す必要はありません）」が、200字という境界線に一切触れていなかった。この文言が「保護される」という誤った安心感を与え、LLMが受入基準・明記事項・confidence指針を詳しく書き連ねた結果、200字を超える承認コメントを書いてしまい、逆に破壊的パスに入ったと推定される（BL-179の修正自体がこの事故を誘発した可能性が高い）。
+
+**実害の伝播確認**：本件発覚時点でrunはまだ継続中（`run_id=1785911225-bcfa11e6`、一時停止マーカーなし）であり、task_1_3のDetector（`log_no_prompt.md:2161`）・Orchestrator（`log_no_prompt.md:3299`）が、破壊後（3行のみ）のtask_1_2成果物を`read_deliverable_file`で既に読んでいたことを確認した。ただし本件発見後にプロセスは既に終了しており（`Get-Process python`で確認）、DB書き込み競合の懸念なくデータ復旧を実施できた。
+
+ユーザーが「1.2をで修正 また今回壊れたtask_1_2のV2（DB上のwhiteboard latest）をV1内容ベースで復旧もお願い」と指示（提示した2案「①プロンプト修正」「②コード側修正」の両方の実施、およびデータ復旧を意味すると解釈）。
+
+**実装完了（`done`）**：
+
+- **①プロンプト修正**：Stage3プロンプト（`cela_main.py:7461-7470`）の該当文言を「decision_whatは短い承認コメントで構いません（全文を書き写す必要はありません。あなたが書く承認コメントが成果物本文を上書きすることはありません）。成果物本文自体の内容を変更・追記したい場合は、decision_whatではなくeditsパラメータ（old_text/new_text）を使ってください。」へ書き換え、`edits`の使い分けを明示した。
+- **②コード側修正（根本対策）**：`_commit_agreement_from_tool`のUPDATE分岐（`cela_main.py:2102-2132`）で、200字超の全文置換パスへ入る条件を`len(raw_content) > 200`単独から`len(raw_content) > 200 and (caller_role == "expert" or not is_whiteboard)`へ変更。BL-169により`entry_type="Deliverable"`の内容執筆はexpertロールのみに許可されている（user/detector/reviewer等は承認・却下・訂正指示しかできない）ため、既にホワイトボード化済みの完全版（`is_whiteboard=True`）に対しexpert以外がedits未指定でUPDATEする場合、文字数によらず常に「承認/却下コメント」であり全文置換の正当な用途は存在しない。expert以外は文字数によらず常に保護するよう変更し、`protected_warning`のメッセージも「あなたはentry_type='Deliverable'の本文を執筆する権限がないため、文字数によらず保護された」旨へ分岐して明確化した。
+- **③データ復旧**：`log/2026-08-05/1639`のrunの`whiteboard_drafts`（`task_id="task_1_2"`）へ、Ver.1本文（DBから直接取得し文字化けなく確認済み）に第3段承認記録セクション（Ver.2のdecision_what全文・機械検証結果・クローズ宣言を反映）を追記したVer.3を新規INSERT。append-only原則（削除は行わずバージョンを積み増す方式）に従い、誤ったVer.2はそのまま履歴として残した。`log/2026-08-05/1639/whiteboards/phase_1_task_1_2_V3.md`としてファイルへも書き出し、DBとの整合を確認。
+- 新規テスト`tests/test_bl180_deliverable_protect_non_expert_full_replace.py`3件（`test_user_role_long_decision_what_on_whiteboard_is_protected_not_replaced`：BL-180実インシデントの再現・修正確認、`test_expert_role_long_decision_what_still_replaces_as_before`：expert役の全文置換は従来通り機能する非退行確認、`test_detector_role_long_decision_what_on_whiteboard_is_also_protected`：user以外の非expertロールへの一般化確認）を追加。`python -m py_compile`合格、既存BL-127/169/172/176/177/178関連69件と合わせて無退行を確認。
+
+---
+
+### BL-181: BL-125のタスク遷移ブロックをOrchestrator/Expertが素通りし、task_idの誤登録・データ破損を招く
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（実装完了） |
+| 優先度 | P0 |
+| 関連 | [BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)（今回素通りされたブロック機構）、[BL-176](#bl-176-_resolve_task_transitionが離脱先task_idの承認成立を検証しておらずuserが1発言で承認と次タスク指示を同時に行うと状態が壊れうる)（同型の機械的検証原則）、[BL-136](#bl-136-issue_logが起票されるが解決されない状態だった可視性強制力の非対称性)（RESOLVE/DEFER必須化の既存機構）、[BL-084](#bl-084-entry_typedeliverableのupdatesupersedeがtopic文字列ドリフトでeditsを0件0件失敗させ続けていたbl-074の未着手項目の再発)（task_idベースのDeliverable識別、今回誤登録で衝突した識別子） |
+
+**内容:**
+
+ユーザーが実ドライラン`log/2026-08-05/1833`をレビューし「1833のログをレビュー」と依頼。調査の結果、task_4_1に未解決の`severity='major'`issue（`task_4_1_route_length_ratio_contradiction`）が残った状態で、Userがtask_4_2への移行を指示していたことが判明した。このissueは、ゴール文の「山間部区間の割合15%（ルート全長基準）」と「片道12km区間を含む」の併記が、論理的にルート全長80km以上（往復160km）を強制し、約50km²のサービスエリア・3台運用と物理的に両立不能な構造的矛盾を指しており、`escalate_premise_concern`により`ESC-1785924841253-c46052`として正式にエスカレーション起票済みだった。
+
+BL-125（`_resolve_task_transition`）はこの未解決issueを正しく検知し、`current_task_id`の更新をブロックした：
+
+```
+🛑 [BL-125] 'task_4_1'に未解決・未先送りのsevere issueが1件存在するため、'task_4_2'への遷移をブロックしました: ['task_4_1_route_length_ratio_contradiction']
+```
+
+これ自体はBL-125の設計通り正しい挙動である。しかし、直後のルーティング関数`route_after_user_decision`（`cela_main.py:9695`付近）は`state["task_transition_blocked_unapproved_task_id"]`（BL-125がブロック時にセットする値）を一切参照せず、無条件に`orchestrator`へ進めていた。その結果、Orchestrator・Expertは（直近の会話文脈にUserが既に発言したtask_4_2の詳細指示が乗っているため）構造化された`current_task_id`との矛盾に気づかないまま、そのままtask_4_2の作業を開始してしまった。
+
+Expertが正しく`task_id="task_4_2"`を指定して`write_agreement`（CREATE）を呼ぶと、BL-146のゲートに拒否された：
+
+```
+→ {'success': False, 'error': "task_id 'task_4_2' は現在のタスク（'task_4_1'）と一致しません。write_agreementのCREATE/UPDATEで書き込めるのは現在進行中のタスクの内容のみです。他タスクの内容を改訂・訂正する場合はaction_type='SUPERSEDE'を使ってください。"}
+```
+
+Expertはこれをメカニカルに検知したものの（「あれ、タスクがtask_4_1のままです...」）、正しい対処（作業を中断してブロック解消を待つ）ではなく、**`task_id="task_4_1"`に付け替えて再送信する回避策**を取ってしまった。User AI Stage3もこの不整合に気づき、承認理由に「task_id登録がtask_4_1となっているのはシステム制約による技術的名称であり、内容はtask_4_2の成果物として適切」と明記した上で承認してしまった。
+
+結果として、`agreements`テーブルおよび`whiteboard_drafts`テーブルの両方に、task_4_2の成果物が`task_id='task_4_1'`として記録された。`get_latest_whiteboard`/`_find_active_deliverable_agreement`はいずれも(phase_id, task_id)の最新版を返すため、以降`read_deliverable_file(task_id="task_4_1")`を呼ぶとtask_4_2の内容が返り、**task_4_1の本当の承認済み成果物（冬季山間部の運行・運休基準の全文）が読めなくなる**データ破損状態になっていた。
+
+根本原因の調査で、`_build_task_transition_blocked_notice`（BL-125のブロック通知）の注入箇所を確認したところ、`generate_user_utterance`（User AI）のプロンプトにしか注入されておらず（`cela_main.py:7549, 7919`）、Orchestrator（`call_orchestrator`）・Expert（`call_expert`）はブロックの存在自体を一切知らされていないことが判明した。
+
+**設計方針（ユーザー提案の2段防御構成）**：
+
+ユーザーは当初「Orchestratorがブロックを知るべき」という私（AI）の提案に対し、実際のグラフ順序（`generate_user_utterance` → `user_detector` → `user_decision_extractor` → `orchestrator`）を踏まえ、「user_detectorはUserの発言直後に番が回ってくるのだから、まさに現タスクの宿題を残したままUserが次へ進もうとするのを止める役目のはず」と指摘。さらに「user_decision_extractorは最後の機械的な強力な砦としてPython側のみで差し戻し、プロンプトへメッセージ注入するのがよい（LLMに決定事項を再抽出させると混乱を招く）」と提案し、2段構成で合意した。
+
+**実装完了（`done`）**：
+
+- **第1段（意味的・user_detector）**：`call_detector`のtarget_role="user"向け`role_specific_instruction`（`cela_main.py:6188-6205`）へ、次の一節を追加：「Userが次のタスクへの移行を指示している場合、`read_issues`で現在のタスクに紐づくseverity='major'またはstatus='escalated'のissueが残っていないか確認し、今回の発言内でRESOLVEまたはDEFERされていなければmajorとし、『次タスクへ進む前に、残存issueをRESOLVEまたはDEFERせよ』と差し戻す」。Detectorは既に`read_issues`ツールと現在タスクのtask_idへのアクセスを持っているため、新規配線は不要。これがmajorを出せば、既存の`route_after_user_detector`（`constraint_issue=="major"`→`generate_user_utterance`）がそのまま機能し、Orchestrator/Expertは一切呼ばれない。
+- **第2段（機械的な最終防衛線・route_after_user_decision）**：`route_after_user_decision`（`cela_main.py:9695`付近）へ、`ready_for_review`判定より先に`state.get("task_transition_blocked_unapproved_task_id")`のチェックを追加。真の場合はLLMを一切介さずPython側のみで`orchestrator`へ進めず`generate_user_utterance`へ差し戻す。差し戻し先のプロンプトには既存の`_build_task_transition_blocked_notice`（BL-125）が自動的に注入されるため、メッセージ注入も新規実装不要。`graph.add_conditional_edges`の第3引数マッピングへ`"generate_user_utterance": "generate_user_utterance"`を追加。decision_extractorのLLM抽出結果自体は通常通りコミットしたままとする（`current_task_id`はBL-125により更新されていないため、抽出された`advances_to_task_id`はどの道無効化される）。
+- 新規テスト`tests/test_bl181_task_transition_block_stops_orchestrator.py`5件：`route_after_user_decision`のソースが`task_transition_blocked_unapproved_task_id`チェックと`"generate_user_utterance"`遷移を含むこと、このチェックが`ready_for_review`判定より先に評価されること、`graph.add_conditional_edges`のマッピングに新規遷移が登録されていること、`build_graph()`が例外なくコンパイルできること、`call_detector`のソースがBL-181節（`read_issues`・`RESOLVE`・`DEFER`を含み、target_role=="user"分岐内にあること）を含むことを確認。`python -m py_compile`合格、既存BL-136/176/checkpoint-resume関連51件と合わせて無退行を確認。
+- **データ復旧（`log/2026-08-05/1833`）**：`cela.db`を`cela.db.bak_bl181`としてバックアップした上で、`whiteboard_drafts`へtask_id='task_4_1'のVer.4（Ver.2の正しい内容を復元）、task_id='task_4_2'のVer.1/Ver.2（Ver.3の内容をtask_4_2として正しく再登録、Ver.2に第3段承認記録を追記）をappend-only原則に従い新規INSERT（誤ったVer.3はtask_id='task_4_1'のまま履歴として温存）。`agreements`では誤登録のApproved行（task_id='task_4_1'扱いだったtask_4_2の承認）をSupersededにし、task_id='task_4_2'として正しいCREATE/UPDATE行（元の内容・reason_why・evidenceをそのまま複製し、task_id/content参照のみ補正）を新規追加。復旧後、`task_4_1`/`task_4_2`それぞれの「現在有効なDeliverable」「最新whiteboard」が正しく分離されていることをクエリで確認。`log/2026-08-05/1833/whiteboards/`へ`phase_4_task_4_1_V4.md`・`phase_4_task_4_2_V1.md`・`phase_4_task_4_2_V2.md`としても書き出し。
+
+**残タスク（未着手）:**
+
+- 実ドライランでの効果確認（BL-125ブロック発生時に実際にOrchestratorへ進まず差し戻されるか）は次回以降。
+
+---
+
+### BL-182: `call_decision_extractor`のDeliverable全文複製要求が、長大な成果物でJSON出力を肥大化させmax_tokens付近での打ち切りを招く
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（実装完了） |
+| 優先度 | P2 |
+| 関連 | [BL-043](#bl-043-decision_extractorのjson出力をfunction-calling方式に作り替え既存の自己修復ループd-009に一本化する)（同種の問題への大規模対応案、「実害として頻発するようになった時点で着手」と当時保留していた条件に今回該当）、[BL-089](#bl-089-複数jsonフェンスブロックの混線によるレビュー安全ゲートの無効化および全ノード共通の重複再検証の抑制)（同型のJSONパース失敗・層2リトライ機構）、[BL-160](#bl-160-_query_ai_liveが最終回答がreasoningチャンネルへ出力されcontentが空になったケースを空応答としてサイレントに握りつぶし1ターン分のdecisiondirectivedeliverable抽出タスク遷移シグナルが丸ごと失われる)（`call_decision_extractor`への層2リトライ導入） |
+
+**内容:**
+
+ユーザーが実ドライラン中に発生した`⚠️ [Decision Extractor] JSON判定パース失敗を検知...層2リトライ 3/2...`エラーを報告（`log/2026-08-05/2311/log_no_prompt.md:5568-5665`）。生レスポンスの冒頭300字は正しいJSON構造で始まっているが、`content`フィールドにtask_5_1「エッジケースA（通信完全ロスト）フェールセーフプロトコル・マニュアル」の全文を複製しようとして途中で打ち切られており、3回のリトライ全てが同様に失敗していた。
+
+調査の結果、直後のログ`[DEBUG] decision_extractor target_role='expert' expert_wrote_agreement=True user_wrote_agreement=True -> wrote_agreement_this_turn=True`により、Expertは既に`write_agreement`ツール経由でこの成果物を正しく登録済みであり、`decision_extractor_node`の`if not wrote_agreement_this_turn:`分岐（`cela_main.py:9010`）によりこの抽出結果自体がまるごと破棄される設計であることを確認した。したがって今回のパース失敗による実害は無かった（`target_role='expert'`のためタスク遷移権限も無く、`advances_to_task_id`喪失リスクも無い）。
+
+しかし根本原因として、`call_decision_extractor`のExpert向け指示（当時の`cela_main.py:6586`）が「成果物本体（仕様書や計画書のテキスト全文。絶対に要約しないこと）」とDeliverable本文の全文複製を要求しており、これがwrite_agreement呼び出し成功時にはどのみち捨てられる無駄な生成であるにもかかわらず、大きな成果物ほどJSON出力を肥大化させmax_tokens付近での打ち切りを招いていることを特定した。
+
+ユーザーが「これは当初はdecision_extractorが抽出していたものをユーザーやエキスパートが直接dbに登録するように変更した後の名残です。もう機能自体を削ってもいいかもしれません」と指摘。AIが`extracted_events`（Decision/Directive/Deliverable抽出）の役割を3つ（①DB登録＝wrote_agreement_this_turn=Trueならまるごと破棄、②先送りDEFER検出＝現在はwrite_issueが本流、③owned_variable_values確定値抽出＝write_agreementのconfirmed_variables指定漏れの保険として毎ターン無条件実行）に整理して提示し、削減範囲をユーザーへ確認したところ、「Deliverable本文の全文複製だけを撤廃（Decision/Directiveの抽出は残す）」という最小スコープの選択があった（全面撤廃はBL-082/096/136/139/154が積み上げてきた「LLMがツールを呼び忘れた場合の最終フォールバック」を完全に失うリスクがあるため見送り）。
+
+**実装完了（`done`）**：
+
+- `decision_extractor_node`の既存フォールバック経路（`cela_main.py:9013-9023`）を確認したところ、`entry_type="Deliverable"`かつ`action_type="CREATE"`で`content`が200字以下の場合、`state["expert_output"]`（Agentの発言全文）が自動的にファイル保存用コンテンツとして使われる仕組みが既に存在していた。つまりdecision_extractor自身が`content`へ全文を複製する必要は元々無く、この安全網は温存されたまま全文複製要求だけを撤廃できることを確認した。
+- Expert向け`role_instruction`（`cela_main.py:6586`）・共通`common_rules`の「🚨成果物抽出に関する絶対ルール🚨」（`cela_main.py:6671-6673`）・JSON出力例の`content`フィールド説明（`cela_main.py:6703`）・BL-029節（`cela_main.py:6604-6608`）を、いずれも「200字以内の簡潔な要約で構わない（write_agreement経由で登録済みならこの抽出結果自体が破棄され、未登録ならAgentの発言全文が自動的に使われるため、全文保持の必要がない）」旨へ書き換えた。
+- Decision/Directive抽出指示、BL-082/BL-136のDEFER検出指示、`advances_to_task_id`/`advances_to_phase_id`検出、User側のUPDATE（評価のみ）時の`content`空文字強制は無変更。
+- 新規テスト`tests/test_bl182_decision_extractor_no_deliverable_full_text.py`5件（Expert向けプロンプトが旧来の全文複製要求文言（「絶対に要約しないこと」「全文をそのまま content に格納せよ」）を含まないこと、ソースにBL-182節と「200字以内」の言及があること、Decision/Directive抽出指示とDEFER検出指示が維持されていること、User側UPDATE時のcontent空文字強制が維持されていること、共通ルールに200字要約への言及があること）を追加、既存BL-041/050/082/096/139/154/160関連85件と合わせて無退行を確認。
+
+**残タスク（未着手）:**
+
+- 実ドライランでの効果確認（今後同種の大きな成果物でパース失敗自体が減るか）は次回以降。
+- BL-043（Function Calling方式への全面移行）は本BLでは対応せず、`open`のまま据え置き。
+
+---
+
+### BL-183: BL-181の機械的な第2防衛線が、BL-125本来の「未解決severe issue」ブロックを見落とし素通りさせていた
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（実装完了） |
+| 優先度 | P0 |
+| 関連 | [BL-181](#bl-181-bl-125のタスク遷移ブロックをorchestratorexpertが素通りしtask_idの誤登録データ破損を招く)（今回穴があった機構そのもの）、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)（本来ブロックすべきだった機構）、[BL-176](#bl-176-_resolve_task_transitionが離脱先task_idの承認成立を検証しておらずuserが1発言で承認と次タスク指示を同時に行うと状態が壊れうる)（BL-181が唯一チェックしていたもう一方のブロック要因） |
+
+**内容:**
+
+ユーザーが実ドライラン`log/2026-08-06/0751`をレビューし「task番号がまたずれているようです」と報告。調査の結果、BL-181で実装したはずの機械的な第2防衛線（`route_after_user_decision`）を、全く同じ壊れ方（Orchestrator/Expertが独自にcurrent taskを誤認して先走り、write_agreementのtask_id不一致ゲートに阻まれたExpertがtask_idを誤登録する）が再発していたことが判明した。
+
+`log/2026-08-06/0009/log_no_prompt.md:5384-5387`で、BL-125本来の未解決severe issueブロックが正しく発火していた：
+
+```
+🔁 [BL-139] transitionのadvances_to_task_idが未設定だったため、抽出されたDirective（task_id='task_6_1'）から遷移意図を補完しました。
+🛑 [BL-125] 'task_5_2'に未解決・未先送りのsevere issueが1件存在するため、'task_6_1'への遷移をブロックしました: ['task_5_3_分類数矛盾']
+
+------ [orchestrator] が思考中 ------
+```
+
+ブロックされた直後にもかかわらず、ルーティングは`generate_user_utterance`へは差し戻されず`orchestrator`へ進んでしまっている。この時点でCtrl+Cにより一時停止（`current_task_id='task_5_2'`のままチェックポイント保存）。同run_idを`log/2026-08-06/0751`で再開したところ、Orchestratorのiter=1の思考がいきなり「現在のタスクはtask_6_1です」（`log_no_prompt.md:96`）となっており、Expertがtask_6_1の成果物を`write_agreement`しようとしてBL-146ゲートに拒否され（`log_no_prompt.md:2172`）、BL-181のときと同じ回避策（`task_id='task_5_2'`のまま再送信）を取って誤登録した（`log_no_prompt.md:2188`）。
+
+根本原因を`_resolve_task_transition`（`cela_main.py:8892-8922`）で確認したところ、ブロック要因は排他的に立ちうる2種類のフラグに分かれていた：
+
+1. `task_transition_blocked_issue_topics`（BL-125本来: 離脱先に未解決・未先送りのsevere issueが残っている）
+2. `task_transition_blocked_unapproved_task_id`（BL-176: 離脱先がまだ承認済み(Approved相当)でない）
+
+ところがBL-181で実装した`route_after_user_decision`のガード（`cela_main.py:9719`、当時）は②のみをチェックしており、①（今回実際に発火したBL-125本来のブロック）を一切参照していなかった。BL-181のテスト（`tests/test_bl181_task_transition_block_stops_orchestrator.py`）もソース確認で②の存在しか検証しておらず、①の欠落を検出できていなかった。
+
+**実装完了（`done`）**：
+
+- `route_after_user_decision`（`cela_main.py:9719`）の条件を`state.get("task_transition_blocked_unapproved_task_id") or state.get("task_transition_blocked_issue_topics")`のORへ拡張。`_build_task_transition_blocked_notice`（BL-125の通知）は両フラグを排他的に扱う設計のため通知本文の生成ロジック自体は無変更。
+- 新規テスト`tests/test_bl183_task_transition_block_severe_issue_flag.py`4件：`route_after_user_decision`のソースが両フラグを参照すること、①のチェックが`ready_for_review`判定より先に評価されること、`task_transition_blocked_issue_topics`が立っている状態で実際に`"generate_user_utterance"`を返すこと（ネスト関数をソースから取り出して直接実行）、両フラグとも立っていない通常時は従来通り`"orchestrator"`を返すこと。既存`test_bl181_...`5件と合わせて9件、無退行を確認。
+- **データ復旧（`log/2026-08-06/0009`→`0751`、run_id=1785911225-bcfa11e6）**：`cela.db`を`cela.db.bak_bl183`としてバックアップした上で、`agreements`/`whiteboard_drafts`/`verified_facts`の3テーブルで、`task_id='task_5_2'`のまま誤登録されていたtask_5_3の成果物（Ver.3・関連agreements 3件・`responsibility_matrix`）とtask_6_1の成果物（Ver.4・関連agreements 1件・`consistency_check_result`等4変数）を、それぞれ正しい`task_id`/`phase_id`へ補正（`whiteboard_drafts`はversionを1から採番し直し、`task_5_2`本来のVer.1/Ver.2のみを(phase_5, task_5_2)タプルに残した）。復旧後、`task_5_2`/`task_5_3`/`task_6_1`それぞれの「現在有効なDeliverable」「最新whiteboard」が正しく分離されていることをクエリで確認。ブロック対象だったissue（`task_5_3_分類数矛盾`）は既に`defer_to_task_id='task_6_1'`でDEFER済みのため、次回の遷移試行では両ブロックとも解除される見込み。`log/2026-08-06/0009/whiteboards/phase_5_task_5_3_V1.md`・`log/2026-08-06/0751/whiteboards/phase_6_task_6_1_V1.md`としても書き出し。
+- **チェックポイント補正（`log/2026-08-06/0832`→`0847`、`cela_checkpoints.db`）**：上記コード修正・データ復旧後も、ユーザーが「まだ、現在のタスクが5_2だと言って混乱が生まれています」と報告。調査の結果、`_resolve_task_transition`によるtask_5_2→task_6_1の遷移自体（`state["current_task_id"]`の書き換え）が、ブロック解除後も一度も成功していないまま`current_task_id='task_5_2'`が3回の再開（`0751`/`0832`/`0847`、いずれもturn=6のまま停止）を跨いで残り続けていたことが判明。既にtask_6_1の作業自体はOrchestrator/Expertが（BL-181/183修正前の混乱により）先行して完了・DBへ正しく格納済みだったため、User AIは「会話文脈ではtask_6_1完了・プロジェクト完了宣言」と「構造的には現在タスクtask_5_2」の板挟みになり、Stage1〜3のレビューを堂々巡りして`advances_to_task_id`の抽出そのものが1件も発生しない状態に陥っていた（`0832`/`0847`両ログで`"advances_to_task_id"`が0件・`BL-139`橋渡しも0件であることを確認）。副作用として、0832の混乱した`write_agreement`呼び出しが`agreements`へ紛らわしい行（`AG-1785973109226`、topic="task_6_1 成果物承認判断"だが`task_id='task_5_2'`）を1件追加していたが、後続の書き込みでSupersededとなり非アクティブなため実害なしと確認（`whiteboard_drafts`は無傷）。ユーザーへ対処方針（チェックポイントを直接補正／このままドライランを継続して自然な遷移を待つ）を確認したところ、前者を選択。`cela_checkpoints.db`を`cela_checkpoints.db.bak_bl183_current_task_id`としてバックアップした上で、生SQLではなくLangGraph公式の`app.update_state(config, {...})`API（チャンネルバージョン管理・reducerを尊重した安全なマージ）を用い、`current_task_id`を`'task_6_1'`、`current_phase`を`phase_6`の辞書へ更新（`task_transition_blocked_*`の2フラグも念のため明示的に空へ）。別接続での再読み込みで`current_task_id='task_6_1'`・`current_phase.phase_id='phase_6'`への反映を確認。
+
+**残タスク（未着手）:**
+
+- 実ドライランでの効果確認（チェックポイント補正後、User AIが混乱なくtask_6_1以降＝プロジェクト完了処理へ進めるか）は次回の再開時に確認。
+- BL-181のテストが「ブロックフラグが立てば差し戻される」ことしか検証しておらず「両方のブロック要因を網羅しているか」を検証していなかった点は、今後同種の排他的フラグ実装時の一般的な教訓として留意する。
+- 今回露見した副次的な設計課題（Stage3の統合承認判断が`current_task_id`ではなく`target_topic`の文字列一致でDeliverableを解決するため、構造的なタスクポインタと会話文脈が乖離すると混乱を招く）は、恒久対応として別途BL化を検討する余地がある（現時点では記録のみ、本BLのスコープ外）。
+
+---
+
+### BL-184: `web_search`/`web_fetch`/`read_reference_file` ツールの新設（現実世界の地理・数値をグラウンディングする）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計完了、実装未着手） |
+| 優先度 | P2 |
+| 関連 | [BL-041](#bl-041-一度確定した決定例-車両台数を後続タスクの発見を根拠に再検討させる自動メカニズムが存在しないresource-arbiter機構が死んだコードパスになっている)（`confidence`の`confirmed`/`provisional` enum設計思想、本BLでは変更せず`citations`活用で対応）、[BL-105](#bl-105-checkpointresume機構がentry_pointから全体再走行するため未応答のuser発言が二重に積まれるlanggraph本来のcheckpointertask未導入という設計ギャップ)（D-086、新規依存パッケージ追加の先例）、`python_repl`（`_run_python_repl`/`_PythonReplSession`、サンドボックス方式の参考実装）、`read_deliverable_file`（`cela_main.py:1221-1226`、resolve-and-containパス検証パターンの参考実装） |
+
+**内容:**
+
+ユーザーが08-05〜08-06分の全ドライランログ・成果物（task_1_1〜task_6_1、計10ログ日時分）の監査を依頼（「ゴールと制約は物理的に困難なはずですが、捏造や単純化や先送りなど、議論の品質と量が十分であるか確認してください」）。監査の結果（詳細は本セッションのdecision_lineage.md 論点134/135周辺の会話記録を参照）、CELAが完全にクローズドな世界（ゴール文＋内部相互参照のみ）で動作しており、現実の地理・費用相場等を一切検証できないことが、以下のような複数の弱点の根本要因の一つと判明した：
+- task_1_3が「15%が山間部（片道12km）」というゴール文の記載から「ルート全長L≥80km」という物理的矛盾（50km²のサービスエリアと矛盾）を一度も計算せず素通りした。
+- task_6_1が「片道12km→7-10km」への再設定を、幾何学的な推測（直線距離×1.5〜2倍の道路距離係数、という未検証の一般則）のみで正当化した。
+
+ユーザーがこれを受けて改善方針を2つ提示：①制約充足の原文照合（ゴール文と提案内容の「言い換え」検出、今回は対象外＝最終QA層の発火状況を見てから判断）、②**web検索・ファイルIOの実装**（本BLのスコープ）。
+
+Plan ModeでExploreエージェント1体を実行し、既存ツール基盤を調査：`TOOL_DISPATCH`辞書パターン（`(args, state)`統一シグネチャ）、読み取り専用ツールはcaller_role非ゲート、`read_deliverable_file`のresolve-and-containパス検証、`python_repl`の多層防御サンドボックス（AST静的解析＋プロセス分離、コメントで「多層防御であることが設計上の限界」と明記）、`verified_facts`テーブルの`confidence`カラム（DBはCHECK制約なしだが`write_agreement`のJSON Schemaで`enum: ["confirmed", "provisional"]`にハードロックされている）、新規依存パッケージ追加の先例（D-086、`langgraph-checkpoint-sqlite`、提案→承認→`requirements.txt`追加→実装という手順）を確認。
+
+検索プロバイダについてAskUserQuestionで確認したところ、当初「まだ決めない、Provider抽象化して提案」との回答。プランをProvider抽象化レイヤー（`WebSearchProvider` Protocol）で設計した後、ユーザーから「web検索はTavilyもいいがどのくらい検索が走るか不明なため、DuckDuckGoにしようかな」との追加判断があり、初期実装プロバイダをDuckDuckGoへ確定。DuckDuckGoには公式検索APIが存在しないため、自前で`html.duckduckgo.com/html/`をHTTP GET＋自前HTMLパース（`requests`のみ、非公式スクレイピング専用パッケージ`ddgs`等は追加しない）で実装する方針とし、非公式スクレイピングゆえのリスク（ページ構造変更で予告なく壊れる可能性、レート制限・一時ブロックのリスク、利用規約上のグレーゾーン）を設計書に明記した上でユーザーの承認を得た。
+
+**設計方針（`done`、実装は未着手）**：
+
+- **3ツール構成**：`web_search`（検索結果一覧`{title,url,snippet}`のみ、本文は含めない）／`web_fetch`（URL本文をHTMLパースしテキスト化、`web_cache/`へ自動キャッシュ）／`read_reference_file`（`web_cache/`配下を読み取り専用参照、`read_deliverable_file`と同じresolve-and-containパターン）。Claude Code自身のWebSearch/WebFetch/Readの分離、および既存の`read_project_plan`→`read_deliverable_file`という「一覧→詳細」パターンを踏襲。
+- **アタッチ設計**：`call_expert`（3ツール全て、仮定値を実際に執筆する主体）／`call_detector`ドメイン監査パス（`read_reference_file`のみ、新規の外部通信・追加コストを発生させずExpertが既に取得済みの証跡との整合性だけを検証させる）。`call_orchestrator`・`task_planner`・User AI等は今回のスコープ外。
+- **安全設計**：`web_fetch`にSSRF対策（http/httpsスキームのみ許可、`socket.gethostbyname`+`ipaddress`でprivate/loopback/link-localレンジを拒否）、Content-Type制限、サイズ上限、`html.parser.HTMLParser`ベースの軽量HTML→テキスト変換（`BeautifulSoup`等の追加依存は見送り）。両ツールともrun単位の呼び出し回数上限（`web_search_call_count`/`web_fetch_call_count`、`MAX_TOOL_ITER`と同型の思想）を`LineageState`へ追加し、DuckDuckGo方式にはリクエスト間隔スロットリングも追加する。
+- **既存スキーマとの統合**：`verified_facts`/`confirmed_variables`の`confidence` enum（`confirmed`/`provisional`）はAGENTS.md §7の重要定数変更に該当するため**変更しない**。代わりに既存の`citations`フィールド（データモデル無改修で既に存在）を活用し、web由来の値のURLトレーサビリティを持たせつつ、単一情報源への依存で無条件`confirmed`昇格はさせない方針とした。
+- 基本設計を`docs/design/back_log/BL-184/BL184_basic_design.md`として原文保存。
+
+**実装着手前の未確定事項（4点、次回セッションで確認）**：
+
+1. 検索Provider＝DuckDuckGo（自前HTTP+自前パース方式）で確定済み。
+2. ~~`web_tools.py`への分割可否~~ → 独立レビュー（下記）を受け、既定方針として分割することで確定。
+3. `max_web_search_calls`/`max_web_fetch_calls`の具体的な上限値、DuckDuckGoスロットリング間隔の具体値（既定案：検索20回/run、取得20回/run、リクエスト間隔1秒以上）。
+4. `call_orchestrator`等、Expert/Detector以外への展開要否。
+
+**独立レビューによる設計修正（2026-08-06）**：
+
+ユーザーが別AIへBL184_basic_design.mdの独立レビューを依頼し、指摘10件（重大3・重要4・軽微3）を共有。AIが実コードで各指摘を検証した上で設計書を修正した。主な修正点：
+- **依存パッケージ変更**（重大）：`requests`新規追加としていたが、実コード確認の結果`cela_main.py`は既に`httpx`をimport・使用済み（BL-072/BL-083のリトライ処理）と判明。`httpx`再利用へ変更し、新規依存追加そのものを不要にした。
+- **`read_reference_file`の`keyword`検索仕様を明記**（重大）：`web_cache/<run_id>/`配下の`# Source: {url}`行への部分一致検索とし、Detectorが`citations`のURLから証跡ファイルを逆引きできる経路を確保。
+- **`MAX_TOOL_ITER`との整合性を明記**（重大）：指摘の「検索20+取得20=40>30」という単純比較は、`MAX_TOOL_ITER`が単一`query_AI`呼び出し内の上限でありrun全体累積の`max_web_search_calls`等とスコープが異なるため不正確と判断したが、両者の相互作用が未検討だった点は妥当な指摘としてリスクを追記。
+- DNSリバインディング対策、`<script>`/`<style>`タグ除去、`read_reference_file`のベースディレクトリを`web_cache/`一本に限定、`citations`の`web:`プレフィックスでの区別、Content-Type制限を`text/*`へ緩和、`web_tools.py`分割を既定方針化、をそれぞれ反映。
+- DuckDuckGoのGET/POST方式についてはAGENTS.md §9に従いWeb調査を実施し、GET+クエリパラメータで動作することを確認（`docs/refs/duckduckgo/html_endpoint_notes.md`にsource URL・取得日付きでキャッシュ）。POST対応は不要と判断。
+
+詳細は`BL184_basic_design.md`の「独立レビューによる修正履歴」節、および`decision_lineage.md` 論点139を参照。
+
+**残タスク（未着手）:**
+
+- 残る未確定事項（上記3・4）の確認後、実装（`web_tools.py`新規モジュールへのツール追加・`cela_main.py`への`TOOL_DISPATCH`登録、`.gitignore`への`web_cache/`追加。`requirements.txt`変更は不要）。
+- 新規テスト`tests/test_bl184_web_search_file_io.py`（Fake Provider差し替え、SSRF拒否・DNSリバインディング拒否、キャッシュヒット時のAPI呼び出しスキップ、呼び出し回数上限、パス脱出拒否、`read_reference_file`のkeyword逆引き等、実ネットワーク呼び出しなし）。
+- 実装完了後、`decision_log.md`へD-153、`decision_lineage.md`へ論点136として詳細な決定理由・経緯を記録（現時点では設計段階のため概要のみ本節に記載）。
+
+---
+
+### BL-185: `generate_user_utterance`（User AI）のsystem_promptを「視座は上から下、文脈は過去から現在」の順に再構成し、差し戻し通知が完了宣言に埋もれ無視される事故を防ぐ
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（実装完了） |
+| 優先度 | P0 |
+| 関連 | [BL-178](#bl-178-call_expertのsystem_promptフル版light_system_prompt軽量版を視座は上から下文脈は過去から現在の順に再構成しdetectorの差し戻し情報を両方で真に最後に読ませる実装完了)（call_expertでの同型の先行実装、本BLの直接の参照元）、[BL-104](#bl-104-call_expertのphases_json目次化read_project_planツール新設プロンプトのキャッシュ効率改善)（先頭固定・末尾動的の原則の初出）、[BL-143](#bl-143-差し戻しプロンプトにdetectorの指摘文だけが載っており何回目の差し戻しか前回と同じ指摘の繰り返しかというpython側で計算可能な現在地情報が渡っていなかった)（`_build_retry_situation_label`、差し戻し回数の機械的要約）、[BL-096](#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)（`_build_escalation_resume_notice`）、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)（`_build_task_transition_blocked_notice`） |
+
+**内容:**
+
+ユーザーが実ドライラン継続中に「detctorの差戻を無視して、プロジェクト完了を連呼している」と報告。調査の結果、`log/2026-08-06/1149`で、Detectorがドメイン監査でmajor判定（オペレーター人件費の労働基準法上の休憩要件違反疑い、資本の予備費ゼロ）を出し差し戻した直後（`♻️ [User AI] 差し戻しのため、直前のNG発言を履歴から取り消しました。`）、User AIの再送された最初の思考（iter=1）が次のようになっていたことを確認した：
+
+```
+The user has provided the final Expert report for task_6_1, which confirms all constraints
+are verified and the project is complete... The user (as the project owner) has already
+declared project completion in the previous turn.
+```
+
+差し戻された事実に一切触れず、削除されたはずの「前回の完了宣言」を一字一句そのまま繰り返して`💬 [User AI] 発言（iter=1）`に出力していた。
+
+根本原因を調査したところ、BL-178でExpert側に発見・修正した構造的欠陥と全く同型であることが判明した。`generate_user_utterance`（`_is_normal_review_turn`がFalseになる単発呼び出しパス。差し戻し再送・初回ターン・本質対話応答・Expert相談応答・終盤のPROJECT_COMPLETE宣言ターンで使われる。通常のExpertレビューターンで使われるStage1-4パイプラインは対象外）は、差し戻し通知（`⚠️【重要】あなたの前回の発言は...差し戻されました`）を`system_prompt`の中盤（🚨最終盤の超重要指示・`_build_escalation_resume_notice`・`_build_task_transition_blocked_notice`より前）に組み込んでいた。しかし`messages`配列は`[system, ...chat_history]`という構造上、`chat_history`側が常に物理的に後ろへ来るため、`chat_history_window=4`件の直近の会話（Expertの長大な完了報告や、それ以前の完了宣言のやり取り）が差し戻し通知よりも後ろで読まれ、埋もれていた。加えて、差し戻し通知の直後には「🚨最終盤の超重要指示」（終盤ターンで`『プロジェクトを完了とする』と宣言せよ`という強い指示）が続く配置になっており、両条件が同時に成立し得るケースでは差し戻し通知と真逆の指示が直後に読まれる構造だった（今回の実例ではturn_count=6で終盤条件自体は不成立だったため、実際の誤読の主因は前者のchat_history埋没だが、後者も潜在的リスクとして併せて是正することとした）。
+
+**設計方針（ユーザー承認）**：
+
+ユーザーが「OKです。差戻以外の通常パスも`_build_escalation_resume_notice`/`_build_task_transition_blocked_notice`など、意識してほしいことは末尾に置きましょう。キャッシュヒットは悪くなるかもしれませんが、それよりも行動の統制の方が大事です」と、BL-178と同型の対応を承認し、あわせて対象を差し戻し再送パスに限らず単発呼び出しパス全体へ拡張するよう指示した。
+
+**実装完了（`done`）**：
+
+- `generate_user_utterance`の`system_prompt`を`system_prompt_leading`（静的指示文＋役割説明＋本質対話/Expert相談応答モードの排他分岐）と`system_prompt_trailing`（動的な状況説明＋直近の是正内容）へ分割し、`messages`配列を`[leading, ...chat_history, trailing]`の3部構成へ変更（BL-178でcall_expertに導入したのと同型のパターン）。
+- `system_prompt_trailing`内の順序を「決定事項DB・直近の行動タイムライン・プロジェクト進行計画・現在タスクのスコープ・エスカレーション状況・BL-094/096の指示」→「`_build_escalation_resume_notice`（BL-096）」→「`_build_task_transition_blocked_notice`（BL-125）」→「🚨最終盤の超重要指示」→「差し戻し通知（trailingの最後＝messages配列全体でも最後）」の順に再構成。エスカレーション再開通知・タスク遷移ブロック通知は、ユーザー指示により差し戻し以外の通常の単発呼び出しパス（初回ターン・本質対話応答・Expert相談応答・終盤宣言ターン）でも常にtrailing側（chat_historyより後ろ）に配置されるようにした（従来は`system_prompt`中盤に固定配置で、通常パスでもchat_historyより前だった）。
+- 🚨最終盤の超重要指示と差し戻し通知の両方に、互いを参照する優先順位の注記（前者に「差し戻しがあれば完了宣言よりその対応を優先」、後者に「最終盤指示よりも差し戻し対応を最優先」）を追加し、両条件が同時に成立するケースでもどちらが優先かをテキスト上で明示する形にした（BL-178には無かった追加の防御線）。
+- 新規テスト`tests/test_bl185_user_ai_prompt_reorder.py`10件：ソースコード上の並び順確認6件（leading/trailing変数の存在、trailing内の順序＝決定事項DB→エスカレーション再開通知→タスク遷移ブロック通知→最終盤指示→差し戻し通知、差し戻しブロックがtrailingへの最後の追記であること、最終盤指示・差し戻しブロック双方に優先順位の相互参照があること、messagesの構築順）、実行時のmessages構造確認3件（初回ターンで3部構成かつ決定事項DBがtrailing側にのみ存在すること、差し戻し再送ターンで差し戻し通知がtrailing側にのみ存在し却下された前回発話が引用されること）、非退行確認1件（通常ターンでは差し戻し通知が一切出現しないこと）を追加。既存BL-178/104/142/143/096/176関連124件と合わせて無退行を確認。`python -m py_compile`合格。
+
+**残タスク（未着手）:**
+
+- 実ドライランでの効果確認（差し戻し直後にUser AIが正しく指摘を汲み取り、完了宣言を繰り返さなくなるか）は次回以降。
+- Stage4パイプライン（`_is_normal_review_turn=True`時の通常レビューターンで使われる次タスク指示ステージ）内の`_transition_notice`/`_escalation_resume_notice`は、本BLでは対象外のまま据え置いた（差し戻し時は`_is_normal_review_turn`がFalseになるためStage4自体が使われず、今回報告された実害には無関係と判断）。将来的に同種の埋没が疑われた場合、別途BL化を検討する。
+
+---
+
+### BL-186: ゴール改定時にtask_plannerへ強制的に過去タスク再検証を引き継ぐ
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（実装完了） |
+| 優先度 | P1 |
+| 関連 | [BL-163](#bl-163-revise_goal成功時既に承認済みの過去タスクへ新ゴールとの整合性要再確認issueを機械的に起票する)（本BLが起点として再利用する`_flagged`・issue起票ロジック）、[BL-168](#bl-168-verified_factsテーブルにゴール改定を反映するsupersede機構が一切ない)（同じ`_flagged`を再利用するverified_facts警告付記、姉妹BL）、[BL-145](#bl-145-エスカレーションissue申し送りissueをdetectorreflectorの正当性監査を経てタスクプランナー経由で明示的にタスク化する)（`plan_revision_reason`/`plan_revision_issue_ids`を経由したtask_planner強制引き継ぎの先行実装、本BLが直接踏襲した配線）、[BL-126](#bl-126-bl-086の前提エスカレーションはexpertのリアクティブな経路に限定されておりfacilitatoruser-aiがゴール制約自体を能動的に問い直すプロアクティブな創造的議論モードが未設計)（Stage C: ラン途中の計画再構成が`plan_revision_reason`セットのみで次ターンに自動発火する仕組みの初出）、[BL-096](#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)（issue_logのseverity/statusモデル）、[BL-086](#bl-086-前提エスカレーション経路-freeze復活-ゴール改定goalshifteventの実消費化)（`revise_goal`本体、`_LAST_GOAL_REVISION`ブリッジの初出） |
+
+**内容:**
+
+ユーザーが実ドライラン（`log/2026-08-06/1432`）でReflectionの層2リトライログを報告したのを機に、「ゴールエスカレーションが起きたことで、phase1-5の多くのタスクをやり直さなければならない可能性がある。今はphase6/task_6_1（最後）だが、この状態で過去タスクも含めてうまく修正していけるか？」と相談された。
+
+調査の結果、以下を確認した：
+
+- BL-163/BL-168は、ゴール改定成功時に承認済み過去タスク（今回のログでは13件、phase1〜5）へ`severity="minor"`, `status="open"`の整合性再確認issueを自動起票し、関連する`verified_facts`（今回42件）へ警告を付記するところまでは正しく動作していた。
+- しかしこれらは意図的に`minor`のまま据え置かれる設計（無関係な現在タスク遂行中に毎ターン催促されるのを避けるため）であり、`major`/`escalated`issue向けの強制解決ルート（BL-136のRESOLVE/DEFER強制、BL-145の`plan_revision_reason`強制引き継ぎ）には一切乗らない。
+- `read_issues`はpull型ツールであり、LLMが自発的に`list_all=True`等で呼ばない限りどのプロンプトにも自動注入されない（Reflection/Integratorも`issue_log`の`minor`/`open`行を一切見ていない）。
+- 現在ランはphase6/task_6_1（計画上の最終タスク）にあり、通常のタスク遷移でphase1-5へ「戻る」経路も存在しない。
+
+したがってこの13件は、task_6_1自体がたまたまそれらの数値を包括的に扱わない限り、誰にも参照されないまま放置されるリスクがあることをユーザーへ報告した。
+
+**設計方針（ユーザー承認）**：
+
+ユーザーへ「(a)タスク遷移で過去タスクへ戻るルートを新設する」か「(b)ゴール改定後は強制的にtask_plannerへ引き継ぎ、過去タスクを洗い直すタスクをphase7以降として追記させる」かを相談した。AIから(b)を推奨した（理由: BL-145と同型の配線を再利用でき、過去task_idへの後方遷移・成果物やwhiteboardのバージョニング・current_task_id管理の分岐・BL-125/176の遷移ブロックロジックとの整合など、(a)が抱える新規リスクを一切増やさずに済むため）。ユーザーが「お願いします」と承認。
+
+**実装完了（`done`）**：
+
+- `_revise_goal_tool_impl`（BL-163の`_flagged`＝影響を受けた過去タスク一覧を構築するループ）を拡張し、`_write_issue_impl`の戻り値から起票済み`issue_id`を収集。`_flagged`が非空の場合のみ、BL-145と同型の文言で`plan_revision_reason`（「新規フェーズ（例: phase7以降）として、各タスクの成果物が新ゴールの制約を満たすか再検証し、必要な修正を行うタスクを計画に追加してください。既存フェーズの内容は書き換えないでください」＋対象task一覧）を組み立て、`plan_revision_issue_ids`と共に戻り値へ追加。
+- ツール実行ブリッジ（`_LAST_GOAL_REVISION`）へ、この2フィールドを転記するよう拡張（既存のnew_goal_text/old_goal_text/escalation_idと同じブリッジパターン）。
+- `generate_user_utterance_node`で、既存の`_goal_revision`反映ブロック（`state["goal"]`更新箇所）の直後に、`state.get("plan_revision_reason")`が未設定の場合のみ`plan_revision_reason`/`plan_revision_issue_ids`をstateへセットするガード付き分岐を追加（BL-145の同型ガードを踏襲、他要因との衝突を回避）。
+- `task_planner_node`/`call_task_planner`は無改修。既存の`revision_reason`/`existing_phases`/`revision_issue_ids`消費ロジック（BL-126 Stage C・BL-145）がそのまま機能し、次ターンの`goal_essence`→`task_planner`再入場時に自動的に再発火して新規phase/taskを追加、`_mark_issue_planned`でissue_logを`open`→`planned`へ遷移させる。
+- 新規テスト`tests/test_bl186_goal_revision_forces_replan.py`6件：`_revise_goal_tool_impl`（`TOOL_DISPATCH["revise_goal"]`経由）が過去タスクを検知した場合に`plan_revision_reason`/`plan_revision_issue_ids`を正しく返すこと3件、`generate_user_utterance_node`が`_LAST_GOAL_REVISION`ブリッジからstateへ反映すること・既存の`plan_revision_reason`を上書きしないガードが機能すること・ゴール改定が無い場合は何もしないこと3件。既存BL-086/087/095/096/101/126/136/145/163/168/185関連197件と合わせて無退行を確認。`python -m py_compile`合格。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -4912,3 +5418,7 @@ _formalizable_stale = [i for i in _stale_escalated if not i.get("defer_to_task_i
 | 2026-08-03 | ユーザー質問「issueって書いたタスクIDと解決すべきタスクID両方ありましたっけ？」「detectorがタスク遷移をブロックするときはtask_id、last_seen_task_id、defer_to_task_idのどれと現在のタスクIDを比較している？」を受け調査し、issue_logの3列（起票場所task_id/last_seen_task_id、解決先defer_to_task_id）とBL-125のブロック判定が`last_seen_task_id`基準であることを回答。続けてユーザーが「先送りはすべてissueにまとめたほうがよい？」と相談し、コードベースに3つの並行した先送り追跡機構（issue_log・agreements Directive/Deferred・plan_drafts）が互いを認識していないことが判明したため、Expertへ`write_issue`ツールを新規付与するのではなく`decision_extractor_node`がissue_log側へも自動橋渡しする方針で合意し、BL-154として起票・実装。Plan ModeでPlan agent1体（コード確認込みの実装計画）を実行。新規内部ロール`decision_extractor_auto`（CREATE専用）を追加し、`_write_issue_impl`のCREATE分岐を拡張してdefer_to_task_idを作成時点で設定可能に、`decision_extractor_node`のDirective/Deferred処理へissue_log橋渡しを追加、`_build_open_issue_pin_text`へdefer_to_task_id表示を追加。BL-125/144/145は無変更で対応済みと確認。新規テスト`tests/test_bl154_decision_extractor_issue_log_bridge.py`（8件）追加。`python -m py_compile`合格、フルオフラインスイート630件Pass（1件failedは本セッション開始前からの未コミット`MAX_TOOL_ITER`変更によるもので本BLと無関係、AGENTS.md §7の定数変更管理対象のためユーザーへ別途確認予定）。BL-154を`done`化。 |
 | 2026-08-03 | フルオフラインスイートの唯一の失敗（`test_max_tool_iter_raised_to_20`）についてユーザーへ確認したところ、「task_plan_reviewerによって差し戻された時、task_plannerが差戻しタスクの内容を1つずつ把握し直す過程でツール使用上限に引っかかる事態がログから観測されたため」20→30へ変更したとの理由提示があった。BL-093（15→20、thinkツール単独呼び出しの許容）と同種の正当な引き上げと確認し、BL-155として起票・即`done`化。`cela_main.py`の値は無変更（既に30）、変更履歴コメントへ理由を追記のみ。テストを`test_max_tool_iter_raised_to_30`へ改名し期待値・docstringを更新。D-125として記録。`python -m py_compile`合格、対象テストファイル45件Pass。 |
 | 2026-08-03 | ユーザーがドライラン中のnemotron-3-ultra-550b-a55b:free経由のResourceExhaustedエラーを見て「APIエラー時には直前の思考は温存されるんでしたっけ？」と質問。調査の結果、BL-122によりloop_messages/reasoning_parts_all/iteration_startはリトライを跨いで温存されるが、エラー発生時点のiteration自体の途中経過は破棄され同じiteration番号でAPI呼び出しのみやり直されると回答。あわせて、リトライ時のprint文言「ツールループを最初からやり直します」がBL-122以前（当時は実際にiter=1へ巻き戻っていた）の挙動のまま実装と食い違っていることを発見し報告。ユーザー指示「さくっと直してください」を受け、BL-156として起票・即`done`化：print文言を「このiterationのAPI呼び出しをやり直します」へ修正、隣接コメントも更新。ロジック変更なし、対応テストなし。D-126として記録。`python -m py_compile`合格。 |
+| 2026-08-06 | ユーザー指示「08-06/0751のログをレビュー」「task番号がまたずれているようです」を受け調査し、BL-181で実装した`route_after_user_decision`の機械的な第2防衛線が、`_resolve_task_transition`の2種類の排他的ブロックフラグ（BL-176の`task_transition_blocked_unapproved_task_id`／BL-125本来の`task_transition_blocked_issue_topics`）のうち前者しかチェックしておらず、`log/2026-08-06/0009`で実際に発火した後者を素通りさせていたことを発見。BL-181と同型の事故（Orchestrator/Expertがcurrent taskを誤認して先走り、task_6_1の成果物がtask_id='task_5_2'として誤登録）が再発していた。ユーザー指示「実装・データ復旧・テストお願い」を受け、BL-183として起票・即実装。`route_after_user_decision`の条件を両フラグのORへ拡張。新規テスト`tests/test_bl183_task_transition_block_severe_issue_flag.py`4件追加、既存`test_bl181_...`5件と合わせて9件無退行を確認。データ復旧：`cela.db`を`cela.db.bak_bl183`へバックアップの上、`agreements`/`whiteboard_drafts`/`verified_facts`の3テーブルで誤登録されていたtask_5_3・task_6_1の成果物を正しいtask_id/phase_idへ補正（task_5_3は同一調査中に発見した同型の追加インスタンス）。D-152として記録。 |
+| 2026-08-06 | ユーザーが「まだ、現在のタスクが5_2だと言って混乱が生まれています」と報告。調査の結果、BL-183のコード修正・データ復旧後も、`task_5_2→task_6_1`の遷移（`_resolve_task_transition`による`state["current_task_id"]`の書き換え）自体が一度も成功しないまま3回の再開（`log/2026-08-06/0751`/`0832`/`0847`、いずれもturn=6で停止）を跨いで残り続け、User AIが「会話文脈ではtask_6_1完了」と「構造的には現在タスクtask_5_2」の板挟みで堂々巡りしていたことを特定（`"advances_to_task_id"`の抽出が両ログとも0件）。ユーザーへ対処方針を確認し、`app.update_state()`（LangGraph公式API）で`cela_checkpoints.db`の`current_task_id`/`current_phase`を直接`task_6_1`/`phase_6`へ補正することを選択。`cela_checkpoints.db.bak_bl183_current_task_id`へバックアップの上、安全に反映を確認。詳細はBL-183詳細節のチェックポイント補正の項を参照。 |
+| 2026-08-06 | ユーザー指示「08-05〜08-06分の全ドライランログをレビューし、議論の品質・量が十分か確認して」を受け、2体の並行エージェント監査によりtask_1_3のL≥80km矛盾見落とし、task_5_3の分類数矛盾（Detectorが3回escalated化を試みるも毎回minorへ切り下げられ未修正のまま先送り）、task_6_1の30分制約の定義すり替え（予約からではなく締切から、と読み替えたことが2回の差し戻しレビューでも一度も疑問視されなかった）を発見・報告。ユーザーが改善方針として「web検索・ファイルIOの実装」を提案し、Plan Modeで設計に着手。Exploreエージェント1体で既存ツール基盤を調査した上で、`web_search`/`web_fetch`/`read_reference_file`の3ツール構成を設計。検索プロバイダはユーザーとの対話の末DuckDuckGo（自前HTTP+自前パース、追加依存なし）に確定。`verified_facts`の`confidence` enumは変更せず既存`citations`フィールドでURLトレーサビリティを持たせる方針とした。ユーザー指示「まずBL-184のプランを保存して」を受け、ExitPlanModeで承認を得た上でBL-184として起票（`open`、設計完了・実装未着手）、`docs/design/back_log/BL-184/BL184_basic_design.md`へ原文保存、D-153・論点136として記録。実装着手前に4点（モジュール分割可否・呼び出し回数上限具体値・ノード展開範囲・プロバイダ確定＝完了済み）の確認が残る。コード変更は行っていない。 |
+| 2026-08-06 | ユーザーが「detctorの差戻を無視して、プロジェクト完了を連呼している」と報告。調査の結果、`log/2026-08-06/1149`で、Detectorのmajor判定による差し戻し直後のUser AIが、差し戻された事実に一切触れず削除されたはずの「前回の完了宣言」を一字一句そのまま繰り返していたことを確認。原因はBL-178でcall_expertに発見・修正した構造的欠陥と同型で、`generate_user_utterance`の差し戻し通知がsystem_prompt中盤に配置される一方、`chat_history_window=4`件の直近会話が常にそれより後ろで読まれ埋もれていたこと。ユーザー承認「OKです。差戻以外の通常パスも`_build_escalation_resume_notice`/`_build_task_transition_blocked_notice`など、意識してほしいことは末尾に置きましょう。キャッシュヒットは悪くなるかもしれませんが、それよりも行動の統制の方が大事です」を受け、BL-185として即実装。BL-178と同型の3分割構成（leading→chat_history→trailing）へ再構成し、エスカレーション/タスク遷移通知を通常パスでも常にtrailing側へ、差し戻し通知をtrailingの最後へ配置。最終盤指示・差し戻し通知の両方に優先順位の相互参照を追加。新規テスト`tests/test_bl185_user_ai_prompt_reorder.py`10件追加、既存BL-178/104/142/143/096/176関連124件と合わせて無退行を確認。D-154・論点137として記録。 |

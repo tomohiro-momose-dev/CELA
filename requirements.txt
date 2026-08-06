@@ -1,0 +1,4 @@
+# 本番実行に必要な依存関係。
+# BL-105/D-086（docs/design/back_log/BL-105/BL105_basic_design.md）で、一時停止・再開機構を
+# LangGraph公式checkpointerへ移行するために追加。SqliteSaver/AsyncSqliteSaverを提供する。
+langgraph-checkpoint-sqlite

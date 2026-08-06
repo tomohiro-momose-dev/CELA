@@ -63,6 +63,20 @@ _TASK_1_2 = {
 _PHASE_1 = {"phase_id": "phase_1", "tasks": [_TASK_1_1, _TASK_1_2]}
 
 
+def _insert_approved_deliverable(conn, run_id, task_id, seq=1):
+    """[BL-176] _resolve_task_transitionは離脱先task_idにApproved相当のDeliverableが
+    無いと遷移をブロックするため、遷移元task_idの承認成立をテスト側で用意する。"""
+    agreement_id = f"AG-TEST-{seq:06d}"
+    conn.execute(
+        "INSERT INTO agreements (id, action_type, status, topic, decision_what, reason_why, proposed_by, "
+        "entry_type, phase_id, task_id, depends_on, resource_claims, timestamp, evidence, is_frozen, "
+        "internal_thought_process, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (agreement_id, "CREATE", "Approved", f"{task_id}の成果物", "X" * 300, "r", "expert", "Deliverable",
+         "phase_1", task_id, "[]", "{}", time.time(), "", 0, None, run_id),
+    )
+    conn.commit()
+
+
 def _base_state(run_id: str, current_task_id: str = "task_1_1") -> dict:
     return {
         "run_id": run_id,
@@ -342,6 +356,7 @@ def test_resolve_task_transition_allows_when_resolved(db_conn):
             {"action_type": "RESOLVE", "topic": "bl125_resolved_a", "resolution_note": "解決済み"},
             conn, run_id, "user", "", "",
         )
+        _insert_approved_deliverable(conn, run_id, "task_1_1")  # [BL-176] 離脱先の承認成立を用意
         state = _base_state(run_id, current_task_id="task_1_1")
         cela_main._resolve_task_transition(
             state, {"advances_to_phase_id": "phase_1", "advances_to_task_id": "task_1_2"}
@@ -367,6 +382,7 @@ def test_resolve_task_transition_allows_when_deferred(db_conn):
              "defer_to_task_id": "task_1_2", "defer_reason": "task_1_2で対応予定"},
             conn, run_id, "user", "", "", state=_base_state(run_id),
         )
+        _insert_approved_deliverable(conn, run_id, "task_1_1")  # [BL-176] 離脱先の承認成立を用意
         state = _base_state(run_id, current_task_id="task_1_1")
         cela_main._resolve_task_transition(
             state, {"advances_to_phase_id": "phase_1", "advances_to_task_id": "task_1_2"}
@@ -382,6 +398,7 @@ def test_resolve_task_transition_allows_when_no_blocking_issue(db_conn):
     cela_main._DB_CONN = conn
     cela_main._CURRENT_RUN_ID = run_id
     try:
+        _insert_approved_deliverable(conn, run_id, "task_1_1")  # [BL-176] 離脱先の承認成立を用意
         state = _base_state(run_id, current_task_id="task_1_1")
         cela_main._resolve_task_transition(
             state, {"advances_to_phase_id": "phase_1", "advances_to_task_id": "task_1_2"}

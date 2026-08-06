@@ -96,34 +96,33 @@ def _row_to_json(row: sqlite3.Row) -> str:
 
 
 # ===========================================================================
-# run_id の特定（checkpoint.json からの抽出）
+# run_id の特定（cela.db からの抽出）
 # ===========================================================================
 
-def extract_run_id_from_checkpoint(log_dir: str) -> str | None:
-    """checkpoint.json から run_id を抽出する。
+def extract_latest_run_id_from_db(db_path: str) -> str | None:
+    """[BL-105] cela.dbのdecisionsテーブルから最新timestampのrun_idを取得する。
 
-    checkpoint.json の構造:
-        {"state": {... "run_id": "xxx" ...}, "config": {...}, "current_turn": N}
+    自前JSON checkpoint（checkpoint.json）はBL-105/D-086でLangGraph公式のcheckpointer
+    （cela_checkpoints.db）へ置き換えられ廃止されたため、run_id自動検出の情報源をDB本体へ
+    切り替えた。
     """
-    checkpoint_path = os.path.join(log_dir, "checkpoint.json")
-    if not os.path.exists(checkpoint_path):
+    if not os.path.exists(db_path):
         return None
+    conn = sqlite3.connect(db_path)
     try:
-        with open(checkpoint_path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        state = payload.get("state", {})
-        if isinstance(state, dict):
-            return state.get("run_id", None)
+        row = conn.execute("SELECT run_id FROM decisions ORDER BY timestamp DESC LIMIT 1").fetchone()
+        return row[0] if row else None
+    except sqlite3.OperationalError:
         return None
-    except (json.JSONDecodeError, KeyError, TypeError):
-        return None
+    finally:
+        conn.close()
 
 
 def extract_run_id_from_log_header(log_path: str) -> str | None:
     """ログファイル冒頭のタイムスタンプから run_id を推定する（フォールバック）。
 
     実際の run_id は UUID 形式のため、タイムスタンプのみでは一意特定できない。
-    この関数はあくまでフォールバックであり、正確な run_id は checkpoint.json から取得するか、
+    この関数はあくまでフォールバックであり、正確な run_id は cela.db から取得するか、
     ユーザーが --run-id で明示指定する必要がある。
     """
     # この関数は設計書 §3.3 のフォールバック経路として用意するが、
@@ -578,7 +577,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--run-id", dest="run_id", default=None,
-        help="検査対象の run_id（省略時は checkpoint.json から自動検出）",
+        help="検査対象の run_id（省略時は cela.db の最新レコードから自動検出）",
     )
     parser.add_argument(
         "--log-dir", dest="log_dir", default="",
@@ -602,10 +601,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # run_id の解決
     run_id = args.run_id
-    if not run_id and args.log_dir:
-        run_id = extract_run_id_from_checkpoint(args.log_dir)
     if not run_id:
-        print("エラー: run_id を指定するか、--log-dir で checkpoint.json のあるディレクトリを指定してください。",
+        run_id = extract_latest_run_id_from_db(args.db_path)
+    if not run_id:
+        print("エラー: run_id を指定するか、cela.db に既存の decisions レコードが必要です。",
               file=sys.stderr)
         return 2
 

@@ -32,9 +32,16 @@ import re
 from unittest import result
 
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.base import BaseCheckpointSaver
 import httpx
 from openai import OpenAI
 from openai import APIError, APIConnectionError, RateLimitError, APITimeoutError
+
+
+# [BL-175] ログ・checkpoint双方の時刻表示を日本時間（JST、UTC+9）へ統一する。
+# 実行環境のOSローカルタイムゾーン設定に依存せず、常に同じ時刻表示になるよう明示的に指定する。
+JST = datetime.timezone(datetime.timedelta(hours=9), name="JST")
 
 
 # ===========================================================================
@@ -65,8 +72,9 @@ class MultiLogger:
             return
         MultiLogger._initialized = True
         self.terminal = sys.__stdout__
-        now = datetime.datetime.now()
-        
+        # [BL-175] OSローカルタイムゾーンに依存せず常にJSTでログ時刻を記録する。
+        now = datetime.datetime.now(JST)
+
         # 日付フォルダを作成 (log/YYYY-MM-DD/HHMM形式)
         date_folder = now.strftime("%Y-%m-%d")
         time_folder = now.strftime("%H%M")
@@ -80,7 +88,7 @@ class MultiLogger:
         self.file_with_prompt = open(self.filename_with, "a", encoding="utf-8")
         self.file_no_prompt = open(self.filename_no, "a", encoding="utf-8")
         
-        start_msg = f"# Execution Log Started at: {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        start_msg = f"# Execution Log Started at: {now.strftime('%Y-%m-%d %H:%M:%S')} JST\n\n"
         self.file_with_prompt.write(start_msg)
         self.file_no_prompt.write(start_msg)
         
@@ -194,34 +202,22 @@ def _archive_old_deliverable_file(file_path: str) -> None:
 # ===========================================================================
 # 一時停止・再開（チェックポイント）
 # ===========================================================================
-# [UX] ドライランが長時間化しやすく、連続稼働させ続けるのが難しいというユーザー要望を受けて追加。
-# app.stream(state, stream_mode="values")によりグラフの各ノード実行後にstateのスナップショットが
-# 得られるため、そのたびにcheckpoint.jsonへ保存する（BL-005: turn_countはグラフ内部でループバックする
-# 限り更新されず、外側のapp.invoke()単位では長時間戻ってこないことがあるため、ノード単位より粗い
-# 「ターン単位」でのチェックポイントは実用にならないと判断）。
-# [CONSTRAINT] グラフのentry_pointはtask_planner固定（再開時も必ずここから通る）であり、
-# 「止めたノードそのものから再開」ではなく「その回（ラウンド）の頭（generate_user_utterance）から
-# 再開」になる。task_planner_nodeはturn_count==1のときのみ実処理するため、ターン2以降の再開は
-# 実質generate_user_utteranceからのやり直しで済む。
-def _save_checkpoint(checkpoint_path: str, state: "LineageState", config: "Appconfig", current_turn: int) -> None:
-    """【SLM要約】
-    現在のstate/config/current_turnをJSONとしてcheckpoint_pathへ原子的に書き込む
-    （一時ファイルへ書いてからos.replaceすることで、書き込み中断による破損ファイルを防ぐ）。
-    """
-    payload = {"state": state, "config": config, "current_turn": current_turn}
-    tmp_path = f"{checkpoint_path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, checkpoint_path)
-
-
-def _load_checkpoint(checkpoint_path: str) -> tuple["LineageState", "Appconfig", int]:
-    """【SLM要約】
-    _save_checkpointで保存したJSONを読み込み、(state, config, current_turn)を返す。
-    """
-    with open(checkpoint_path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-    return payload["state"], payload["config"], payload["current_turn"]
+# [BL-105/D-086 Tier1] 自前JSON checkpoint（_save_checkpoint/_load_checkpoint、--resume <path>）は
+# 廃止し、LangGraph公式のcheckpointer（SqliteSaver）+ thread_id（==run_id）ベースの再開へ移行した。
+# 旧方式は--resume時に必ずentry_point（goal_essence）からapp.stream()を再実行しており、
+# generate_user_utterance_nodeに再入場ガードが無いため、ラウンド途中で一時停止したものを
+# 再開すると必ずuser発言が二重に積まれる欠陥があった（BL-105）。SqliteSaverはノード完了ごとに
+# 自動的に状態を永続化し、thread_idへNoneを入力してstream/invokeすることで「中断した直後の
+# ノードから」再開できる（entry_pointの全体再走行にはならない）。checkpointer実体・resume分岐の
+# 実装本体はrun_ai_vs_ai_loop（下部）を参照。設計の詳細はdocs/design/back_log/BL-105/
+# BL105_basic_design.md。
+#
+# [CONSTRAINT] ノード**内部**（Expert/Detector等の_query_AI_liveツールループの途中）での
+# Ctrl+Cには対応できない（LangGraph公式ドキュメントにも明記された制約）。そのノードは
+# 中断前の内容を含めて最初から再実行される。これはTier1導入前後で変わらない既知の挙動であり、
+# 新規の後退ではない。真に解消するにはノード内部を@taskへ分解するTier2が必要だが、今回は
+# 意図的にスコープ外とした（将来ヒューマンインザループ機能を具体設計する際に着手する方針）。
+CELA_CHECKPOINT_DB_PATH = "cela_checkpoints.db"
 
 
 # ===========================================================================
@@ -243,6 +239,7 @@ nemotron_3_super = "nemotron-3-super-120b-a12b:free"
 nemotron_3_ultra = "nemotron-3-ultra-550b-a55b:free"
 gpt_5_6_luna = "gpt-5.6-luna"
 ling_3_flash = "ling-3.0-flash:free"
+laguna_S_2_1 ="laguna-s-2.1:free"
 mimo_2_5 = "mimo-v2.5"
 _gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
 _gemini_auditor_key = os.environ.get("GEMINI_API_KEY_AUDITOR", "")
@@ -293,16 +290,16 @@ model_auditor = gemini_3_1
 """
 
 client_summarizer = client_local
-model_summarizer = nemotron_3_ultra
+model_summarizer = gpt_5_6_luna
 
 client_user = client_openrouter
-model_user = nemotron_3_ultra
+model_user = gpt_5_6_luna
 
 client_agent = client_openrouter
-model_agent = nemotron_3_ultra
+model_agent = gpt_5_6_luna
 
 client_auditor = client_openrouter
-model_auditor = nemotron_3_ultra
+model_auditor = gpt_5_6_luna
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -310,13 +307,13 @@ STRUCTURED_OUTPUT_LABEL_KEYWORDS = ("detector", "decision extractor", "reflectio
 
 
 MAX_TOKENS_BY_ROLE = {
-    "expert": 150000,
-    "user": 150000,
-    "detector": 150000,
-    "reflection": 150000,
-    "review": 150000,
-    "decision extractor": 150000,
-    "orchestrator": 150000,
+    "expert": 100000,
+    "user": 100000,
+    "detector": 100000,
+    "reflection": 100000,
+    "review": 100000,
+    "decision extractor": 100000,
+    "orchestrator": 100000,
 }
 
 def get_max_tokens(label: str) -> int:
@@ -1580,6 +1577,8 @@ def db_create_goal_escalation(conn: sqlite3.Connection, run_id: str, phase_id: s
         (escalation_id, run_id, phase_id, task_id, raised_by_role, concern_summary,
          implicated_constraint, why_conflicts, suggested_reframe, "Open", time.time())
     )
+    print(f"  🚩 [DB] goal_escalationsへINSERT: escalation_id={escalation_id}, raised_by={raised_by_role}, "
+          f"phase={phase_id}, task={task_id}, status=Open")
     return escalation_id
 
 
@@ -1625,6 +1624,8 @@ def apply_goal_patch(conn: sqlite3.Connection, run_id: str, new_content: str,
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (f"GD-{int(time.time()*1000)}", new_version, new_content, author_role, edit_summary, time.time(), run_id)
     )
+    print(f"  📝 [DB] goal_draftsへINSERT: version={new_version}, author={author_role}, "
+          f"edit_summary={str(edit_summary)[:60]}")
     return new_version
 
 
@@ -1639,6 +1640,7 @@ def _escalate_premise_concern_tool_impl(args: dict, conn: sqlite3.Connection, ru
     required = ["concern_summary", "implicated_constraint", "why_conflicts_with_true_need", "suggested_reframe"]
     missing = [f for f in required if not args.get(f)]
     if missing:
+        print(f"  🚫 [escalate_premise_concern guard] 必須フィールド不足を拒否: caller={caller_role}, missing={missing}")
         return {"success": False, "error": f"必須フィールドが不足: {missing}"}
     escalation_id = db_create_goal_escalation(
         conn, run_id, args.get("phase_id", ""), args.get("task_id") or task_id, caller_role,
@@ -1730,10 +1732,111 @@ def _revise_goal_tool_impl(args: dict, conn: sqlite3.Connection, run_id: str, ca
     decision = make_decision(who="user", what=f"ゴール制約を改定（Escalation {escalation_id} 承認）", why=reason_why)
     db_append_decision(decision, conn, run_id)
 
+    # [BL-163] ゴール改定成功時、既に承認済みの過去タスクは旧ゴールの前提で成果物が
+    # 作られているため、新ゴールとの整合性を再確認すべき対象として機械的に起票する。
+    # 全面リスタートではなく、既存のSUPERSEDE改訂・issue解決フローに乗せて前進しながら
+    # 修正する設計（ユーザー判断）。severity="minor"（open）に留め、BL-136の強制
+    # RESOLVE/DEFER（major/escalated対象）は発動させない——無関係な現在タスク遂行中に
+    # 毎ターン催促されるのを避けるため。
+    _seen_tasks: set[tuple[str, str]] = set()
+    _flagged: list[tuple[str, str]] = []
+    for a in reversed(get_agreements_from_db(conn, run_id)):
+        if a.get("entry_type") != "Deliverable":
+            continue
+        key = (a.get("phase_id", ""), a.get("task_id", ""))
+        if not key[1] or key in _seen_tasks:
+            continue
+        _seen_tasks.add(key)
+        if a.get("status") in RESOLVING_DELIVERABLE_STATUSES:
+            _flagged.append(key)
+    # [BL-186] BL-163が起票したissueは意図的にseverity="minor"のまま据え置かれ、BL-136/BL-145の
+    # 強制解決ルート（major/escalated専用）には乗らない。read_issuesはpull型ツールであり、
+    # LLMが自発的に呼ばない限りどのプロンプトにも自動注入されないため（Reflection/Integratorも
+    # 見ていない）、この13件が誰にも参照されないまま放置されるリスクが実ドライラン
+    # （`log/2026-08-06/1432`、phase6/task_6_1＝計画上の最終タスクで発生、通常のタスク遷移では
+    # phase1-5へ戻る経路が無い）で確認された。BL-145（滞留escalated issueをplan_revision_reason
+    # 経由でtask_plannerへ強制引き継ぐ既存の仕組み）と同型の配線を、ここでも使う。
+    _flagged_issue_ids: list[str] = []
+    for _phase_id, _task_id in _flagged:
+        _issue_result = _write_issue_impl(
+            {
+                "action_type": "CREATE",
+                "topic": f"goal_revision_consistency_check_{_phase_id}_{_task_id}",
+                "severity": "minor",
+                "description": (
+                    f"ゴール改定（Escalation {escalation_id}承認、理由: {reason_why}）により、"
+                    "このタスクの成果物は旧ゴール文の前提に基づいています。新ゴールとの整合性を"
+                    "再確認してください。"
+                ),
+            },
+            conn, run_id, "revise_goal_auto", _phase_id, _task_id,
+        )
+        if isinstance(_issue_result, dict) and _issue_result.get("success") and _issue_result.get("id"):
+            _flagged_issue_ids.append(_issue_result["id"])
+    if _flagged:
+        print(f"  🧭 [BL-163] ゴール改定に伴い、承認済み過去タスク{len(_flagged)}件へ整合性再確認issueを起票しました: {[t for _, t in _flagged]}")
+
+    # [BL-186] plan_revision_reason/plan_revision_issue_idsを組み立てる。呼び出し元
+    # ノード（generate_user_utterance_node）が_LAST_GOAL_REVISION経由で受け取り、
+    # BL-145と同じ配線でtask_plannerを強制的に再発火させる（新規task/phaseの追加を促す）。
+    _plan_revision_reason = ""
+    if _flagged:
+        _reason_lines = [
+            f"- phase_id={_phase_id}, task_id={_task_id}, "
+            f"topic=goal_revision_consistency_check_{_phase_id}_{_task_id}"
+            + (f", issue_id={_issue_id}" if _issue_id else "")
+            for (_phase_id, _task_id), _issue_id in zip(_flagged, _flagged_issue_ids + [""] * (len(_flagged) - len(_flagged_issue_ids)))
+        ]
+        _plan_revision_reason = (
+            f"[BL-186] ゴール改定（Escalation {escalation_id}承認、理由: {reason_why}）により、"
+            "以下の承認済み過去タスクは新ゴールとの整合性が未確認です。新規フェーズ（例: "
+            "phase7以降）として、各タスクの成果物が新ゴールの制約を満たすか再検証し、必要な"
+            "修正を行うタスクを計画に追加してください。既存フェーズの内容は書き換えないで"
+            "ください（無関係な既存タスクへの影響を避けるため）:\n"
+            + "\n".join(_reason_lines)
+        )
+
+    # [BL-168] BL-163はagreements（成果物）のみを対象にしており、verified_facts（read_verified_fact
+    # で参照される「確定済みの定数」ストア）は対象外だった。upsert_verified_factは(run_id,
+    # variable_name)のUPSERT方式で、該当変数が再度upsert_verified_factされない限り、ゴール改定で
+    # 前提が変わったことを示す仕組みが一切なく永久に「現在の確定値」として返り続ける。実ログで、
+    # ゴール改定前にtask_1_1が確定したmax_vehicle_count='2'等が、改定後も無警告で後続ノードに
+    # 供給され続けていたことを確認した。BL-163が既に列挙した_flagged（影響を受ける過去タスク）を
+    # そのまま再利用し、該当task_idをsource_task_idに持つverified_facts行のreasonへ警告を付記する
+    # （valueは過去の事実として正しいため改変しない）。
+    if _flagged:
+        _stale_marker = "⚠️[BL-168: ゴール改定後未確認] "
+        _flagged_task_ids = sorted({t for _, t in _flagged})
+        _placeholders = ",".join("?" for _ in _flagged_task_ids)
+        _fact_rows = conn.execute(
+            f"SELECT variable_name, source_task_id, reason FROM verified_facts "
+            f"WHERE run_id=? AND source_task_id IN ({_placeholders})",
+            (run_id, *_flagged_task_ids),
+        ).fetchall()
+        _marked_count = 0
+        for _row in _fact_rows:
+            _old_reason = _row["reason"] or ""
+            if _old_reason.startswith(_stale_marker):
+                continue  # 既にマーキング済み（同一runで複数回ゴール改定された場合の重複防止）
+            _new_reason = (
+                f"{_stale_marker}このtask_id（{_row['source_task_id']}）の確定値はゴール改定"
+                f"（Escalation {escalation_id}）前の前提に基づいています。無条件に信頼せず、"
+                f"整合性を再確認してください。\n{_old_reason}"
+            )
+            conn.execute(
+                "UPDATE verified_facts SET reason=? WHERE run_id=? AND variable_name=?",
+                (_new_reason, run_id, _row["variable_name"]),
+            )
+            _marked_count += 1
+        if _marked_count:
+            print(f"  🧭 [BL-168] ゴール改定に伴い、承認済み過去タスクのverified_facts {_marked_count}件へ整合性未確認の警告を付記しました。")
+
     return {
         "success": True, "escalation_id": escalation_id,
         "new_goal_text": new_content, "old_goal_text": _CURRENT_GOAL_TEXT,
         "frozen_agreement_id": freeze_agreement_id or None,
+        "plan_revision_reason": _plan_revision_reason,
+        "plan_revision_issue_ids": _flagged_issue_ids,
     }
 
 
@@ -1787,7 +1890,8 @@ def _ask_user_question_tool_impl(args: dict, caller_role: str) -> dict:
     return {"success": True, "question_text": question_text}
 
 
-def _check_write_permission(args: dict, caller_role: str) -> str | None:
+def _check_write_permission(args: dict, caller_role: str, conn: sqlite3.Connection | None = None,
+                             run_id: str = "", task_id: str = "", phase_id: str = "") -> str | None:
     """[F-3.2] 権限チェック: ロール×status許可表を全組み合わせで判定する。
     ExpertはProposedのみ、User AIは全status、Detector/Reviewer/Arbiter/IntegratorはRejectedのみ。
     [BL-095] task_planner/goal_essence_analystはExpert同様、自らの計画・本質分析の判断根拠を
@@ -1795,6 +1899,9 @@ def _check_write_permission(args: dict, caller_role: str) -> str | None:
     ため、Approvedを名乗らせない）。task_plan_reviewerはDetector/Reviewer等と同じ監査役として
     Rejectedのみ許可し、既存のBL-062 SUPERSEDEパターン（誤りと判定した既存記録をRejectedで
     無効化する）を踏襲する。
+    [BL-172] `conn`/`run_id`/`task_id`/`phase_id`は「承認対象のDeliverableが実在するか」の
+    DB照会に使う任意引数（`_write_agreement_impl`からのみ渡される）。`conn`を渡さない既存の
+    純粋呼び出し（テスト等）では、この照会を伴う分岐はスキップされ従来通りの挙動を維持する。
     """
     ALLOWED_STATUS_BY_ROLE = {
         "expert": {"Proposed"},
@@ -1816,6 +1923,41 @@ def _check_write_permission(args: dict, caller_role: str) -> str | None:
     if status not in allowed:
         print(f"  🚫 [write_agreement permission] {caller_role}によるstatus='{status}'の書き込みを拒否しました（許可: {sorted(allowed)}）。")
         return f"{caller_role}はstatus='{status}'を書き込めません（許可: {sorted(allowed)}）"
+
+    # [BL-169] Userは成果物のレビュー・承認・却下役であり、entry_type="Deliverable"の新規作成
+    # （action_type="CREATE"）はExpertの役目。ここを塞がないと、User自身が成果物を執筆し
+    # 自ら承認まで完結でき、Expert↔Detectorの査読ループを丸ごと迂回できてしまう
+    # （実ログ`log/2026-08-04/1548`で観測、Reflectionが"collusion"と判定したstagnation原因の一つ）。
+    # UPDATE/SUPERSEDE（既存Deliverableへのstatus変更・訂正指示）は従来通り許可する。
+    if caller_role == "user" and args.get("entry_type") == "Deliverable" and args.get("action_type") == "CREATE":
+        print("  🚫 [write_agreement permission][BL-169] userによるentry_type='Deliverable'のCREATEを拒否しました（成果物の新規作成はExpertの役目です）。")
+        return "userはentry_type='Deliverable'をaction_type='CREATE'で新規作成できません（成果物の作成はExpertへ指示してください）"
+
+    # [BL-172] BL-169はentry_type="Deliverable"のCREATEのみを塞いでいたが、実ドライラン
+    # （`log/2026-08-04/2316`）で、userがそれを拒否された直後、全く同じ内容のままentry_typeだけ
+    # "Decision"へ変えて再送し、そのまま通ってしまう回避策が観測された。BL-169自体は正しく
+    # 機能したが、「userがExpertの仕事を代行して完了を宣言する」という根本行動は防げていなかった。
+    # ホワイトボードファイル書き出し（apply_whiteboard_patch）はentry_type="Deliverable"の時
+    # にしか発火しないため、この回避策ではホワイトボード.mdが一切生成されないまま、タスクだけが
+    # Approved扱いになってDBに残っていた（ユーザー報告）。
+    # 正当なUserの承認は、常に「既存（Expert作成）のDeliverableをUPDATEでApproved等へ変更する」
+    # 形を取り、CREATEで承認系statusのエントリを新規に持ち込む正規の使い方は（entry_typeを
+    # 問わず）存在しない。そこでentry_type単位の判定ではなく、「承認しようとしているtask_idに
+    # Expert作成のDeliverableが実在するか」で一般化する。
+    if (conn is not None and caller_role == "user" and args.get("action_type") == "CREATE"
+            and args.get("status") in RESOLVING_DELIVERABLE_STATUSES):
+        effective_task_id = args.get("task_id") or task_id
+        effective_phase_id = args.get("phase_id") or phase_id
+        if effective_task_id and _find_active_deliverable_agreement(conn, run_id, effective_phase_id, effective_task_id) is None:
+            print(
+                f"  🚫 [write_agreement permission][BL-172] userによるtask_id='{effective_task_id}'への"
+                f"CREATE（status='{args.get('status')}'）を拒否しました（Expert作成のDeliverableがまだ存在しません）。"
+            )
+            return (
+                f"task_id='{effective_task_id}'にはExpert作成のDeliverableがまだ存在しないため、"
+                f"userはstatus='{args.get('status')}'で新規承認を作成できません（Expertへ成果物の提出を指示してください）"
+            )
+
     return None
 
 
@@ -1835,6 +1977,7 @@ def _check_issue_permission(args: dict, caller_role: str) -> str | None:
         "user": {"CREATE", "RESOLVE", "DEFER"},
         "detector_auto": {"CREATE"},  # [BL-096] detector_nodeのPython側自動バックアップ書き込み専用
         "decision_extractor_auto": {"CREATE"},  # [BL-154] decision_extractor_nodeのPython側自動起票専用
+        "revise_goal_auto": {"CREATE"},  # [BL-163] revise_goal成功時のPython側自動起票専用
     }
     action_type = args.get("action_type")
     allowed = ALLOWED_ISSUE_ACTIONS_BY_ROLE.get(caller_role, set())
@@ -1861,7 +2004,7 @@ def _find_active_deliverable_agreement(conn: sqlite3.Connection, run_id: str, ph
     return None
 
 
-def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str, task_id: str = "") -> tuple[str | None, str | None]:
+def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str, task_id: str = "", phase_id: str = "") -> tuple[str | None, str | None]:
     """[F-3.1] write_agreementツールからDBへagreementをコミットする。
     action_type=SUPERSEDEの場合は既存レコードをSupersededに更新する。
     戻り値: (error, protected_warning)のタプル。errorが非Noneなら失敗（呼び出し元
@@ -1890,7 +2033,15 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
     entry_type = args.get("entry_type", "Decision")
     topic = args.get("topic", "")
     raw_content = args.get("decision_what", "")
-    phase_id = args.get("phase_id", "")
+    # [BL-161] 従来はargsにphase_idが無ければ空文字のまま（フォールバックなし）だった。
+    # tidと異なりphase_idには呼び出し元からのフォールバックが一切なかったため、Expertが
+    # write_agreementのUPDATE呼び出しでphase_idを省略すると_find_active_deliverable_agreement
+    # が空文字と一致するレコードを見つけられずtarget=None・old_content=""のまま、以降の
+    # editsが必ず0件一致で失敗し続けていた（実ログで11回連続失敗を確認）。tidと同じ
+    # パターンでフォールバックを追加する。
+    phase_id = args.get("phase_id") or phase_id
+    if not args.get("phase_id") and phase_id:
+        print(f"  ℹ️ [write_agreement] phase_id省略を検知、呼び出し元の現在フェーズ'{phase_id}'へフォールバックしました（BL-161）。")
     tid = args.get("task_id") or task_id
     # [BL-127] ホワイトボードへの実反映がスキップされた（保護された）場合の非エラー警告。
     protected_warning: str | None = None
@@ -1986,8 +2137,15 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
                 content = f"WHITEBOARD:{phase_id}:{tid}"
                 print(f"  📋 [Whiteboard] write_agreement経由で '{target_topic}' に{len(edits)}件の差分を適用しました（phase={phase_id}, task={tid}）。")
             elif raw_content:
-                # edits未指定・全文が渡された場合は全文置換の抜け道として扱う
-                if len(raw_content) > 200:
+                # edits未指定・全文が渡された場合は全文置換の抜け道として扱う。
+                # [BL-180] ただし、entry_type="Deliverable"の内容執筆はBL-169によりexpertのみに
+                # 限定されている（user/detector等は承認・却下しかできない）。したがってis_whiteboard
+                # （既に完全版が存在する）状態でexpert以外がedits未指定のdecision_whatを送るのは、
+                # 常に「承認/却下コメント」であり正当な全文置換の用途がない。200字という長さの閾値
+                # だけで判定すると、承認理由を詳しく書いただけのUser AI（Stage3）が既存の完全版を
+                # 丸ごと消し飛ばす事故が実際に発生した（`log/2026-08-05/1639`、task_1_2のV1詳細仕様書
+                # が3行の承認コメントへ全置換された）。expert以外は文字数によらず常に保護する。
+                if len(raw_content) > 200 and (caller_role == "expert" or not is_whiteboard):
                     v = apply_whiteboard_patch(conn, run_id, phase_id, tid, raw_content, author_role=caller_role,
                                                 edit_summary=args.get("reason_why", ""))
                     _LAST_WHITEBOARD_EDIT = {"phase_id": phase_id, "task_id": tid, "version": v}
@@ -1995,19 +2153,29 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
                     print(f"  📋 [Whiteboard] write_agreement経由で '{target_topic}' の全文を新バージョンとして保存しました（phase={phase_id}, task={tid}）。")
                 elif is_whiteboard:
                     # [H2踏襲] 既にホワイトボード化済みの完全版に対し、200文字以下の短い要約が
-                    # 送られてきた場合は「承認コメント」等とみなし、既存の完全版を上書きしない。
+                    # 送られてきた場合、または200字を超えていてもexpert以外からの更新の場合は
+                    # 「承認/却下コメント」等とみなし、既存の完全版を上書きしない（BL-180）。
                     content = old_content
                     # [BL-127] 従来はprint()のみでLLMへは一切伝わらず、ホワイトボード本体が
                     # 実際には更新されていないのに「成功」と返るためExpertが誤って自己申告する
                     # 実インシデントが発生していた。呼び出し元へ返す警告として明示する。
-                    protected_warning = (
-                        f"⚠️ '{target_topic}'への更新は反映されませんでした：edits未指定で"
-                        f"decision_whatが200字以下の短文だったため、既存の完全版（ホワイトボード）"
-                        f"を上書きしない保護仕様が適用されました。実際にホワイトボード本文を"
-                        f"変更したい場合は、editsパラメータ（old_text/new_text）を指定するか、"
-                        f"200字を超える全文をdecision_whatに渡してください。"
-                    )
-                    print(f"  🔒 [Whiteboard Protected] '{target_topic}' への短い更新が既存の完全版を上書きしないよう保護しました。")
+                    if len(raw_content) > 200:
+                        protected_warning = (
+                            f"⚠️ '{target_topic}'への更新は反映されませんでした：あなた（{caller_role}）"
+                            f"はentry_type='Deliverable'の本文を執筆する権限がないため、edits未指定の"
+                            f"decision_whatは文字数によらず既存の完全版（ホワイトボード）を上書きしない"
+                            f"保護仕様が適用されました。ホワイトボード本文を変更したい場合はeditsパラメータ"
+                            f"（old_text/new_text）を指定してください。"
+                        )
+                    else:
+                        protected_warning = (
+                            f"⚠️ '{target_topic}'への更新は反映されませんでした：edits未指定で"
+                            f"decision_whatが200字以下の短文だったため、既存の完全版（ホワイトボード）"
+                            f"を上書きしない保護仕様が適用されました。実際にホワイトボード本文を"
+                            f"変更したい場合は、editsパラメータ（old_text/new_text）を指定するか、"
+                            f"200字を超える全文をdecision_whatに渡してください。"
+                        )
+                    print(f"  🔒 [Whiteboard Protected] '{target_topic}' への更新（caller_role={caller_role}）が既存の完全版を上書きしないよう保護しました。")
                 # 200文字以下かつ未昇格ならそのまま短文としてagreementsに保持（content=raw_contentのまま）
             else:
                 content = old_content
@@ -2052,7 +2220,7 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
 
 def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str, task_id: str = "",
                            phases: list[dict] | None = None, pending_task_ids: list[str] | None = None,
-                           effective_current_task_id: str = "") -> dict:
+                           effective_current_task_id: str = "", phase_id: str = "") -> dict:
     """[F-3.2] write_agreement_toolの実体。バリデーション→権限チェック→SQLiteコミット→確定値反映
 
     ★修正（レビュー指摘H1、二重JSONエンコード対応）: 生のdictを返す。json.dumps済み文字列を
@@ -2073,6 +2241,7 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
         required.append("decision_what")
     missing = [f for f in required if not args.get(f)]
     if missing:
+        print(f"  🚫 [write_agreement guard] 必須フィールド不足を拒否: caller={caller_role}, missing={missing}, topic={args.get('topic')!r}")
         return {"success": False, "error": f"必須フィールドが不足: {missing}"}
 
     # 2. enum値チェック
@@ -2084,14 +2253,17 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
     # 転用できる）。
     valid_entries = {"Decision", "Directive", "Deliverable", "EssenceProposal"}
     if args["action_type"] not in valid_actions:
+        print(f"  🚫 [write_agreement guard] 不正なaction_typeを拒否: caller={caller_role}, action_type={args['action_type']!r}")
         return {"success": False, "error": f"不正なaction_type: {args['action_type']}"}
     if args["status"] not in valid_statuses:
+        print(f"  🚫 [write_agreement guard] 不正なstatusを拒否: caller={caller_role}, status={args['status']!r}")
         return {"success": False, "error": f"不正なstatus: {args['status']}"}
     if args["entry_type"] not in valid_entries:
+        print(f"  🚫 [write_agreement guard] 不正なentry_typeを拒否: caller={caller_role}, entry_type={args['entry_type']!r}")
         return {"success": False, "error": f"不正なentry_type: {args['entry_type']}"}
 
     # 3. 権限チェック
-    perm_error = _check_write_permission(args, caller_role)
+    perm_error = _check_write_permission(args, caller_role, conn=conn, run_id=run_id, task_id=task_id, phase_id=phase_id)
     if perm_error:
         return {"success": False, "error": perm_error}
 
@@ -2102,6 +2274,7 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
                 "SELECT 1 FROM agreements WHERE id=? AND run_id=?", (dep_id, run_id)
             ).fetchone()
             if not exists:
+                print(f"  🚫 [write_agreement guard] 存在しないdepends_on IDを拒否: caller={caller_role}, dep_id={dep_id}, topic={args.get('topic')!r}")
                 return {"success": False, "error": f"depends_onに存在しないID: {dep_id}"}
 
     # 4.5. [BL-131] task_id実在チェック。entry_type='Decision'（ゴール直下の一般的な合意事項）は
@@ -2109,9 +2282,11 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
     if args["entry_type"] in ("Directive", "Deliverable"):
         tid = args.get("task_id") or task_id
         if not tid:
+            print(f"  🚫 [write_agreement guard] task_id未指定を拒否: caller={caller_role}, entry_type={args['entry_type']}, topic={args.get('topic')!r}")
             return {"success": False, "error": "entry_type='Directive'/'Deliverable'にはtask_idが必須です"}
         task_obj = _find_task_by_id(phases or [], tid)
         if task_obj is None and tid not in (pending_task_ids or []):
+            print(f"  🚫 [write_agreement guard][BL-131] 存在しないtask_idを拒否: caller={caller_role}, task_id={tid!r}, topic={args.get('topic')!r}")
             return {
                 "success": False,
                 "error": (
@@ -2129,6 +2304,11 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
         # 場合はフェイルオープンでゲートをスキップする。
         if (args["action_type"] != "SUPERSEDE" and effective_current_task_id
                 and tid != effective_current_task_id):
+            print(
+                f"  🚫 [write_agreement guard][BL-146] current_task_id不一致を拒否: caller={caller_role}, "
+                f"要求task_id={tid!r}, current_task_id={effective_current_task_id!r}, action={args['action_type']}, "
+                f"topic={args.get('topic')!r}"
+            )
             return {
                 "success": False,
                 "error": (
@@ -2143,13 +2323,14 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
     # （Deliverableは既にBL-084でphase_id/task_idベースに切り替え済みのため対象外）。
     if args["action_type"] in ("UPDATE", "SUPERSEDE") and args["entry_type"] != "Deliverable":
         if not args.get("target_topic"):
+            print(f"  🚫 [write_agreement guard][BL-131] target_topic未指定を拒否: caller={caller_role}, action={args['action_type']}, entry_type={args['entry_type']}, topic={args.get('topic')!r}")
             return {
                 "success": False,
                 "error": f"action_type='{args['action_type']}'にはtarget_topicが必須です（更新対象のtopicを明示してください）",
             }
 
     # 5. コミット
-    commit_error, protected_warning = _commit_agreement_from_tool(args, conn, run_id, caller_role, task_id)
+    commit_error, protected_warning = _commit_agreement_from_tool(args, conn, run_id, caller_role, task_id, phase_id)
     if commit_error:
         return {"success": False, "error": commit_error}
 
@@ -2401,11 +2582,14 @@ def _mark_issue_planned(conn: sqlite3.Connection, run_id: str, issue_id: str,
         "SELECT id FROM issue_log WHERE run_id=? AND id=? AND status != 'resolved'", (run_id, issue_id)
     ).fetchone()
     if not existing or not embedded_task_ids:
+        print(f"  🔕 [DB] issue_logをplanned化スキップ: issue_id={issue_id}, "
+              f"existing={bool(existing)}, embedded_task_ids={embedded_task_ids}（既にresolved等のため冪等スキップ）")
         return False
     conn.execute(
         "UPDATE issue_log SET status='planned', defer_to_task_id=?, updated_at=? WHERE id=? AND run_id=?",
         (embedded_task_ids[0], time.time(), issue_id, run_id)
     )
+    print(f"  📌 [DB] issue_logをplanned化: issue_id={issue_id}, defer_to_task_id={embedded_task_ids[0]}")
     return True
 
 
@@ -2557,22 +2741,38 @@ def _build_task_transition_blocked_notice(state: LineageState) -> str:
     ブロックした直後、次のUser AI呼び出しで一度だけ「なぜ遷移が起きなかったか」を明示する
     通知を返す。_build_escalation_resume_noticeと同じ「one-shot注入して消費後クリア」
     パターンを踏襲する。
+    [BL-176] 離脱先task_idが未承認（Approved相当のDeliverable不在）でブロックされた場合も
+    同じone-shotパターンで通知する。両ブロック要因は_resolve_task_transition内で排他的に
+    しか発生しない（先に判定された方でreturnする）ため、両方が同時にセットされることはない。
     """
     topics = state.get("task_transition_blocked_issue_topics")
-    if not topics:
-        return ""
-    state["task_transition_blocked_issue_topics"] = []
-    current_task_id = state.get("current_task_id", "")
-    topics_text = "、".join(topics)
-    print(f"  📣 [BL-125] タスク遷移ブロック通知をLLMプロンプトへ注入します（current_task_id: {current_task_id}、issues: {topics_text}）。")
-    return (
-        f"\n【🛑 BL-125: タスク遷移をブロックしました】直前の発言は次タスクへの移行として"
-        f"解釈されましたが、現在のtask_id（{current_task_id}）に未解決・未先送りの重大issue"
-        f"（{topics_text}）が残っているため、移行を見送りました。"
-        "write_issue(action_type=\"RESOLVE\", ...)で解決するか、write_issue(action_type=\"DEFER\", "
-        "defer_to_task_id=\"...\", ...)で対応予定のtaskを明示してから、改めて次タスクへの移行を"
-        "指示してください。\n"
-    )
+    if topics:
+        state["task_transition_blocked_issue_topics"] = []
+        current_task_id = state.get("current_task_id", "")
+        topics_text = "、".join(topics)
+        print(f"  📣 [BL-125] タスク遷移ブロック通知をLLMプロンプトへ注入します（current_task_id: {current_task_id}、issues: {topics_text}）。")
+        return (
+            f"\n【🛑 BL-125: タスク遷移をブロックしました】直前の発言は次タスクへの移行として"
+            f"解釈されましたが、現在のtask_id（{current_task_id}）に未解決・未先送りの重大issue"
+            f"（{topics_text}）が残っているため、移行を見送りました。"
+            "write_issue(action_type=\"RESOLVE\", ...)で解決するか、write_issue(action_type=\"DEFER\", "
+            "defer_to_task_id=\"...\", ...)で対応予定のtaskを明示してから、改めて次タスクへの移行を"
+            "指示してください。\n"
+        )
+
+    unapproved_task_id = state.get("task_transition_blocked_unapproved_task_id")
+    if unapproved_task_id:
+        state["task_transition_blocked_unapproved_task_id"] = ""
+        print(f"  📣 [BL-176] タスク遷移ブロック通知をLLMプロンプトへ注入します（未承認task_id: {unapproved_task_id}）。")
+        return (
+            f"\n【🛑 BL-176: タスク遷移をブロックしました】直前の発言は次タスクへの移行として"
+            f"解釈されましたが、現在のtask_id（{unapproved_task_id}）にはまだExpertからの"
+            "承認済み（Approved相当）のDeliverableが存在しないため、移行を見送りました。"
+            "まず現タスクの成果物をレビューし、write_agreementで承認する（未提出ならExpertへ"
+            "提出を指示する）まで、次タスクへの移行指示は行わないでください。\n"
+        )
+
+    return ""
 
 
 def _read_issues_handler(args: dict) -> dict | list:
@@ -2684,7 +2884,8 @@ TOOL_DISPATCH = {
     "write_agreement": lambda args, state=None: _write_agreement_impl(
         args, get_active_conn(), _run_id_from(state), _CURRENT_CALLER_ROLE, _task_id_from(state),
         phases=_phases_from(state), pending_task_ids=_pending_task_ids_from(state),
-        effective_current_task_id=_effective_current_task_id_from(state)
+        effective_current_task_id=_effective_current_task_id_from(state),
+        phase_id=_phase_id_from(state)
     ),
     "freeze_agreement": lambda args, state=None: _freeze_agreement_tool_impl(
         args, get_active_conn(), _run_id_from(state), _CURRENT_CALLER_ROLE
@@ -2835,6 +3036,18 @@ def get_last_think_summary() -> str:
     if decided:
         return f"{decided}（{why}）" if why else decided
     return last.get("summary", "")
+
+
+class DailyQuotaExhaustedError(RuntimeError):
+    """[BL-171] OpenRouter無料枠の日次上限（例: "free-models-per-day-high-balance"）に達した
+    ことを示す。X-RateLimit-Resetは翌日固定のタイムスタンプであり、指数バックオフでの
+    リトライ（8〜128秒）や層2リトライを繰り返しても日付が変わるまで解消しない。query_AIの
+    リトライループはこの状態を検知した時点で即座にこの例外を送出し、通常のAPIエラー
+    リトライ（一時的な障害向け）を打ち切って、run_ai_vs_ai_loopまで伝播させる
+    （実ドライラン`log/2026-08-04/2344`で、無意味なリトライ→JSON解析失敗→フェイルクローズ
+    (major)が延々と繰り返され、その偽のmajor判定がDetector等の判断に混入して進行が
+    破壊される実害を確認した）。
+    """
 
 
 def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unknown Node", tools: list[dict] | None = None,
@@ -3034,11 +3247,11 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                 # 戻したが、reasoning_effort_levelは元々`elif tools is not None`経由でしか付与
                 # されていなかったため、明示的にlabelへ追加しないとtools=None化の副作用として
                 # サイレントにreasoningが無効化されてしまう（実装時に発見・修正）。
-                reasoning_effort_level = "medium"
+                reasoning_effort_level = "low"
             elif label_lower == "reflection" or label_lower == "review" or label_lower == "detector" or label_lower == "except":
-                reasoning_effort_level = "high"
-            elif tools is not None:
                 reasoning_effort_level = "medium"
+            elif tools is not None:
+                reasoning_effort_level = "low"
 
             create_kwargs["max_tokens"] = get_max_tokens(label_lower)
             # 🌟 【追加部分】OpenRouter使用時のみ、高速プロバイダーを強制指定する
@@ -3051,7 +3264,7 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                             "session_id": f"{_CURRENT_RUN_ID}-{label_lower}",
                         
                             #"provider":{
-                            #     "order": ["novita/fp8","deepseek/fp8"],          
+                            #     "order": ["deepinfra/fp4", "novita/fp8", "deepseek/fp8"],          
                             #            "allow_fallbacks": False # 全滅した場合は空いている他プロバイダーへ迂回
                             #}
                         
@@ -3062,9 +3275,9 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                             # 推論速度が速いプロバイダーを左から順に優先して接続させる
                             #"order": ["venice/fp8", "novita/fp8", "xiaomi/fp8", "baidu/fp8", "fireworks", "streamlake/fp8", "novita/fp8" ],
                             #"order": ["fireworks","novita/fp8", "siliconflow/fp8" ,"parasail/fp8"],
-                            #"order": ["morph"],
-                            #["xiaomi/fp8","io-net/fp8"], 
-                            "order": ["gmicloud/fp8","deepseek/fp8","alibaba/fp8","novita/fp8"],
+                            #"order": ["deepinfra/fp4", "deepseek/fp8", "gmicloud/fp8", "baseten/fp8"],
+                            "order":  ["xiaomi/fp8"], 
+                            #"order": ["gmicloud/fp8","deepseek/fp8","alibaba/fp8","novita/fp8"],
                                                       
                             "allow_fallbacks": False # 全滅した場合は空いている他プロバイダーへ迂回
                         }
@@ -3327,6 +3540,9 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                                             "new_goal_text": result.get("new_goal_text"),
                                             "old_goal_text": result.get("old_goal_text"),
                                             "escalation_id": result.get("escalation_id"),
+                                            # [BL-186] 過去タスク再検証の強制plan_revision引き継ぎ用。
+                                            "plan_revision_reason": result.get("plan_revision_reason") or "",
+                                            "plan_revision_issue_ids": result.get("plan_revision_issue_ids") or [],
                                         }
                                 elif tc.function.name == "write_issue":
                                     # [BL-158] detector_nodeがUser AIのターンを機械的に差し戻すか
@@ -3428,6 +3644,16 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
         # 通常運転中に発生。BL-082以降のロジックとは無関係な純粋なネットワーク層の欠落）。
         # 一時的な接続断でありロジックエラーではないため、リトライ対象に追加する。
         except (APIError, APIConnectionError, RateLimitError, APITimeoutError, json.JSONDecodeError, httpx.RemoteProtocolError, httpx.TimeoutException, httpx.ReadError) as e:
+
+            # [BL-171] OpenRouter無料枠の日次上限は指数バックオフでのリトライでは解消しない
+            # （X-RateLimit-Resetが翌日固定のタイムスタンプ）。他の一時的なAPIエラーと同じ
+            # リトライ経路に乗せると、実ドライラン`log/2026-08-04/2344`のように無意味な
+            # リトライ→JSON解析失敗→フェイルクローズ(major)を延々と繰り返し、その偽の
+            # major判定がDetector等の判断へ混入して進行が破壊される。このパターンだけは
+            # リトライせず即座に検知し、Ctrl+Cと同じ一時停止経路へ逃がす。
+            if isinstance(e, RateLimitError) and "per-day" in str(e):
+                print(f"\n🚨 [{label}] OpenRouter無料枠の日次上限に達しました。リトライせず一時停止します: {e}")
+                raise DailyQuotaExhaustedError(str(e)) from e
 
             if attempt < len(delays):
                 # [BL-046] 中間リトライは従来何も表示せずtime.sleepするだけだったため、
@@ -3767,6 +3993,8 @@ def db_append_decision(d: dict, conn: sqlite3.Connection, run_id: str) -> None:
         (d.get("id"), d.get("timestamp"), d.get("who"), d.get("what"), d.get("why"),
          1 if d.get("reason_missing") else 0, d.get("internal_thought_process"), run_id)
     )
+    print(f"  📌 [DB] decisionsへINSERT: id={d.get('id')}, who={d.get('who')}, "
+          f"what={str(d.get('what'))[:60]}")
 
 
 def db_append_goal_shift_event(shift: dict, conn: sqlite3.Connection, run_id: str) -> None:
@@ -3783,6 +4011,8 @@ def db_append_goal_shift_event(shift: dict, conn: sqlite3.Connection, run_id: st
             run_id,
         )
     )
+    print(f"  🔄 [DB] goal_shift_eventsへINSERT: shift_kind={shift.get('shift_kind')}, "
+          f"triggered_by={shift.get('triggered_by')}")
 
 
 def db_save_goal_essence(conn: sqlite3.Connection, run_id: str, true_essence: str, feasibility_notes: str) -> None:
@@ -3793,6 +4023,7 @@ def db_save_goal_essence(conn: sqlite3.Connection, run_id: str, true_essence: st
         "INSERT OR REPLACE INTO goal_essence (run_id, true_essence, feasibility_notes, created_at) VALUES (?,?,?,?)",
         (run_id, true_essence, feasibility_notes, time.time())
     )
+    print(f"  🎯 [DB] goal_essenceへINSERT OR REPLACE: run_id={run_id}")
 
 
 def get_goal_essence(conn: sqlite3.Connection, run_id: str) -> dict | None:
@@ -3831,6 +4062,8 @@ def db_append_agreement(a: dict, conn: sqlite3.Connection, run_id: str) -> None:
          a.get("phase_id"), a.get("task_id", ""),
          depends_on_val, resource_claims_val, a.get("timestamp"), None, 0, None, run_id)
     )
+    print(f"  📋 [DB] agreementsへINSERT: id={a.get('id')}, action={a.get('action_type')}, "
+          f"status={a.get('status')}, topic={str(a.get('topic'))[:60]}")
 
 
 def db_supersede_agreement(agreement_id: str, conn: sqlite3.Connection, run_id: str) -> None:
@@ -3841,6 +4074,7 @@ def db_supersede_agreement(agreement_id: str, conn: sqlite3.Connection, run_id: 
         "UPDATE agreements SET status='Superseded' WHERE id=? AND run_id=?",
         (agreement_id, run_id)
     )
+    print(f"  ♻️ [DB] agreementsをSuperseded化: id={agreement_id}")
 
 
 # [BL-073] Deliverableが承認された際、対応するtask_idのDirective（Userの指示）がstatus='Proposed'の
@@ -3849,6 +4083,22 @@ def db_supersede_agreement(agreement_id: str, conn: sqlite3.Connection, run_id: 
 # 既に履行済みの指示がノイズとして出続け、実ドライランでReflectionが毎回「なぜProposedのままか」
 # の自問自答を強いられていた（根本原因未解消のため放置すると将来的に誤判定を誘発しうる）。
 RESOLVING_DELIVERABLE_STATUSES = {"Approved", "Approved_with_Conditions", "Implicitly_Accepted"}
+
+
+def _is_task_completed(conn: sqlite3.Connection, run_id: str, task_id: str) -> bool:
+    """[BL-167] 指定task_idの最新Deliverableが完了相当（RESOLVING_DELIVERABLE_STATUSES）かを判定する。
+    BL-145の滞留issue再構築フィルタが「defer_to_task_id設定済み＝受け皿タスクが存在する」ことだけを
+    見て、その受け皿タスクが既に完了済みかどうかを一切検証していなかったため、受け皿タスクが完了
+    してもissueが解決されないまま(defer_to_task_idが過去に一度でも設定された事実だけで)恒久的に
+    タスク再構築の対象から除外され続ける「永久迷子」issueを生んでいた（実ログで確認、BL-167）。
+    """
+    if not task_id:
+        return False
+    for a in reversed(get_agreements_from_db(conn, run_id)):
+        if a.get("entry_type") != "Deliverable" or a.get("task_id") != task_id:
+            continue
+        return a.get("status") in RESOLVING_DELIVERABLE_STATUSES
+    return False
 
 
 def _resolve_directive_for_task(conn: sqlite3.Connection, run_id: str, task_id: str, phase_id: str, resolved_by: str) -> None:
@@ -4195,12 +4445,19 @@ def _get_forced_escalated_issues_text(conn: sqlite3.Connection, run_id: str) -> 
     （BL-134の実例で0/7件しか解決されなかった原因の一つ）。write_issueのRESOLVE/DEFERどちらかを
     今回の発言で必ず呼ぶよう明示し、defer_to_task_id設定済みの行（既に対応予定が明示された
     ものはBL-082同様のスケジュール調整として許容する）はここでは対象外とする。
+    [BL-167] ただしdefer_to_task_idの受け皿タスクが既に完了（RESOLVING_DELIVERABLE_STATUSES）して
+    いるのにissueが未解決のままの場合、その受け皿は事実上失効しており、defer_to_task_idが
+    設定済みという理由だけで対象外にし続けると永久にUser AIへ提示されない「永久迷子」issueに
+    なる（BL-145の同型フィルタで実ログ確認済み）。受け皿タスクが完了済みの行は対象に含める。
     """
     rows = conn.execute(
-        "SELECT * FROM issue_log WHERE run_id=? AND status='escalated' AND "
-        "(defer_to_task_id IS NULL OR defer_to_task_id='') ORDER BY id",
+        "SELECT * FROM issue_log WHERE run_id=? AND status='escalated' ORDER BY id",
         (run_id,)
     ).fetchall()
+    rows = [
+        r for r in rows
+        if not r["defer_to_task_id"] or _is_task_completed(conn, run_id, r["defer_to_task_id"])
+    ]
     if not rows:
         return ""
     lines = [
@@ -4614,6 +4871,10 @@ class LineageState(TypedDict):
     # [BL-125] _resolve_task_transitionが未解決・未先送りのsevere issueによりタスク遷移を
     # ブロックした場合、そのtopic一覧を次のUser AIターンへ一度だけ通知するためのフラグ。
     task_transition_blocked_issue_topics: list[str]
+    # [BL-176] _resolve_task_transitionが離脱先task_idの未承認（Approved相当のDeliverable
+    # 不在）によりタスク遷移をブロックした場合、そのtask_idを次のUser AIターンへ一度だけ
+    # 通知するためのフラグ。空文字列は未設定を意味する。
+    task_transition_blocked_unapproved_task_id: str
     # [BL-144] reflection_nodeがBL-096の機械的stagnant上書きを「escalated issueが1件でも
     # 存在すれば無条件」から「同じescalated issueがユーザーノードを3回通過しても未解決」へ
     # 絞るための滞留追跡。issue_log行id -> 初めてescalated状態で観測したround_countの辞書。
@@ -4680,6 +4941,13 @@ class LineageState(TypedDict):
     # review_mode="goal_change"を使わせるための単発フラグ。generate_user_utterance_nodeが
     # セットし、detector_nodeが消費・リセットする（expert_consultation_modeと同型のライフサイクル）。
     goal_revision_pending_review: bool
+    # [BL-162] goal_revision_pending_review=Trueの間だけ有効な、改定前のゴール文。
+    # review_mode="goal_change"監査の判定基準1「旧文が置換ではなく追記として保持されているか」を
+    # 評価するために必要だが、従来はgenerate_user_utterance_nodeが_LAST_GOAL_REVISIONから
+    # new_goal_textだけをstate["goal"]へ反映しold_goal_textを一切保存していなかったため、
+    # Detectorが読める手段が存在しなかった（read_verified_fact/read_deliverable_fileを
+    # 計5回試して全てnot_foundになる実害をログで確認）。
+    goal_revision_old_text: str
     # [BL-126 Stage C] ラン途中でのtask_planner再構成トリガー。task_planner_nodeのガード判定
     # 直後（消費「後」ではなく先頭）でクリアする（plan_reviewer_feedbackとは異なる箇所——
     # チェックポイント再開時の多重発火を避けるため、design.md §6/v2修正）。
@@ -4769,20 +5037,33 @@ Filters out superseded or directive items and applies status-based formatting/la
         clean_topic = re.sub(r'^\[.*?\]\s*', '', raw_topic)
 
         # 1. アイコンの判定（成果物は専用アイコンを使用。Freeze済みは🔒を最優先）
+        # [BL-166] 以前はDeliverableの場合`"📄" if status == "Proposed" else "✅"`という二値判定で、
+        # Approved/Approved_with_Conditions/Implicitly_Acceptedだけでなく"Rejected"も無条件で✅に
+        # なっていた（Decision/Directive分岐にはRejectedをelse節の⚠️へ落とす保護があるのに、
+        # Deliverable分岐だけこの保護が欠けていた）。実ログでRejectされたDeliverableが「✅ [成果物]」
+        # のまま表示され続け、User AIが誤って「承認済み」と誤認する実害を確認したため、
+        # 成功系ステータス（RESOLVING_DELIVERABLE_STATUSES）とそれ以外を明示的に分ける。
         if a.get("is_frozen"):
             icon = "🔒"
         elif entry_type == "Deliverable":
-            icon = "📄" if status == "Proposed" else "✅"
+            if status == "Proposed":
+                icon = "📄"
+            elif status in RESOLVING_DELIVERABLE_STATUSES:
+                icon = "✅"
+            else:
+                icon = "⚠️"
         elif status == "Approved":
             icon = "✅"
         elif status == "Proposed":
             icon = "🤔"
         else:
             icon = "⚠️"
-            
+
         # 2. ラベル（テキスト）の動的判定
         if entry_type == "Deliverable":
-            type_label = "[成果物]"
+            # [BL-166] Decision/Directiveにはあった却下時の専用ラベルがDeliverableには
+            # 存在せず、Rejectされていても常に"[成果物]"と表示されていた。
+            type_label = "[却下成果物]" if status == "Rejected" else "[成果物]"
         else:
             # ここでステータスに応じた正しいラベルを振る
             if status == "Approved":
@@ -5540,28 +5821,35 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     後退ではありません。\n
     """)
 
-    # ここから先は実行中に変化する動的な内容（プレフィックスキャッシュの都合上、末尾側に配置）。
+    # ここから先は実行中に変化する動的な内容。[BL-178] ユーザー指定順（視座は上から下、
+    # 文脈は過去から現在）で提示するため、system_promptを先頭システムメッセージ用
+    # （system_prompt_leading）と末尾システムメッセージ用（system_prompt_trailing）の
+    # 2つに分けて組み立てる。system_prompt内でテキスト位置をどう並べても、messages配列は
+    # [system, ...chat_history]という構造上chat_history側が常に物理的に後ろへ来るため、
+    # 「差し戻し情報を本当に最後に読ませる」にはchat_historyより後ろへ新規メッセージを
+    # 追加する必要がある（実ログlog/2026-08-05/1049で、末尾のchat_historyが無関係な話題で
+    # 占められ差し戻し指摘が埋もれていたことを確認、詳細はBL178_basic_design.md）。
+    #
+    # leading: 絶対的な行動指針（ゴール＋本質）→プロジェクト計画目次→直近の会話への導入。
+    # trailing（chat_historyより後ろ）: 決定事項DB→Detectorの気づき→申し送り→エスカレーション
+    # 状況→エスカレーション再開通知→現在のタスクのスコープ→ホワイトボード→Orchestratorの
+    # 着眼点→制限時間→厳守事項→Detectorからの差し戻し（最後）。
+    system_prompt_leading = system_prompt
+    system_prompt_trailing = ""
 
     # [BL-078] Orchestratorが専門家選定時に考察した、このタスク固有の着眼点・注意点。
-    # Detectorの「観点を変えるだけで仕事ぶりが変わる」効果と同じ発想で、Expertの思考を
-    # 個々のタスクの実態に最適化する狙い（従来はOrchestratorの選定理由としてログに残るのみで、
-    # Expertには一切伝わっていなかった）。
     expert_focus_guidance = state.get("expert_focus_guidance", "")
-    if expert_focus_guidance:
-        system_prompt += f"\n🎯 【このタスクで特に注意すべき観点（Orchestratorより）】\n{expert_focus_guidance}\n"
 
     if agent_has_guardrail:
-        system_prompt += f"\n【あなたの絶対的な行動指針】\n👉 {state['goal']}\n"
-        system_prompt += f"\n{_get_goal_essence_text(_conn, state['run_id'])}\n"
-
-    system_prompt += _build_detector_observations_block(state)
+        system_prompt_leading += f"\n【あなたの絶対的な行動指針】\n👉 {state['goal']}\n"
+        system_prompt_leading += f"\n{_get_goal_essence_text(_conn, state['run_id'])}\n"
 
     # [BL-104] 全フェーズ・全タスクの完全なJSON（phases_json）は、read_verified_fact/
     # read_deliverable_fileと機能的にほぼ重複する上、BL-025のスコープガードレールの趣旨
     # （他タスクのowns_variables領域に踏み込ませない）とも逆行するため、常時表示は
     # phase_id/task_id/titleのみの軽量な目次（ToC）にとどめ、詳細が必要な場合のみ
     # read_project_planツールで能動的に取得させる。
-    system_prompt += (f"""
+    system_prompt_leading += (f"""
     \n📊 [プロジェクト進行計画 目次]
     Task Plannerが作成したフェーズとタスクの一覧（目次）を以下に示します。各タスクの詳細
     （description・acceptance_criteria・depends_on・owns_variables）が必要な場合は、
@@ -5572,14 +5860,71 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     """)
 
     # BL-025: Expertが他タスクのowns_variables領域まで踏み込むことを防ぐスコープガードレール
+    # （current_task_json等はtrailing側で使用するが、deferred_notes_textが先に必要なため
+    # ここで一括取得する）。
     _scope_ctx = _build_task_scope_context(state, _conn)
     current_task_json = _scope_ctx["current_task_json"]
     verified_facts_json = _scope_ctx["verified_facts_json"]
     remaining_criteria_text = _scope_ctx["remaining_criteria_text"]
     whiteboard_text = _scope_ctx["whiteboard_text"]
     deferred_notes_text = _scope_ctx["deferred_notes_text"]
+    _escalation_status_text = _get_escalation_status_text_for_expert(_conn, state["run_id"])
+    # 履歴からは消えた「前回の自分のNG発言」をStateから復元して突きつける
+    previous_output = state.get("expert_output", "(取得不可)")
 
-    system_prompt += (f"""
+    if is_stateless_mode:
+        hydrate_context = _build_hydrate_context_from_db(_conn, state["run_id"], config)
+        # [BL-103] facilitatorのエスカレーション名指しはchat_history末尾に追記されるだけで
+        # chat_history_windowを過ぎると跡形もなく消える。issue_logのescalated行を毎ターン
+        # DBから直接注入することで、その「発言が消えた後の穴」を埋める（recencyに関係ない pin）。
+        escalation_pin = _build_escalation_pin_text(_conn, state["run_id"])
+        if escalation_pin:
+            hydrate_context += f"\n\n【⚠️エスカレーション中の懸念（要対応、issue_log）】\n{escalation_pin}"
+        # [BL-136] status='open'（minor）行も参考情報として可視化する（従来はescalated行のみ）。
+        open_issue_pin = _build_open_issue_pin_text(_conn, state["run_id"])
+        if open_issue_pin:
+            hydrate_context += f"\n\n【ℹ️ 未解決の軽微な懸念（参考、issue_log）】\n{open_issue_pin}"
+        # [BL-178] 過去の圧縮ログは「これから直近の会話を示す」という次の導入文より前に置き、
+        # 「直近の会話です」という予告の直後には実際に直近のraw chat_historyが来るようにする。
+        system_prompt_leading += f"\n【過去の会話を圧縮したシステム判断ログ】\n{hydrate_context}\n"
+
+    system_prompt_leading += (f"""
+    \n文脈の参考として以下に直近の会話を示します
+    [-----以下は直近の会話です-----]\n
+    """)
+
+    messages = []
+    if is_stateless_mode:
+        messages.append({"role": "system", "content": system_prompt_leading})
+        recent_history = state["chat_history"][-chat_history_window:]
+        for msg in recent_history:
+            messages.append(msg)
+        #messages.append({"role": "user", "content": user_input})
+    else:
+        messages.append({"role": "system", "content": system_prompt_leading})
+        for msg in state["chat_history"]:
+            messages.append(msg)
+        #messages.append({"role": "user", "content": user_input})
+
+    # [BL-178] ここから先（system_prompt_trailing）はmessages配列の最後（chat_historyより
+    # 後ろ）へ独立したsystemメッセージとして追加する。決定事項DB・厳守事項・差し戻し情報という
+    # 「直近の是正内容」を、chat_historyの内容に関わらず必ず最後に読ませるための構成。
+    system_prompt_trailing += f"\n【プロジェクトの合意・決定事項・検討状況DB（遵守必須）】\n{agreements_text}\n\n"
+
+    system_prompt_trailing += _build_detector_observations_block(state)
+
+    if deferred_notes_text:
+        system_prompt_trailing += f"\n📌 【BL-082: 他タスクからの申し送り事項（先送り）】\n{deferred_notes_text}\n"
+
+    # [BL-086] これまでに提起したエスカレーションの状況（Open/Rejectedのみ）を提示し、
+    # 同じ懸念の重複再提起を防ぐ。Acceptedはstate["goal"]自体が既に改定済みのため
+    # ここでは表示しない（毎ターン再埋め込みされるgoal本文が既に反映済み）。
+    if _escalation_status_text:
+        system_prompt_trailing += f"\n{_escalation_status_text}\n"
+
+    system_prompt_trailing += _build_escalation_resume_notice(state)  # [BL-096]
+
+    system_prompt_trailing += (f"""
     \n📏 【回答のスコープについて（厳守）】\n
     あなたの回答で扱ってよい内容は、以下の「現在のタスク」の acceptance_criteria の範囲に厳密に限定してください。\n
     他タスクが owns_variables として所有する値（例：他タスクで算出すべき数値）は、たとえ関連性が高く見えても\n
@@ -5595,19 +5940,28 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     {remaining_criteria_text}\n
     """)
 
-    system_prompt += f"\n📋 【R4: 成果物の差分編集】\n{whiteboard_text}\n"
-    if deferred_notes_text:
-        system_prompt += f"\n📌 【BL-082: 他タスクからの申し送り事項（先送り）】\n{deferred_notes_text}\n"
+    system_prompt_trailing += f"\n📋 【R4: 成果物の差分編集】\n{whiteboard_text}\n"
 
-    # [BL-086] これまでに提起したエスカレーションの状況（Open/Rejectedのみ）を提示し、
-    # 同じ懸念の重複再提起を防ぐ。Acceptedはstate["goal"]自体が既に改定済みのため
-    # ここでは表示しない（毎ターン再埋め込みされるgoal本文が既に反映済み）。
-    _escalation_status_text = _get_escalation_status_text_for_expert(_conn, state["run_id"])
-    if _escalation_status_text:
-        system_prompt += f"\n{_escalation_status_text}\n"
+    # [BL-078] Orchestratorが専門家選定時に考察した、このタスク固有の着眼点・注意点。
+    # Detectorの「観点を変えるだけで仕事ぶりが変わる」効果と同じ発想で、Expertの思考を
+    # 個々のタスクの実態に最適化する狙い（従来はOrchestratorの選定理由としてログに残るのみで、
+    # Expertには一切伝わっていなかった）。
+    if expert_focus_guidance:
+        system_prompt_trailing += f"\n🎯 【このタスクで特に注意すべき観点（Orchestratorより）】\n{expert_focus_guidance}\n"
 
-    # 履歴からは消えた「前回の自分のNG発言」をStateから復元して突きつける
-    previous_output = state.get("expert_output", "(取得不可)")
+    system_prompt_trailing += f"\n⏳ 【制限時間】: 全 {max_turns} ターン中、現在は **{turn_count} ターン目** です。\n"
+    if turn_count >= max_turns - 2:
+        system_prompt_trailing += "🚨 【超重要・最終盤】これが最後の回答です。これまでの議論と『決定事項DB』の内容をすべて網羅し、集大成としての成果物を出力してください。\n"
+    elif turn_count > max_turns * 0.5:
+        system_prompt_trailing += "⚠️ 【議論の後半戦】新しい案の提示は控えてください。これまでの決定事項を具体化し、ドキュメント化にフォーカスしてください。\n"
+
+    # 【追加】Agent AIの越権行為（勝手なDB更新）を禁止する
+    system_prompt_trailing += (
+        "⚠️ 【厳守事項】\n"
+        "上記の【決定事項DB】はシステム側で自動管理されます。\n"
+        "あなたの回答内に「決定事項DB」のブロックを自分で書いたり、勝手に「✅ 決定事項」と宣言したりしないでください。\n"
+        "あなたはあくまでUserに『提案・報告』を行う立場です。\n"
+    )
 
     if state.get("drift_flag") or state.get("constraint_issue") in ["major"]:
         # [BL-075/D-047] 以前はロールバックでホワイトボードを2版前へ戻した上で「新しい提案を
@@ -5616,8 +5970,11 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         # 現在はホワイトボードの内容をそのまま保持し（📋セクション参照）、Detectorの指摘箇所を
         # write_agreementのedits（old_text/new_text）で部分修正することを基本方針とする。
         # [BL-143] 何回目の差し戻しか・前回と同じ指摘の繰り返しかを機械的に要約し先頭へ提示する。
+        # [BL-178] このブロックはsystem_prompt_trailingの最後（＝messages配列全体でも最後）
+        # に配置する。「上記📋セクション」（whiteboard_text）は同じsystem_prompt_trailing内で
+        # 既に前段に存在するため、位置的参照は成立する。
         _retry_label = _build_retry_situation_label(state, state.get("expert_retry_count", 0))
-        system_prompt += f"""
+        system_prompt_trailing += f"""
             \n{_retry_label}
             \n⚠️ 【重要：Detectorからの差し戻し】\n
             あなたの前回の発言は、倫理違反、矛盾、リソース超過や制約違反などの重大な矛盾が検知されDetector（監査システム）により差し戻されました。\n
@@ -5637,71 +5994,31 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
             必ず、矛盾の内容とその理由を明示し、どのタスク・フェーズに影響があるかを具体的に指摘してください。\n
         """
 
-    system_prompt += _build_escalation_resume_notice(state)  # [BL-096]
-
-    system_prompt += (f"""
-    \n文脈の参考として以下に直近の会話を示します
-    [-----以下は直近の会話です-----]\n
-    """)
-
-    # [BL-104] ここから先は最も変動が激しい内容（毎ターン必ず変わる）のため、プレフィックス
-    # キャッシュへの影響を最小化するべく末尾に配置する。
-    system_prompt += f"\n⏳ 【制限時間】: 全 {max_turns} ターン中、現在は **{turn_count} ターン目** です。\n"
-    if turn_count >= max_turns - 2:
-        system_prompt += "🚨 【超重要・最終盤】これが最後の回答です。これまでの議論と『決定事項DB』の内容をすべて網羅し、集大成としての成果物を出力してください。\n"
-    elif turn_count > max_turns * 0.5:
-        system_prompt += "⚠️ 【議論の後半戦】新しい案の提示は控えてください。これまでの決定事項を具体化し、ドキュメント化にフォーカスしてください。\n"
-
-    system_prompt += f"\n【プロジェクトの合意・決定事項・検討状況DB（遵守必須）】\n{agreements_text}\n\n"
-
-    # 【追加】Agent AIの越権行為（勝手なDB更新）を禁止する
-    system_prompt += (
-        "⚠️ 【厳守事項】\n"
-        "上記の【決定事項DB】はシステム側で自動管理されます。\n"
-        "あなたの回答内に「決定事項DB」のブロックを自分で書いたり、勝手に「✅ 決定事項」と宣言したりしないでください。\n"
-        "あなたはあくまでUserに『提案・報告』を行う立場です。\n"
-    )
-
-    messages = []
-    if is_stateless_mode:
-        hydrate_context = _build_hydrate_context_from_db(_conn, state["run_id"], config)
-        # [BL-103] facilitatorのエスカレーション名指しはchat_history末尾に追記されるだけで
-        # chat_history_windowを過ぎると跡形もなく消える。issue_logのescalated行を毎ターン
-        # DBから直接注入することで、その「発言が消えた後の穴」を埋める（recencyに関係ない pin）。
-        escalation_pin = _build_escalation_pin_text(_conn, state["run_id"])
-        if escalation_pin:
-            hydrate_context += f"\n\n【⚠️エスカレーション中の懸念（要対応、issue_log）】\n{escalation_pin}"
-        # [BL-136] status='open'（minor）行も参考情報として可視化する（従来はescalated行のみ）。
-        open_issue_pin = _build_open_issue_pin_text(_conn, state["run_id"])
-        if open_issue_pin:
-            hydrate_context += f"\n\n【ℹ️ 未解決の軽微な懸念（参考、issue_log）】\n{open_issue_pin}"
-        system_prompt += f"\n【過去の会話を圧縮したシステム判断ログ】\n{hydrate_context}\n"
-        messages.append({"role": "system", "content": system_prompt})
-
-        recent_history = state["chat_history"][-chat_history_window:]
-        for msg in recent_history:
-            messages.append(msg)
-
-        #messages.append({"role": "user", "content": user_input})
-    else:
-        messages.append({"role": "system", "content": system_prompt})
-        for msg in state["chat_history"]:
-            messages.append(msg)
-        #messages.append({"role": "user", "content": user_input})
+    # [BL-178] system_prompt_trailingをchat_historyより後ろへ独立したsystemメッセージとして
+    # 追加する。複数のrole:"system"メッセージを会話途中・末尾に挿入すること自体はBL-093の
+    # 自動reasoningダイジェストで既に実績のあるパターン（新規リスクではない）。
+    messages.append({"role": "system", "content": system_prompt_trailing})
 
     # BL-025 ②: ツールループの自問自答フェーズ（iter=2以降）では、全フェーズ・全DB agreementsを含む
     # 巨大なsystem_promptではなく、現在タスクの情報のみに絞った軽量版に差し替える。
+    # [BL-178] 「視座は上から下、文脈は過去から現在」の順に並び替え、厳守事項・差し戻し情報の
+    # 2ブロックを新規追加する（従来は`_query_AI_live`がloop_messages[0]をこの文字列で丸ごと
+    # 置換するため、iter=2以降は差し戻し情報が完全にコンテキストから消えていた）。ただし
+    # light_system_promptはloop_messages[0]への一度きりの置換に過ぎず、それ以降積み上がる
+    # tool呼び出し履歴の位置には影響しないため、iter=3以降まで含めた「真に最後」はこの並び替え
+    # だけでは達成できない（既知の限界、詳細はBL178_basic_design.md）。
     light_system_prompt = (
         f"あなたは有能な{expert_name}の分野の専門家です。\n\n"
-        + (f"🎯 【このタスクで特に注意すべき観点（Orchestratorより）】\n{expert_focus_guidance}\n\n" if expert_focus_guidance else "")
         + f"【現在のタスク】\n{current_task_json}\n\n"
         f"【この値は確定済みです。再導出しないでください】\n{verified_facts_json}\n\n"
         f"【未充足の要求項目】\n{remaining_criteria_text}\n\n"
-        "他タスクのowns_variablesに該当する内容は新たに算出・提案しないでください。\n"
-        "数値的根拠は python_repl ツールで検算し、暗算での提示は禁止します。\n"
+        + (f"🎯 【このタスクで特に注意すべき観点（Orchestratorより）】\n{expert_focus_guidance}\n\n" if expert_focus_guidance else "")
+        + "他タスクのowns_variablesに該当する内容は新たに算出・提案しないでください。\n"
         "[BL-041] ゴールで直接与えられた絶対制約以外で、このタスク内で導出した数値は、"
         "write_agreementのconfirmed_variablesでconfidence=\"provisional\"として記録してください"
         "（他タスクの制約とまだ突き合わせが済んでいないため）。\n"
+        "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
+        "read_project_plan・write_agreement・escalate_premise_concern・ask_user_question・thinkです。\n"
         "[BL-086] ゴール文の制約そのものが真の目的と矛盾していると具体的根拠を持って判断した場合のみ、"
         "escalate_premise_concernツールで懸念を提起できます（一般的な泣き言としては使用不可、"
         "今回のacceptance_criteriaは提起後も通常通り満たすこと）。\n"
@@ -5725,12 +6042,28 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "呼ぶと、その理由づけは次回以降のtool結果として全履歴ごと返され、雪だるま式に引き継がれ"
         "ます。todoに確認すべき論点をリストアップし、action/decided/why（却下案があれば"
         "rejected/rejected_why）を書いてください。他ツールと同一応答内でまとめて呼んでも単独で"
-        "呼んでも構いません。\n"
-        "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
-        "read_project_plan・write_agreement・escalate_premise_concern・ask_user_question・thinkです。"
-        + _THINK_TRAILER_SENTENCE + "\n"
+        "呼んでも構いません。" + _THINK_TRAILER_SENTENCE + "\n"
+        "数値的根拠は python_repl ツールで検算し、暗算での提示は禁止します。\n"
+        # [BL-178] 厳守事項（新規）。フル版の文言「上記の【決定事項DB】は…」は、軽量版には
+        # 決定事項DBブロック自体が存在しないため、位置的参照の無い独立文へ書き換える。
+        "⚠️ 【厳守事項】決定事項DBはシステム側で自動管理されます。あなたの回答内でDBのブロックを"
+        "自分で書いたり、勝手に「決定事項」と宣言したりしないでください。あなたはあくまでUserに"
+        "『提案・報告』を行う立場です。\n"
         f"\n[R4] {whiteboard_text}\n"
     )
+    if state.get("drift_flag") or state.get("constraint_issue") in ["major"]:
+        # [BL-178] Detectorからの差し戻し情報（新規）。フル版と異なりprevious_output全文は
+        # 再掲しない（軽量版の「軽量」という目的に反するため。iter=2以降はExpert自身が今回の
+        # 応答を推敲中であり、「何を直すべきか」の要点があれば足りる。ホワイトボード本文は
+        # 直前で既に提示済みのため[BL-076]インライン注釈との突き合わせも可能）。
+        light_system_prompt += (
+            f"\n{_retry_label}\n"
+            "⚠️ 【重要：Detectorからの差し戻し】あなたの前回の発言はDetectorにより差し戻されました。"
+            f"[Detectorからの指摘事項（要修正箇所）]\n{state.get('constraint_issue_log', [])[-1:]}\n"
+            "上記のホワイトボード本文には「> 🔴 **[Detector指摘 #...]**」という注釈が埋め込まれて"
+            "いる場合があります。まずこの注釈を探し、write_agreementのedits（old_text/new_text）で"
+            "注釈行ごと該当箇所のみを部分修正してください。\n"
+        )
 
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
     _CURRENT_CALLER_ROLE = "expert"
@@ -5758,7 +6091,17 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
     _CURRENT_TASK_ID = state.get("current_task_id", "")
     _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")
 
-    recent_decitions = json.dumps(get_decisions_from_db(get_active_conn(), state["run_id"])[-2:], ensure_ascii=False)
+    # [BL-164] 従来はSELECT *の生行（internal_thought_process列込み、数千字規模）をそのままJSON化
+    # していたため、既にsupersede済みのホワイトボード版への一字一句引用がinternal_thought_process
+    # 内に残ったまま次のDetectorへ渡り、それを最新内容と誤認してverify_whiteboard_excerptを
+    # 無駄打ちし続けMAX_TOOL_ITERを浪費する実害を確認した（同一run内で2回再現）。
+    # thought_process_audit（本ターンのExpert/User AI自身の思考過程を専用に監査する別ブロック）
+    # と役割が重複する上に本質的にsupersede非対応なため、who/what/whyの要約のみに絞る。
+    _recent_decisions_raw = get_decisions_from_db(get_active_conn(), state["run_id"])[-2:]
+    recent_decitions = json.dumps(
+        [{"who": d.get("who", ""), "what": d.get("what", ""), "why": d.get("why", "")} for d in _recent_decisions_raw],
+        ensure_ascii=False,
+    )
     # [BL-062] Detectorがmajor判定を出した際、対象のtopicをtarget_topicとしてSUPERSEDEできるよう、
     # 既存の【決定事項DB】（topic名・ID）を提示する。従来はDetectorに一切見えておらず、
     # write_agreementの権限（status='Rejected'）はあってもtarget_topicを指定する材料がなかった。
@@ -5865,11 +6208,18 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         # [BL-126 Stage B/§5] revise_goal（反応的経路・Essence Dialogue収束後の双方）による
         # ゴール文改定そのものを評価する専用モード。通常の成果物レビューとは判断基準が異なるため、
         # domain_role_instructionのみをこの4項目に完全に差し替える（§13.3: 排他的なelif分岐）。
+        # [BL-162] 判定基準1（旧文の包含確認）にはold_goal_text自体が必要。従来はここに埋め込まず
+        # Detector自身にread_verified_fact等での探索を委ねていたが、旧ゴール文を読める経路が
+        # どこにも存在しなかったため必ず空振りしていた（実ログで5回連続not_found確認）。
+        # generate_user_utterance_nodeが橋渡しするstate["goal_revision_old_text"]を直接埋め込む。
+        _old_goal_text = state.get("goal_revision_old_text", "") or "(旧ゴール文を取得できませんでした)"
         domain_role_instruction = (
             "評価対象：User(発注者)によるゴール文の改定（revise_goalツール経由）。"
             "これは通常の成果物レビューではありません。以下の判断基準でのみ評価してください：\n"
-            "1. 旧文が置換ではなく追記として保持されているか（新しい文の中に、元の文の内容が"
-            "包含されているか）。\n"
+            f"【改定前のゴール文（旧文）】\n{_old_goal_text}\n\n"
+            f"【改定後のゴール文（新文、System Goalとして下記にも再掲）】\n{goal}\n\n"
+            "1. 旧文が置換ではなく追記として保持されているか（上記の新文の中に、上記の旧文の内容が"
+            "包含されているか。旧文を探すためのツール呼び出しは不要です、上記に既に提示済みです）。\n"
             "2. 理由づけ（reason_why）が、提起された懸念の重大さに見合っているか。\n"
             "3. 変更が提起された懸念の範囲内に収まっているか（無関係な制約まで書き換えていないか、"
             "スコープ逸脱がないか）。\n"
@@ -5909,7 +6259,12 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
             2. 【レビュー・承認の場合（最重要）】: UserがAgentの直前の提案に対して「妥当である」「承認する」「次のタスクへ進む」と合意の意思を示している場合、\n
                 **その承認しようとしている提案内容に制約違反や論理破綻がないか**を必ず確認してください。\n
                 Agentの提案に重大な不備（予算超過、要求事項の欠落、根拠のない計算など）があるにも関わらず、Userがそれを見落として安易に承認・合意している場合は、\n
-                「発注者としてのレビュー不足（妥協）」とみなし、**容赦なく major を出力し、Userに対して『承認を取り消し、Agentに厳しく修正を要求せよ』と差し戻してください。**\n
+                「発注者としてのレビュー不足（妥協）」とみなし、**容赦なく major を出力し、Userに対して『承認を取り消し、Agentに厳しく修正を要求せよ』と差し戻してください。**\n\n
+            3. 【BL-181: 次タスクへの移行時の宿題残し】: Userが次のタスクへの移行を指示している場合、read_issuesで現在のタスク（{_current_task_id}）に紐づく\n
+                severity='major'またはstatus='escalated'のissueが残っていないか確認してください。\n
+                残っている場合、今回の発言内でそのissueがwrite_issueのRESOLVEまたはDEFERにより明示的に対応されていなければ、\n
+                「現タスクの重大な懸念を未解決のまま次タスクへ進めようとしている」とみなし、**major を出力し、\n
+                『次タスクへ進む前に、残存issueをRESOLVEまたはDEFERせよ』と差し戻してください。**\n
         """)
     else:
         role_specific_instruction = (f"""
@@ -6143,6 +6498,10 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"{python_calls_block}\n"
         f"{write_agreement_status_block}\n"
         f"{thought_process_audit}\n"
+        f"【注意】直近の決定事項は状況把握のための参考情報であり、ここに含まれる引用（whyの内容等）は"
+        f"執筆時点のホワイトボード内容である可能性があり、既に上書き・改訂されている場合があります。"
+        f"target_excerptやverify_whiteboard_excerptの根拠には、必ず下記【R4: 現在タスクの成果物・"
+        f"最新ホワイトボード】節の内容のみを使用してください。\n"
         f"Recent Decisions（参考程度）: {recent_decitions}\n\n"
         f"【プロジェクトの合意・決定事項・検討状況DB】\n{agreements_text}\n\n"
         f"【BL-086: 🔒Freeze済み項目の扱い】上記DBで🔒アイコンが付いている項目は、既に人間の発注者"
@@ -6288,7 +6647,10 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
         `status: "Proposed"`\n
         としてください。\n
         
-        - "Deliverable": 成果物本体（仕様書や計画書のテキスト全文。絶対に要約しないこと）\n
+        - "Deliverable": 成果物の提示があったことの検出のみ。[BL-182] write_agreementが既に呼ばれた
+          ターンではこの抽出結果自体がまるごと破棄されるため、200字以内の簡潔な要約で構いません
+          （全文を複製しないでください）。write_agreementが呼ばれていなかった場合の保険としては、
+          contentが短い場合Agentの発言全文が自動的に使われるため、content自体の全文保持は不要です。\n
         - "Decision": 今回Agentが提案した新たなルールや計算結果\n
 
         【重要】既存トピック一覧にある話題をAgentが「修正・更新」して再提示してきた場合でも、\n
@@ -6306,11 +6668,10 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
         Agentが今回、これらの変数のいずれかについて具体的な数値を確定させた場合（python_replでの検算結果を含む）、
         `owned_variable_values` に {{変数名: 値}} の形で出力してください。該当がなければ空オブジェクト `{{}}` としてください。
 
-        【BL-029: owned_variable_valuesはcontentと目的が異なります】
-        `content`（Deliverable本体）は要約禁止・全文保持ですが、これは後で部分成果物を製本・合成するための
-        ものであり、`owned_variable_values`とは無関係です。`owned_variable_values`は他タスクが
-        `depends_on`を通じてこの値を参照する際に読む、ごく簡潔な要約（確定した結論・数値・根拠の要点のみ）
-        にしてください。`content`の全文をコピーしないでください。
+        【BL-029/BL-182: owned_variable_valuesはcontentと目的が異なります】
+        `content`（Deliverable本体）は上記の通り簡潔な要約で構いませんが、`owned_variable_values`は
+        それとは別に、他タスクが`depends_on`を通じてこの値を参照する際に読む、ごく簡潔な要約
+        （確定した結論・数値・根拠の要点のみ）にしてください。
         """
     else:
         # ==========================================
@@ -6372,7 +6733,9 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
       ※タスクごとに作成される「詳細仕様書」や「計画書」などのまとまった出力は必ずこれに分類してください。
       
     🚨 【成果物抽出に関する絶対ルール】 🚨
-    1. CREATE(新規作成)時: AIが提示した成果物の「全文」をそのまま content に格納せよ。絶対に短く要約してはいけない。
+    1. [BL-182] CREATE(新規作成)時: content は200字以内の簡潔な要約で構いません。全文を複製する必要は
+       ありません（write_agreement経由で既に登録済みの場合はこの抽出結果自体が破棄され、未登録の場合は
+       Agentの発言全文が別途自動的に使われるため、content自体に全文を保持する意味がありません）。
     2. UPDATE(更新)時: Userが「承認」「条件付き承認」「却下」などの評価をしただけで、AI側から新しい成果物本文の提示がない場合、content は【必ず空文字 ""】にせよ。「承認された」などの短い説明文を絶対に入れないこと。
 
     [BL-050] action_type="UPDATE"（既存topicの値を変更する）の場合、rationale には
@@ -6401,7 +6764,7 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
             "target_topic": "UPDATEの場合のみ必須",
             "status": "Proposed / Approved / Rejected / Deferred 等",
             "topic": "話題の簡潔なタイトル",
-            "content": "提案内容(DeliverableのUPDATE時は必ず空文字に)",
+            "content": "提案内容(Deliverableは200字以内の要約でよい。DeliverableのUPDATE時は必ず空文字に)",
             "rationale": "抽出または判定の理由",
             "proposed_by": "Agent または User",
             "phase_id": "現在のフェーズID",
@@ -6553,7 +6916,8 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
     for i, d in enumerate(decisions):
         why_short = (d["why"] + "…") if len(d.get("why", "")) > 60 else d.get("why", "")
         ts_val = d.get("timestamp", 0)
-        ts = datetime.datetime.fromtimestamp(ts_val).strftime("%H:%M:%S") if ts_val else "??:??:??"
+        # [BL-175] ログのタイムスタンプ（JST）と同期させる。
+        ts = datetime.datetime.fromtimestamp(ts_val, JST).strftime("%H:%M:%S") if ts_val else "??:??:??"
         timeline.append(f"└ [{ts}] [{d.get('who','?')}] No.{i+1}: {d.get('what','?')} | 理由: {why_short}")
     timeline_str = "\n".join(timeline) if timeline else "(意思決定のログはありません)"
 
@@ -6754,6 +7118,15 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
         # （reflectionのnoteに言及があるとは限らないため、この経路だけは常に保証する）。
         # 漠然とした停滞への対応（上記の抽象的な促し）とは別に、具体的な懸念を名指しして
         # その解消を最優先事項として提示する専用の指示を追加する。
+        # [BL-170] escalated_issues_textはDetector等が指摘した具体的な数値issueの生テキストで
+        # あり、財務モデルの誤り等、内容自体がいかにも「自分で計算し直すべき課題」に読める。
+        # 実際に`log/2026-08-04/1435`で、この具体的な数値issue（オペレーター人員体制の労基法
+        # 違反計算）を読んだFacilitatorが、自分の職掌（短い誘導メッセージを1つ書くこと）を
+        # 逸脱してExpertの仕事（財務モデル全体の再計算・Deliverable再提出）を自分でやるべきだと
+        # 誤認し、python_repl（このノードには意図的に付与されていない）を呼ぶ計画をthinkで
+        # 宣言し続けるだけの空回りに陥り、MAX_TOOL_ITER予算を丸ごと空費して無出力に終わった
+        # （BL-170）。「これは誘導メッセージの材料であり、あなた自身が解決する課題ではない」旨を
+        # 明示するガードレール文を追加し、role境界の踏み越えを防ぐ。
         escalated_issues_block = (
             f"""
     🚨 【具体的に特定済みの未解決issue（最優先で解消させてください）】
@@ -6763,6 +7136,12 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     ください（「〇〇を直ちに決定してください」という直接的な表現を避けるべきなのは、漠然とした
     停滞への対応の場合のみです。ここでは具体的に何を解消すべきかをはっきり伝えてください）:
     {escalated_issues_text}
+
+    [BL-170] 【重要】上記はあくまで、あなたが書く誘導メッセージの材料（背景情報）です。
+    あなた自身がこの数値を再計算・修正したり、代わりに成果物を作成・提出することは
+    あなたの役目ではありません（それはExpert/Userの役目です）。あなたにはpython_replの
+    ような検算ツールも、Deliverable新規作成の権限も与えられていません。この懸念そのものを
+    自分で解決しようとせず、AI達へ的確に提示する短いメッセージの作成に専念してください。
     """
             if escalated_issues_text else ""
         )
@@ -6994,11 +7373,344 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
 
     _conn = get_active_conn()
 
+    # [BL-177] 通常の「Expertの成果物をUserがレビューする」ターンのみ、Detectorの2段監査パス
+    # （BL-049/BL-054）と同型の段階化パイプラインへ分岐する。本質対話（BL-126）・Expert相談
+    # 応答（BL-130）・差し戻し再送（BL-142/143）・終盤のPROJECT_COMPLETE宣言・初回ターンは
+    # 対象外とし、既存の単発呼び出し（このifブロックの後に続く現行コード）をそのまま使う
+    # （docs/design/back_log/BL-177/BL177_basic_design.md「スコープ」節）。
+    _is_normal_review_turn = (
+        bool(state["chat_history"])
+        and not state.get("essence_dialogue_active")
+        and not state.get("expert_pending_question")
+        and not (state.get("drift_flag") or state.get("constraint_issue") in ["major"])
+        and turn_count < max_turns - 2
+    )
+    if _is_normal_review_turn:
+        global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID, _CURRENT_GOAL_TEXT, _CURRENT_PHASE_ID
+        _CURRENT_CALLER_ROLE = "user"
+        _CURRENT_TASK_ID = state.get("current_task_id", "")
+        _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")
+        _CURRENT_GOAL_TEXT = user_goal
+
+        # [BL-177 制約2] query_AI()は呼び出しごとにターン単位トラッカー（_LAST_WRITE_AGREEMENT_
+        # SUCCEEDED等）をリセットする。4回query_AIを呼ぶため、各ステージ後にローカルへOR/後勝ちで
+        # 集約し、関数末尾でグローバルへ書き戻す（generate_user_utterance_nodeの既存の読み取り
+        # コードを変更せずに済ませるため）。
+        _stage_wrote_agreement = False
+        _stage_wrote_issue_resolution = False
+        _stage_reasoning_text = ""
+        _stage_goal_revision = None
+        _stage_essence_proposal = None
+
+        def _absorb_stage_trackers():
+            nonlocal _stage_wrote_agreement, _stage_wrote_issue_resolution, _stage_reasoning_text, _stage_goal_revision, _stage_essence_proposal
+            _stage_wrote_agreement = _stage_wrote_agreement or get_last_write_agreement_succeeded()
+            _stage_wrote_issue_resolution = _stage_wrote_issue_resolution or get_last_write_issue_resolve_or_defer_succeeded()
+            _stage_reasoning_text = get_last_reasoning_text() or _stage_reasoning_text
+            _stage_goal_revision = get_last_goal_revision() or _stage_goal_revision
+            _stage_essence_proposal = get_last_essence_proposal() or _stage_essence_proposal
+
+        _scope_ctx = _build_task_scope_context(state, _conn)
+        current_task_json = _scope_ctx["current_task_json"]
+        verified_facts_json = _scope_ctx["verified_facts_json"]
+        remaining_criteria_text = _scope_ctx["remaining_criteria_text"]
+        deferred_notes_block = (
+            "📌 【BL-082: 他タスクからの申し送り事項（先送り）】\n" + _scope_ctx["deferred_notes_text"] + "\n"
+            if _scope_ctx["deferred_notes_text"] else ""
+        )
+        recent_history = state["chat_history"][-2:]
+        stage_history_text = "\n".join(
+            f"{'[あなた（発注者）の直前の発言]' if m['role'] == 'user' else '[Agent AIの直前の発言]'}\n{m['content']}"
+            for m in recent_history
+        )
+        goal_essence_text = _get_goal_essence_text(_conn, state["run_id"])
+
+        # ===== Stage 1: レビュー（ドメイン妥当性、read-only） =====
+        review_prompt = (
+            f"あなたは目標達成のプロジェクトオーナー（発注者）です。相手のAgent AIが提出した最新の"
+            f"成果物を、これから4段階に分けてレビューします。今回はこの第1段（ドメイン妥当性レビュー）"
+            f"のみを担当してください。承認判断・issueの記録・次の指示は後続の別ステージで行うため、"
+            f"ここでは行わないでください。\n\n"
+            f"【絶対目標】{user_goal}\n"
+            f"{goal_essence_text}\n"
+            f"【検算とドメインレビューの役割分担】数値の機械的検算（合計・比率・閾値比較等）は既に"
+            f"Detector（監査システム）がpython_replで独立して実行済みです。あなたが同じ検算を"
+            f"繰り返す必要はなく、その検算結果を信頼してよいものとします。代わりに、Detectorの"
+            f"数値監査だけでは拾えない「ドメイン的な妥当性」に重きを置いてレビューしてください:\n"
+            f"- その前提・計画は現実世界で本当に成立するか（労働基準法上の休憩・シフト要件、"
+            f"物理的な運用可能性、予備・冗長性の欠如、安全規制等）。\n"
+            f"- 数式としては辻褄が合っていても、現実の運用としては無理がある内訳・仮定をその場で"
+            f"でっち上げていないか。\n"
+            f"- [BL-134] 「最低N名常駐」のような部分的な要件を、ゴール文が明示する時間帯・範囲等の"
+            f"条件を無視して無条件に拡大解釈していないか。拡大解釈の根拠がゴール文中に無いのに"
+            f"confidence=\"confirmed\"として確定されている値があれば指摘してください。\n"
+            f"計算結果そのものに強い違和感がある場合に限り、あなた自身もpython_replで検算して"
+            f"ください（毎回のルーティンとして再検算する必要はありません）。\n\n"
+            f"【現在のタスク】\n{current_task_json}\n"
+            f"【この値は確定済みです。再導出を指示・要求しないでください】\n{verified_facts_json}\n"
+            f"【現在のタスクで未充足の要求項目】\n{remaining_criteria_text}\n"
+            f"[R4] {_scope_ctx['whiteboard_text']}\n"
+            f"{deferred_notes_block}"
+            f"[BL-094: read_verified_fact/read_deliverable_fileで既存の決定と同期する] 数値の出所が"
+            f"ゴール文の直接記載か、Agent自身の派生仮定かを見分けるため、必要に応じてこれらのツールで"
+            f"確認してください。\n\n"
+            f"【今回レビューする直近のやり取り】\n{stage_history_text}\n\n"
+            f"【重要】あなたが使えるツールはread_verified_fact・read_deliverable_file・python_repl・"
+            f"thinkです。{_THINK_TRAILER_SENTENCE}\n"
+            f'Return ONLY JSON: {{"domain_concerns": "ドメイン妥当性上の懸念（無ければ空文字）", '
+            f'"scope_compliant": true/false, "review_comment": "レビューの要点（次段へ引き継ぐ短い要約）"}}'
+        )
+        _reset_think_scratchpad()
+        review_parsed, review_parse_failed = _query_and_parse_with_retry(
+            review_prompt, client=client_user, model=model_user, label="User AI (Stage1: レビュー)",
+            tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, PYTHON_REPL_TOOL, THINK_TOOL],
+            fallback={"domain_concerns": "", "scope_compliant": True, "review_comment": ""},
+            state=state,
+        )
+        _absorb_stage_trackers()
+        if review_parse_failed:
+            review_comment = "(Stage1レビューのJSON解析に失敗したため、要約なしで次段へ進みます)"
+        else:
+            review_comment = review_parsed.get("review_comment", "") or review_parsed.get("domain_concerns", "")
+
+        # ===== Stage 2: issue確認 =====
+        _open_escalations_text = _get_open_escalations_text(_conn, state["run_id"])
+        _forced_escalated_issues_text = _get_forced_escalated_issues_text(_conn, state["run_id"])
+        issue_prompt = (
+            f"あなたは目標達成のプロジェクトオーナー（発注者）です。これは4段階レビューの第2段"
+            f"（issue確認）です。第1段のレビュー結果を踏まえ、issue_logの未解決事項を確認・整理して"
+            f"ください。承認判断や次の指示はまだ行わないでください。\n\n"
+            f"【第1段（レビュー）の結果】{review_comment}\n\n"
+            f"[BL-096: write_issue/read_issuesで軽微な懸念・訂正指示を引き継ぐ] Expertへ訂正指示を"
+            f"出す際、それが後続タスクでも忘れてはならない指示であれば、write_issue(action_type="
+            f"\"CREATE\", topic=\"<固定の識別文字列>\", description=\"Expertへの訂正指示: ...\")で"
+            f"記録してください。【最低限、read_issuesを一度は呼び、過去に起票した未解決issueが"
+            f"このタスクの範囲に関係しないか確認してください】。Expertの回答がその懸念を解消して"
+            f"いれば、write_issue(action_type=\"RESOLVE\", topic=\"...\", resolution_note=\"...\")"
+            f"で明示的にクローズしてください（issueをクローズする役目はあなたです）。\n"
+            f"{_open_escalations_text}\n"
+            f"{_forced_escalated_issues_text}\n"
+            f"【重要：ゴール自体の文言と真の目的が矛盾していると気づいた場合の3ツール】\n"
+            f"・escalate_premise_concern: ゴール文の制約・前提の文言が真の目的と矛盾していると"
+            f"具体的根拠を持って判断した場合、自ら懸念を提起できます。\n"
+            f"・resolve_premise_concern: 未解決のエスカレーションについて、検討の結果やはり文言"
+            f"通りが正しいと判断した場合、却下してください。\n"
+            f"・revise_goal: 未解決のエスカレーションを承認する場合に、ゴール文自体を該当箇所だけ"
+            f"改定してください。承認する例外を体現するAgreementがあれば、freeze_agreement_idで"
+            f"同時にFreezeしてください。\n\n"
+            f"【今回レビューする直近のやり取り】\n{stage_history_text}\n\n"
+            f"【重要】あなたが使えるツールはread_issues・write_issue・escalate_premise_concern・"
+            f"resolve_premise_concern・revise_goal・freeze_agreement・thinkです。"
+            f"{_THINK_TRAILER_SENTENCE}\n"
+            f'Return ONLY JSON: {{"issues_handled": true/false, "remaining_concerns": '
+            f'"未解決のまま残る懸念（無ければ空文字、次段へ引き継ぐ）"}}'
+        )
+        _reset_think_scratchpad()
+        issue_parsed, issue_parse_failed = _query_and_parse_with_retry(
+            issue_prompt, client=client_user, model=model_user, label="User AI (Stage2: issue確認)",
+            tools=[READ_ISSUES_TOOL, WRITE_ISSUE_TOOL, ESCALATE_PREMISE_CONCERN_TOOL,
+                   RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, THINK_TOOL],
+            fallback={"issues_handled": True, "remaining_concerns": ""},
+            state=state,
+        )
+        _absorb_stage_trackers()
+        remaining_concerns = "" if issue_parse_failed else (issue_parsed.get("remaining_concerns", "") or "")
+
+        # ===== Stage 3: 統合承認判断（write_agreementを単独所有） =====
+        agreements_text = _build_agreements_context_from_db(_conn, state["run_id"])
+        # [BL-178フォローアップ] 承認先のtarget_topicを明示的に注入する。従来はこの指定が無く、
+        # LLMが「統合承認判断」という別トピックのDecisionエントリを新規CREATEしてしまい
+        # （Expertの成果物＝entry_type="Deliverable"自体はProposedのまま更新されず）、
+        # BL-176のゲート（_is_task_completedがentry_type="Deliverable"の最新行のみ判定）を
+        # 永久に満たせずタスク遷移がブロックされ続ける実害が実ドライラン
+        # （log/2026-08-05/1542, 1556）で確認された。BL-172のD-142が既に確立していた
+        # 「正当な承認は既存Deliverableへのaction_type="UPDATE"」という規約をStage3にも
+        # 明示的に持ち込む。
+        _deliverable_agreement = _find_active_deliverable_agreement(
+            _conn, state["run_id"], _CURRENT_PHASE_ID, _CURRENT_TASK_ID,
+        )
+        _deliverable_topic = _deliverable_agreement["topic"] if _deliverable_agreement else ""
+        approval_prompt_base = (
+            f"あなたは目標達成のプロジェクトオーナー（発注者）です。これは4段階レビューの第3段"
+            f"（統合承認判断）です。第1段（レビュー）・第2段（issue確認）の結果を踏まえ、"
+            f"Agent AIの成果物を承認するかどうかだけを判断してください。次タスクへの指示はまだ"
+            f"行わないでください（後続の第4段で行います）。\n\n"
+            f"【第1段（レビュー）の結果】{review_comment}\n"
+            f"【第2段（issue確認）の結果】issues_handled等の対応済み、残存懸念: {remaining_concerns or '(なし)'}\n\n"
+            f"🔥 【発注者としての絶対的なスタンス】あなたは妥協を許さないプロジェクトオーナーです。"
+            f"相手が「制約が厳しい」「要件を満たせない」と泣き言を言ってきても、絶対に【絶対目標】の"
+            f"ハードルを下げないでください。ただし、緩和を求めているのが「動かせない真の制約」なのか"
+            f"「議論の前提として例示的に与えられているだけの見直し可能な条件」なのかは見極めてください。\n\n"
+            f"【絶対目標】{user_goal}\n"
+            f"{goal_essence_text}\n"
+            f"【現在のタスクで未充足の要求項目】\n{remaining_criteria_text}\n"
+            f"[R4] {_scope_ctx['whiteboard_text']}\n\n"
+            f"【プロジェクトの合意・決定事項・検討状況DB】\n{agreements_text}\n\n"
+            f"承認する場合は、必ずwrite_agreementツールを呼び出して確定してください（status="
+            f"\"Approved\"または条件付きなら\"Approved_with_Conditions\"）。"
+            + (
+                f"【重要・厳守】承認はAgentの成果物（Deliverable）自体を更新することで記録して"
+                f"ください: action_type=\"UPDATE\", entry_type=\"Deliverable\", "
+                f"target_topic=\"{_deliverable_topic}\"（この文字列をそのまま指定）。"
+                f"承認判断を新しいDecisionエントリとして別途CREATEしてはいけません——それでは"
+                f"Agentの成果物自体がProposedのまま更新されず、次タスクへ進めなくなります。"
+                f"decision_whatは短い承認コメントで構いません（全文を書き写す必要はありません。"
+                f"あなたが書く承認コメントが成果物本文を上書きすることはありません）。成果物本文"
+                f"自体の内容を変更・追記したい場合は、decision_whatではなくeditsパラメータ"
+                f"（old_text/new_text）を使ってください。\n"
+                if _deliverable_topic else ""
+            )
+            + f"承認しない場合は"
+            f"write_agreementを呼ばず、approval_status=\"Rejected\"としてください。まだ判断材料が"
+            f"不足している場合はapproval_status=\"Pending\"としてください。\n\n"
+            f"【今回レビューする直近のやり取り】\n{stage_history_text}\n\n"
+            f"【重要】あなたが使えるツールはwrite_agreement・thinkです。{_THINK_TRAILER_SENTENCE}\n"
+            f'Return ONLY JSON: {{"approval_status": "Approved/Approved_with_Conditions/Rejected/Pending", '
+            f'"approval_reason": "承認・却下・保留の理由"}}'
+        )
+        # [BL-177] LLMの自己申告（approval_status）とツール呼び出し結果（get_last_write_agreement_
+        # succeeded）の食い違いは、Stage4のLLMにではなくここでPythonコードが機械的に判定する
+        # （BL-091/BL-176と同じ「自己申告を信用しない」原則）。食い違えばStage3自体を訂正指示付きで
+        # 最大2回まで再試行し、Stage4へは進めない。使い切っても解消しなければApprovalRecordingFailed
+        # という専用ラベルでStage4へ渡す（design: BL177_basic_design.md Stage3節）。
+        _approval_mismatch_notice = ""
+        approval_status = "Pending"
+        approval_reason = ""
+        for _approval_attempt in range(3):
+            _reset_think_scratchpad()
+            approval_parsed, approval_parse_failed = _query_and_parse_with_retry(
+                approval_prompt_base + _approval_mismatch_notice, client=client_user, model=model_user,
+                label="User AI (Stage3: 統合承認判断)", tools=[WRITE_AGREEMENT_TOOL, THINK_TOOL],
+                fallback={"approval_status": "Pending", "approval_reason": ""}, state=state,
+            )
+            _absorb_stage_trackers()
+            if approval_parse_failed:
+                approval_status = "Pending"
+                approval_reason = "(承認判断のJSON解析に失敗しました)"
+                break
+            approval_status = approval_parsed.get("approval_status", "Pending")
+            if approval_status not in RESOLVING_DELIVERABLE_STATUSES | {"Rejected", "Pending"}:
+                approval_status = "Pending"
+            approval_reason = approval_parsed.get("approval_reason", "")
+            if approval_status not in RESOLVING_DELIVERABLE_STATUSES:
+                break  # Rejected/Pendingはwrite_agreement成功の自己申告を伴わないため対象外
+            # [BL-178フォローアップ] get_last_write_agreement_succeeded()は「write_agreementが
+            # 何かしら成功したか」しか見ておらず、Stage3のLLMがtarget_topicを誤り「統合承認判断」
+            # という別のDecisionエントリをCREATEしてしまうケース（実ドライランで確認）を検知
+            # できない。_is_task_completed（BL-167、BL-176のゲートと同一の判定基準）を併用し、
+            # 「Expertの成果物（Deliverable）自体が実際にResolving相当へ更新されたか」まで
+            # 機械的に確認する。
+            if get_last_write_agreement_succeeded() and _is_task_completed(_conn, state["run_id"], _CURRENT_TASK_ID):
+                break  # 自己申告とツール呼び出し結果（Deliverable自体の更新）が一致
+            print(
+                f"  ⚠️ [User AI Stage3] BL-177/BL-178: approval_status='{approval_status}'ですが、"
+                f"Expertの成果物（Deliverable）自体がApproved相当へ更新されたことを確認できません"
+                f"（試行{_approval_attempt + 1}/3）。"
+            )
+            _approval_mismatch_notice = (
+                "\n\n【訂正指示】あなたは前回approval_status=\"" + approval_status + "\"と回答しましたが、"
+                "Agentの成果物（Deliverable）自体が承認済みへ更新されたことを確認できませんでした。"
+                "write_agreementを呼ぶ際、action_type=\"UPDATE\", entry_type=\"Deliverable\", "
+                "target_topic=\"" + _deliverable_topic + "\"（この文字列をそのまま指定）で、"
+                "新しいDecisionエントリではなくAgentの成果物自体を更新してください。\n"
+            )
+        else:
+            print("  🚨 [User AI Stage3] BL-177: リトライを使い切っても承認記録の食い違いが解消しませんでした。ApprovalRecordingFailedとして扱います。")
+            approval_status = "ApprovalRecordingFailed"
+
+        # ===== Stage 4: 次タスク指示 / 現タスク修正指示 / 承認記録失敗の待機メッセージ =====
+        _transition_notice = _build_task_transition_blocked_notice(state)  # [BL-125/BL-176]
+        _escalation_resume_notice = _build_escalation_resume_notice(state)  # [BL-096]
+        if approval_status in RESOLVING_DELIVERABLE_STATUSES:
+            stage4_system_prompt = (
+                f"あなたは目標達成のプロジェクトオーナー（発注者）です。これは4段階レビューの"
+                f"第4段（最終段）です。第3段で成果物の承認（{approval_status}）が確定しました。"
+                f"あなたの役割は、Task Plannerが作成した計画に従い、Agent AIへ**1度に1つずつ**"
+                f"次のタスクを指示することです（一気に複数指示すると相手が混乱するため厳禁）。\n\n"
+                f"【絶対目標】{user_goal}\n"
+                f"{goal_essence_text}\n"
+                f"📊 [プロジェクト進行計画]\n{json.dumps(state.get('phases', []), ensure_ascii=False, indent=2)}\n\n"
+                f"【承認理由（第3段）】{approval_reason}\n"
+                f"{_escalation_resume_notice}"
+                f"{_transition_notice}"
+                f"【同じ検証・計算を繰り返さない】必要な確認は既に前段で完了しています。ここでは"
+                f"次タスクへの具体的な指示文を簡潔に書いてください。\n"
+            )
+            if turn_count >= max_turns - 4:
+                stage4_system_prompt += (
+                    "🚨 【終盤】計画された全タスクの成果物が出揃っていれば、"
+                    "『すべてのタスクが完了したため、プロジェクトを完了とする。[PROJECT_COMPLETE]』"
+                    "と宣言してください。相手に最終報告書の作成を指示しないでください"
+                    "（統合はIntegratorが行います）。\n"
+                )
+        elif approval_status == "ApprovalRecordingFailed":
+            stage4_system_prompt = (
+                f"あなたは目標達成のプロジェクトオーナー（発注者）です。これは4段階レビューの"
+                f"第4段（最終段）です。第3段で承認処理を試みましたが、システム側の技術的な理由で"
+                f"承認の記録が完了しませんでした（Agent AIの成果物の内容自体に問題があったわけでは"
+                f"ありません）。Agent AIの成果物内容には一切言及・評価しないでください。"
+                f"「承認手続きの確認中のため、少し待ってほしい」という趣旨の短い待機メッセージのみを"
+                f"書いてください。存在しない欠陥や修正点をでっち上げないでください。\n"
+            )
+        else:
+            stage4_system_prompt = (
+                f"あなたは目標達成のプロジェクトオーナー（発注者）です。これは4段階レビューの"
+                f"第4段（最終段）です。第3段の判断（{approval_status}）により、今回は承認せず、"
+                f"Agent AIへ現タスクの修正指示を出します。\n\n"
+                f"【絶対目標】{user_goal}\n"
+                f"{goal_essence_text}\n"
+                f"【却下・保留の理由（第3段）】{approval_reason}\n"
+                f"【第1段（レビュー）の結果】{review_comment}\n"
+                f"【第2段（issue確認）で残った懸念】{remaining_concerns or '(なし)'}\n\n"
+                f"矛盾の内容とその理由を明示し、Agent AIが成果物のどこをどう直すべきか具体的に"
+                f"示した修正指示を出してください。次タスクへの移行はまだ指示しないでください。\n"
+            )
+        stage4_system_prompt += (
+            f"\n【重要】あなたが使えるツールはthinkのみです。{_THINK_TRAILER_SENTENCE}\n"
+        )
+        _reset_think_scratchpad()
+        stage4_messages = [{"role": "system", "content": stage4_system_prompt}]
+        if is_stateless_mode:
+            _recent = state["chat_history"][-config["chat_history_window"]:] if state["chat_history"] else []
+        else:
+            _recent = state["chat_history"]
+        for msg in _recent:
+            _role = "assistant" if msg["role"] == "user" else "user"
+            stage4_messages.append({"role": _role, "content": msg["content"]})
+
+        content = query_AI(stage4_messages, client=client_user, model=model_user, label="User AI (Stage4)",
+                            tools=[THINK_TOOL], state=state)
+        _absorb_stage_trackers()
+        if content is None or content.strip() == "" or content == "(APIから空の応答が返されました)":
+            for _retry in range(3):
+                print(f"⚠️ [User AI Stage4] 空応答を検知。リトライ {_retry + 1}/3...")
+                _reset_think_scratchpad()
+                content = query_AI(stage4_messages, client=client_user, model=model_user, label="User AI (Stage4)",
+                                    tools=[THINK_TOOL], state=state)
+                _absorb_stage_trackers()
+                if content and content.strip() and content != "(APIから空の応答が返されました)":
+                    break
+            else:
+                raise RuntimeError("User AI(Stage4)の応答取得に3回連続で失敗しました。実行を中断します。")
+
+        # [BL-177 制約2] 集約したトラッカーをグローバルへ書き戻す（generate_user_utterance_nodeの
+        # 既存の読み取りコードは無変更で正しく動作する）。
+        global _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ESSENCE_PROPOSAL
+        _LAST_WRITE_AGREEMENT_SUCCEEDED = _stage_wrote_agreement
+        _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED = _stage_wrote_issue_resolution
+        _LAST_REASONING_TEXT = _stage_reasoning_text
+        _LAST_GOAL_REVISION = _stage_goal_revision
+        _LAST_ESSENCE_PROPOSAL = _stage_essence_proposal
+        return content
+
     # [BL-104] プロンプトキャッシュのヒット率向上のため、内容が変わらない固定の指示文を
     # 先頭付近にまとめ、ターンごとに変わる動的な内容（決定事項DB・直近の行動タイムライン・
     # 現在タスク情報等）は末尾側に配置する（call_expertと同じ原則、詳細はBL104_basic_design.md）。
     # ただし「後述の【現在のタスクで未充足の要求項目】」「上記の【この値は確定済みです】」等、
     # 他ブロックへの位置的参照を持つ箇所は、参照先との相対位置を崩さないよう並び替えの対象外とする。
+    # [BL-185] さらに、動的な内容の中でも「決定事項DB・タスク情報」等の状況説明と、
+    # 「差し戻し通知・最終盤指示」等の直近の是正内容は区別し、後者をchat_historyより後ろへ
+    # 独立したsystemメッセージ（system_prompt_trailing）として配置する（詳細は下記コメント）。
     system_prompt = ""
 
     if user_always_remembers or state["turn_count"] == 1:
@@ -7125,7 +7837,18 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             "判断は不要です。この質問にのみ、明確かつ簡潔に回答してください。\n"
         )
 
-    # ここから先は実行中に変化する動的な内容（プレフィックスキャッシュの都合上、末尾側に配置）。
+    # ここから先は実行中に変化する動的な内容。[BL-185] ユーザー指定順（視座は上から下、
+    # 文脈は過去から現在）で提示するため、system_promptを先頭システムメッセージ用
+    # （system_prompt_leading）と末尾システムメッセージ用（system_prompt_trailing）の
+    # 2つに分けて組み立てる。system_prompt内でテキスト位置をどう並べても、messages配列は
+    # [system, ...chat_history]という構造上chat_history側が常に物理的に後ろへ来るため、
+    # 「差し戻し情報を本当に最後に読ませる」にはchat_historyより後ろへ新規メッセージを
+    # 追加する必要がある（BL-178でcall_expertに導入した構成と同型。実ログ
+    # log/2026-08-06/1149で、差し戻し直後のUser AIがchat_history末尾（Expertの完了報告）に
+    # 引きずられ、削除されたはずの「前回の完了宣言」をそのまま繰り返した実害を確認、
+    # 詳細はBL185_basic_design.md）。
+    system_prompt_leading = system_prompt
+    system_prompt_trailing = ""
 
     _conn = get_active_conn()
     agreements_text = _build_agreements_context_from_db(_conn, state["run_id"])
@@ -7148,7 +7871,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     if planned_issue_pin:
         timeline_str += f"\n\n【📋 計画済みissue（参考、対応task_idあり、issue_log）】\n{planned_issue_pin}"
 
-    system_prompt += (f"""
+    system_prompt_trailing += (f"""
         \n現在までの決定事項・検討状況DB】\n
         {agreements_text}\n\n
         【直近の各役割の行動、評価、その理由リスト】\n
@@ -7164,7 +7887,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     remaining_criteria_text = _scope_ctx["remaining_criteria_text"]
 
     #Task Plannerが作成したフェーズとタスクを明示する
-    system_prompt += (f"""
+    system_prompt_trailing += (f"""
         \n📊 [プロジェクト進行計画]
         目標達成への道しるべとして、Task Plannerが作成したフェーズとタスクの一覧を以下に示します。\n
         {phases_json}\n\n
@@ -7195,17 +7918,17 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     # 必ずresolve_premise_concern（却下）かrevise_goal（承認・ゴール改定）で解決させる。
     _open_escalations_text = _get_open_escalations_text(_conn, state["run_id"])
     if _open_escalations_text:
-        system_prompt += f"\n{_open_escalations_text}\n"
+        system_prompt_trailing += f"\n{_open_escalations_text}\n"
 
     # [BL-136] issue_logのescalated行（未先送り）についても、BL-086と同様に今回の発言で
     # 必ずRESOLVEかDEFERを呼ばせる（従来は受動的なpinのみで強制力がなかった）。
     _forced_escalated_issues_text = _get_forced_escalated_issues_text(_conn, state["run_id"])
     if _forced_escalated_issues_text:
-        system_prompt += f"\n{_forced_escalated_issues_text}\n"
+        system_prompt_trailing += f"\n{_forced_escalated_issues_text}\n"
 
-    system_prompt += _build_detector_observations_block(state)
+    system_prompt_trailing += _build_detector_observations_block(state)
 
-    system_prompt += (
+    system_prompt_trailing += (
         "\n[BL-094: read_verified_fact/read_deliverable_fileで既存の決定と同期する]\n"
         "上記の【この値は確定済みです】は現在タスクに関連する確定値の一部にすぎません。"
         "read_verified_factは全フェーズ・全タスクを横断して、変数名やキーワードから確定値"
@@ -7235,10 +7958,47 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
 
     previous_user_input = state.get("user_input", "(取得不可)")
 
+    # [BL-185] エスカレーション再開通知・タスク遷移ブロック通知は、決定事項DB等と同じ
+    # 「状況説明」寄りの情報のため、差し戻し・最終盤指示より前（trailing内の中盤）に置く。
+    system_prompt_trailing += _build_escalation_resume_notice(state)  # [BL-096]
+    system_prompt_trailing += _build_task_transition_blocked_notice(state)  # [BL-125]
+
+    #system_prompt_trailing += f"""
+    #    \n📋 【出力フォーマット（厳守）】\n"
+    #    あなたは必ず以下のJSON形式でのみ応答してください。自然言語のテキストをJSONの外に書かないでください。\n"
+    #    現在指示を出す対象のフェーズIDとタスクIDを明記し、`user_utterance` の中にAgent AIへの発言内容を記述してください。\n\n"
+    #    Return ONLY JSON:
+    #    {{
+    #        "phase_id": "phase_1",
+    #        "task_id": "task_1_1",
+    #        "user_utterance": "エージェントAIへの具体的な指示やフィードバック..."
+    #    }}
+    #"""
+
+    #print("---USER_AI---\n")
+    #print("---chat_histroy---\n")
+
+    if state["turn_count"] >= max_turns - 2:
+        system_prompt_trailing += f"""
+            🚨 【最終盤の超重要指示】\n
+            これまでの議論で、計画されたすべてのタスクが完了し、それぞれのタスクの「成果物」が提出されているか確認してください。\n
+            すべてのタスクの個別成果物が出揃い、内容に問題がなければ、**『すべてのタスクが完了したため、プロジェクトを完了とする。[PROJECT_COMPLETE]』** と明確に宣言して議論を締めくくってください。\n
+            ※注意：相手のAIに『これまでの議論をすべてまとめた最終報告書を作成せよ』とは**絶対に指示しないでください**。統合はシステムの別機能（Integrator）が行います。\n
+            [BL-185] ただし、今回Detectorからの差し戻し（下記に表示されている場合）があれば、\n
+            その指摘への対応を最優先してください。差し戻しを無視して拙速にプロジェクト完了を\n
+            宣言することは禁止です。\n
+        """
+
+    # [BL-185] 差し戻し通知（drift_flag/constraint_issue="major"）は、system_prompt_trailingの
+    # 最後（＝messages配列全体でも最後）に配置する。BL-178でcall_expertに導入したのと同じ
+    # 「最も直近の是正内容を、chat_historyの内容やそれより前のtrailing内テキストに関わらず
+    # 必ず最後に読ませる」構成（実ログlog/2026-08-06/1149で、差し戻し直後のUser AIが
+    # 🚨最終盤の超重要指示（当時は差し戻し通知の直後に配置）や、chat_history末尾のExpertの
+    # 完了報告に引きずられ、削除されたはずの「前回の完了宣言」をそのまま繰り返した実害を確認）。
     if state.get("drift_flag") or state.get("constraint_issue") in ["major"]:
         # [BL-143] 何回目の差し戻しか・前回と同じ指摘の繰り返しかを機械的に要約し先頭へ提示する。
         _retry_label = _build_retry_situation_label(state, state.get("user_retry_count", 0))
-        system_prompt += f"""
+        system_prompt_trailing += f"""
             \n{_retry_label}
             \n⚠️ 【重要】\n
             あなたの前回の発言は、倫理違反、矛盾、リソース超過や制約違反などの重大な矛盾が検知されDetector（監査システム）により差し戻されました。\n
@@ -7254,37 +8014,16 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             指摘された矛盾点をAgent AIが成果物のどこをどう直すべきか具体的に示した修正指示を\n
             出してください。次タスクへの移行は、Agent AIが修正版を再提出し、あなたが指摘事項の\n
             解消を確認できてから改めて行ってください。\n
+            [BL-185] 【最優先】上記の🚨最終盤の超重要指示（表示されている場合）よりもこの差し戻し\n
+            対応を優先してください。差し戻された内容をそのまま繰り返したり、完了宣言で押し切ろうと\n
+            したりすることは絶対に禁止です。\n
             """
 
-    if state["turn_count"] >= max_turns - 2:
-        system_prompt += f"""
-            🚨 【最終盤の超重要指示】\n
-            これまでの議論で、計画されたすべてのタスクが完了し、それぞれのタスクの「成果物」が提出されているか確認してください。\n
-            すべてのタスクの個別成果物が出揃い、内容に問題がなければ、**『すべてのタスクが完了したため、プロジェクトを完了とする。[PROJECT_COMPLETE]』** と明確に宣言して議論を締めくくってください。\n
-            ※注意：相手のAIに『これまでの議論をすべてまとめた最終報告書を作成せよ』とは**絶対に指示しないでください**。統合はシステムの別機能（Integrator）が行います。\n
-        """
-        
-    #system_prompt += f"""
-    #    \n📋 【出力フォーマット（厳守）】\n"
-    #    あなたは必ず以下のJSON形式でのみ応答してください。自然言語のテキストをJSONの外に書かないでください。\n"
-    #    現在指示を出す対象のフェーズIDとタスクIDを明記し、`user_utterance` の中にAgent AIへの発言内容を記述してください。\n\n"
-    #    Return ONLY JSON:
-    #    {{
-    #        "phase_id": "phase_1",
-    #        "task_id": "task_1_1",
-    #        "user_utterance": "エージェントAIへの具体的な指示やフィードバック..."
-    #    }}
-    #"""
-
-    #print("---USER_AI---\n")
-    #print("---chat_histroy---\n")
-
-    system_prompt += _build_escalation_resume_notice(state)  # [BL-096]
-    system_prompt += _build_task_transition_blocked_notice(state)  # [BL-125]
-
+    # [BL-185] system_prompt_trailingをchat_historyより後ろへ独立したsystemメッセージとして
+    # 追加する（BL-178でcall_expertに導入したのと同型のパターン）。
     # --- 3. メッセージ履歴の構築 ---
-    messages = [{"role": "system", "content": system_prompt}]
-    
+    messages = [{"role": "system", "content": system_prompt_leading}]
+
     if is_stateless_mode:
         print("---stateless_mode---\n")
         recent_history = state["chat_history"][-config["chat_history_window"]:] if state["chat_history"] else []
@@ -7305,7 +8044,13 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         messages.append({"role": "user", "content": "(会話を開始してください。要件を伝えて作業を指示してください)"})
         print("---NO chat_history---\n")
 
-    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID, _CURRENT_GOAL_TEXT, _CURRENT_PHASE_ID
+    # [BL-185] system_prompt_trailing（決定事項DB・エスカレーション通知・最終盤指示・
+    # 差し戻し通知を含む「直近の是正内容」）をchat_historyより後ろへ独立したsystemメッセージ
+    # として追加する。複数のrole:"system"メッセージを会話途中・末尾に挿入すること自体は
+    # BL-093/BL-178で既に実績のあるパターン（新規リスクではない）。
+    messages.append({"role": "system", "content": system_prompt_trailing})
+
+    # [BL-177] globalは関数冒頭（_is_normal_review_turn分岐内）で宣言済みのため再宣言不要。
     _CURRENT_CALLER_ROLE = "user"
     _CURRENT_TASK_ID = state.get("current_task_id", "")
     _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")  # [BL-096] write_issueのphase_id用
@@ -7421,11 +8166,30 @@ def generate_user_utterance_node(state: LineageState) -> LineageState:
     _goal_revision = get_last_goal_revision()
     if _goal_revision:
         state["goal"] = _goal_revision["new_goal_text"]
+        # [BL-162] old_goal_textも橋渡しする。従来はnew_goal_textのみstate["goal"]へ反映され
+        # old_goal_textはここで捨てられていたため、次のgoal_change監査Detectorが「旧文が
+        # 保持されているか」を確認する手段を一切持たなかった（read_verified_fact等で計5回
+        # 探して全てnot_found）。
+        state["goal_revision_old_text"] = _goal_revision.get("old_goal_text") or ""
         print(f"🧭 [BL-086] Escalation {_goal_revision['escalation_id']} 承認によりgoalを改定しました。")
         # [BL-126 Stage B] 次のuser_detectorに、通常の成果物監査ではなくreview_mode="goal_change"
         # （§5の4判断基準）を使わせる。反応的revise_goal経路にも既存パスを変えずに適用できる
         # （detector_node/route_after_user_detectorの既存ロジックは一切変更不要）。
         state["goal_revision_pending_review"] = True
+        # [BL-186] ゴール改定で影響を受けた過去タスクの再検証を、BL-145と同型の配線で
+        # task_plannerへ強制的に引き継ぐ（次ターンのgoal_essence→task_planner再入場時に
+        # 自動的に消費される、BL-126 Stage C）。他要因（task_plan_reviewerの差し戻し等）が
+        # 既にplan_revision_reasonをセット済みの場合は上書きしない。
+        _new_plan_revision_reason = _goal_revision.get("plan_revision_reason") or ""
+        if _new_plan_revision_reason:
+            if not state.get("plan_revision_reason"):
+                state["plan_revision_reason"] = _new_plan_revision_reason
+                state["plan_revision_issue_ids"] = _goal_revision.get("plan_revision_issue_ids") or []
+                print(f"  🧭 [BL-186] ゴール改定に伴い、過去タスクの再検証をplan_revision_reasonとして"
+                      f"task_plannerへ強制的に引き継ぎました（{len(state['plan_revision_issue_ids'])}件）。")
+            else:
+                print("  ⚠️ [BL-186] plan_revision_reasonが既に別要因でセット済みのため、"
+                      "今回は次回reflectionでの再評価に譲ります。")
     # [BL-126 Stage D] 今ターンでwrite_agreement(entry_type="EssenceProposal")が成功していれば
     # stateへ橋渡しする（facilitator_nodeがこのターンでの収束判定に使う。ツールハンドラは
     # stateへ直接触れられないため、他のブリッジ変数と同じパターン）。
@@ -7574,9 +8338,10 @@ Sets the starting phase for subsequent execution steps within the lineage state.
     revision_reason = state.get("plan_revision_reason", "")
     revision_issue_ids = state.get("plan_revision_issue_ids", [])
 
-    # [UX/一時停止再開] checkpointからの再開時、entry_pointが常にtask_planner固定のため
-    # ターン1の途中（既にphasesが確定済み）で止めた場合もこのノードを必ず通る。
-    # turn_count==1だけを見ると計画を毎回再生成してしまうため、phases未確定の場合のみ実処理する。
+    # [BL-105] グラフのentry_pointはgoal_essence固定であり、外側whileループが完了済みの
+    # threadへフルstateを再投入するたびに（次ターン開始時、通常の多ターンパターン）、この
+    # ノードを毎回必ず通る。turn_count==1だけを見ると計画を毎回再生成してしまうため、
+    # phases未確定の場合のみ実処理する。
     if is_initial or revision_reason:
         if revision_reason:
             # [BL-126 Stage C/v2修正] 消費「後」ではなくガード判定直後（先頭）でクリアする。
@@ -8134,6 +8899,7 @@ Manages state updates including risk levels, constraint logging, and decision re
             },
             get_active_conn(), state["run_id"], "detector_auto", _bl096_phase_id, current_task_id,
         )
+        print(f"  🗂️ [BL-096] Detectorのobservations（{len(observations)}字）を機械的バックアップとしてissue_logへ自動起票しました: topic={_bl096_topic}")
 
     if result["risk"] == "high":
         print("🛑 [Detector] risk=highを検出しました。state['halt']=Trueで緊急停止します。")
@@ -8252,6 +9018,22 @@ def _resolve_task_transition(state: LineageState, transition: dict) -> None:
                     f"{len(blocking_issues)}件存在するため、'{canonical_task_id}'への遷移をブロックしました: {topics}"
                 )
                 state["task_transition_blocked_issue_topics"] = topics
+                return
+
+            # [BL-176] 離脱しようとしているtaskがまだ承認済み（Approved相当のDeliverable）で
+            # ない場合も遷移を拒否する。write_agreementによる承認の成否（即時DBコミット＋事後の
+            # Detector監査）と、この関数への入力advances_to_task_id（decision_extractorが会話文
+            # から自由文脈で抽出する遷移意図）は完全に独立した経路であり、Userが1発言で「現タスク
+            # の承認」と「次タスクへの指示」を同時に述べても両者の整合性は保証されない。BL-125と
+            # 同型の機械的ゲートとして、承認未成立のままcurrent_task_idが先走ることを防ぐ。
+            # departing_task_idが空（まだ一度もタスクに着手していない最初の遷移）の場合は、
+            # そもそも承認すべき前任taskが存在しないため対象外とする。
+            if departing_task_id and not _is_task_completed(get_active_conn(), state["run_id"], departing_task_id):
+                print(
+                    f"  🛑 [BL-176] '{departing_task_id}'はまだ承認済み（Approved相当）の"
+                    f"Deliverableが存在しないため、'{canonical_task_id}'への遷移をブロックしました。"
+                )
+                state["task_transition_blocked_unapproved_task_id"] = departing_task_id
                 return
 
         state["current_task_id"] = canonical_task_id
@@ -8574,7 +9356,16 @@ It generates a formal decision based on reflection results, updating the overall
         # （_get_forced_escalated_issues_textと同じフィルタ）。plan_revision_reasonが既に
         # 別要因（task_plan_reviewerの差し戻し・facilitatorのEssence Dialogue収束）で
         # セット済みの場合は上書きしない（次回のreflectionで再評価される）。
-        _formalizable_stale = [i for i in _stale_escalated if not i.get("defer_to_task_id")]
+        # [BL-167] ただし受け皿タスク（defer_to_task_id）が既に完了（RESOLVING_DELIVERABLE_
+        # STATUSES）しているのにissueが未解決のままの場合、その受け皿は事実上失効しており
+        # 二度と拾われない「永久迷子」状態になる（実ログで確認：「車両台数2台では要件を満たせ
+        # ない」issueがdefer_to_task_id="task_1_2"のまま、task_1_2完了後も放置され続けていた）。
+        # この場合は受け皿が既にあるとはみなさず、再度タスク化対象に含める。
+        _formalizable_stale = [
+            i for i in _stale_escalated
+            if not i.get("defer_to_task_id")
+            or _is_task_completed(get_active_conn(), state["run_id"], i["defer_to_task_id"])
+        ]
         if _formalizable_stale and not state.get("plan_revision_reason"):
             _reason_lines = [
                 f"- topic={i['topic']}: {i['description']}（累積{i['occurrence_count']}回発生、"
@@ -8923,9 +9714,12 @@ def halt_node(state: LineageState) -> LineageState:
 # 5. 分岐ロジック & グラフ構築
 # ---------------------------------------------------------------------------
 
-def build_graph():
+def build_graph(checkpointer: BaseCheckpointSaver | None = None):
     """【SLM要約】
     Construction of the core state machine graph, defining all processing nodes (e.g., planners, detectors, experts) and their execution flow within the system.
+    [BL-105] checkpointerを渡すとLangGraph公式のノード境界チェックポイント（SqliteSaver等）が
+    有効になる。省略時（None）は従来通りチェックポイント無しでコンパイルされ、既存のトポロジー
+    確認専用テスト（build_graph()を引数無しで呼ぶもの）はそのまま動作する。
     """
     graph = StateGraph(LineageState)
 # 1. ノードの登録（★関数は同じものを使い回し、名前で役割を分ける）
@@ -9026,26 +9820,43 @@ Otherwise, routing to "user_decision_extractor."
         """【SLM要約】
         Determines the next system step after a user decision, directing flow to 'halt', 'integrator' for review, or 'orchestrator' for further processing.
         """
-        if state.get("halt"): 
+        if state.get("halt"):
             print("\n[route_after_user_decision]------ !!! Halt !!! ------\n")
             return "halt"
-            
+
+        # [BL-181] 第2段（機械的な最終防衛線）: BL-125が今回のターンでタスク遷移をブロックした
+        # （current_task_idは更新されていない）にもかかわらず、Orchestrator/Expertが会話文脈
+        # （Userが既に発言した次タスクの指示）だけを頼りに先走ってしまう事故が実際に発生した
+        # （`log/2026-08-05/1833`、task_4_1の未解決major issueを残したままtask_4_2の成果物が
+        # 生成され、write_agreementのtask_id不一致ゲートに阻まれてtask_idを誤登録する回避策を
+        # Expertが取ってしまった）。第1段（user_detectorのドメイン監査）で捕捉できなかった場合の
+        # 保険として、ここでPython側のみで機械的に差し戻す（LLMを再度介在させない）。
+        # [BL-183] _resolve_task_transitionのブロック要因はtask_transition_blocked_unapproved_task_id
+        # （BL-176: 離脱先未承認）とtask_transition_blocked_issue_topics（BL-125本来: 未解決severe
+        # issue）の2種類が排他的に立ちうる。当初はBL-176側のみをチェックしており、BL-125本来の
+        # ブロック（`log/2026-08-06/0009`→`0751`で実際に再発、task_6_1の成果物がtask_id='task_5_2'
+        # として誤登録された）を素通りさせてしまっていたため、両方をチェックする。
+        if state.get("task_transition_blocked_unapproved_task_id") or state.get("task_transition_blocked_issue_topics"):
+            print("\n[route_after_user_decision]------ !!! BL-125によりタスク遷移がブロックされたため、Orchestratorへは進めずUser AIへ差し戻します !!! ------\n")
+            return "generate_user_utterance"
+
         # ★ User AIが「完了宣言」を出した場合は、エージェントを呼ばずに直接Integratorへ
         if state.get("ready_for_review"):
             print("\n[route_after_user_decision]------ レビューの準備が整いました ------\n")
-            return "integrator" 
-            
+            return "integrator"
+
         # 通常の指示であれば、Orchestrator（専門家選定）へ進む
         return "orchestrator"
 
     # user_decision_extractorからの遷移を条件付きに変更
     graph.add_conditional_edges(
-        "user_decision_extractor", 
+        "user_decision_extractor",
         route_after_user_decision,
         {
-            "halt": "halt", 
-            "integrator": "integrator", 
-            "orchestrator": "orchestrator"
+            "halt": "halt",
+            "integrator": "integrator",
+            "orchestrator": "orchestrator",
+            "generate_user_utterance": "generate_user_utterance",
         }
     )
 
@@ -9218,22 +10029,37 @@ Otherwise, routing to "user_decision_extractor."
     )
     
     graph.add_edge("halt", END)
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 # ---------------------------------------------------------------------------
 # 6. AI vs AI 実行用ループ
 # ---------------------------------------------------------------------------
 
-def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.db", resume_from: str | None = None):
+def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.db", resume_run_id: str | None = None,
+                       checkpoint_id: str | None = None):
     """【SLM要約】
     Orchestration of an iterative, goal-driven dialogue loop where multiple AIs collaborate to refine a solution based on predefined constraints and state management.
     SQLite接続（run単位のシングルトン）を初期化し、ループ終了時に必ずクローズする（R1、設計書§3.6.1準拠）。
-    [UX/一時停止再開] resume_fromに_save_checkpointで保存したcheckpoint.jsonのパスを渡すと、
-    そのstate/config/current_turnから再開する（新規run_idは発行しない）。
+    [BL-105/D-086 Tier1] resume_run_idに過去のrun_id（==LangGraphのthread_id）を渡すと、
+    CELA_CHECKPOINT_DB_PATHへSqliteSaverが自動永続化した状態から再開する（新規run_idは発行しない）。
+    entry_pointからの全体再走行ではなく、中断した直後のノードから再開する（app.stream(None, ...)）。
+    [BL-174] checkpoint_idを併せて渡すと、そのthreadの「最新」ではなく、指定した過去の
+    checkpoint（`--list-checkpoints`で一覧表示できる、ノード完了ごとに自動保存されている
+    LangGraph公式のスナップショットの1つ）から再開する（LangGraph公式のtime travel/replay。
+    それ以降のノードだけが実行し直され、それより前のノードは再実行されない）。これは新しい
+    分岐（LangGraphの言葉で言えばそのcheckpointを親とする新規checkpoint列）を作ることに
+    相当し、元の「その後の履歴」は上書きされず、checkpoint_id指定で個別に参照可能なまま
+    checkpointer DBに残り続ける（gitのbranchに近い挙動）。
     """
     global _DB_CONN
+    if checkpoint_id and not resume_run_id:
+        print("🚨 --checkpoint-idは--resume（run_id）と併用してください。")
+        return
 
-    app = build_graph()
+    checkpointer_conn = sqlite3.connect(CELA_CHECKPOINT_DB_PATH, check_same_thread=False)
+    checkpointer = SqliteSaver(checkpointer_conn)
+    checkpointer.setup()  # 冪等（CREATE TABLE IF NOT EXISTS相当）
+    app = build_graph(checkpointer=checkpointer)
 
     reset_call_seq()
     if REPLAY_MODE == "replay":
@@ -9244,112 +10070,140 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
         os.replace(_REPLAY_FIXTURE_PATH, backup_path)
         print(f"⚠️ [RECORD] 既存のfixtureファイルを {backup_path} に退避しました（前回記録の上書き消失を防止）。")
 
-    if resume_from:
-        state, config, current_turn = _load_checkpoint(resume_from)
-        run_id = state["run_id"]
-        db_path = state["db_path"]
-        print(f"♻️ [Resume] チェックポイント {resume_from} から再開します（run_id={run_id}、turn={current_turn}）。")
-        # [BL-121] チェックポイントが「既にhalt済み」の状態を保存していた場合
-        # （haltを引き起こした要因の直後に保存された等）、これまでは外側whileループの
-        # while条件（current_turn<=max_turns）しかチェックしておらず、halt済みの状態を
-        # そのままapp.stream()へ再投入して処理を継続してしまう経路が存在した。
-        # 再開直後にhaltを明示チェックし、既にhalt済みならここで停止する。
-        if state.get("halt"):
-            print(f"\n🚨 [Resume/HALT] 再開したチェックポイントは既にhalt済みでした。 (ステータス: {state.get('discussion_status')})")
-            print("============================================================")
-            print("🏁 評価ループが終了しました。（再開時点で既にhalt済み）")
-            print("============================================================")
-            return
-    else:
-        run_id = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
-        current_turn = 1
-        state: LineageState = {
-            "goal": target_goal,
-            "user_input": "",
-            "current_task_summary": "",
-            "selected_expert": "",
-            "expert_output": "",
-            "run_id": run_id,
-            "db_path": db_path,
-            "chat_history": [],
-            "turn_count": 0,
-            "round_count": 0,
-            "max_turns":  config["initial_max_turnval"],
-            "reflection_interval": config["reflection_interval"],
-            "drift_flag": False,
-            "halt": False,
-            "agent_has_guardrail": config["agent_has_guardrail"],
-            "discussion_status": "continuing",
-            "is_stateless_mode": config["is_stateless_mode"],
-            "facilitation_count": 0,
-            "review_count": 0,
-            "is_completed": False,
-            "ready_for_review": False,
-            "constraint_issue": "none",
-            "constraint_issue_log": [],
-            "detector_observations_log": [],
-            "escalation_active": False,
-            "escalation_just_resolved_notice_pending": False,
-            "task_transition_blocked_issue_topics": [],
-            "escalated_issue_first_seen_round": {},
-            "global_constraints": [],
-            "phases": [],
-            "current_phase": {
-                "phase_id": "phase_0",
-                "title": "初期化待ち",
-                "description": "",
-                "allowed_abstraction_levels": ["concept", "constraint", "design", "impl"],
-                "focus_scope": "global",
-                "expected_time_axis": "assumption",
-                "tasks": [],
-                "budget_hint": {}
-            },
-            "current_task_id": "",
-            "verified_facts": {},
-            "task_criteria_status": {},
-            "expert_last_python_calls": [],
-            "expert_last_reasoning": "",
-            "user_last_reasoning": "",
-            "risk_register": [],
-            "needs_revision_phases": [],
-            "phases_to_revise": [],
-            "last_reflection_note": "",
-            "plan_review_done": False,
-            "plan_reviewer_retry_count": 0,
-            "plan_reviewer_feedback": "",
-            "goal_essence_done": False,
-            "pending_task_ids": [],
-            "expert_consultation_mode": False,
-            "expert_pending_question": "",
-            "expert_blocking_reason": "",
-            "goal_revision_pending_review": False,
-            "plan_revision_reason": "",
-            "plan_revision_issue_ids": [],
-            "plan_revision_count": 0,
-            "phases_superseded": [],
-            "essence_dialogue_active": False,
-            "essence_dialogue_round": 0,
-            "essence_dialogue_max_rounds": 5,
-            "essence_dialogue_topic": "",
-            "last_essence_proposal": None,
-        }
-
-    global _CURRENT_RUN_ID
-    _CURRENT_RUN_ID = run_id
-    _DB_CONN = get_db_connection(db_path)
-    init_db(_DB_CONN)
-
-    checkpoint_path = os.path.join(getattr(MultiLogger, "log_dir", "log"), "checkpoint.json")
-
-    mode_str = "【ステートレス（決定事項DBによる知識永続化）】" if config["is_stateless_mode"] else "【ステートフル（生ログ全蓄積）】"
-
+    _DB_CONN = None
     try:
+        # [BL-105] LangGraphランタイム設定は`config`（Appconfig、関数引数）と名前が衝突するため
+        # 必ず`runtime_config`という別名を使う。
+        pending_resume_drain = False
+        if resume_run_id:
+            run_id = resume_run_id
+            runtime_config = {"configurable": {"thread_id": run_id}}
+            if checkpoint_id:
+                runtime_config["configurable"]["checkpoint_id"] = checkpoint_id
+            snapshot = app.get_state(runtime_config)
+            if not snapshot.values:
+                target_desc = f"checkpoint_id={checkpoint_id}" if checkpoint_id else "最新のチェックポイント"
+                print(f"🚨 [Resume] run_id={run_id}（{target_desc}）が見つかりませんでした（{CELA_CHECKPOINT_DB_PATH}）。--list-checkpoints {run_id} で一覧を確認してください。")
+                return
+            state = snapshot.values
+            db_path = state["db_path"]
+            current_turn = state.get("turn_count", 1)
+            if checkpoint_id:
+                print(f"♻️ [Resume] run_id={run_id} をcheckpoint_id={checkpoint_id}から再開します（turn={current_turn}）。")
+            else:
+                print(f"♻️ [Resume] run_id={run_id} から再開します（turn={current_turn}）。")
+            # [BL-121] チェックポイントが「既にhalt済み」の状態を保存していた場合
+            # （haltを引き起こした要因の直後に保存された等）、これまでは外側whileループの
+            # while条件（current_turn<=max_turns）しかチェックしておらず、halt済みの状態を
+            # そのままapp.stream()へ再投入して処理を継続してしまう経路が存在した。
+            # 再開直後にhaltを明示チェックし、既にhalt済みならここで停止する。
+            if state.get("halt"):
+                print(f"\n🚨 [Resume/HALT] 再開したチェックポイントは既にhalt済みでした。 (ステータス: {state.get('discussion_status')})")
+                print("============================================================")
+                print("🏁 評価ループが終了しました。（再開時点で既にhalt済み）")
+                print("============================================================")
+                return
+            # [BL-105] snapshot.nextが非空＝ラウンド途中（Ctrl+Cの大半のケース）で止まっている。
+            # まずNone入力でそのラウンドの続きをEND（またはhalt）まで走らせる必要がある。
+            # snapshot.nextが空＝ちょうどラウンド境界（END直後）で止まっていた稀なケースは、
+            # 通常の「新規ターン」としてフルstateを投入すればよい。
+            pending_resume_drain = bool(snapshot.next)
+        else:
+            run_id = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
+            runtime_config = {"configurable": {"thread_id": run_id}}
+            current_turn = 1
+            state: LineageState = {
+                "goal": target_goal,
+                "user_input": "",
+                "current_task_summary": "",
+                "selected_expert": "",
+                "expert_output": "",
+                "run_id": run_id,
+                "db_path": db_path,
+                "chat_history": [],
+                "turn_count": 0,
+                "round_count": 0,
+                "max_turns":  config["initial_max_turnval"],
+                "reflection_interval": config["reflection_interval"],
+                "drift_flag": False,
+                "halt": False,
+                "agent_has_guardrail": config["agent_has_guardrail"],
+                "discussion_status": "continuing",
+                "is_stateless_mode": config["is_stateless_mode"],
+                "facilitation_count": 0,
+                "review_count": 0,
+                "is_completed": False,
+                "ready_for_review": False,
+                "constraint_issue": "none",
+                "constraint_issue_log": [],
+                "detector_observations_log": [],
+                "escalation_active": False,
+                "escalation_just_resolved_notice_pending": False,
+                "task_transition_blocked_issue_topics": [],
+                "task_transition_blocked_unapproved_task_id": "",
+                "escalated_issue_first_seen_round": {},
+                "global_constraints": [],
+                "phases": [],
+                "current_phase": {
+                    "phase_id": "phase_0",
+                    "title": "初期化待ち",
+                    "description": "",
+                    "allowed_abstraction_levels": ["concept", "constraint", "design", "impl"],
+                    "focus_scope": "global",
+                    "expected_time_axis": "assumption",
+                    "tasks": [],
+                    "budget_hint": {}
+                },
+                "current_task_id": "",
+                "verified_facts": {},
+                "task_criteria_status": {},
+                "expert_last_python_calls": [],
+                "expert_last_reasoning": "",
+                "user_last_reasoning": "",
+                "risk_register": [],
+                "needs_revision_phases": [],
+                "phases_to_revise": [],
+                "last_reflection_note": "",
+                "plan_review_done": False,
+                "plan_reviewer_retry_count": 0,
+                "plan_reviewer_feedback": "",
+                "goal_essence_done": False,
+                "pending_task_ids": [],
+                "expert_consultation_mode": False,
+                "expert_pending_question": "",
+                "expert_blocking_reason": "",
+                "goal_revision_pending_review": False,
+                "plan_revision_reason": "",
+                "plan_revision_issue_ids": [],
+                "plan_revision_count": 0,
+                "phases_superseded": [],
+                "essence_dialogue_active": False,
+                "essence_dialogue_round": 0,
+                "essence_dialogue_max_rounds": 5,
+                "essence_dialogue_topic": "",
+                "last_essence_proposal": None,
+            }
+
+        global _CURRENT_RUN_ID
+        _CURRENT_RUN_ID = run_id
+        _DB_CONN = get_db_connection(db_path)
+        init_db(_DB_CONN)
+
+        mode_str = "【ステートレス（決定事項DBによる知識永続化）】" if config["is_stateless_mode"] else "【ステートフル（生ログ全蓄積）】"
+
+        # [BL-105] 最初のapp.stream()呼び出しのみ、再開でラウンド途中から続ける場合はNone
+        # （中断した直後のノードから再開）、それ以外（新規runの初回、または境界で止まっていた
+        # 再開）はフルstateを投入する。2回目以降のイテレーションは常にフルstateを投入する
+        # （既存の「完了済みstateをそのまま次ターンへ再投入する」パターンと同一）。
+        next_input = None if pending_resume_drain else state
+
         print("============================================================")
         print(f"🚀 Lineage Orchestrator: シナリオ検証  - DB+QAレビュー＆介入強化版")
         print(f"⚙️ 実行モード: {mode_str}")
+        print(f"🆔 run_id: {run_id}")
         print(f"🎯 共通目標:\n{target_goal}")
         print(f"⏳ 初期設定ターン数: {config["initial_max_turnval"]} ターン制限")
-        print(f"⏸️  Ctrl+Cでいつでも一時停止できます（{checkpoint_path} に保存されます）")
+        print(f"⏸️  Ctrl+Cでいつでも一時停止できます（再開: python cela_main.py --resume {run_id}）")
         print("============================================================")
 
         while current_turn <= state["max_turns"]:
@@ -9366,21 +10220,40 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
             prev_decision_count = len(get_decisions_from_db(_DB_CONN, run_id))
 
             #print("\n🤖 Agent AI が思考中...")
-            # [UX/一時停止再開] app.invoke()（グラフ全体を1回で最後まで実行）の代わりに
-            # app.stream(..., stream_mode="values")を使い、ノード実行後のstateスナップショットを
-            # 都度受け取ってcheckpointへ保存する。BL-005によりturn_countはグラフ内部で
-            # ループバックし続ける限り更新されず、app.invoke()単位のチェックポイントでは
-            # 長時間戻ってこないことがあるため、ノード単位の粒度で保存する。
+            # [BL-105] LangGraph公式のcheckpointer（SqliteSaver）がノード完了ごとに自動で状態を
+            # 永続化するため、手動でのcheckpoint保存は不要。Ctrl+C時は、これまでに完了済みの
+            # ノードまではcheckpointerに既に保存されているため、追加の保存操作なしで安全に
+            # 一時停止できる。
             try:
-                for step_state in app.stream(state, stream_mode="values"):
+                for step_state in app.stream(next_input, config=runtime_config, stream_mode="values"):
                     state = step_state
-                    _save_checkpoint(checkpoint_path, state, config, current_turn)
             except KeyboardInterrupt:
-                _save_checkpoint(checkpoint_path, state, config, current_turn)
                 print("\n\n⏸️ [PAUSE] Ctrl+Cを検知し、ドライランを一時停止しました。")
-                print(f"    直前の状態を {checkpoint_path} に保存しました。")
-                print(f"    再開するには: python cela_main.py --resume \"{checkpoint_path}\"")
+                print(f"    直前の状態はLangGraph checkpointer（run_id={run_id}）に自動保存済みです。")
+                print(f"    再開するには: python cela_main.py --resume {run_id}")
                 return
+            except DailyQuotaExhaustedError as e:
+                # [BL-171] KeyboardInterruptと同じ一時停止経路。checkpointerは完了済みノードまで
+                # 既に保存済みのため、追加の保存操作なしで安全に一時停止できる。
+                print("\n\n⏸️ [PAUSE] OpenRouter無料枠の日次上限に達したため、ドライランを一時停止しました。")
+                print(f"    詳細: {e}")
+                print(f"    直前の状態はLangGraph checkpointer（run_id={run_id}）に自動保存済みです。")
+                print("    無料枠は日次リセット（X-RateLimit-Reset）まで回復しません。クレジット購入で即時解消することもできます。")
+                print(f"    再開するには: python cela_main.py --resume {run_id}")
+                return
+
+            # [BL-105] 以降は常にフルstateを入力として渡す（既存の多ターンパターンと同型。
+            # 完了済みthreadへフルstateを再投入すると__start__からの新規runとして扱われる）。
+            next_input = state
+
+            # [BL-174] checkpoint_id指定での再開は最初のapp.stream()呼び出しのみに適用する。
+            # 固定したconfigurable.checkpoint_idを次イテレーション以降も使い続けると、毎ターン
+            # 同じ過去の分岐点から再度フォークしてしまい前進しない。最初の1回でLangGraphが
+            # その分岐点を親とする新しいcheckpoint列を書き込んだ後は、thread_idのみのconfigへ
+            # 切り替え、以降は（既存の多ターンパターンと同じく）その新しい分岐の最新checkpointを
+            # 自然にたどらせる。
+            if "checkpoint_id" in runtime_config["configurable"]:
+                runtime_config = {"configurable": {"thread_id": run_id}}
 
             #print("\n--- 🧠 Agent AIの内部思考プロセス (Decision Lineage & Extracted Agreements) ---")
 
@@ -9427,19 +10300,79 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
         print(f"🏁 評価ループが終了しました。 {mode_str})")
         print("============================================================")
     finally:
-        _DB_CONN.close()
-        _DB_CONN = None
+        if _DB_CONN is not None:
+            _DB_CONN.close()
+            _DB_CONN = None
+        checkpointer_conn.close()
+
+
+def list_checkpoints(run_id: str) -> None:
+    """[BL-174] `--list-checkpoints RUN_ID`向け。LangGraph公式のcheckpointerが各ノード完了
+    （superstep）ごとに自動保存しているスナップショット履歴を、`app.get_state_history()`
+    （新しい順で返る）で取得し、古い順（`git log --reverse`相当、実行の時系列通りに上から
+    下へ読める順）に並べ替えてgitのlogに近い一覧として表示する。ai_vs_ai_loop本体は
+    一切実行しない、純粋な閲覧用ユーティリティ。
+    """
+    checkpointer_conn = sqlite3.connect(CELA_CHECKPOINT_DB_PATH, check_same_thread=False)
+    try:
+        checkpointer = SqliteSaver(checkpointer_conn)
+        checkpointer.setup()
+        app = build_graph(checkpointer=checkpointer)
+        # get_state_historyは新しい順で返るため、時系列通り（古い順）に読めるよう反転する。
+        history = list(reversed(list(app.get_state_history({"configurable": {"thread_id": run_id}}))))
+        if not history:
+            print(f"🚨 run_id={run_id} のチェックポイントが見つかりませんでした（{CELA_CHECKPOINT_DB_PATH}）。")
+            return
+        print(f"📜 [Checkpoints] run_id={run_id} の履歴（古い順、全{len(history)}件）:")
+        print("=" * 110)
+        for snap in history:
+            checkpoint_id = snap.config["configurable"]["checkpoint_id"]
+            step = snap.metadata.get("step") if snap.metadata else None
+            writes = (snap.metadata.get("writes") or {}) if snap.metadata else {}
+            completed_nodes = ", ".join(writes.keys()) if writes else "(初期状態)"
+            next_nodes = ", ".join(snap.next) if snap.next else "(完了/END)"
+            turn_count = snap.values.get("turn_count") if snap.values else None
+            current_task_id = (snap.values.get("current_task_id") or "(未着手)") if snap.values else "?"
+            # [BL-175] LangGraphのcreated_atはUTCのISO文字列（例: "...+00:00"）で固定のため、
+            # ログ側の時刻表示（JST）と同期させるためここでJSTへ変換する。checkpoint自体の
+            # 保存形式（UTC）は変更しない、表示のみの変換。
+            created_at_jst = datetime.datetime.fromisoformat(snap.created_at).astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
+            print(
+                f"  step={step!s:<4} {created_at_jst} JST | 完了: {completed_nodes:<24} | 次: {next_nodes:<24} "
+                f"| turn={turn_count} task={current_task_id} | checkpoint_id={checkpoint_id}"
+            )
+        print("=" * 110)
+        print(f"再開するには: python cela_main.py --resume {run_id} --checkpoint-id <checkpoint_id>（省略時は最新から再開）")
+    finally:
+        checkpointer_conn.close()
 
 
 if __name__ == "__main__":
-    # [UX] --resume <checkpoint.jsonのパス> で一時停止したドライランを再開できる。
+    # [BL-105] --resume <run_id> で一時停止したドライランを再開できる。
     import argparse
     _cli_parser = argparse.ArgumentParser(description="CELA Lineage Orchestrator")
     _cli_parser.add_argument(
-        "--resume", metavar="CHECKPOINT_JSON", default=None,
-        help="Ctrl+Cで一時停止した際に保存されたcheckpoint.jsonのパスを指定して再開する。",
+        "--resume", metavar="RUN_ID", default=None,
+        help="Ctrl+Cで一時停止した際に起動時バナーへ表示されたrun_idを指定して再開する。",
+    )
+    # [BL-174] ノード完了ごとに自動保存されているLangGraph公式のcheckpoint履歴を一覧表示・
+    # 任意の過去checkpointから再開できるようにする（time travel/replay）。
+    _cli_parser.add_argument(
+        "--list-checkpoints", metavar="RUN_ID", default=None,
+        help="指定run_idのcheckpoint履歴（ノードごとのスナップショット一覧）をgit log風に表示して終了する。",
+    )
+    _cli_parser.add_argument(
+        "--checkpoint-id", metavar="CHECKPOINT_ID", default=None,
+        help="--resumeと併用し、--list-checkpointsで確認したcheckpoint_idを指定して、"
+             "threadの最新状態ではなくその時点から再開する（省略時は従来通り最新から再開）。",
     )
     _cli_args = _cli_parser.parse_args()
+
+    if _cli_args.list_checkpoints:
+        # [BL-174] 純粋な閲覧用コマンドのため、ai_vs_ai_loop本体もMultiLoggerによる
+        # log/<日付>/<時刻>/ ディレクトリ作成も一切行わず、素のstdoutへ表示してすぐ終了する。
+        list_checkpoints(_cli_args.list_checkpoints)
+        sys.exit(0)
 
     # カスタムロガーを標準出力に設定（importのみでは発火させない。BL-027）
     sys.stdout = MultiLogger()
@@ -9502,5 +10435,6 @@ if __name__ == "__main__":
     run_ai_vs_ai_loop(
         target_goal=TARGET_GOAL,
         config= config,
-        resume_from=_cli_args.resume,
+        resume_run_id=_cli_args.resume,
+        checkpoint_id=_cli_args.checkpoint_id,
     )

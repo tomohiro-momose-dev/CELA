@@ -355,15 +355,25 @@ def test_integrator_node_reads_whiteboard_pointer(db_conn, monkeypatch):
     """integrator_nodeがWHITEBOARD:ポインタを正しく読み込み、統合文書に反映すること
     （FILE_PATH:の既存の読み込み分岐と対）。call_integrator（実LLM呼び出し）はモックする。"""
     conn, run_id = db_conn
-    cela_main._CURRENT_CALLER_ROLE = "user"  # Expertはstatus='Approved'を書き込めないため
     cela_main._CURRENT_TASK_ID = "task_1_1"
     marker_text = "これは統合されるべきWHITEBOARD本文マーカーです"
+    # [BL-169] entry_type='Deliverable'のCREATEはExpertのみ許可（userは不可）になったため、
+    # Expertが新規作成した上でUserが承認する2段階の現実的なフローで成果物を用意する。
+    cela_main._CURRENT_CALLER_ROLE = "expert"
     create_result = cela_main.TOOL_DISPATCH["write_agreement"]({
-        "action_type": "CREATE", "status": "Approved", "topic": "R4統合テスト成果物",
+        "action_type": "CREATE", "status": "Proposed", "topic": "R4統合テスト成果物",
         "decision_what": marker_text + "。" * 200,
         "reason_why": "r", "entry_type": "Deliverable", "phase_id": "phase_1",
     })
     assert create_result["success"] is True
+
+    cela_main._CURRENT_CALLER_ROLE = "user"
+    approve_result = cela_main.TOOL_DISPATCH["write_agreement"]({
+        "action_type": "UPDATE", "status": "Approved", "topic": "R4統合テスト成果物",
+        "decision_what": marker_text + "。" * 200,
+        "reason_why": "r", "entry_type": "Deliverable", "phase_id": "phase_1",
+    })
+    assert approve_result["success"] is True
 
     captured = {}
 
