@@ -5169,8 +5169,8 @@ Plan ModeでExploreエージェント1体を実行し、既存ツール基盤を
 
 1. 検索Provider＝DuckDuckGo（自前HTTP+自前パース方式）で確定済み。
 2. ~~`web_tools.py`への分割可否~~ → 独立レビュー（下記）を受け、既定方針として分割することで確定。
-3. `max_web_search_calls`/`max_web_fetch_calls`の具体的な上限値、DuckDuckGoスロットリング間隔の具体値（既定案：検索20回/run、取得20回/run、リクエスト間隔1秒以上）。
-4. `call_orchestrator`等、Expert/Detector以外への展開要否。
+3. ~~`max_web_search_calls`/`max_web_fetch_calls`の具体的な上限値~~ → ユーザーが**各30回/run**に確定（D-158）。DuckDuckGoスロットリング間隔（1秒以上）は既定案のまま変更なし。
+4. ~~`call_orchestrator`等、Expert/Detector以外への展開要否~~ → ユーザーが「task_planner/task_plan_reviewer/Expert/Detector/reflector/facilitatorで試してみて、必要ならUserや他にも拡張」と回答（D-158）。`call_orchestrator`/`generate_user_utterance`（User AI）は今回のスコープ外のまま。
 
 **独立レビューによる設計修正（2026-08-06）**：
 
