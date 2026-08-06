@@ -2232,6 +2232,20 @@
 
 ---
 
+### D-157: BL-184のweb_search初期実装プロバイダをDuckDuckGo（非公式スクレイピング）からBrave Search API（正式API）へ変更する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-07 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（AIから4案（検知して明示エラー化しこのまま進める／他Providerへ切替／ブラウザ自動化／今回は保留）を提示された上で、当初「chromiumどchorome driverでgoogle検索を叩くのは？」と提案。AIがブラウザ自動化の依存重量・Google ToS/技術リスク・`MAX_TOOL_ITER`圧迫の懸念を説明したところ、「Brave Search APIに切り替える」を選択） |
+| **決定理由** | `web_tools.py`実装完了後、実際に`html.duckduckgo.com/html/`へ疎通確認したところ、数回のリクエストだけで即座にBot対策の画像認証チャレンジ（HTTP 202、`anomaly-modal`）が返り、5秒後の再試行でも解除されなかった。D-153で「レート制限・一時ブロックのリスクあり」と一般論としては記録していたが、実測により理論上の懸念ではなく即時的・高頻度に発生する実害であることが判明した。ユーザーが提案したブラウザ自動化（Chromium/ChromeDriver）は技術的には有効だが、AIが（1）ブラウザバイナリ含む重量級の新規依存（BL-184が一貫して守ってきた依存追加最小化方針から大きく外れる）、（2）Google検索はDuckDuckGo以上に自動化を敵視しておりToS上・ブロック回避の持続性の両面でリスクが高い、（3）ブラウザ起動コストが`MAX_TOOL_ITER`（1回のquery_AI呼び出し内のツール往復上限）を圧迫しかねない、という懸念を説明した上で、正式APIであるBrave Search API（無料枠あり、`httpx`のみで実装可能＝新規パッケージ依存なし）への切り替えを提案し、ユーザーが承認した。 |
+| 決定内容 | `web_tools.py`に`BraveSearchProvider`（`https://api.search.brave.com/res/v1/web/search`、`X-Subscription-Token`ヘッダでAPIキー認証、`web.results[].{title,url,description}`を`{title,url,snippet}`へマッピング）を追加し、`get_search_provider()`の既定値を`duckduckgo`から`brave`へ変更。APIキーは環境変数`CELA_BRAVE_SEARCH_API_KEY`から読み、未設定時は`WebSearchConfigError`。`DuckDuckGoSearchProvider`はコードとして温存し`CELA_WEB_SEARCH_PROVIDER=duckduckgo`で引き続き選択可能とした上で、Bot対策チャレンジページ検知時に空の結果リストではなく明示エラーを返す防御を追加。 |
+| 影響 | `web_tools.py`（`BraveSearchProvider`追加、`get_search_provider()`既定値変更、`DuckDuckGoSearchProvider`へのチャレンジ検知追加）。API仕様調査メモを`docs/refs/brave_search/api_notes.md`（AGENTS.md §9準拠、source URL・取得日付き）へキャッシュ、`docs/refs/duckduckgo/html_endpoint_notes.md`へ実測結果を追記。新規テスト5件追加（`tests/test_bl184_web_tools.py`、Brave成功/APIキー未設定/レスポンス欠落フィールド、DuckDuckGoチャレンジ検知）、既存36件と合わせて41件全通過。`python -m py_compile`合格。**利用にはBrave Search APIキーの取得・環境変数設定がユーザー側で別途必要**（実ドライラン実施前の残作業）。 |
+| 関連 BL | [BL-184](back_log/issue_backlog.md#bl-184-web_searchweb_fetchread_reference_file-ツールの新設現実世界の地理数値をグラウンディングする) |
+
+---
+
 ## 未決定（pending）
 
 ---
