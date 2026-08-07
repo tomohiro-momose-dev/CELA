@@ -80,6 +80,23 @@ BL-184（web_search/web_fetch/read_reference_fileのcela_main.py配線）完了�
   `read_reference_file`のkeyword検索でこのrun内の既存キャッシュ（call limitを消費しない）を
   先に確認する」というガイドラインを`WEB_SEARCH_TOOL`/`READ_REFERENCE_FILE_TOOL`の説明文へ
   追加した。
+
+### 6. 各ノードのシステムプロンプト本文への反映（ユーザー指摘、初回実装時に漏れていた）
+
+ツールスキーマの説明文だけでなく、他の既存ツール（`read_verified_fact`/`read_deliverable_file`
+等、BL-094のパターン）と同様に、各ノードのシステムプロンプト本文にも「あなたが使えるツールは
+...です」という明示的な列挙と、web検索・キャッシュ利用のガイドライン段落を追加した：
+
+- **task_planner/task_plan_reviewer/Expert（軽量プロンプト）**: 番号付き指示として
+  「ゴール文にない現実世界の事実が必要なら推測せずweb_searchで調べる」「新規呼び出し前に
+  read_reference_fileでこのrun内の既存キャッシュを先に確認する」「web検索結果は一次ソース優先」
+  「citationsで引用元を明示する」を追加し、ツール列挙にweb_search/web_fetch/
+  read_reference_fileを追記。
+- **Detector（両パス）/Reflection/Facilitator**: 「citations付きのweb由来の主張について、
+  read_reference_fileでキャッシュ本文を確認し主張との整合性を検証できる（新規のweb検索・取得は
+  行わない）」という監査役向けの短い段落を追加し、ツール列挙にread_reference_fileを追記。
+  Facilitator・Reflectionはそもそも「あなたが使えるツールは...」という明示列挙自体が
+  存在しなかったため、この機会に新設した。
 - 各ノードの巨大なシステムプロンプト文字列（call_expert/call_task_planner/
   call_task_plan_reviewer/generate_user_utterance）を個別に書き換えるのではなく、
   **ツールスキーマの説明文に一元化**した。理由: これらのツールはfunction-calling仕様上、
