@@ -2272,6 +2272,32 @@
 
 ---
 
+### D-160: Detectorへweb_search/web_fetchを追加し、Expertの検索義務を強化し、Detector監査へ根拠実在性チェックを追加する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | BL-188実装後の実ドライラン3件（`log/2026-08-07/1047`/`1244`/`1312`）をユーザーがレビューした結果、(1) `1312`ではExpertが7回呼ばれ全てweb_search/web_fetchを装備していたにもかかわらず一度も使わず、根拠のない前提数値（デマンドタクシー運営費`@8,000円/日`）を土台に大規模な戦略分析を構築していたこと、(2) それを差し戻したDetectorの反論（最低賃金法に基づく試算）自体もD-158の設計通りweb_search/web_fetchを持たず、Detector自身の学習知識からの推論に過ぎなかったこと、の2点が判明した。ユーザーから「(1) Detectorにもweb_searchを追加しつつ (2) Expertの検索義務を強化し (3) Detector監査も数値・提案に根拠があるかを確認する方向にプロンプトを強化してほしい」との指示を受けた。 |
+| **決定理由** | D-158では「監査役（Detector/Reflection/Facilitator）には新規の外部通信を発生させない」という原則でDetectorをread_reference_file限定にしたが、実ドライランで「ExpertのAI推測をDetectorの別のAI推測で監査しているだけで、どちらも実在の相場データに当たっていない」という構造的な弱点が露呈した。Detectorが数値の妥当性を監査する以上、検算（python_repl）が式の正しさしか保証しないのと同様、外部裏取りの手段（web_search/web_fetch）を持たない監査は前提の実在性までは検証できない。プロンプト誘導のみでExpertが自発的に検索する頻度が実ドライラン3件を通じて一貫して低かった（1047: 0件、1244: 途中から発火、1312: 0件）ことから、より強い動機付け（「最低限」文言による半必須化）も必要と判断した。Detector側の強制力については、BL-188当初（D-159）は「まず様子見」としていたが、ユーザーが今回明示的に「根拠があるかを確認する形に強化」を指示したため、citationsが`expert_calculation`のみ（外部裏付けなし）の前提についてDetector自身が検証する、という形でプロンプトを強化した（Detectorのminor/major判定ロジック自体への機械的組み込みは引き続き行わず、BL-042の硬直化リスクは回避）。 |
+| 決定内容 | ① `call_detector`の両パス（ドメイン監査・数値監査）の`tools=[...]`へ`WEB_SEARCH_TOOL`/`WEB_FETCH_TOOL`を追加（`READ_REFERENCE_FILE_TOOL`と合わせ、Expert/task_planner/task_plan_reviewerと同じ3ツール構成になる）。② Detectorの両パスのプロンプトへ「根拠の実在性チェック」段落を追加：citationsが`expert_calculation`/`prior_agreement`のみで外部一次情報の裏付けがなく、かつDetector自身も真偽の確信が持てない前提数値があればweb_searchで検証し、実態と乖離していればconstraint_issueの根拠にする、という指示を明記。③ Expertのフルsystem_prompt/light_system_promptのBL-188ガイダンスへ「【最低限】」文言を追加し、ゴール文にない数値を新たに前提として置く場合はcitationsを`expert_calculation`のみで済ませず最低1回はweb_searchを呼ぶことを明記（機械的な強制ゲートではなくプロンプト上の強い要請、BL-042の教訓を踏まえ引き続き機械的介入は見送り）。 |
+| 影響 | `cela_main.py`（`call_detector`両パスの`tools=[...]`拡張、両パスのプロンプト追記、`call_expert`のフル/light system_promptの追記）。オフライン全テストスイート783件通過（`test_bl168_verified_facts_stale_after_goal_revision.py`の1件はBL-173起因の既知のタイミング依存flakyで単体実行では通過、本変更とは無関係）、`python -m py_compile`合格。効果測定は次回以降の実ドライランで確認する。 |
+| 関連 BL | [BL-188](back_log/issue_backlog.md#bl-188-全ての情報にソースcitationsを明示させる) |
+
+---
+
+### D-161: web_fetchのHTML/PDF抽出をpypdf/html.parser自前実装からMicrosoft markitdownへ置き換える
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | ユーザーが`log/2026-08-07/1312`のPDF抽出結果を見て「単純な文字解析だと体裁が崩れ、図もなく結構厳しい」と指摘。表構造を持つPDF（国交省の乗合タクシー資料等）で、`pypdf.extract_text()`が表の行列構造を無視してテキストを流し込むだけになっていることを確認した。ユーザーがMicrosoft markitdown（PDF/HTML等をMarkdown化するPython ユーティリティ、https://github.com/microsoft/markitdown）の利用を提案し、HTML変換も含めて検証するよう指示した。 |
+| **決定理由** | 実データ（`log/2026-08-07/1525`で実際にfetchされた国交省PDF、および`log/2026-08-07/1244`でExpertが辿ろうとしたRoAD to the L4のHTMLページ）で`pypdf`/独自`_HtmlTextExtractor` vs `markitdown`を側で比較した結果、markitdownはPDFの表を`| --- | --- |`形式の本物のMarkdownテーブルとして、HTMLは見出し階層（`#`/`##`/`###`）・太字・リンクを本文中の自然な位置（`[text]（url）`形式のMarkdownリンク記法）に保持したMarkdownとして返すことを確認した。特にHTMLのリンクが本文中の文脈的位置に保たれる点は、直前に独自実装した「ページ末尾へのリンク一覧付記」（BL-188セクション9）より優れており、その独自実装は本決定により不要になった。依存重量は`pypdf`（数MB、純Python）から`markitdown[pdf]`（onnxruntime/numpy/Pillow/pdfminer等を含み約100MB、内部でファイル形式自動判定にGoogleのmagikaという軽量MLモデルを使うためonnxruntimeがコア依存になる）へ大幅に増えるが、ユーザーが「情報が上手く取得できずエージェントの能力が損なわれるのは本末転倒。依存が重くても、より良くするために使える手段があるなら使いたい」と明示的に判断した。画像・図の内容理解（OCR/vision相当）は本決定の範囲外（markitdownの`llm_client`オプションで対応可能だが、追加のLLM呼び出しコストを伴うため今回は見送り、将来必要になれば別途検討）。 |
+| 決定内容 | `requirements.txt`の`pypdf`を`markitdown[pdf]`へ置き換え。`web_tools.py`の`_HtmlTextExtractor`（html.parser自前実装、BL-184/BL-188で拡張したリンク収集機能含む）と`_extract_pdf_text`（pypdf自前実装）を削除し、`fetch_and_extract`をHTML/PDF共通で`MarkItDown().convert_stream(io.BytesIO(raw), stream_info=StreamInfo(mimetype=...), url=url)`を呼ぶ実装へ統一した。markitdownは`convert_stream(url=...)`を渡しても相対リンクを自動解決しないことを実データで確認したため、`_resolve_relative_markdown_links`（正規表現ベースの後処理）でMarkdownリンク記法`](url)`の相対URLをfetch元のURLを基準に絶対URLへ解決する処理を追加した。安全性面では、より厳密な内部パーサ（pdfminer/BeautifulSoup等）に渡す前提のため、HTML/PDF共通でバイト列サイズ上限超過時は（従来PDFのみだった）切り捨てず明示エラーとする方針にHTMLも統一した。ページ数上限（`_MAX_PDF_PAGES`）等のpypdf固有の細粒度制御は撤廃し、既存の総文字数上限（`_MAX_OUTPUT_CHARS`）とバイトサイズ上限（`_MAX_FETCH_BYTES`）による制御に一本化。変換失敗時（`MarkItDownException`）はSsrfBlockedErrorへラップし、既存のエラーレスポンス変換パターンをそのまま踏襲。 |
+| 影響 | `requirements.txt`、`web_tools.py`（`fetch_and_extract`全面書き換え、`_HtmlTextExtractor`/`_extract_pdf_text`削除）、`cela_main.py`（`WEB_FETCH_TOOL`説明文の更新、「[Links found on this page]」への言及を削除しインラインリンクの説明へ変更）。`tests/test_bl184_web_tools.py`のfetch関連テストを全面書き換え（`pypdf`/`_HtmlTextExtractor`の内部実装ではなく`web_tools._MARKITDOWN.convert_stream`の呼び出し境界をモックする方式へ統一）。同ファイル45件、オフライン全テストスイート781件通過、`python -m py_compile`合格。 |
+| 関連 BL | [BL-188](back_log/issue_backlog.md#bl-188-全ての情報にソースcitationsを明示させる) |
+
+---
+
 ---
 
 ## 未決定（pending）

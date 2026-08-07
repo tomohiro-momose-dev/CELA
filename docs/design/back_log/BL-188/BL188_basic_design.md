@@ -244,3 +244,41 @@ PDFにはリンクセクションが付かないこと）を`tests/test_bl184_we
 on_repeated_revision`はフルスイート実行時のみ発生する既知のタイミング依存flaky［BL-173の
 `shift_id`ミリ秒精度衝突、単体実行では常に通過］であり本変更とは無関係）、`python -m py_compile`
 合格。
+
+## 10. Detectorへのweb_search追加、Expert検索義務の強化、Detector根拠実在性チェック（D-160）
+
+ユーザーが実ドライラン`log/2026-08-07/1312`をレビューし、(1) Expertが7回呼ばれ全てweb_search/
+web_fetch装備済みだったが一度も使わず、根拠のない前提数値（デマンドタクシー運営費
+`@8,000円/日`）で大規模な戦略分析を構築していたこと、(2) それを差し戻したDetectorの反論
+（最低賃金法に基づく試算）自体もD-158の設計通りweb_search非搭載のため学習知識のみに依って
+いたことを指摘。「①Detectorにもweb_search追加、②Expertの検索義務強化、③Detector監査に
+根拠実在性チェックを追加」との指示を受け実装した。
+
+- `call_detector`の両パス（ドメイン監査・数値監査）の`tools=[...]`へ`WEB_SEARCH_TOOL`/
+  `WEB_FETCH_TOOL`を追加（D-158で「監査役には新規の外部通信を発生させない」としていた方針の
+  一部改訂、D-158側に改訂注記を追加）。
+- Detector両パスのプロンプトへ「根拠の実在性チェック」段落を追加：citationsが
+  `expert_calculation`/`prior_agreement`のみで外部一次情報の裏付けがなく、Detector自身も
+  真偽の確信が持てない前提数値があればweb_searchで検証し、実態と乖離していれば
+  constraint_issueの根拠にする、という指示。
+- Expertのフル/light system_promptのBL-188ガイダンスへ「【最低限】ゴール文にない数値を
+  新たに前提として置く場合、citationsを`expert_calculation`のみで済ませず最低1回は
+  web_searchを呼ぶ」という半必須化文言を追加。
+
+機械的な強制ゲート（Detectorのminor/major判定ロジックへの組み込み）は引き続き見送り、
+プロンプト強化に留めた（BL-042の硬直化リスク回避）。詳細は`decision_log.md` D-160を参照。
+
+## 11. HTML/PDF抽出をMicrosoft markitdownへ全面置換（D-161）
+
+ユーザーがPDF抽出結果（`log/2026-08-07/1312`）を見て「単純な文字解析だと体裁が崩れ、図もなく
+結構厳しい」と指摘し、Microsoft markitdown（PDF/HTML等をMarkdown化するPythonユーティリティ）
+の利用を提案。実データ側比較（国交省PDF・RoAD to the L4のHTML）で、markitdownがPDFの表を
+Markdownテーブルとして、HTMLを見出し階層・リンクの文脈的位置を保った形で変換できることを
+確認した上で、ユーザーが「依存が重くても情報取得の質を優先したい」と判断し、`pypdf`/独自
+`_HtmlTextExtractor`をmarkitdownへ全面置換した。詳細は`decision_log.md` D-161を参照
+（依存重量の内訳、相対リンク解決の後処理、サイズ上限の安全設計統一等）。
+
+**この置換により不要になった実装**: BL-188セクション9で追加した「ページ末尾への
+`[Links found on this page]`リンク一覧付記」機構は、markitdownがリンクを本文中の文脈的
+位置に`[text]（url）`形式（Markdownリンク記法）で自然に保持するため撤去した
+（より良い形で目的を達成）。
