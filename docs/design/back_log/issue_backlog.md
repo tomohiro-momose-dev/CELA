@@ -5331,7 +5331,7 @@ AskUserQuestionで2つの設計分岐を確認：①citations未記載の強制�
 - `WRITE_AGREEMENT_TOOL`スキーマへ、トップレベル`citations`パラメータと`confirmed_variables[].citations`サブフィールドを追加（`{"type": "web"/"goal_text"/"prior_agreement"/"expert_calculation"/"user_input"/"document", "detail": "..."}`）。ツール説明文へ一次ソース優先・最新性優先・web検索結果の批判的評価を促す指示を追記。
 - `_commit_agreement_from_tool`が`args["citations"]`を`agreements.citations`へ永続化。`confirmed_variables[].citations`が指定されていればそれを`verified_facts.citations`へ使い、未指定時は従来通りtopic文字列へフォールバック（後方互換、プロンプト誘導のみで強制しないという決定に対応）。
 - `_build_agreements_context`へ`evidence_suffix`と同型の`citations_suffix`を追加し、Detector等の監査ノードへ渡すコンテキストへcitationsを反映（BL-064と同型の「書き込まれるのみで表示に反映されない」失敗の再発防止）。
-- `WEB_SEARCH_TOOL`/`WEB_FETCH_TOOL`の説明文にも一次ソース優先・批判的評価の指示を追記。各ノードの巨大なシステムプロンプトを個別に書き換えるのではなく、function-calling仕様上毎回必ず提示されるツール説明文に一元化した（保守性・一貫性のため）。
+- `WEB_SEARCH_TOOL`/`WEB_FETCH_TOOL`の説明文にも一次ソース優先・批判的評価の指示を追記。当初はツール説明文への一元化のみで済ませたが、ユーザーから「他のツールと同様にシステムプロンプトにも書くべき」との指摘を受け、`read_verified_fact`/`read_deliverable_file`（BL-094）と同型のパターンで、task_planner/task_plan_reviewer/Expert（軽量プロンプト）の番号付き指示・ツール列挙、およびDetector両パス/Reflection/Facilitatorの監査役向け段落・ツール列挙を追加した（Reflection/Facilitatorはツール列挙自体がこれまで存在しなかったため新設）。あわせてWEB_SEARCH_TOOL/READ_REFERENCE_FILE_TOOLの説明文へ「情報は推測せず能動的にweb_searchで探す」「新規呼び出し前にread_reference_fileで既存キャッシュを先に確認する（call limit非消費）」というガイドラインも追記した（これも初回実装時に漏れていた）。
 - 基本設計を`docs/design/back_log/BL-188/BL188_basic_design.md`として原文保存。
 
 **実装中のインシデント**：`agreements.citations`列追加の実装直後、Edit操作が「ファイルが外部で変更されている」と警告し、実際にその2箇所（CREATE TABLE定義とマイグレーション関数・その呼び出し登録）のみがファイルから消失していることが判明した（原因はユーザー側の別プロセスによる`cela_main.py`への同時ファイル操作）。この状態のままオフライン全テストスイートを実行し69件が失敗したが、これは実装バグではなく上記の消失によるもの（`agreements`テーブルに`citations`列が存在しないままINSERT文が実行されていた）と特定し、該当2箇所を再適用・`grep`によるマーカー総数の突合で全体整合性を再確認した上で、全テストスイートを再実行し無退行を確認した。
