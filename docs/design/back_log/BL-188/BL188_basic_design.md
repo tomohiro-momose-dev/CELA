@@ -97,6 +97,41 @@ BL-184（web_search/web_fetch/read_reference_fileのcela_main.py配線）完了�
   行わない）」という監査役向けの短い段落を追加し、ツール列挙にread_reference_fileを追記。
   Facilitator・Reflectionはそもそも「あなたが使えるツールは...」という明示列挙自体が
   存在しなかったため、この機会に新設した。
+
+### 7. 実ドライラン（`log/2026-08-07/1047`）でのweb_search未使用の実測、および見つかった実装漏れ
+
+ユーザーが実ドライランログをレビューし、Expertがオペレーター人件費単価（`@3,500円/h`）や
+労働基準法の条文番号（`第34条`）を、一切web_searchで裏取りせず学習知識から断定していた実例を
+発見した（`log/2026-08-07/1047/log_no_prompt.md:396`等）。`web_search`/`web_fetch`の実行ログは
+run全体で0件、`web_cache/`ディレクトリも未作成だった。
+
+原因調査の結果、**BL-188の初回実装（本ドキュメント第5節）には見落としがあった**ことが判明した：
+`call_expert`のガイダンス文言は、iter=2以降にのみ使われる`light_system_prompt`側にしか
+追加されておらず、iter=1（最初の応答、ツールを呼ぶかどうかを最初に判断するタイミング）に
+使われる`system_prompt`（フル版）には、web_search/web_fetch/read_reference_fileへの言及が
+一切無かった。ツール自体のdescription（`WEB_SEARCH_TOOL`等）にはガイダンスがあるが、
+システムプロンプト本文としての明示的な後押しが、最初の意思決定タイミングに欠落していた。
+
+ユーザーからの指示（「webサーチをするすべてのノードのプロンプトに以下の趣旨を加えてください：
+モデルの学習知識から導き出した回答や思考も、学習知識が必ずしも正確であり、最新の情勢を反映して
+いるものとは限らない。必ずwebサーチで信頼できる1次情報から確認・裏どりをし、追跡可能な出典や
+参考資料を用いて根拠を明示せよ」）を受け、以下を実装した：
+
+- **`call_expert`のフル`system_prompt`（iter=1）**: F-2.6機械的検算ゲートの直後に、
+  「学習知識を無検証で断定しない（必須）」という新規ブロックを追加（初回実装時に完全に欠落
+  していた箇所）。
+- **`call_expert`のlight_system_prompt/`call_task_planner`/`call_task_plan_reviewer`**: 既存の
+  BL-188ガイダンス文言を、ユーザー指定の趣旨（学習知識の正確性・最新性への疑い→web検索での
+  裏取り→追跡可能な出典の明示）に沿って書き換え・強化した。
+
+**副次的に発見・対応した事項**: `task_plan_reviewer_node`の差し戻し上限（`plan_reviewer_retry_count`
+の比較値）が、ユーザーにより手動で2から5へ変更されていたことを確認した（`cela_main.py`の
+`task_plan_reviewer_node`内）。関連するコメント3箇所と、この値をハードコードして
+いた既存テスト`tests/test_bl087_stage2_task_plan_reviewer_node.py::test_reviewer_gives_up_after_retry_limit_reached`
+を新しい上限値（5）に合わせて修正した（ユーザー確認済み）。
+
+**検証**: `python -m py_compile cela_main.py`合格、オフライン全テストスイート777件通過
+（`tests/test_f26_detection.py`のみOpenRouter日次クォータ枯渇による既知のflaky除外）。
 - 各ノードの巨大なシステムプロンプト文字列（call_expert/call_task_planner/
   call_task_plan_reviewer/generate_user_utterance）を個別に書き換えるのではなく、
   **ツールスキーマの説明文に一元化**した。理由: これらのツールはfunction-calling仕様上、
