@@ -166,3 +166,49 @@ run全体で0件、`web_cache/`ディレクトリも未作成だった。
 `WEB_FETCH_TOOL`/`READ_REFERENCE_FILE_TOOL`の出現数が定義1件+アタッチ先ノード数と一致することを
 確認等）とテスト実行で全体の整合性を再確認した。同一ファイルへの同時編集が今後も起こりうる前提で、
 大きな編集作業の後には内容の再グレップ確認を徹底する。
+
+## 8. PDF読み取り対応、および「検索ばかりで深掘りしない」パターンへの対処（2026-08-07）
+
+ユーザーが実ドライラン`log/2026-08-07/1244`をレビューし、以下2点を指摘した。
+
+**指摘1: web_fetchがPDFを読めない**。政府・自治体・研究機関の一次資料はPDF配布が非常に多い
+（`road-to-the-l4.go.jp`、`mlit.go.jp`等）。従来の`web_fetch`はContent-Typeを`text/*`のみに
+限定していたため（BL-184時点の設計）、Expertが最も権威ある一次資料（例:
+`.../pdf/20240228_theme01.pdf`）へ`web_fetch`した際、`許可されていないContent-Typeです:
+'application/pdf'`で拒否されていた（`log/2026-08-07/1244/log_no_prompt.md`の611-612行目）。
+ユーザーへ「新規依存（`pypdf`等）が必要になるがBL-184以来の依存ゼロ方針から外れる」と確認したところ、
+「これにこだわる必要はありません」との回答を得て実装した。
+
+**指摘2: web_searchを繰り返すばかりで、有望な結果を深掘り（web_fetch）しない**。同ログを詳細に
+確認したところ、iter=2の最初の検索で既に複数の高品質な一次情報（`road-to-the-l4.go.jp`の複数ページ、
+SOMPOインスティチュートの記事等）がヒットしていたにもかかわらず、Expertはそれらを一切fetchせず、
+iter=3〜7で言い回しを変えた検索を5回連続で重ね、iter=8で初めてfetchを試みたがそれがPDFで拒否され、
+さらにiter=9〜10で検索を続け、iter=11でようやく最初の成功fetchに至っていた。最終的にはiter=17で
+（tool_calls使用16回、うちfetch2回）citations付きの充実した成果物を完成させており「無限ループ」
+ではなかったが、fetchに至るまでの検索の重複・非効率は明確な改善対象と判断した。
+
+**実装内容**:
+
+1. **PDF抽出対応**（`web_tools.py`）: `requirements.txt`へ`pypdf`（純Python実装、システム依存
+   なし、BL-105/D-086の新規依存追加の先例と同じ「提案→承認→requirements.txt追加→実装」手順）を
+   追加。`fetch_and_extract`のContent-Type判定を`text/*`に加えて`application/pdf`も許可し、
+   `_extract_pdf_text`（`pypdf.PdfReader`でページ単位に`extract_text()`、改ページで連結、
+   先頭50ページ`_MAX_PDF_PAGES`まで）を新設。PDFはバイナリ構造（xrefテーブル等）を持つため
+   HTMLと異なりバイト列の途中切り捨てが安全でない（パース自体が失敗しうる）ことを踏まえ、
+   サイズ上限超過時は切り捨てずに明示エラーとする設計にした。スキャン画像PDF（OCR要）は
+   `extract_text()`が空文字を返すため対象外（見送り、将来必要になれば別途検討）。
+2. **「検索ばかりで深掘りしない」への対処**（`WEB_SEARCH_TOOL`説明文）: 「有望な結果が見つかったら
+   別の言い回しで検索し直す前にweb_fetchすること」「スニペット10件より、しっかり読み込んだ
+   1ページの方が価値が高い」という明示的なアンチパターン警告を追加。強制ロジック（例:
+   N回連続search後は自動でfetchを促す機械的介入）は設けず、プロンプト誘導のみとした
+   （BL-188全体の「プロンプト誘導のみ、まず様子見」という既定方針を踏襲、Detector等での
+   機械的な連続search回数カウントはBL-042の硬直判定の再発リスクがあるため見送り）。
+
+**検証**: 新規テスト4件（`test_fetch_and_extract_extracts_pdf_text`、
+`test_fetch_and_extract_rejects_oversized_pdf`、`test_fetch_and_extract_truncates_pdf_to_max_pages`、
+既存の`test_fetch_and_extract_rejects_non_text_content_type`を`test_fetch_and_extract_rejects_
+non_text_non_pdf_content_type`へ改名・PDFは許可対象になったため`application/octet-stream`で
+再検証）を`tests/test_bl184_web_tools.py`へ追加、`pypdf.PdfReader`自体をモックする方式
+（実際のPDFバイナリを組み立てず、既存のhttpx.Clientモックと同じ「外部境界を差し替える」方針）を
+採用。同ファイル44件全通過、オフライン全テストスイート780件通過（`test_f26_detection.py`は
+OpenRouter日次クォータ枯渇による既知のflakyのため除外）、`python -m py_compile`合格。
