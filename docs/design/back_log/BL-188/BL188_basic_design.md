@@ -212,3 +212,35 @@ non_text_non_pdf_content_type`へ改名・PDFは許可対象になったため`a
 （実際のPDFバイナリを組み立てず、既存のhttpx.Clientモックと同じ「外部境界を差し替える」方針）を
 採用。同ファイル44件全通過、オフライン全テストスイート780件通過（`test_f26_detection.py`は
 OpenRouter日次クォータ枯渇による既知のflakyのため除外）、`python -m py_compile`合格。
+
+## 9. web_fetchのページ内リンク一覧対応（2026-08-07）
+
+ユーザーが「web_fetchで特定のページを見ても、ページ内のリンクは表示されない。良い情報がある
+ページに入ってもそこから網羅的に情報を集めることはできませんか？」と指摘。`_HtmlTextExtractor`が
+`<a href>`のhrefを完全に破棄し本文テキストのみ抽出していたため、良質なインデックスページ
+（例: `.../case/`のような一覧ページ）へ到達しても、そこからサブページへ辿る手段がなかった。
+
+**実装内容**:
+
+- `_HtmlTextExtractor`を拡張し、`<a href>`のテキスト＋href（`urljoin`でfetch対象URLを基準に
+  絶対URL化）を収集する（`javascript:`/`mailto:`/`tel:`/フラグメントのみ`#`のhrefと、リンク
+  テキストが空のものは除外、同一URLは重複排除）。
+- `fetch_and_extract`は、本文抽出後（`_MAX_OUTPUT_CHARS`による切り捨て後）に
+  `[Links found on this page]`セクションを追記する。上位`_MAX_LINKS_SHOWN`（20）件に限定し、
+  超過分は「(...N more links omitted)」と件数のみ表示する（インデックスページ等でのプロンプト
+  肥大化を防ぐ）。本文の文字数上限とは別枠で追記するため、本文とリンク一覧が共倒れで切り捨て
+  られることはない。
+- PDFはリンク抽出の対象外（見送り、`pypdf`でのハイパーリンク抽出は別途調査が必要なため）。
+- `WEB_FETCH_TOOL`の説明文へ、リンク一覧の使い方（インデックスページからサブページへのナビゲー
+  ション）と、無制限に辿り続けないよう促す注意（「1トピックあたり1〜2階層まで」「run単位の
+  呼び出し回数上限はリンク経由のfetchにも同様に適用される」）を追加。機械的な深さ制限は設けず、
+  既存のrun単位呼び出し回数上限とプロンプト誘導の組み合わせで対処する（BL-188全体の
+  「プロンプト誘導のみ、まず様子見」という既定方針を踏襲）。
+
+**検証**: 新規テスト4件（リンク一覧付記・空/javascriptリンク除外・上位N件への絞り込み・
+PDFにはリンクセクションが付かないこと）を`tests/test_bl184_web_tools.py`へ追加、同ファイル48件
+全通過。オフライン全テストスイート783件通過（`test_f26_detection.py`除外、
+`test_bl168_verified_facts_stale_after_goal_revision.py::test_revise_goal_marking_is_idempotent_
+on_repeated_revision`はフルスイート実行時のみ発生する既知のタイミング依存flaky［BL-173の
+`shift_id`ミリ秒精度衝突、単体実行では常に通過］であり本変更とは無関係）、`python -m py_compile`
+合格。
