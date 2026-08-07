@@ -2255,6 +2255,8 @@
 | 影響 | `cela_main.py`（`WEB_SEARCH_TOOL`/`WEB_FETCH_TOOL`/`READ_REFERENCE_FILE_TOOL`スキーマ追加、`TOOL_DISPATCH`登録、`LineageState`/`AppConfig`拡張、6ノードの`tools=[...]`更新）、`.gitignore`（`web_cache/`追加）。`tests/test_bl184_web_tools.py`41件再通過、`python -m py_compile`合格を確認。実ドライラン確認はBrave Search APIキー設定後（ユーザー側対応）に別途実施。 |
 | 関連 BL | [BL-184](back_log/issue_backlog.md#bl-184-web_searchweb_fetchread_reference_file-ツールの新設現実世界の地理数値をグラウンディングする) |
 
+> **一部改訂（2026-08-07、D-160）**: 「`call_detector`（両パス）には`READ_REFERENCE_FILE_TOOL`のみ、新規の外部通信・追加コストを発生させない」という決定内容は、実ドライラン（`log/2026-08-07/1244`/`1312`）で監査役自身も未検証の学習知識のみで判定していた実態が判明したことを受け、D-160でweb_search/web_fetchの追加アタッチへ改訂された。他の内容（呼び出し回数上限30、task_planner/task_plan_reviewer/Expertの3ツール全アタッチ、Reflection/Facilitatorの読み取り限定）は変更なし。
+
 ---
 
 ### D-159: BL-188のcitations強制力とスキーマ適用範囲を確定する
