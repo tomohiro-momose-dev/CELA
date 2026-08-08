@@ -220,6 +220,7 @@
 | BL-186 | 高 | `cela_main.py`（`_revise_goal_tool_impl`、ツール実行ブリッジ、`generate_user_utterance_node`） | ゴール改定（`revise_goal`、BL-086）成功時、BL-163/BL-168が承認済み過去タスクへ`severity="minor"`のissueを起票し`verified_facts`へ警告を付記するが、`minor`issueはBL-136/BL-145の強制解決ルート（major/escalated専用）に乗らず`read_issues`はpull型ツールのためどのプロンプトにも自動注入されない。実ドライラン`log/2026-08-06/1432`で、ゴール改定によりphase1-5の過去タスク13件が整合性未確認のままflagされたが、ランが既にphase6/task_6_1（計画上の最終タスク）にあり通常のタスク遷移ではphase1-5へ戻る経路が無いため放置リスクをユーザーへ報告。ユーザーと「タスク遷移で過去タスクへ戻る新ルート」か「ゴール改定時にBL-145と同型の配線でtask_plannerへ強制的に過去タスク再検証を引き継ぐ」かを相談し、後者を採用（ユーザー承認: 「お願いします」）。詳細は[BL-186詳細](#bl-186-ゴール改定時にtask_plannerへ強制的に過去タスク再検証を引き継ぐ)を参照。**実装完了（`done`）**：`_revise_goal_tool_impl`がBL-163の`_flagged`と起票issue_idから`plan_revision_reason`/`plan_revision_issue_ids`を組み立てて返し、`_LAST_GOAL_REVISION`ブリッジ経由で`generate_user_utterance_node`が`state["plan_revision_reason"]`へ反映（他要因セット済みなら上書きしないガード付き、BL-145と同型）。`task_planner_node`/`call_task_planner`は無改修（既存のrevision_reason消費ロジックをそのまま再利用）。新規テスト`tests/test_bl186_goal_revision_forces_replan.py`6件、既存BL-086/087/095/096/101/126/136/145/163/168/185関連197件と合わせて無退行を確認。 | P1 |
 | BL-188 | 中 | `cela_main.py`（`WRITE_AGREEMENT_TOOL`、`_commit_agreement_from_tool`、`_build_agreements_context`、`agreements`テーブルスキーマ、全ノードのシステムプロンプト）、`web_tools.py`（HTML/PDF抽出をmarkitdownへ統一） | ユーザーが「数字だけでなく全ての情報にソースを明示させたい。一次ソース・最新情報を優先し、web検索結果は批判的に評価させたい」と要望。調査の結果、`verified_facts.citations`はDB列として存在するが`_write_agreement_impl`内でtopic文字列が機械的に入るだけの実質未実装で、`agreements`テーブル本体には構造化ソース欄が皆無だった。AskUserQuestionで強制力（プロンプト誘導のみ、Detector未組込）と適用範囲（agreementsテーブルにも新規citations列追加）を確認し実装。`WRITE_AGREEMENT_TOOL`へ実際に引用元を渡せるcitationsパラメータを追加、`_build_agreements_context`へ表示反映（BL-064と同型の失敗再発防止）。詳細は[BL-188詳細](#bl-188-全ての情報にソースcitationsを明示させる)を参照。 | P2 |
 | BL-187 | 中 | `cela_main.py`（`get_verified_facts_from_db`, `_read_verified_fact_handler`） | ユーザーが「read_verified_factで探したいものが見つからない時が散見されます。ragを導入して意味検索をしてはどうか」と提案。調査の結果、`topic_keyword`検索は`variable_name LIKE '%keyword%' OR reason LIKE '%keyword%'`というフレーズ全体一致のみで、AIが渡すキーワードの言い回し・語順が保存済みの文言と一字一句噛み合わないと`not_found`になる構造的な弱点を確認。1run内のverified_facts件数は数十件程度でありembeddingベースのRAG導入はオーバーエンジニアリングと判断し、新規依存なしの段階的改善（①トークン分割OR検索、②difflibによる近似候補フォールバック）を提案、ユーザーが承認。詳細は[BL-187詳細](#bl-187-read_verified_factのtopic_keyword検索をトークン分割or検索と近似候補フォールバックで緩和する)を参照。**実装完了（`done`）**：フレーズ全体一致→トークンOR検索→`difflib.get_close_matches`による`did_you_mean`候補提示、の3段階フォールバックを実装。`variable_name`指定時（一意識別子）はトークン緩和の対象外。新規テスト`tests/test_bl187_verified_fact_fuzzy_search.py`13件、既存BL-093/094/095/104/148/162/167/168/169/186関連238件と合わせて無退行を確認。 | P2 |
+| BL-189 | 中 | `cela_main.py`（役割ごとのクライアント/モデル変数、`call_task_planner`/`call_task_plan_reviewer`/`call_detector`（両パス）/`call_decision_extractor`/`call_resource_arbiter`/`call_reflection`/`call_facilitator`/`call_integrator`/`call_reviewer_qa`/`call_goal_essence_analyst`/`call_expert`/`call_orchestrator`各関数のquery_AI呼び出し） | ユーザーから「各ノードで使用するモデルを指定したい。現在でも3〜4つほどに分けているが、ノードごとに指定したい」との要望。調査の結果、従来は`client_user`/`model_user`（User AI）、`client_agent`/`model_agent`（Expert・Orchestratorの2ノードが共有）、`client_auditor`/`model_auditor`（Task Planner・Detector両パス・Decision Extractor・Resource Arbiter・Reflection・Facilitator・Integrator・Reviewer QA・Goal Essence Analyst・Task Plan Reviewerの計10ノードが共有）、`client_summarizer`/`model_summarizer`の4変数のみで、特に`client_auditor`が10ノードに一括適用されておりノード単位の使い分けが不可能だった。AskUserQuestionでDetectorの2パス（ドメインレビュー／数値監査）を別々に指定したいか確認したところ「別々に指定」、モデル切り替えの方式は「コード内の変数を直接編集（現状踏襲）」との回答を得た。**実装完了（`done`）**：`client_agent`/`model_agent`と`client_auditor`/`model_auditor`を廃止し、ノードごとに独立した13組の`client_X`/`model_X`変数（`client_orchestrator`、`client_expert`、`client_task_planner`、`client_task_plan_reviewer`、`client_detector_domain`、`client_detector_numeric`、`client_decision_extractor`、`client_resource_arbiter`、`client_reflection`、`client_facilitator`、`client_integrator`、`client_reviewer_qa`、`client_goal_essence`、各対応する`model_X`）を新設し、各query_AI呼び出し箇所を対応する専用変数へ置き換えた。デフォルト値は全ノードとも従来通り`client_openrouter`/`nemotron_3_ultra`のままとしたため、ユーザーが該当行のclient/model値を書き換えない限り挙動は変わらない。`python -m py_compile`合格、フルオフラインスイート781件中780件Pass（1件はBL-173として既知のflakyテストで本修正と無関係、単体再実行では成功）。 | P2 |
 
 ---
 
@@ -5337,6 +5338,26 @@ AskUserQuestionで2つの設計分岐を確認：①citations未記載の強制�
 **実装中のインシデント**：`agreements.citations`列追加の実装直後、Edit操作が「ファイルが外部で変更されている」と警告し、実際にその2箇所（CREATE TABLE定義とマイグレーション関数・その呼び出し登録）のみがファイルから消失していることが判明した（原因はユーザー側の別プロセスによる`cela_main.py`への同時ファイル操作）。この状態のままオフライン全テストスイートを実行し69件が失敗したが、これは実装バグではなく上記の消失によるもの（`agreements`テーブルに`citations`列が存在しないままINSERT文が実行されていた）と特定し、該当2箇所を再適用・`grep`によるマーカー総数の突合で全体整合性を再確認した上で、全テストスイートを再実行し無退行を確認した。
 
 新規テスト`tests/test_bl188_citations.py`9件（スキーママイグレーション2件、`_write_agreement_impl`のトップレベルcitations永続化2件、confirmed_variables citations優先/フォールバック2件、`_build_agreements_context`表示3件）追加。`tests/test_r3_smoke.py`/`test_r4_smoke.py`/`test_r5_thought_log_freeze_goalshift.py`/`test_bl184_web_tools.py`を含む関連テスト群131件、既存オフライン全スイートと合わせて無退行を確認。`python -m py_compile`合格。
+
+---
+
+### BL-189: ノードごとにLLMクライアント/モデルを個別指定できるよう役割別変数を細分化する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（実装完了） |
+| 優先度 | P2 |
+| 関連 | [D-162](../decision_log.md)（本変更の決定理由・詳細） |
+
+**内容:**
+
+ユーザーから「各ノードで使用するモデルを指定したい。現在でも3〜4つほどに分けているが、ノードごとに指定したい」との要望。調査の結果、従来は`client_user`/`model_user`（User AI）、`client_agent`/`model_agent`（Expert・Orchestratorの2ノードが共有）、`client_auditor`/`model_auditor`（Task Planner・Detector両パス・Decision Extractor・Resource Arbiter・Reflection・Facilitator・Integrator・Reviewer QA・Goal Essence Analyst・Task Plan Reviewerの計10ノードが共有）、`client_summarizer`/`model_summarizer`の4変数のみで、特に`client_auditor`が10ノードに一括適用されておりノード単位の使い分けが不可能だった。AskUserQuestionでDetectorの2パス（ドメインレビュー／数値監査）を別々に指定したいか確認したところ「別々に指定」、モデル切り替えの方式は「コード内の変数を直接編集（現状踏襲）」との回答を得た。
+
+**実装完了（`done`）**：
+
+`client_agent`/`model_agent`と`client_auditor`/`model_auditor`を廃止し、ノードごとに独立した13組の`client_X`/`model_X`変数（`client_orchestrator`、`client_expert`、`client_task_planner`、`client_task_plan_reviewer`、`client_detector_domain`、`client_detector_numeric`、`client_decision_extractor`、`client_resource_arbiter`、`client_reflection`、`client_facilitator`、`client_integrator`、`client_reviewer_qa`、`client_goal_essence`、各対応する`model_X`）を新設し、各query_AI呼び出し箇所（`call_task_planner`、`call_detector`両パス、`call_decision_extractor`、`call_resource_arbiter`、`call_reflection`、`call_facilitator`、`call_integrator`、`call_reviewer_qa`、`call_goal_essence_analyst`、`call_task_plan_reviewer`、`call_expert`、`call_orchestrator`）を対応する専用変数へ置き換えた。デフォルト値は全ノードとも従来通り`client_openrouter`/`nemotron_3_ultra`のままとしたため、ユーザーが該当行のclient/model値を書き換えない限り挙動は変わらない。`client_user`/`model_user`（User AI）と`client_summarizer`/`model_summarizer`はそれぞれ元から単一ノード専用のため変更不要と判断した。
+
+`python -m py_compile`合格、フルオフラインスイート781件中780件Pass（1件はBL-173として既知のflakyテストで本修正と無関係、単体再実行では成功）。既存の全ノードのquery_AI呼び出しはlabel文字列（`MAX_TOKENS_BY_ROLE`/`LOW_TEMP_LABEL_KEYWORDS`等の判定基準）を変更していないため、モデル変更以外の副作用は無い。
 
 ---
 

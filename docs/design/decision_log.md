@@ -2298,6 +2298,19 @@
 
 ---
 
+### D-162: ノードごとにLLMクライアント/モデルを個別指定できるよう役割別変数を細分化する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | ユーザーから「各ノードで使用するモデルを指定したい。現在でも3〜4つほどに分けているが、ノードごとに指定したい」との要望があった。調査の結果、従来は`client_user`/`model_user`（User AI）、`client_agent`/`model_agent`（Expert・Orchestratorが共有）、`client_auditor`/`model_auditor`（Task Planner・Detector両パス・Decision Extractor・Resource Arbiter・Reflection・Facilitator・Integrator・Reviewer QA・Goal Essence Analyst・Task Plan Reviewerの計10ノードが共有）、`client_summarizer`/`model_summarizer`の4変数構成だった。特に`client_auditor`への一括集約により、性質の異なる10ノード（機械的検算中心のDetector数値監査、文脈理解中心のFacilitator等）が同一モデルに固定され、ノード特性に応じたモデル選定ができなかった。AskUserQuestionで(1)Detectorの2パス（ドメインレビュー／数値監査）を同一変数にまとめるか別々にするか、(2)モデル切り替えの方式（コード内変数の直接編集 or 環境変数での上書き対応）を確認した。 |
+| **決定理由** | (1) Detectorの2パスは「与えられた情報内の論理・法令矛盾を検出する」ドメインレビューと「python_replでの検算結果を評価する」数値監査という異なる性質の監査タスクであり、ユーザーは将来的に別モデルを割り当てる可能性を残したいとして「別々に指定」を選択した。(2) 環境変数方式は.envでの切り替えを可能にする一方、既存のモデル変数定義（`deepseek`/`gemini_2_5`等）自体が既にコード内の名前付き定数として運用されており、ユーザーは普段からこのファイルを直接編集してモデルを切り替えている実運用スタイルに合わせ「コード内の変数を直接編集（現状踏襲）」を選択した。環境変数対応は追加の抽象化層となり今回のスコープでは過剰と判断された。 |
+| 決定内容 | `client_agent`/`model_agent`と`client_auditor`/`model_auditor`を廃止し、ノードごとに独立した13組の`client_X`/`model_X`変数（`client_orchestrator`、`client_expert`、`client_task_planner`、`client_task_plan_reviewer`、`client_detector_domain`、`client_detector_numeric`、`client_decision_extractor`、`client_resource_arbiter`、`client_reflection`、`client_facilitator`、`client_integrator`、`client_reviewer_qa`、`client_goal_essence`、および各対応する`model_X`）へ分解した。各ノードのquery_AI呼び出し箇所（call_task_planner、call_detector両パス、call_decision_extractor、call_resource_arbiter、call_reflection、call_facilitator、call_integrator、call_reviewer_qa、call_goal_essence_analyst、call_task_plan_reviewer、call_expert、call_orchestrator）を、対応する専用変数を参照するよう変更した。デフォルト値は全ノードとも従来通り`client_openrouter`/`nemotron_3_ultra`のままとし、ユーザーが該当行のclient/model値を書き換えない限り挙動は変わらない（後方互換）。`client_user`/`model_user`（User AI）と`client_summarizer`/`model_summarizer`（要約用ローカルモデル）はそれぞれ元から単一ノード専用のため変更不要と判断した。 |
+| 影響 | `cela_main.py`（設定ブロック・13箇所のquery_AI呼び出し）。`python -m py_compile`合格、フルオフラインスイート781件中780件Pass（1件はBL-173として既知のflakyテストで本修正と無関係、単体再実行では成功）。 |
+| 関連 BL | [BL-189](back_log/issue_backlog.md#bl-189-ノードごとにllmクライアントモデルを個別指定できるよう役割別変数を細分化する) |
+
+---
+
 ---
 
 ## 未決定（pending）
