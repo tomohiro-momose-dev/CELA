@@ -132,20 +132,29 @@ def test_reflection_node_excludes_already_deferred_stale_issue_from_formalizatio
     _create_escalated_issue(conn, run_id, topic="bl145_deferred")
     _make_reflection_mock(monkeypatch)
 
-    # 既存タスクへ先送り済み（BL-136のDEFER）にしておく。
+    # [BL-194回帰修正] 元のフィクスチャはEXISTING_PHASESにtask_1_1しか無く、DEFER先も
+    # "task_1_1"（＝呼び出し元のcurrent task_idと同一）を指定していたため、実際には
+    # 「別タスクへの先送り」ではなく「自己先送り」を検証していた。BL-194のS8（自己先送り
+    # のtool boundary拒否）導入後、このDEFER呼び出し自体が失敗するようになり本テストの
+    # 前提が崩れた。RECONFIGURED_PHASES（task_1_2を含む）を使い、真に別タスクへ先送りする。
     cela_main._write_issue_impl(
-        {"action_type": "DEFER", "topic": "bl145_deferred", "defer_to_task_id": "task_1_1", "defer_reason": "後で見る"},
+        {"action_type": "DEFER", "topic": "bl145_deferred", "defer_to_task_id": "task_1_2", "defer_reason": "後で見る"},
         conn, run_id, "user", "", "task_1_1",
-        state={"phases": EXISTING_PHASES},
+        state={"phases": RECONFIGURED_PHASES},
     )
 
     state = _reflection_base_state(run_id, round_count=1)
+    state["phases"] = RECONFIGURED_PHASES
     state = cela_main.reflection_node(state)
     state["round_count"] = 4
     state = cela_main.reflection_node(state)
 
-    assert state["discussion_status"] == "stagnant"  # 滞留自体は引き続き検知される
-    assert state.get("plan_revision_issue_ids", []) == []  # だがタスク化対象からは除外
+    # [BL-194] 正当に他タスク（task_1_2、未完了）へ先送り済みのissueは、受け皿が確定して
+    # いるためactionable集合から除外され、そもそもstagnant判定の根拠にならない
+    # （BL-194不変条件：督促集合と滞留集合は同一述語で決定する）。従来はここが無条件で
+    # stagnantへ上書きされていたが、それこそがlog/2026-08-08/1514のhalt事故の原因だった。
+    assert state["discussion_status"] != "stagnant"
+    assert state.get("plan_revision_issue_ids", []) == []  # タスク化対象にも入らない
     assert state.get("plan_revision_reason", "") == ""
 
 

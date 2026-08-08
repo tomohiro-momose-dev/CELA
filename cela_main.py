@@ -299,7 +299,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = gpt_5_6_luna
+model_user = laguna_S_2_1
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -309,10 +309,10 @@ model_user = gpt_5_6_luna
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = gpt_5_6_luna
+model_orchestrator = laguna_S_2_1
 
 client_expert = client_openrouter
-model_expert = nemotron_3_ultra
+model_expert = laguna_S_2_1
 
 client_task_planner = client_openrouter
 model_task_planner = nemotron_3_ultra
@@ -324,10 +324,10 @@ client_detector_domain = client_openrouter
 model_detector_domain = nemotron_3_ultra
 
 client_detector_numeric = client_openrouter
-model_detector_numeric = gpt_5_6_luna
+model_detector_numeric = laguna_S_2_1
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = gpt_5_6_luna
+model_decision_extractor = laguna_S_2_1
 
 client_resource_arbiter = client_openrouter
 model_resource_arbiter = nemotron_3_ultra
@@ -736,6 +736,16 @@ WRITE_ISSUE_TOOL = {
             "RESOLVEで解決するか、今このタスク・フェーズでは対応すべきでないと判断した場合はDEFERで"
             "対応を予定している具体的なdefer_to_task_id（実在するtask_id）を明示してください。"
             "理由もなく無期限に放置することはできません。"
+            "[BL-194] DEFER先は「その懸念に実際に対応できるタスク」を選んでください。受け皿タスクの"
+            "acceptance_criteria/owns_variablesが、この懸念の内容と対応している必要があります"
+            "（対応していない先へ送ると、そのタスクの担当者に解けない問題を押し付けることになります）。"
+            "判断に迷う場合はread_project_planで各タスクのスコープを確認してから指定してください。"
+            "自分自身が実行中のタスクへのDEFERはできません（成立していないため拒否されます）。"
+            "[BL-194] ACKNOWLEDGEは「この懸念は確かに現在のタスクの責務であり、今まさに対応中である」"
+            "と表明するためのものです。RESOLVE（本当に解決した）でもDEFER（別のタスクの責務である）"
+            "でもない、正直な第三の選択肢です。督促は一時的に止まりますが、この懸念を未解決のまま"
+            "次のタスクへ進むことはできません（タスク離脱ゲートは解除されません）。猶予は有限で、"
+            "同一topicにつき2回までです。"
             "[BL-110] Optionally call `think` (with a `summary`) alongside this or any other tool call "
             "to record your reasoning -- it is no longer required, and other tool calls are no "
             "longer rejected for omitting it."
@@ -743,7 +753,7 @@ WRITE_ISSUE_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
-                "action_type": {"type": "string", "enum": ["CREATE", "RESOLVE", "DEFER"]},
+                "action_type": {"type": "string", "enum": ["CREATE", "RESOLVE", "DEFER", "ACKNOWLEDGE"]},
                 "topic": {
                     "type": "string",
                     "description": "固定の検索可能な識別文字列。既存issueの再発検知・解決・先送りに使う（一度決めたら変えないこと）"
@@ -764,11 +774,15 @@ WRITE_ISSUE_TOOL = {
                 },
                 "defer_to_task_id": {
                     "type": "string",
-                    "description": "DEFER時必須。この懸念への対応を予定している実在のtask_id"
+                    "description": "DEFER時必須。この懸念への対応を予定している実在のtask_id（現在実行中のタスク自身は指定不可）"
                 },
                 "defer_reason": {
                     "type": "string",
                     "description": "DEFER時必須。なぜ今このタスクでは対応せず、指定したtask_idへ先送りするのか"
+                },
+                "ack_reason": {
+                    "type": "string",
+                    "description": "ACKNOWLEDGE時必須。なぜこの懸念が現在タスクの責務であり、今まさに対応中と言えるのか"
                 }
             },
             "required": ["action_type", "topic"]
@@ -2387,7 +2401,7 @@ def _check_issue_permission(args: dict, caller_role: str) -> str | None:
     """
     ALLOWED_ISSUE_ACTIONS_BY_ROLE = {
         "detector": {"CREATE"},
-        "user": {"CREATE", "RESOLVE", "DEFER"},
+        "user": {"CREATE", "RESOLVE", "DEFER", "ACKNOWLEDGE"},  # [BL-194] ACKNOWLEDGEもuserのみ許可
         "detector_auto": {"CREATE"},  # [BL-096] detector_nodeのPython側自動バックアップ書き込み専用
         "decision_extractor_auto": {"CREATE"},  # [BL-154] decision_extractor_nodeのPython側自動起票専用
         "revise_goal_auto": {"CREATE"},  # [BL-163] revise_goal成功時のPython側自動起票専用
@@ -2831,9 +2845,15 @@ def _bump_issue_occurrence(conn: sqlite3.Connection, run_id: str, row: dict, new
         )
     elif will_escalate and row["severity"] != "major":
         print("  ⬆️ [BL-096] occurrence_count>=2のため機械的にseverity=major, status=escalatedへ昇格しました。")
+    # [BL-194] 同じtopicが再検出された時点でACKNOWLEDGEの猶予を即時失効させる。「対応中」と
+    # 宣言した直後に同じ懸念が再検出されるのは、対応が実際には進んでいない証拠であるため。
+    # これが無いと、ACKNOWLEDGEは「唱えるだけで督促を無限に止められる呪文」になってしまう
+    # （TTL・累計上限と並ぶ、万能の逃げ道化を防ぐガードの一つ）。
+    if int(row.get("acknowledged_until_round") or 0) > 0:
+        print(f"  🔓 [BL-194] topic={row['topic']}が再検出されたためACKNOWLEDGEの猶予を失効させました。")
     conn.execute(
-        "UPDATE issue_log SET occurrence_count=?, last_seen_task_id=?, severity=?, status=?, updated_at=? "
-        "WHERE id=? AND run_id=?",
+        "UPDATE issue_log SET occurrence_count=?, last_seen_task_id=?, severity=?, status=?, "
+        "acknowledged_until_round=0, updated_at=? WHERE id=? AND run_id=?",
         (occurrence_count, new_task_id, severity, status, time.time(), row["id"], run_id)
     )
     return occurrence_count
@@ -2846,7 +2866,7 @@ def _write_issue_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_
     タスク横断の再発検知というBL-096の目的自体と矛盾するため、(topic, task_id)キー案は撤回した）。
     """
     action_type = args.get("action_type")
-    if action_type not in ("CREATE", "RESOLVE", "DEFER"):
+    if action_type not in ("CREATE", "RESOLVE", "DEFER", "ACKNOWLEDGE"):
         return {"success": False, "error": f"不正なaction_type: {action_type}"}
 
     topic = args.get("topic")
@@ -2935,8 +2955,38 @@ def _write_issue_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_
         else:
             return {"success": False, "error": f"存在しないtask_id '{defer_to_task_id}' への先送りは無効です"}
 
+        # [BL-194/S8] 自己先送りの拒否。DEFERの意味は「今このタスクでは扱わない」であり、
+        # 受け皿を実行中のタスク自身にすると何も先送りされない。にもかかわらず、
+        # defer_to_task_idが立つという一点でBL-136/145/125/158の是正経路が全て沈黙し、
+        # BL-103 pinとBL-096/144停滞判定という懲罰経路だけが点灯し続ける非対称状態
+        # （＝解消不能かつ強制停止を招くissue）が生まれる。log/2026-08-08/1514で
+        # 20件中6件がこの状態にあり、12時間のランがhaltした（BL-194 D-164）。
+        # [REJECTED] 「受理するが消費側で先送り扱いしない」案も検討した。消費側の無効化
+        # （_is_issue_effectively_deferred）は多重防御として実装済みだが、tool boundaryで
+        # 黙って受理するとUser AIには成功として返り、次ターン以降なぜ督促が消えないのか
+        # 説明がつかない（BL-151/BL-193が確立した「失敗は理由つきで即座に返し、同ターン内で
+        # 自己修復させる」原則に反する）。
+        if canonical_defer_to_task_id == task_id:
+            return {
+                "success": False,
+                "error": (
+                    f"'{canonical_defer_to_task_id}' は現在あなたが実行中のタスク自身です。"
+                    "自分自身への先送りはできません（何も先送りされないまま、システム上は"
+                    "「対応予定あり」と扱われてしまうため）。次のいずれかを選んでください: "
+                    "(1) この懸念が本当に別タスクの責務なら、その実在するtask_idを"
+                    "defer_to_task_idに指定してDEFERする。"
+                    "(2) 現在タスクのacceptance_criteriaの範囲で既に解消しているなら "
+                    "RESOLVEする。"
+                    "(3) 現在タスクの責務であり、今まさに対応中なら "
+                    "write_issue(action_type=\"ACKNOWLEDGE\", topic=..., ack_reason=...) を"
+                    "使ってください（一時的に督促を止めますが、タスク離脱時のゲートは"
+                    "解除されません）。"
+                ),
+            }
+
         conn.execute(
-            "UPDATE issue_log SET defer_to_task_id=?, updated_at=? WHERE id=? AND run_id=?",
+            "UPDATE issue_log SET defer_to_task_id=?, acknowledged_until_round=0, updated_at=? "
+            "WHERE id=? AND run_id=?",
             (canonical_defer_to_task_id, now, existing["id"], run_id)
         )
         print(f"  📤 [write_issue] {caller_role}がtopic={topic}を'{canonical_defer_to_task_id}'へDEFERしました: {defer_reason}")
@@ -2948,9 +2998,67 @@ def _write_issue_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_
         )
         if not _plan_note_appended:
             print(f"  ⚠️ [write_issue DEFER] plan_draftsへの申し送り追記に失敗しました（issue_logのdefer_to_task_id自体は更新済み）。")
+        # [BL-194/S6] スコープ整合性の機械的判定（LLMジャッジ・キーワード一致）は却下した
+        # （前者はホットパスでのコストと非決定性、後者は日本語自由文での誤判定。いずれも
+        # 誤って拒否すると、自己先送りを塞いだ本BLの下ではUser AIのtriage手段が消え
+        # 新種のデッドロックになる）。代わりに受け皿タスクのスコープをそのまま返し、
+        # ミスマッチの判断はモデル自身に委ねる（BL-042/BL-188の「プロンプト誘導のみ」方針、
+        # およびBL-151/BL-193の「同ターン内で自己修復させる」原則に沿う）。
+        _target_task = task_id_to_task.get(canonical_defer_to_task_id, {})
         return {
             "success": True,
             "message": f"'{canonical_defer_to_task_id}'への先送りとして記録しました",
+            "target_task_scope": {
+                "task_id": canonical_defer_to_task_id,
+                "description": _target_task.get("description", ""),
+                "acceptance_criteria": _target_task.get("acceptance_criteria", []),
+                "owns_variables": _target_task.get("owns_variables", []),
+            },
+            "scope_check_hint": (
+                "上記が先送り先タスクのスコープです。この懸念がこれらのどれにも対応しない場合、"
+                "そのタスクの担当者も同じように解けない問題を抱えることになります。"
+                "より適切なtask_idがあれば、同じtopicで再度DEFERし直してください"
+                "（最新のDEFERが有効になります）。"
+            ),
+        }
+
+    if action_type == "ACKNOWLEDGE":
+        # [BL-194/D-165] 「現在タスクの責務であり、今まさに対応中である」という正直な
+        # 第三の選択肢。RESOLVE（本当に解決した）でもDEFER（別タスクの責務である）でもない。
+        # statusは一切変更しない（D-079/D-080の不変条件を保護するため、TTL付き補助列のみ更新）。
+        ack_reason = args.get("ack_reason")
+        if not ack_reason:
+            return {"success": False, "error": "ack_reason（ACKNOWLEDGE時必須）が指定されていません"}
+        if not existing:
+            return {"success": False, "error": f"topic='{topic}'に該当する未解決issueが見つかりません"}
+        if existing["status"] != "escalated":
+            return {"success": False, "error": f"topic='{topic}'はstatus='{existing['status']}'です。ACKNOWLEDGEはstatus='escalated'の懸念にのみ使えます。"}
+        if int(existing.get("acknowledged_count") or 0) >= _BL194_ACK_MAX_GRANTS:
+            return {
+                "success": False,
+                "error": (
+                    f"この懸念は既に{_BL194_ACK_MAX_GRANTS}回ACKNOWLEDGEされています。"
+                    f"{_BL194_ACK_MAX_GRANTS + 1}回目はできません。現在タスクで実際に解消してRESOLVEするか、"
+                    "別タスクの責務であることを認めてDEFERしてください。このまま放置すると滞留として"
+                    "計画再構成の対象になります。"
+                ),
+            }
+        round_count = state.get("round_count", 0) if state else 0
+        new_count = int(existing.get("acknowledged_count") or 0) + 1
+        new_until_round = round_count + _BL194_ACK_TTL_ROUNDS
+        conn.execute(
+            "UPDATE issue_log SET acknowledged_until_round=?, acknowledged_count=?, "
+            "acknowledge_reason=?, updated_at=? WHERE id=? AND run_id=?",
+            (new_until_round, new_count, ack_reason, now, existing["id"], run_id)
+        )
+        print(f"  🛠 [write_issue] {caller_role}がtopic={topic}をACKNOWLEDGEしました（{new_count}/{_BL194_ACK_MAX_GRANTS}回目、"
+              f"round={round_count}〜{new_until_round}まで有効）: {ack_reason}")
+        return {
+            "success": True,
+            "message": f"対応中として記録しました（残り猶予{_BL194_ACK_TTL_ROUNDS}ラウンド、"
+                       f"残り{_BL194_ACK_MAX_GRANTS - new_count}回）",
+            "acknowledged_until_round": new_until_round,
+            "remaining_grants": _BL194_ACK_MAX_GRANTS - new_count,
         }
 
     # RESOLVE
@@ -3054,21 +3162,141 @@ def _get_escalated_issues(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def _build_escalation_pin_text(conn: sqlite3.Connection, run_id: str) -> str:
+def _is_issue_effectively_deferred(conn: sqlite3.Connection, run_id: str, issue: dict,
+                                    current_task_id: str = "") -> bool:
+    """[BL-194] 「この issue には、今このタスク以外の実効的な受け皿がある」と機械的に言えるか。
+
+    [CONSTRAINT] BL-136のDEFERはstatusを変えずdefer_to_task_idだけを立てる設計のため、
+    「受け皿があるか」の判定は列の有無ではなく述語で行う必要がある。従来その述語は
+    _get_forced_escalated_issues_text(BL-136/167) / _get_blocking_issues_for_transition(BL-125) /
+    _formalizable_stale(BL-145)の3箇所に別実装でコピーされ、_get_escalated_issues(BL-096)を
+    使う側（BL-103 pin・BL-096/144停滞判定・facilitator名指し）には一切存在しなかった。
+    log/2026-08-08/1514で、全20件がtriage済み（全件defer_to_task_idあり）であるにも
+    かかわらず停滞判定だけが発火し12時間のランがhaltした事故の直接原因（BL-194）。
+
+    [REJECTED] statusに新しい値（'deferred'）を導入してSQL一発で表現する案は却下した。
+    D-079/D-080の「severity='major' ⇒ status='escalated'」不変条件と、_bump_issue_occurrence
+    の再発昇格・_write_issue_impl全分岐のstatus判定がこの不変条件に依存しており、status
+    語彙の拡張はBL-096系全体の再設計になるため。
+    """
+    target = issue.get("defer_to_task_id") or ""
+    if not target:
+        return False
+    # [BL-194] 自己先送り: 受け皿が「今まさに実行中のタスク」なら、先送りは何も先送りしていない。
+    # current_task_idを引数化しているのは、BL-191のredirect_backward（過去タスクへの意図的な
+    # 巻き戻し）中に issue["last_seen_task_id"] だけで近似すると誤判定するため
+    # （task_3_1実行中に発見した「task_2_1が新ゴールと不整合」というissueをtask_2_1へDEFER
+    # するのは正当な後方申し送りだが、last_seen_task_idが過去にtask_2_1だと自己先送りに
+    # 誤認しかねない）。呼び出し元は全てstateを保持しているためcurrent_task_idを渡せる。
+    if current_task_id and target == current_task_id:
+        return False
+    # [BL-167] 受け皿タスクが既に完了済みなら、その受け皿は失効している（永久迷子の防止）。
+    if _is_task_completed(conn, run_id, target):
+        return False
+    return True
+
+
+_BL194_ACK_TTL_ROUNDS = 3  # [BL-194][AGENTS.md §7 承認済み] ACKNOWLEDGE1回あたりの猶予ラウンド数。
+# BL-144の3ラウンド滞留閾値と揃え、「ACKは滞留カウントをちょうど1周期分止める」という
+# 明確な意味を持たせる（D-165）。
+_BL194_ACK_MAX_GRANTS = 2  # [BL-194][AGENTS.md §7 承認済み] 同一issueへのACKNOWLEDGE累計上限。
+# これにより最悪でも6ラウンドで必ず滞留判定へ復帰し、不死身化しない（D-165）。
+
+
+def _is_issue_acknowledged_active(issue: dict, round_count: int) -> bool:
+    """[BL-194] ACKNOWLEDGEの猶予が有効か。TTLを過ぎたら自動的に無効化される
+    （新しいstatusを作らず列とround_countの比較だけで表現するため、
+    「解除し忘れて不死身化する」経路が構造的に存在しない）。"""
+    return int(issue.get("acknowledged_until_round") or 0) > round_count
+
+
+def _get_actionable_escalated_issues(conn: sqlite3.Connection, run_id: str,
+                                      current_task_id: str = "",
+                                      round_count: int | None = None) -> list[dict]:
+    """[BL-194] status='escalated'のうち、「今このタスクで実際に対応を迫るべき」行だけを返す。
+    _get_escalated_issues（BL-096、生の全件）は、対応予定の有無を問わず全件を見せてよい
+    用途（escalation_activeの一度きり復帰通知、reflectionのcompleted判定抑止一覧）に
+    限って使い続けること——この2用途をactionableへ切り替えると、DEFER/ACK済みでも
+    未解決であるはずのissueに対して「解決した」「completed可」という虚偽の判定を
+    許してしまう（BL-194設計書§9-R1参照）。
+    round_countを渡した場合のみACKNOWLEDGE中のissueも追加で除外する（BL-125のように
+    roundを持たない／持たせたくない呼び出し元との混線を防ぐため、既定Noneでは
+    ACK抑制を行わない——ACK有効中の懸念は別途_build_acknowledged_issue_pin_textで
+    「対応中」として可視化されるため、督促からの除外であって不可視化ではない）。
+    """
+    result = [
+        r for r in _get_escalated_issues(conn, run_id)
+        if not _is_issue_effectively_deferred(conn, run_id, r, current_task_id)
+    ]
+    if round_count is not None:
+        result = [r for r in result if not _is_issue_acknowledged_active(r, round_count)]
+    return result
+
+
+def _build_escalation_pin_text(conn: sqlite3.Connection, run_id: str, current_task_id: str = "",
+                                round_count: int = 0) -> str:
     """[BL-103] issue_logのescalated行を、recency（chat_history_window/expert_history_window）
     に関係なく常時hydrate_contextへ差し込むための整形テキストを返す（無ければ空文字）。
     facilitatorのフィードバックはchat_history末尾に追記されるだけで窓を過ぎると消えるため
     （facilitator_node）、本関数はそれとは別に、call_expert/generate_user_utteranceの
     ambient contextへ「facilitatorの発言が消えた後の穴埋め」として毎ターン注入する用途。
     フォーマットはfacilitator_nodeのescalated_issues_text組み立てと同一にする。
+    [BL-194] 生の全件ではなくactionable集合（triage済みを除いた集合）のみを返す。
+    「⚠️要対応」という見出し（呼び出し元）の意味を正しくするため——DEFER済み分は
+    _build_deferred_issue_pin_textへ、ACKNOWLEDGE中の分は_build_acknowledged_issue_pin_text
+    へそれぞれ分離し、いずれも非「要対応」の別トーンで表示する。
     """
-    escalated = _get_escalated_issues(conn, run_id)
+    escalated = _get_actionable_escalated_issues(conn, run_id, current_task_id, round_count=round_count)
     if not escalated:
         return ""
     return "\n".join(
         f"- topic={i['topic']}: {i['description']}（累積{i['occurrence_count']}回発生、"
         f"raised_by={i['raised_by']}）"
         for i in escalated
+    )
+
+
+def _build_deferred_issue_pin_text(conn: sqlite3.Connection, run_id: str,
+                                    current_task_id: str = "") -> str:
+    """[BL-194] status='escalated'だが実効的な受け皿（別task_id）が確定済みの行を、
+    非強制トーンで参考提示する。BL-103のpinは従来これらを「⚠️要対応」として毎ターン
+    Expert/Detector/User AIへ刺し続けており、log/2026-08-08/1514ではtask_2_2スコープの
+    車両台数issueがtask_2_1実行中のExpertプロンプトへ数時間にわたり「要対応」として
+    表示され続けた結果、Expertが現在タスクのacceptance_criteriaに無い車両台数の再導出を
+    繰り返した（Ver.1→Ver.41のchurnの機械的な引き金）。
+    [CONSTRAINT] 文脈自体は落とさない（重複起票の防止）。落とすのは「今あなたが解決せよ」
+    という強制トーンだけ、というBL-145 _build_planned_issue_pin_textと同じ設計。
+    """
+    deferred = [
+        r for r in _get_escalated_issues(conn, run_id)
+        if _is_issue_effectively_deferred(conn, run_id, r, current_task_id)
+    ]
+    if not deferred:
+        return ""
+    return "\n".join(
+        f"- topic={i['topic']}: {i['description']}"
+        f"（対応予定task_id={i['defer_to_task_id']}。現在のタスクでこれを解決する必要はありません。"
+        "現在タスクのacceptance_criteriaに無い内容をこの懸念のために先取りしないでください）"
+        for i in deferred
+    )
+
+
+def _build_acknowledged_issue_pin_text(conn: sqlite3.Connection, run_id: str, round_count: int) -> str:
+    """[BL-194] ACKNOWLEDGE中（現在タスクの責務であり対応中と表明済み）の懸念を、
+    DEFER済み（対応不要）とは意味が逆の前向きなトーンで表示する。可視性は保ちつつ、
+    「⚠️要対応」（_build_escalation_pin_text）からは除外されるため、督促の二重化を避ける。
+    """
+    rows = [
+        r for r in _get_escalated_issues(conn, run_id)
+        if _is_issue_acknowledged_active(r, round_count)
+    ]
+    if not rows:
+        return ""
+    return "\n".join(
+        f"- topic={i['topic']}: {i['description']}"
+        f"（対応中と表明済み、残り{int(i.get('acknowledged_until_round') or 0) - round_count}ラウンド。"
+        "これは現在タスクの責務であり、今回の成果物で対応が期待されています）"
+        for i in rows
     )
 
 
@@ -4478,6 +4706,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_agreements_citations_column(conn)
     _ensure_verified_facts_r3a_columns(conn)
     _ensure_issue_log_defer_column(conn)
+    _ensure_issue_log_acknowledge_columns(conn)
 
 
 def _ensure_issue_log_defer_column(conn: sqlite3.Connection) -> None:
@@ -4489,6 +4718,23 @@ def _ensure_issue_log_defer_column(conn: sqlite3.Connection) -> None:
     if "defer_to_task_id" not in cols:
         print("  🛠️ [schema migration] issue_logへdefer_to_task_id列を追加します（BL-136）。")
         conn.execute("ALTER TABLE issue_log ADD COLUMN defer_to_task_id TEXT DEFAULT ''")
+        conn.commit()
+
+
+def _ensure_issue_log_acknowledge_columns(conn: sqlite3.Connection) -> None:
+    """[BL-194] issue_logへacknowledged_until_round/acknowledged_count/acknowledge_reasonを
+    追加する。RESOLVE（本当に解決した）でもDEFER（別タスクの責務である）でもない、第3の
+    正直な選択肢——「現在タスクの責務であり、今まさに対応中である」——を表現するための補助列。
+    statusの語彙は増やさない（D-079/D-080の`severity='major' ⇒ status='escalated'`不変条件を
+    BL-096系全経路が依存しており、拡張すると全経路から不可視になりBL-158を無効化する万能の
+    逃げ道になってしまうため。D-165参照）。BL-136の_ensure_issue_log_defer_columnと同型の
+    ALTERベース冪等マイグレーション。"""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(issue_log)").fetchall()}
+    if "acknowledged_until_round" not in cols:
+        print("  🛠️ [schema migration] issue_logへACKNOWLEDGE用の3列を追加します（BL-194）。")
+        conn.execute("ALTER TABLE issue_log ADD COLUMN acknowledged_until_round INTEGER DEFAULT 0")
+        conn.execute("ALTER TABLE issue_log ADD COLUMN acknowledged_count INTEGER DEFAULT 0")
+        conn.execute("ALTER TABLE issue_log ADD COLUMN acknowledge_reason TEXT DEFAULT ''")
         conn.commit()
 
 
@@ -4990,6 +5236,39 @@ def _build_task_focus_state_text(state: LineageState) -> str:
     return "【🧭 BL-191: 現在のタスクフォーカス状況】\n" + "\n".join(lines) + "\n"
 
 
+def _build_current_task_scope_brief(state: LineageState) -> str:
+    """[BL-194] Reflection/Facilitator向けの、現在タスクのスコープ最小要約。
+
+    [REJECTED] _build_task_scope_context（BL-023/025）の再利用は却下した。あちらは
+    DBクエリ2本と、実測50KB超になり得るホワイトボード全文＋R4編集方針（write_agreement
+    のeditsの使い方）を返すが、Reflection/Facilitatorはdeliverableを書く権限を持たず
+    無意味であるうえ、Facilitatorについては BL-170（具体的issueを読んだFacilitatorが
+    Expertの仕事を自分でやろうとしてMAX_TOOL_ITERを空費）の再現リスクを高める。
+    ここではstateのみを読み、DBアクセスもホワイトボードも伴わない軽量版を返す。
+
+    [BL-191] _build_task_focus_state_textと同じ「state上の値はプロンプトに自動では
+    現れないので明示描画する」パターン・同じ注入先（Reflection/Facilitator）に揃える。
+
+    log/2026-08-08/1514で、Reflection/Facilitatorがこのスコープを一切見ておらず、
+    task_2_1のacceptance_criteria外（task_2_2の責務である車両台数・フリート実現可能性）
+    の懸念を現タスクの義務であるかのように扱い続けた（Facilitator自身のthinkログにも
+    「需要モデリングには7〜8台の車両が必要」とtask_2_2の問いを取り込んだ記述がある）。
+    """
+    task = _get_current_task(state)
+    if not task:
+        return ""
+    criteria = task.get("acceptance_criteria", []) or []
+    owns = task.get("owns_variables", []) or []
+    lines = [
+        f"task_id: {task.get('task_id','')}",
+        f"目的: {task.get('description','')}",
+        "acceptance_criteria（このタスクで満たすべき項目はこれが全てです）:",
+        *([f"  - {c}" for c in criteria] or ["  (未定義)"]),
+        f"owns_variables（このタスクが確定させる変数はこれが全てです）: {owns or '(なし)'}",
+    ]
+    return "【🎯 BL-194: 現在のタスクのスコープ】\n" + "\n".join(lines) + "\n"
+
+
 def _build_task_focus_transition_notice(state: LineageState) -> str:
     """[BL-191] _apply_backward_redirect/_maybe_resume_forward_focus/_force_resume_forward_focusが
     直後に発火した場合、次のExpert/User AIターンへ一度だけ明示する通知
@@ -5087,7 +5366,8 @@ def _get_open_escalations_text(conn: sqlite3.Connection, run_id: str) -> str:
     )
 
 
-def _get_forced_escalated_issues_text(conn: sqlite3.Connection, run_id: str) -> str:
+def _get_forced_escalated_issues_text(conn: sqlite3.Connection, run_id: str,
+                                       current_task_id: str = "", round_count: int = 0) -> str:
     """[BL-136] User AI向け: issue_logのstatus='escalated'かつ未先送り（defer_to_task_id=''）行を、
     _get_open_escalations_text（BL-086）と同じトーンの強制解決文言で提示する。従来の
     _build_escalation_pin_textは「要対応」というラベルのみで具体的な行動を強制していなかった
@@ -5098,15 +5378,14 @@ def _get_forced_escalated_issues_text(conn: sqlite3.Connection, run_id: str) -> 
     いるのにissueが未解決のままの場合、その受け皿は事実上失効しており、defer_to_task_idが
     設定済みという理由だけで対象外にし続けると永久にUser AIへ提示されない「永久迷子」issueに
     なる（BL-145の同型フィルタで実ログ確認済み）。受け皿タスクが完了済みの行は対象に含める。
+    [BL-194] フィルタ述語を_is_issue_effectively_deferredへ委譲した（自前SQLフィルタを廃止）。
+    自己先送り（defer_to_task_id==current_task_id）は「先送りされていない」扱いとなり本文の
+    強制対象へ復帰する——従来は「受け皿あり」として永久に督促外だった6件（log/2026-08-08/1514）
+    がここで初めて督促されるようになる。
     """
-    rows = conn.execute(
-        "SELECT * FROM issue_log WHERE run_id=? AND status='escalated' ORDER BY id",
-        (run_id,)
-    ).fetchall()
-    rows = [
-        r for r in rows
-        if not r["defer_to_task_id"] or _is_task_completed(conn, run_id, r["defer_to_task_id"])
-    ]
+    # [BL-194] round_countを渡しACKNOWLEDGE中のissueも督促対象から除外する
+    # （ACKの目的そのもの：「今回必ずRESOLVE/DEFERせよ」という督促を一時的に止める）。
+    rows = _get_actionable_escalated_issues(conn, run_id, current_task_id, round_count=round_count)
     if not rows:
         return ""
     lines = [
@@ -6822,9 +7101,19 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         # [BL-103] facilitatorのエスカレーション名指しはchat_history末尾に追記されるだけで
         # chat_history_windowを過ぎると跡形もなく消える。issue_logのescalated行を毎ターン
         # DBから直接注入することで、その「発言が消えた後の穴」を埋める（recencyに関係ない pin）。
-        escalation_pin = _build_escalation_pin_text(_conn, state["run_id"])
+        escalation_pin = _build_escalation_pin_text(_conn, state["run_id"], state.get("current_task_id", ""), state.get("round_count", 0))
         if escalation_pin:
             hydrate_context += f"\n\n【⚠️エスカレーション中の懸念（要対応、issue_log）】\n{escalation_pin}"
+        # [BL-194] DEFER済み（別タスクへの受け皿が確定済み）の懸念は、非強制トーンで
+        # 別見出しに分離する。「要対応」側に混ぜたままだと、現タスクのacceptance_criteria
+        # に無い懸念をExpertが先取りして再導出し続ける事故（log/2026-08-08/1514）を招く。
+        deferred_issue_pin = _build_deferred_issue_pin_text(_conn, state["run_id"], state.get("current_task_id", ""))
+        if deferred_issue_pin:
+            hydrate_context += f"\n\n【📤 対応予定が確定済みの懸念（参考・現タスクでは対応不要、issue_log）】\n{deferred_issue_pin}"
+        # [BL-194] ACKNOWLEDGE中（現在タスクの責務であり対応中）の懸念も前向きなトーンで表示する。
+        acknowledged_issue_pin = _build_acknowledged_issue_pin_text(_conn, state["run_id"], state.get("round_count", 0))
+        if acknowledged_issue_pin:
+            hydrate_context += f"\n\n【🛠 現在のタスクで対応中の懸念（issue_log）】\n{acknowledged_issue_pin}"
         # [BL-136] status='open'（minor）行も参考情報として可視化する（従来はescalated行のみ）。
         open_issue_pin = _build_open_issue_pin_text(_conn, state["run_id"])
         if open_issue_pin:
@@ -7275,9 +7564,27 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
     # （BL-103のpin）を一切受け取っておらず、他ロールが既に折り込み済みの懸念を知らないまま
     # 独立に判定してしまっていた。ドメイン妥当性レビュー（前提・実現可能性等）と意味的に
     # 最も親和性が高いためPass 1にのみ注入する（Pass 2は算術検算に専念する設計のため対象外）。
-    escalation_pin = _build_escalation_pin_text(get_active_conn(), state["run_id"])
+    escalation_pin = _build_escalation_pin_text(get_active_conn(), state["run_id"], state.get("current_task_id", ""), state.get("round_count", 0))
     escalation_pin_block = (
         f"【⚠️エスカレーション中の懸念（要対応、issue_log）】\n{escalation_pin}\n\n" if escalation_pin else ""
+    )
+    # [BL-194] DEFER済み（別タスクへの受け皿が確定済み）の懸念は非強制トーンで分離する。
+    # Detector専用の1文を添える：担当タスクが別に確定している懸念を理由にmajor判定しない
+    # こと——BL-123がpinを導入した目的（他ロールが折り込み済みの懸念を知る）は保ちつつ、
+    # 逆方向の誤用（スコープ外を理由とした差し戻し）を塞ぐ。log/2026-08-08/1514で、
+    # task_2_2スコープの車両台数issueを理由にDetectorがtask_2_1をmajor差し戻しし続けた
+    # churnの再点火経路への直接の対処。
+    deferred_issue_pin = _build_deferred_issue_pin_text(get_active_conn(), state["run_id"], state.get("current_task_id", ""))
+    deferred_issue_pin_block = (
+        f"【📤 対応予定が確定済みの懸念（参考・現タスクでは対応不要、issue_log）】\n{deferred_issue_pin}\n"
+        "以下は担当タスクが別に確定している懸念です。現在タスクの成果物にこれらが反映されていない"
+        "ことを理由にmajorと判定しないでください（BL-194）。\n\n"
+        if deferred_issue_pin else ""
+    )
+    # [BL-194] ACKNOWLEDGE中（現在タスクの責務であり対応中）の懸念も前向きなトーンで表示する。
+    acknowledged_issue_pin = _build_acknowledged_issue_pin_text(get_active_conn(), state["run_id"], state.get("round_count", 0))
+    acknowledged_issue_pin_block = (
+        f"【🛠 現在のタスクで対応中の懸念（issue_log）】\n{acknowledged_issue_pin}\n\n" if acknowledged_issue_pin else ""
     )
 
     # [BL-054] 第1段: ドメイン妥当性レビューを検算より先に実行する。
@@ -7336,6 +7643,8 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"既に審議の上で承認した意図的な例外です。同じ論点をmajor/minorの根拠にしないでください"
         f"（ただし別の新しい問題点はこれまで通り厳格に評価してください）。\n\n"
         f"{escalation_pin_block}"
+        f"{deferred_issue_pin_block}"
+        f"{acknowledged_issue_pin_block}"
         f"System Goal: {goal}\n"
         f"{_get_goal_essence_text(get_active_conn(), state['run_id'])}\n"
         f"[BL-087 Stage4] 上記【🎯 本質】に照らして、数値・条件設定自体は妥当でも本質から"
@@ -7939,10 +8248,28 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
 
     # [BL-096] issue_logのstatus='escalated'行も、Python側の直接DB問い合わせでここに統合する
     # （モデルのツール呼び出し判断に依存せず、必ずreflectionへ届ける）。
+    # [BL-194] この一覧は「停滞判定の材料」と「completed宣言の抑止材料」を兼ねている。
+    # DEFER/ACK済み行を一覧から落とすと後者が壊れ（未解決なのにcompletedを宣言できる）、
+    # 落とさないと前者が壊れる（triage済みで停滞と誤断）。両立させるため一覧は全件のまま
+    # 残し、行ごとに「対応予定task_idが確定済みか」を注記して役割を分離する。機械的な
+    # stagnant上書き（reflection_node）側は_get_actionable_escalated_issuesを使う（B-1で対応済み）。
     escalated_issues = _get_escalated_issues(_conn, state["run_id"])
     for i in escalated_issues:
+        _defer_note = ""
+        if _is_issue_effectively_deferred(_conn, state["run_id"], i, state.get("current_task_id", "")):
+            _defer_note = (
+                f"【対応予定task_id={i['defer_to_task_id']}が確定済み。"
+                "完了(completed)判定では未解決として扱うこと。ただし現在タスクでの停滞(stagnant)の"
+                "根拠にはしないこと——対応する担当タスクが既に決まっているため】"
+            )
+        elif _is_issue_acknowledged_active(i, round_count):
+            _defer_note = (
+                f"【現在タスクで対応中と表明済み（残り{int(i.get('acknowledged_until_round') or 0) - round_count}"
+                "ラウンド）。完了(completed)判定では未解決として扱うこと。ただし現在タスクでの"
+                "停滞(stagnant)の根拠にはしないこと——既に対応中であるため】"
+            )
         constraint_log_lines.append(
-            f"- [issue_log topic={i['topic']}] {i['description']}（累積{i['occurrence_count']}回発生）"
+            f"- [issue_log topic={i['topic']}] {i['description']}（累積{i['occurrence_count']}回発生）{_defer_note}"
         )
 
     constraint_log_text = "\n".join(constraint_log_lines) if constraint_log_lines else "(なし)"
@@ -7993,6 +8320,15 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
     [BL-191] 上記のタスクフォーカス状況が「一時的に過去タスクへフォーカス中」等を示している場合、
     それは発注者の意図的な手戻り対応です。同じタスクが繰り返し再提出されているように見えても、
     それだけを理由にstagnant（膠着）や迎合と判定しないでください。
+
+    {_build_current_task_scope_brief(state)}
+    [BL-194] 停滞(stagnant)判定の前に、必ず次を確認してください: 上で「未解決」として挙がっている
+    懸念のそれぞれが、上記の現在タスクのacceptance_criteria/owns_variablesのどれかに対応して
+    いますか。どれにも対応しない懸念は、現在タスクで解決すべき問題ではありません（別タスクの責務、
+    または計画そのものへの指摘です）。その懸念が未解決であることだけを理由にstagnantと判定しないで
+    ください。代わりにnoteへ「この懸念はtask_X_Yのスコープである」と明記してください——noteは
+    Facilitatorへそのまま引き継がれ（BL-061）、Facilitatorが現在タスクで解決させようと誘導するのを
+    防ぐ唯一の経路です。
 
     【でっちあげ監査（★R5 F-2.1、cela_r5_design_v2.md §1.3）】
     上記の直近の会話の流れとタイムラインを俯瞰し、単発のDetectorでは見逃されがちな
@@ -8118,6 +8454,7 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     ■ プロジェクトの目標(Goal): {goal}
     {goal_essence_text}
     {_build_task_focus_state_text(state) if state else ""}
+    {_build_current_task_scope_brief(state) if state else ""}
     ■ 直近の会話:
     {history_text}
     """
@@ -8207,6 +8544,13 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     {reflection_block}
     {escalated_issues_block}
     {_build_task_focus_state_text(state) if state else ""}
+    {_build_current_task_scope_brief(state) if state else ""}
+    [BL-194] 上の懸念のうち、現在タスクのacceptance_criteria/owns_variablesのどれにも対応しない
+    ものについては、「現在のタスクで解決してください」という誘導を書かないでください。それは
+    現在の担当者に、担当外の解けない問題を押し付けることになります（実例: log/2026-08-08/1514で、
+    需要セグメント定義のタスクに車両台数と待ち時間の実現可能性証明を求め続け、ホワイトボードが
+    Ver.41まで空転しランが強制停止しました）。スコープ外だと判断した場合は、代わりに「その論点は
+    どのタスクの責務か」を整理させる方向の短いメッセージを書いてください。
     ■ 直近の会話:
     {history_text}
     """
@@ -8508,7 +8852,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
 
         # ===== Stage 2: issue確認 =====
         _open_escalations_text = _get_open_escalations_text(_conn, state["run_id"])
-        _forced_escalated_issues_text = _get_forced_escalated_issues_text(_conn, state["run_id"])
+        _forced_escalated_issues_text = _get_forced_escalated_issues_text(_conn, state["run_id"], state.get("current_task_id", ""), state.get("round_count", 0))
         issue_prompt = (
             f"あなたは目標達成のプロジェクトオーナー（発注者）です。これは4段階レビューの第2段"
             f"（issue確認）です。第1段のレビュー結果を踏まえ、issue_logの未解決事項を確認・整理して"
@@ -8908,9 +9252,20 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     # 際限なく肥大化するリスクがあった。Expertと同じ共通ヘルパーに統一し、issue_logの
     # escalated行（recencyに関係ない pin）も併せて注入する。
     timeline_str = _build_hydrate_context_from_db(_conn, state["run_id"], config)
-    escalation_pin = _build_escalation_pin_text(_conn, state["run_id"])
+    escalation_pin = _build_escalation_pin_text(_conn, state["run_id"], state.get("current_task_id", ""), state.get("round_count", 0))
     if escalation_pin:
         timeline_str += f"\n\n【⚠️エスカレーション中の懸念（要対応、issue_log）】\n{escalation_pin}"
+    # [BL-194] DEFER済み（別タスクへの受け皿が確定済み）の懸念は非強制トーンで別見出しに
+    # 分離する。log/2026-08-08/1514で、task_2_1自身への自己先送り6件がここでも「要対応」
+    # 側に混入し続け、User AIが同じ懸念を繰り返し督促され続けていた（DEFERの実効性が
+    # 消えていた事故の一部）。
+    deferred_issue_pin = _build_deferred_issue_pin_text(_conn, state["run_id"], state.get("current_task_id", ""))
+    if deferred_issue_pin:
+        timeline_str += f"\n\n【📤 対応予定が確定済みの懸念（参考・現タスクでは対応不要、issue_log）】\n{deferred_issue_pin}"
+    # [BL-194] ACKNOWLEDGE中（現在タスクの責務であり対応中）の懸念も前向きなトーンで表示する。
+    acknowledged_issue_pin = _build_acknowledged_issue_pin_text(_conn, state["run_id"], state.get("round_count", 0))
+    if acknowledged_issue_pin:
+        timeline_str += f"\n\n【🛠 現在のタスクで対応中の懸念（issue_log）】\n{acknowledged_issue_pin}"
     # [BL-136] status='open'（minor）行も参考情報として可視化する（従来はescalated行のみ）。
     open_issue_pin = _build_open_issue_pin_text(_conn, state["run_id"])
     if open_issue_pin:
@@ -8972,7 +9327,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
 
     # [BL-136] issue_logのescalated行（未先送り）についても、BL-086と同様に今回の発言で
     # 必ずRESOLVEかDEFERを呼ばせる（従来は受動的なpinのみで強制力がなかった）。
-    _forced_escalated_issues_text = _get_forced_escalated_issues_text(_conn, state["run_id"])
+    _forced_escalated_issues_text = _get_forced_escalated_issues_text(_conn, state["run_id"], state.get("current_task_id", ""), state.get("round_count", 0))
     if _forced_escalated_issues_text:
         system_prompt_trailing += f"\n{_forced_escalated_issues_text}\n"
 
@@ -10029,12 +10384,25 @@ Manages state updates including risk levels, constraint logging, and decision re
 
     return state
 
-def _get_blocking_issues_for_transition(conn: sqlite3.Connection, run_id: str, departing_task_id: str) -> list[dict]:
+def _get_blocking_issues_for_transition(conn: sqlite3.Connection, run_id: str, departing_task_id: str,
+                                         exclude_acknowledged: bool = False, round_count: int = 0) -> list[dict]:
     """[BL-125] departing_task_idから離脱する際にタスク遷移をブロックすべき未解決issueを取得する。
     severity='major'（D-079/D-080の不変条件によりstatus='escalated'を伴う）かつ、
     最後にこのtaskで検出された（last_seen_task_id一致）ものだけを対象とする。
     BL-136のDEFER（defer_to_task_idが設定済み）で既に明示的に先送りされたものは対象外とし、
     「今すぐ解決」と「明示的に将来のtaskへ先送り」のどちらかが済んでいれば遷移を許可する。
+
+    [BL-194 CONSTRAINT] このSQLは意図的にBL-194の共有述語（_is_issue_effectively_deferred/
+    _get_actionable_escalated_issues）へ統一しない。理由: (1) BL-167の受け皿失効リバイバル
+    （defer先タスク完了時にDEFERを無効化する）をここへ持ち込むと、完了済みタスクへDEFERされた
+    issueが離脱ゲートに復活し、現在タスクの担当者が解けないissueでタスクを出られなくなる
+    新規デッドロックを招く（BL-194設計書§9-R2）。(2) BL-125の遷移ゲートは督促（是正を促す）
+    ではなく安全装置（未解決のまま離脱させない）という異なる関心事であり、BL-194不変条件
+    「督促集合と滞留集合は同一述語で決定する」の明示的な例外として据え置く（D-163参照）。
+    exclude_acknowledged=Trueの場合のみACKNOWLEDGE中（BL-194 §5、S7）のissueを追加除外する
+    ——BL-158の機械的差し戻し（督促経路）だけがこの引数を使い、本体（離脱ゲート）は
+    既定Falseのまま抑制しない。「今対応中」と表明しても未解決のまま離脱することは許さない、
+    というACKNOWLEDGEの設計上の要（万能の逃げ道にしないための歯止め）。
     """
     if not departing_task_id:
         return []
@@ -10043,7 +10411,10 @@ def _get_blocking_issues_for_transition(conn: sqlite3.Connection, run_id: str, d
         "AND last_seen_task_id=? AND (defer_to_task_id IS NULL OR defer_to_task_id='') ORDER BY id",
         (run_id, departing_task_id)
     ).fetchall()
-    return [dict(r) for r in rows]
+    result = [dict(r) for r in rows]
+    if exclude_acknowledged:
+        result = [r for r in result if not _is_issue_acknowledged_active(r, round_count)]
+    return result
 
 
 def _resolve_task_transition(state: LineageState, transition: dict,
@@ -10606,12 +10977,22 @@ It generates a formal decision based on reflection results, updating the overall
     # 「同じescalated issueがユーザーノードを3回通過しても未解決のまま」という滞留を条件に
     # 絞る（ユーザーには毎ターンBL-136の強制解決プロンプトが表示されるため、3回は実質的な
     # 解決機会を与えたことになる）。
+    # [BL-194] _escalated_now（生の全件）はこの直後の escalation_active 判定でのみ使う
+    # （B-2：意図的に据え置き。DEFER/ACK済みでもエスカレーションが「存在する」事実自体は
+    # 変わらないため、actionableへ絞ると「解決しました」という虚偽の復帰通知が飛ぶ）。
+    # 停滞トリガーの母集合は _actionable_escalated（triage済みを除いた集合）を使う——
+    # log/2026-08-08/1514で、全20件がDEFER済みだったにもかかわらずここが無フィルタだった
+    # ため機械的にstagnantへ上書きされhaltした事故の一次修正（BL-194）。
     _escalated_now = _get_escalated_issues(get_active_conn(), state["run_id"])
+    _actionable_escalated = _get_actionable_escalated_issues(
+        get_active_conn(), state["run_id"], state.get("current_task_id", ""),
+        round_count=state.get("round_count", 0),
+    )
     _escalated_first_seen = state.setdefault("escalated_issue_first_seen_round", {})
     _current_round = state.get("round_count", 0)
     _stale_escalated = []
     _current_escalated_ids = set()
-    for _issue in _escalated_now:
+    for _issue in _actionable_escalated:
         _iid = _issue["id"]
         _current_escalated_ids.add(_iid)
         _first_round = _escalated_first_seen.setdefault(_iid, _current_round)
@@ -10630,21 +11011,14 @@ It generates a formal decision based on reflection results, updating the overall
             f"（{_stale_topics}）がユーザーノードを3回通過しても未解決のため、"
             f"discussion_statusを機械的にstagnantへ上書きしました。"
         )
-        # [BL-145] 既にDEFER済み（defer_to_task_idが設定済み）のissueは、既存タスクへの
-        # 先送りという受け皿が既にあるため、二重の受け皿を避けるためタスク化対象から除外する
-        # （_get_forced_escalated_issues_textと同じフィルタ）。plan_revision_reasonが既に
-        # 別要因（task_plan_reviewerの差し戻し・facilitatorのEssence Dialogue収束）で
-        # セット済みの場合は上書きしない（次回のreflectionで再評価される）。
-        # [BL-167] ただし受け皿タスク（defer_to_task_id）が既に完了（RESOLVING_DELIVERABLE_
-        # STATUSES）しているのにissueが未解決のままの場合、その受け皿は事実上失効しており
-        # 二度と拾われない「永久迷子」状態になる（実ログで確認：「車両台数2台では要件を満たせ
-        # ない」issueがdefer_to_task_id="task_1_2"のまま、task_1_2完了後も放置され続けていた）。
-        # この場合は受け皿が既にあるとはみなさず、再度タスク化対象に含める。
-        _formalizable_stale = [
-            i for i in _stale_escalated
-            if not i.get("defer_to_task_id")
-            or _is_task_completed(get_active_conn(), state["run_id"], i["defer_to_task_id"])
-        ]
+        # [BL-145/BL-194] _stale_escalatedは既に_actionable_escalated（受け皿なし・自己先送り・
+        # 受け皿失効のいずれかに該当する行のみ）から絞り込まれているため、正当にDEFER済みの
+        # issueはそもそもこの時点で混入しない。以前はここでBL-136/167と同じフィルタ式を
+        # 独立に再実装しており（4箇所目の重複コピー）、上流の述語が変わっても下流が古いままに
+        # なる同型事故のリスクがあった（BL-194設計書「補正③」参照：停滞と断罪する集合と
+        # 是正のため計画へ渡す集合が同一ifブロック内で食い違っていた）。フィルタは上流の
+        # _get_actionable_escalated_issuesへ一元化したため、ここでは単純に代入するのみ。
+        _formalizable_stale = _stale_escalated
         if _formalizable_stale and not state.get("plan_revision_reason"):
             _reason_lines = [
                 f"- topic={i['topic']}: {i['description']}（累積{i['occurrence_count']}回発生、"
@@ -10757,8 +11131,15 @@ def facilitator_node(state: LineageState) -> LineageState:
     print(f"\n------ [facilitator] が思考中 ------")
     # [BL-096] reflectionと同じくPython側の直接DB問い合わせでescalated issueを取得し、
     # facilitatorのプロンプトに構造化データとして注入する（LLMツール呼び出しには依存しない）。
+    # [BL-194] 生の_get_escalated_issuesではなくactionable集合を使う。triage済み（DEFER先が
+    # 確定している）issueを「🚨最優先で解消させてください」という最強トーンのブロックへ
+    # 流し込むのはBL-194不変条件の直接違反であり、log/2026-08-08/1514ではFacilitator自身が
+    # 「need車両7〜8台」とtask_2_2の責務をtask_2_1の義務として誤って取り込む原因になっていた。
     _conn = get_active_conn()
-    _escalated_for_facilitator = _get_escalated_issues(_conn, state["run_id"])
+    _escalated_for_facilitator = _get_actionable_escalated_issues(
+        _conn, state["run_id"], state.get("current_task_id", ""),
+        round_count=state.get("round_count", 0),
+    )
     escalated_issues_text = "\n".join(
         f"- topic={i['topic']}: {i['description']}（累積{i['occurrence_count']}回発生、"
         f"raised_by={i['raised_by']}）"
@@ -11667,48 +12048,57 @@ if __name__ == "__main__":
     # カスタムロガーを標準出力に設定（importのみでは発火させない。BL-027）
     sys.stdout = MultiLogger()
 
-    TARGET_GOAL = (
-        "過疎地域向け「AIオンデマンド自動運転バス」の導入計画と安全基準策定\n"
-        "1. 初期導入予算は「上限1億円」、年間維持費（ランニングコスト）は「上限3,000万円」とする。\n"
-        "車両本体、遠隔監視システムの構築費や、遠隔監視オペレーター（最低2名常駐）の人件費、車両のメンテナンス費もすべてこの予算内で賄うこと。\n"
-        "利用料金は「1乗車一律200円」とし、住民の負担を最小限に抑えること。\n"
-        "2. 【ターゲット層とUXの制約】\n"
-        "対象地域の住民の70%が65歳以上の高齢者であり、スマートフォンの所持率は30%未満である。\n"
-        "オンデマンド配車の「予約手段」として、スマホアプリ以外の代替手段を必ず用意すること。\n"
-        "予約から乗車までの「最大待ち時間」は、いかなる場合でも30分以内を死守すること。\n"
-        "3. 【安全基準と法規制】\n"
-         "運行ルートの15%は「冬季（12月〜2月）に積雪・凍結が発生する勾配のある山間部」である。\n"
-         "また、ルート全体の約5%に「携帯キャリアの通信（4G/5G）が一時的に途切れる不安定なエリア」が存在する。\n"
-         "自動運転レベル4（特定条件下での無人運転）を想定し、これらの環境下でどう運行を維持するのか、あるいは運休するのかの基準を明確にすること。\n"
-         "4. 【異常時のエッジケースと法的責任】\n"
-         "以下の2つのエッジケースについて、システム上のフェールセーフ（安全装置）の挙動と、責任分界点（事故・トラブル時の責任は「自治体」「システム開発会社」「遠隔オペレーター」の誰にあるか）をマニュアルに明記すること。\n"
-         "ケースA: 走行中に通信障害エリアに入り、遠隔監視センターとの通信が完全にロストした場合。\n"
-         "ケースB: 雪でセンサーが誤作動し、車両が立ち往生している際に、後続の一般車両に追突された場合。\n"
-         "【付帯情報】対象地域「水ノ守（みずのもり）町」の基本データ\n"
-         "1. 人口・交通動態\n"
-         "想定利用人口（町全体の人口）: 5,000人\n"
-         "高齢者（65歳以上）: 3,500人（70%） ※うち単身世帯が約4割\n"
-         "現役世代・子供: 1,500人（30%）\n"
-         "想定乗車密度（1日の予測総乗車数）: 約 400人 / 日\n"
-         "ピークタイム（午前8:00〜11:00：通院・買い物）: 約200人（集中発生）\n"
-         "オフピーク（午後12:00〜17:00）: 約150人\n"
-         "夜間（17:00〜20:00：通勤・通学帰り）: 約50人\n"
-         "※20:00〜翌朝8:00までは運行外とする。\n"
-         "2. 地理・インフラ環境\n"
-         "総面積: 約 50平方キロメートル（一般的な地方の過疎盆地エリア）\n"
-         "主要拠点（運行の起点・終点となる場所）:\n"
-         "【中心部】町立総合病院（高齢者の目的地NO.1）\n"
-         "【中心部】大型スーパー・役場周辺（商業・行政の中心）\n"
-         "【地方部】山間部集落（中心部から片道約 12km、ここに積雪・通信障害エリアが存在）\n"
-         "移動速度の前提:\n"
-         "信号が少ない平坦な道では平均時速 40km/h、勾配のある山間部では平均時速 20km/h とする。\n"
-         "3. 経営環境（自治体の財政補填限界）\n"
-         "水ノ守町は財政健全化団体の一歩手前であり、前述の「年間維持費上限3,000万円（実質的な自治体からの最大補助金）」を1円でも超える予算案は、議会で絶対に承認されない。\n"
-         "運賃収入の試算（参考数値）:\n"
-         "400人×200円＝80,000円/日。年間300日稼働として、年間運賃収入は最大でも 2,400万円。\n"
-         "したがって、年間の「総運行コスト」から「運賃収入（2,400万円）」を引いた「実質赤字額」が、自治体補助金（3,000万円）の枠内に収まる必要がある。\n"
-         "実質赤字額 ＝（オペレーター人件費＋システム維持費＋電気代/燃料代＋車検メンテ費等）－ 2,400万円 ≦ 3,000万円\n"
-    )
+    TARGET_GOAL = (f"""
+                   # 課題：八ヶ嶺市（仮名）における自動運転バス導入計画の策定
+
+以下の背景・地理データ・制約条件に基づき、八ヶ嶺市（やつがねし）における「自動運転バス導入計画書」を作成してください。
+
+---
+
+## 1. 背景と地域データ（公的統計準拠）
+
+### (1) 社会・交通背景
+- 人口・世帯: 総人口 約54,000人 / 高齢化率 約31.5%（65歳以上：約17,000人。うち単身・高齢者のみ世帯が約4割）。その他、私立理工系大学の学生 約1,200人。
+- 既存交通の崩壊: モータリゼーションの進行により自家用車依存率が極めて高く、既存の路線バスは利用者の激減により相次いで赤字撤退・廃線化。
+- 移動弱者の急増: 近年、高齢ドライバーの運転免許返納件数が急増。通院や日常の買い物が困難な「移動難民」の増加が深刻な社会問題となっている。
+- デジタルリテラシー: 65歳以上のスマートフォン所有率は約65%に達するが、アプリによる配車予約操作を問題なく行える高齢者は全体の15%程度にとどまり、7割以上の高齢者が電話予約等に頼らざるを得ない。
+
+### (2) 地理・インフラ環境（中心駅からのベクトル構造）
+- 総面積: 約 266 km²
+- 地形・標高: 
+  - 【市街地平坦部】：JR主要駅（標高 約800m）を中心とした半径 5km 圏内。平坦〜緩勾配（平均時速 40km/h 想定）。
+  - 【山間登坂・高原部】：駅（中心部）から 5km を超えると急勾配に入り、10km〜20km 圏内に標高 1,000m〜1,500m の集落や別荘地が散在（平均時速 25km/h 想定。冬季は積雪・路面凍結）。
+- 主要拠点と中心部（駅）からの距離:
+  1. 【交通結節点】JR中央本線 主要駅（標高800m）
+  2. 【基幹病院】地域基幹総合病院（駅より北東へ 約2.5km / 標高820m / 高齢者の目的地首位）
+  3. 【商業・行政】大型商業施設・市役所周辺（駅より東〜北東へ 約1.2km / 標高810m）
+  4. 【文教】私立理工系大学キャンパス（駅より北東へ 約4.5km / 標高900m / 朝夕の通学集中）
+  5. 【山間集落】東部山間集落群（駅より東〜北東へ 約10km〜14km / 標高1,000〜1,100m）
+  6. 【最遠集落】北東部高原集落群（駅より北東へ 約18km〜22km / 標高1,300〜1,500m）
+
+---
+
+## 2. 絶対制約条件（ハード制約）
+
+1. 【財務制約】
+   - 初期構築・車両導入費（CapEx）の公的補助総額は「上限 1億円以内」。
+   - 年間の市からの赤字補填補助金（OpEx）は「年間 4,000万円以内」を絶対厳守（1円でも超える計画は議会で否決される）。
+   - 利用者運賃は1乗車数百円程度の住民負担に配慮した設定とし、運賃収入を試算すること。
+2. 【サービスレベル（SLA）】
+   - ピーク帯（午前8:00〜11:00の通院・買い物、朝の通学）の需要を破綻なく捌くこと。
+   - 予約から乗車までの最大待ち時間は、市街地（5km圏内）で20分以内、山間部（5km超）で30分以内とする。
+   - 電話予約等の非アプリ予約受入体制および人件費を計上すること。
+3. 【法規制・労働・気象】
+   - 運行時間帯: 7:30〜19:30（12時間運行）。
+   - 労働基準法（交代制勤務・法定休憩・時間外労働規制）および遠隔監視オペレーター・乗務員配置基準の厳格な順守。
+   - 冬季（12月〜3月）の標高1,000m超エリアにおける積雪・凍結時の安全運行基準（運休条件等）の明記。
+
+---
+
+## 3. 指示
+
+上記の背景および制約条件をすべて踏まえ、八ヶ嶺市における「自動運転バス導入計画書」を作成してください。"
+    """)
 
     config : Appconfig = {
         "pattern":  4,

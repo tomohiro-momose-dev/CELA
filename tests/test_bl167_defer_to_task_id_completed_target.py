@@ -117,7 +117,16 @@ def _make_reflection_mock(monkeypatch):
 
 
 def test_reflection_still_excludes_issue_deferred_to_incomplete_task(db_conn, monkeypatch):
-    """回帰確認: 受け皿タスクがまだ未完了の場合は、従来通り除外され続けること（BL-145の想定通りの動作）。"""
+    """回帰確認: 受け皿タスクがまだ未完了の場合は、タスク化対象からは従来通り除外され続けること
+    （BL-145の想定通りの動作）。
+    [BL-194] discussion_statusの期待値は"stagnant"から変更した。以前は_stale_escalatedの母集合が
+    生のescalated全件（無フィルタ）だったため、正当にDEFER済み（受け皿task_1_2は未完了だが
+    存在する）でもstagnant自体は機械的に上書きされていた——これがまさにlog/2026-08-08/1514で
+    「全件triage済みなのにhaltした」事故の直接原因（BL-194不変条件：督促集合と滞留集合は
+    同一述語で決定する）。停滞判定の母集合もactionable集合（_get_actionable_escalated_issues）
+    へ統一したため、正当な受け皿がある限りstagnantの根拠にもならない。plan_revision_issue_idsが
+    空のままという本来の検証意図（タスク化対象からの除外）は変わらず成立する。
+    """
     conn, run_id = db_conn
     _create_escalated_issue(conn, run_id, "bl167_pending_target")
     cela_main._write_issue_impl(
@@ -132,7 +141,7 @@ def test_reflection_still_excludes_issue_deferred_to_incomplete_task(db_conn, mo
     state["round_count"] = 4
     state = cela_main.reflection_node(state)
 
-    assert state["discussion_status"] == "stagnant"
+    assert state["discussion_status"] != "stagnant"
     assert state.get("plan_revision_issue_ids", []) == []
 
 
