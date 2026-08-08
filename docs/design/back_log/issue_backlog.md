@@ -224,6 +224,7 @@
 | BL-190 | 高 | `cela_main.py`（`task_planner_node`、`_get_current_task`、`_build_task_transition_blocked_notice`、`LineageState`、実装済み） | ユーザーとのログレビュー（`log/2026-08-07/2355`）中に、task_plan_reviewerの指摘でtask_plannerが計画全体を再構成した（phase_7をphase_2位置へ移動、旧phase_2-6をphase_3-7へ繰り下げ）直後、`_get_current_task`が`current_task_id='task_2_1'がcurrent_phaseのタスク一覧に見つかりません`という警告を繰り返し出し、User AIのwrite_agreement(UPDATE, task_id='task_2_1')がBL-146ガードに拒否される事態を発見した。原因は`task_planner_node`（`cela_main.py:8850-8852`）が初回計画・ラン途中の再構成いずれの場合も無条件に`current_phase = phases[0]`へリセットする一方、`current_task_id`（BL-024により`_resolve_task_transition`のみが書き手）には一切触れないため、フェーズの並び順・phase_idが変わる規模の再構成では両者が不整合になることと特定した。今回はエラーメッセージがaction_type='SUPERSEDE'への切り替えを促し、User AIがそれに従って正常に処理を完了したため実害はなかったが、ユーザーへ報告したところ「これは予期していたが対処を考えていなかった。今、その時が来た。対処法を設計して」との指示があり、設計のみ実施した。詳細は[BL-190詳細](#bl-190-ラン途中の計画再構成後current_task_idcurrent_phaseが不整合になる問題への対処)を参照。**状態: `open`（設計完了、実装はユーザー指示待ち）**。 | P1 |
 | BL-191 | 高 | `cela_main.py`（`LineageState`、`SCHEDULE_TASK_FOCUS_TOOL`、`TOOL_DISPATCH`、`scheduling_drafts`テーブル+CRUD、`_resolve_task_transition`、`decision_extractor_node`、Stage4含む`generate_user_utterance`、`call_expert`、`call_detector`、`call_reflection`、`call_facilitator`、実装済み） | BL-190のログレビュー後、ユーザーが「ゴールの再定義や再タスクプランが発火すると、過去のタスクで書いた成果物やDB内の確定値も整合が取れなくなる。一時的に過去タスクに戻り検討しなおす必要が生まれるが、現在の設計はUser AIへのプロンプト指示も含めて前へ進むようにしか設計されていない」と問題提起。BL-186で一度「(a)過去タスクへ戻る新ルートを作る／(b)前進のみで新フェーズを追加する」を検討し(b)を選んだ判断を、今回のストレステスト結果を踏まえて覆し、(a)実際にcurrent_task_idを過去タスクへ一時的に巻き戻す経路を新設することを決定。実装場所はユーザー指定により新規ノードではなくUser AIの既存Stage4（次タスクへ進むか現タスクを修正するかを判断する段階）を拡張する形とした（理由：バラバラなノードが独立に過去タスクの不整合に気づき混乱するより、Stage4という単一の意思決定点で「過去タスクへ明示的に戻る」か「前進しつつ過去タスクを併記対象として明示する」かを一度に宣言する方がスムーズなため）。3体のExploreエージェントによる既存メカニズム（SUPERSEDE、BL-163/168/186カスケード、issue DEFER機構、死んだ`phases_to_revise`、BL-041の未実装ドラフト）の棚卸しと1体のPlanエージェントによる詳細設計、さらにユーザー主導のユースケース通しトレース（早すぎる自動復帰・BL-190との相互作用による永久迷子等、6件のバグを発見）と別AIによる独立レビュー（7件反映・3件偽陽性）を経て設計を完成させた。新規ツール`schedule_task_focus`（decision_type: redirect_backward/joint_focus/clear_companion/force_resume）、新規state（`task_focus_stack`等6フィールド）、新規DBテーブル`scheduling_drafts`を導入し、`current_task_id`/`current_phase`の唯一の書き手という既存原則（BL-024）は保ちつつ、Stage4発の構造化決定を`_resolve_task_transition`へ新しい入力経路として渡す設計とした。詳細は[BL-191詳細](#bl-191-stage4駆動の過去タスク一時フォーカス切替併記対象タスクの明示)、および`docs/design/back_log/BL-191/BL191_basic_design.md`（Planエージェント原文＋ユースケーストレース＋独立レビュー対応、要約せず全文保存）を参照。**実装完了（`done`）**：BL-190（`_reconcile_current_phase_after_replan`）を先に実装した上で、Phase 1（`joint_focus`/`clear_companion`）とPhase 2（`redirect_backward`/`force_resume`）を一括実装した。実装中に設計時点では見つからなかった2件の追加不具合を発見・修正：(1) `_force_resume_forward_focus`の復帰先自体も新計画から消えている「二重消失」パターンで`current_task_id`が無効な値のまま残る問題（`_reconcile_current_phase_after_replan`のフォールスルー処理を追加）、(2) `pending_task_redirect`が`decision_extractor_node`内で読み取られるだけで明示的にクリアされていなかった問題（one-shot消費として`None`へ明示リセット）。新規テスト`tests/test_bl191_task_focus_scheduling.py`34件（ツール実装・redirect/resume・joint_focus/companion・decision_extractor_node統合・DB CRUD・BL-190×BL-191結合）、既存の関連テスト138件（BL-024/125/126/145/146/163/167/176/181/183/186/190系）と合わせて無退行を確認。`python -m py_compile`合格、フルオフラインスイート825件Pass。 | P1 |
 | BL-192 | 中 | `cela_main.py`（Stage4含む`generate_user_utterance`のシステムプロンプト、非Stage4 User AIパスの`system_prompt_trailing`。プロンプト文言追記のみ、新規state/DB/ツールなし、実装済み） | BL-191設計中、ユーザーから追加要望：「ユーザーAIプロンプトにも、過去タスクの洗い直しや依存関係にある過去タスクの同時検討の指示、agreementを書く際の注意（過去タスク書き換えにはSUPERSEDEが必要等）、次タスクで根拠があいまいな数値・前提がある場合はまずweb検索で調べて『もっともらしさ』を排除する指示など、単に『次はこれをやれ』ではなく、Expertへどういう思考で・どう行動してほしいかを網羅的に指示する部分を強化したい」。うち「過去タスク書き換え時のSUPERSEDE注意」はBL-191の`joint_focus`機能のcompanion表示ヘルパーへ直接組み込み、残る2点（①根拠不明な数値・前提のweb_search義務化、②期待される思考プロセスの網羅的な明示）はBL-191のスケジューリング機構の有無に関わらずStage4の指示文全般に当てはまる独立した関心事のためBL-192として分離した。BL-188が確立した「プロンプト誘導のみ（機械的な強制ゲートは追加しない）」という標準方針をそのまま踏襲し、新規の状態・ツール・DBスキーマは一切不要、Stage4のシステムプロンプトへの追記のみで完結する設計とした。独立レビューにより、User AIには差し戻しターン等でStage3/Stage4をスキップする非Stage4パス（`cela_main.py:8484`）が存在し、根拠不明値のweb_search義務化指示が差し戻しターンで一切適用されない見落としが発覚したため、両パスへ共通定数で同じ指示ブロックを注入する設計に修正した。詳細はBL-191と同じ`docs/design/back_log/BL-191/BL191_basic_design.md`内のBL-192セクションを参照（実装箇所がStage4で重なるためBL-191と同一セッションで実装した）。**実装完了（`done`）**：共通定数`_BL192_DIRECTIVE_QUALITY_BLOCK`（web_search義務化＋思考プロセス明示の2指示）を新設し、Stage4の承認済み分岐と非Stage4パス（`system_prompt_trailing`）の両方から参照する形で実装（文言の二重管理を回避）。新規テスト`tests/test_bl192_stage4_directive_quality.py`4件、既存Stage4関連テストと合わせて無退行を確認。 | P2 |
+| BL-193 | 高 | `cela_main.py`（`_apply_text_edits`/`_nearest_content_snippet`、`READ_WHITEBOARD_EXCERPT_TOOL`/`_read_whiteboard_excerpt_handler`/`TOOL_DISPATCH`、`call_expert`のtools一覧、`_build_task_scope_context`のR4編集方針プロンプト、実装済み） | ユーザーが`log/2026-08-08/1514`のレビュー中、「ホワイトボードの書き換えが失敗しまくっています。どうにかなりませんか？」と報告。調査の結果、task_2_1のホワイトボードが50KB超に育った状態で、Expertがwrite_agreement(edits=...)のold_textとしてDetector注釈ブロックごと巻き込んだ数千文字の巨大な引用を組み立て、実際の格納内容と一字一句一致せず、同一パターンの失敗を8回連続（他の時間帯にも複数回）繰り返していたことを特定。根本原因はBL-151で追加された「不一致時に実際の格納内容を見せて同ターン内で自己修復させる」機構（`_apply_text_edits`）のスニペットが、文書サイズに関わらず**常にcontent[:400]（文書先頭）固定**だったため、編集対象が先頭から遠い節にある大規模文書では一度もその節の実際の中身が見えず、自己修復が機能していなかったことと判明。ユーザーとの議論で「Claude Code等の実際のエージェントがdiff編集をどう行っているか」を参照し、(1) Editツールは編集直前に必ず現物を読み直す、(2) old_stringは最小限・一意な範囲に留め無関係な周辺を巻き込まない、という2原則を確認。ユーザーから「ファイル化してgrepのような汎用コマンドを使わせた方が早いか」との提案があったが、R4設計が「DBが正、`.md`ファイルはベストエフォートの副産物」と明記済みであり、ファイルを読み取り主経路にすると2つ目の正本を生み二重管理の同型事故を招くこと、また汎用grep/シェル的ツールは`read_deliverable_file`が既に慎重に実装しているパストラバーサル対策等を作り直す必要があることから、**DB直参照のまま**既存のBL-079（`verify_whiteboard_excerpt`、Detector専用の事前検証ツール）と同じ判定ロジックを流用した新ツールを追加する方針で合意した。**実装完了（`done`）**：3点を実装。①`_nearest_content_snippet`：不一致時のスニペットを、`old_text`との最長共通部分（`difflib.SequenceMatcher`）の周辺へ差し替える（有意な一致が無ければBL-151の元の「文書先頭」挙動へフォールバック）。②`read_whiteboard_excerpt`ツール（Expert専用、BL-079の`verify_whiteboard_excerpt`と同じ完全一致→正規化緩い一致の判定を流用するが目的が逆で「実際の中身を返す」）：old_textを組み立てる前にキーワード指定で対象箇所の現在の実際の文字列をピンポイント取得できる。③R4編集方針プロンプト（`_build_task_scope_context`）へ、old_textを最小限に保つ（Detector注釈ブロック等の無関係な周辺を巻き込まない）指示と`read_whiteboard_excerpt`の使用推奨を追記。新規テスト`tests/test_bl193_whiteboard_edit_reliability.py`16件（スニペット近傍化4件、ツールハンドラ8件、配線確認4件）、既存BL-151テスト1件を新しいスニペット文言に合わせて更新、既存BL-081/151/079系と合わせて無退行を確認。`python -m py_compile`合格、フルオフラインスイート841件Pass、`check_docs_consistency.py`合格。 | P1 |
 
 ---
 
@@ -5542,6 +5543,69 @@ companion表示ヘルパー（`_get_task_focus_companion_text`）へ直接組み
 
 ---
 
+### BL-193: `write_agreement(edits=...)`によるホワイトボード書き換えが大規模文書で繰り返し失敗する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（実装完了） |
+| 優先度 | P1 |
+| 関連 | [BL-151](#bl-151-revise_goalのold_textがプロンプト表示専用の絵文字装飾を含んでいたため9回以上自己修復に失敗し続けた)（本BLが拡張した「不一致時スニペットで自己修復させる」機構の初出）、[BL-081](#bl-081-write_agreementのeditsold_textnew_textがmarkdownテーブル行頭の全角スペースパイプ記号の有無で完全一致に失敗しやすかった)（`_find_loose_match_spans`正規化緩い一致の初出、本BLが流用）、[BL-079](#bl-079-ホワイトボード注釈の一致失敗をdetector自身にフィードバックし同一ツールループ内でリトライさせる)（`verify_whiteboard_excerpt`、本BLの`read_whiteboard_excerpt`が同じ判定ロジックを流用した先例） |
+
+**内容:**
+
+ユーザーが`log/2026-08-08/1514`のレビュー中、「ホワイトボードの書き換えが失敗しまくっています。
+どうにかなりませんか？」と報告。task_2_1のホワイトボードが50KB超に育った状態で、Expertが
+write_agreement(edits=...)のold_textとして、Detector注釈ブロック（`> 🔴 **[Detector指摘
+#...]**`）ごと巻き込んだ数千文字の巨大な引用を組み立て、実際の格納内容と一字一句一致せず、
+同一パターンの失敗を8回連続（他の時間帯にも複数回）繰り返していたことを特定した。
+
+根本原因はBL-151で追加された「old_text不一致時に実際の格納内容のスニペットを見せ、同ターン内
+での自己修復を可能にする」機構（`_apply_text_edits`）にあった。スニペットが文書サイズに関わらず
+**常に`content[:400]`（文書先頭400文字）固定**だったため、編集対象が先頭から遠い節（今回は
+3.6節）にある大規模文書では、スニペットが一度もその節の実際の中身を見せず、BL-151が意図した
+自己修復が機能しないまま同じ不一致を繰り返していた。
+
+ユーザーとの議論で「実際のClaude Code等のコーディングエージェントがdiff編集をどう行っているか」
+を参照し、(1) Editツールは編集の直前に必ず現物を読み直す（記憶や要約からold_stringを組み立てない）、
+(2) old_stringは最小限・一意になる範囲だけに留め、無関係な周辺を巻き込まない、という2原則を
+確認した。ユーザーから「いっそファイル化してgrepなどの汎用コマンドを使わせた方が早いか」との
+提案があったが、R4設計が「DBが正、`.md`ファイルはベストエフォートの副産物（書き込み失敗は
+握りつぶす）」と明記済みであり、ファイルを読み取りの主経路にすると2つ目の正本を生み、今回
+診断したのと同型の「見せた内容と実データが食い違う」事故を別の場所で再発させかねないこと、
+また汎用grep/シェル的ツールは`read_deliverable_file`が既に慎重に実装しているパストラバーサル
+対策等を新ツールでも作り直す必要があることから、**DB直参照のまま**、既存のBL-079
+（`verify_whiteboard_excerpt`、Detector専用の「引用が一致するか事前検証するだけ」のツール）と
+同じ判定ロジックを流用した新ツールを追加する方針で合意した。
+
+**実装完了（`done`）**：3点を実装。
+
+1. `_nearest_content_snippet`：不一致時のスニペットを、`old_text`と`content`の間の最長共通
+   部分（`difflib.SequenceMatcher.find_longest_match`）の周辺へ差し替える。有意な一致
+   （20文字未満）が見つからない場合はBL-151の元の挙動（文書先頭のスニペット）へフォールバック
+   する——完全に無関係なold_textに対しては「近傍」という概念自体が意味を持たないため。
+2. `read_whiteboard_excerpt`ツール（Expert専用、`READ_WHITEBOARD_EXCERPT_TOOL`/
+   `_read_whiteboard_excerpt_handler`/`TOOL_DISPATCH`登録、`call_expert`のtools一覧へ追加）：
+   `verify_whiteboard_excerpt`と同じ完全一致→正規化緩い一致の判定を流用するが、あちらは
+   「検証のみ」、こちらは「一致した周辺の実際の中身を返す」点が異なる。old_textを組み立てる
+   前に、キーワード指定で対象箇所の"現在の"実際の文字列だけをピンポイント取得できる
+   （一意に定まらない場合は一致件数を返し、より長い一意な語句での再指定を促す）。
+   `current_task_id`/`current_phase`はstate経由（`_effective_current_task_id_from`/
+   `_phase_id_from`）で取得する——`call_expert`は`_CURRENT_PHASE_ID`グローバルを更新しない
+   ため、`verify_whiteboard_excerpt`と同じグローバル依存にはできない。
+3. R4編集方針プロンプト（`_build_task_scope_context`のwhiteboard_text）へ、old_textを最小限に
+   保つ（Detector注釈ブロック等の無関係な周辺を巻き込まない、注釈削除は本文修正と別のedits
+   要素にする）指示と、`read_whiteboard_excerpt`の使用推奨（特に前ターンで一度でも不一致に
+   なった場合は必須）を追記。
+
+新規テスト`tests/test_bl193_whiteboard_edit_reliability.py`16件（`_nearest_content_snippet`の
+近傍化・フォールバック4件、`read_whiteboard_excerpt`ハンドラの正常系・異常系8件、ツール登録・
+Expertのtools一覧・R4プロンプトへの結線確認4件）を追加。既存の`tests/test_bl151_*`のうち
+スニペット文言を直接検証していた1件を、新しい文言（「実際の先頭部分」固定→「old_textに
+最も近い実際の内容」）に合わせて更新。既存BL-081/151/079系と合わせて無退行を確認。
+`python -m py_compile`合格、フルオフラインスイート841件Pass、`check_docs_consistency.py`合格。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -5712,3 +5776,4 @@ companion表示ヘルパー（`_get_task_focus_companion_text`）へ直接組み
 | 2026-08-07 | ユーザーが実ドライラン`log/2026-08-07/1312`をレビューし、Expertがweb_search/web_fetch装備済みなのに一度も使わず、根拠のない前提数値（デマンドタクシー運営費@8,000円/日）で大規模な戦略分析を構築していたこと、それを差し戻したDetectorの反論もD-158の設計通りweb_search非搭載のため学習知識のみに依っていたことを指摘。ユーザー指示「①Detectorにもweb_search追加、②Expertの検索義務強化、③Detector監査に根拠実在性チェックを追加」を受け、D-160として実装：`call_detector`両パスへWEB_SEARCH_TOOL/WEB_FETCH_TOOLを追加（D-158の一部改訂）、両パスのプロンプトへ「citationsがexpert_calculationのみで外部裏付けがなければweb_searchで検証する」根拠実在性チェック段落を追加、Expertのフル/light system_promptへ「最低限1回はweb_searchを呼ぶ」という半必須化文言を追加。D-158への改訂注記も追加。オフライン全テストスイート783件通過（BL-173起因の既知flaky1件除く）、`python -m py_compile`合格。効果測定は次回以降の実ドライランで確認する。 |
 | 2026-08-07 | ユーザーがPDF抽出結果（`log/2026-08-07/1312`）を見て「単純な文字解析だと体裁が崩れ、図もなく結構厳しい」と指摘し、Microsoft markitdown（PDF/HTML等をMarkdown化するPythonユーティリティ）の利用を提案。実データ（国交省PDF・RoAD to the L4のHTML）で側で比較検証した結果、markitdownがPDFの表をMarkdownテーブルとして、HTMLを見出し階層・リンクの文脈的位置を保った形で変換できることを確認。依存重量（onnxruntime/numpy/Pillow等、約100MB）についても確認した上で、ユーザーが「依存が重くても情報取得の質を優先したい」と判断（D-161）。`pypdf`/独自`_HtmlTextExtractor`（BL-188セクション9のリンク一覧付記機構含む）を全面撤去し、`markitdown[pdf]`ベースの実装へ統一。markitdownが相対リンクを自動解決しないことを実データで確認したため、`_resolve_relative_markdown_links`による後処理を追加。HTML/PDF共通でサイズ上限超過時は切り捨てず明示エラーとする安全設計に統一。`tests/test_bl184_web_tools.py`のfetch関連テストを全面書き換え（`web_tools._MARKITDOWN.convert_stream`の呼び出し境界をモック）、同ファイル45件、オフライン全テストスイート781件通過。 |
 | 2026-08-08 | ユーザーが「実装してください」と指示。BL-190（`_reconcile_current_phase_after_replan`）を先に実装し、その上でBL-191（Stage4駆動の過去タスク一時フォーカス切替、`schedule_task_focus`ツール、`task_focus_stack`/`task_focus_companion`、`scheduling_drafts`テーブル）とBL-192（Stage4指示文の質強化、`_BL192_DIRECTIVE_QUALITY_BLOCK`）を実装した。実装中に設計時点では見つからなかった2件の追加不具合を発見・修正：(1) `_force_resume_forward_focus`の復帰先自体も新計画から消えている「二重消失」パターンで`current_task_id`が無効な値のまま残る問題（`_reconcile_current_phase_after_replan`にフォールスルー処理を追加）、(2) `pending_task_redirect`が`decision_extractor_node`内で読み取られるだけで明示的にクリアされていなかった問題（one-shot消費として`None`へ明示リセット）。新規テスト`tests/test_bl190_current_phase_reconcile_after_replan.py`9件、`tests/test_bl191_task_focus_scheduling.py`34件、`tests/test_bl192_stage4_directive_quality.py`4件を追加。既存の関連テスト138件（BL-024/125/126/145/146/163/167/176/181/183/186/190系）を含め、オフライン全テストスイート825件通過、`python -m py_compile`合格、`check_docs_consistency.py`合格。BL-191のPhase 2（`redirect_backward`/`force_resume`）は設計書の段階的ロールアウト方針に反し一括実装したため、実ドライランでの`joint_focus`単体の事前検証は行っていない点に留意（次回ドライランで確認）。 |
+| 2026-08-08 | ユーザーが`log/2026-08-08/1514`のレビュー中、「ホワイトボードの書き換えが失敗しまくっています。どうにかなりませんか？」と報告（BL-193）。調査の結果、task_2_1のホワイトボードが50KB超に育った状態で、Expertがwrite_agreement(edits=...)のold_textとしてDetector注釈ブロックごと巻き込んだ巨大な引用を組み立て、実際の格納内容と一致せず同一失敗を8回連続で繰り返していたことを特定。根本原因はBL-151の不一致時スニペットが文書サイズに関わらず常に先頭400文字固定だったため、編集対象が先頭から遠い大規模文書では自己修復が機能していなかったこと。ユーザーとの議論でClaude Code等の実エージェントのdiff編集規律（編集直前に現物を読み直す・old_stringは最小限に保つ）を参照し、「ファイル化してgrepさせる」案はR4設計の「DBが正」原則と衝突するため却下、DB直参照のままBL-079（`verify_whiteboard_excerpt`）と同じ判定ロジックを流用する方針で合意。実装完了：①`_nearest_content_snippet`（不一致時スニペットをold_textとの最長共通部分の周辺へ差し替え）、②`read_whiteboard_excerpt`ツール（Expert専用、old_text組み立て前に対象箇所の現在の実際の文字列をピンポイント取得）、③R4編集方針プロンプトへold_text最小化指示と新ツールの使用推奨を追記。新規テスト`tests/test_bl193_whiteboard_edit_reliability.py`16件、既存BL-151テスト1件をスニペット文言変更に合わせて更新、オフライン全テストスイート841件通過、`python -m py_compile`合格、`check_docs_consistency.py`合格。 |
