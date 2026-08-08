@@ -5533,6 +5533,13 @@ companion表示ヘルパー（`_get_task_focus_companion_text`）へ直接組み
 機構面の複雑さ・状態機械・複数ノードにまたがる相互作用を持たないため、独立したBLとして
 軽量に起票した）。
 
+**実装完了（`done`）**：共通定数`_BL192_DIRECTIVE_QUALITY_BLOCK`を新設し、Stage4の
+承認済み分岐（`generate_user_utterance`）と非Stage4パス（`system_prompt_trailing`）の
+両方から同一定数を参照する形で実装した（文言の二重管理を回避）。新規テスト
+`tests/test_bl192_stage4_directive_quality.py`4件（指示文の内容確認、Stage4・非Stage4
+両パスでの参照確認、二重管理になっていないことの確認）を追加、既存Stage4関連テストと
+合わせて無退行を確認。`python -m py_compile`合格。
+
 ---
 
 | 日付 | 内容 |
