@@ -5398,7 +5398,7 @@ User AIがそれに従って正常に処理を完了したため、データ破�
 考えていなかった。今、その時が来た。対処法を設計して」との指示があり、Plan Modeで設計を
 実施した。基本設計を`docs/design/back_log/BL-190/BL190_basic_design.md`として原文保存。
 
-**設計概要（実装は未着手）**：`_get_current_task`の直後に新規ヘルパー
+**実装完了（`done`）**：`_get_current_task`の直後に新規ヘルパー
 `_reconcile_current_phase_after_replan`を追加し、`task_planner_node`が新しい`phases`を
 確定させた直後、`current_task_id`が新`phases`のどこに属するかを全phase横断で再探索して
 `current_phase`をそこへ追随させる（BL-024の「唯一の書き手」原則は`current_task_id`の値
