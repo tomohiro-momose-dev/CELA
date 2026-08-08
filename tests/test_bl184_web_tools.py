@@ -260,27 +260,6 @@ def test_validate_url_dns_failure_raises(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _HtmlTextExtractor
-# ---------------------------------------------------------------------------
-
-def test_html_extractor_strips_script_and_style():
-    html_text = """
-    <html><head><style>body { color: red; }</style></head>
-    <body>
-      <script>alert('x');</script>
-      <p>本文テキスト</p>
-    </body></html>
-    """
-    extractor = web_tools._HtmlTextExtractor()
-    extractor.feed(html_text)
-    extractor.close()
-    text = extractor.get_text()
-    assert "本文テキスト" in text
-    assert "color: red" not in text
-    assert "alert" not in text
-
-
-# ---------------------------------------------------------------------------
 # fetch_and_extract
 # ---------------------------------------------------------------------------
 
@@ -319,11 +298,58 @@ def _patch_httpx_client(monkeypatch, response):
     monkeypatch.setattr(web_tools.httpx, "Client", functools.partial(_FakeClient, response))
 
 
+class _FakeMarkItDownResult:
+    def __init__(self, text_content):
+        self.text_content = text_content
+
+
+def _patch_markitdown(monkeypatch, text_content=None, exc=None, capture=None):
+    """[BL-188] web_tools._MARKITDOWN.convert_streamをモックする（既存のhttpx.Clientモックと
+    同じ方針：外部ライブラリの内部実装ではなく、呼び出し境界を差し替える。実際のHTML/PDF
+    バイナリ構造を組み立てずに済む）。"""
+
+    def fake_convert_stream(stream, *, stream_info=None, url=None, **kwargs):
+        if capture is not None:
+            capture["stream_info"] = stream_info
+            capture["url"] = url
+            capture["raw"] = stream.read()
+        if exc is not None:
+            raise exc
+        return _FakeMarkItDownResult(text_content)
+
+    monkeypatch.setattr(web_tools._MARKITDOWN, "convert_stream", fake_convert_stream)
+
+
 def test_fetch_and_extract_success(monkeypatch):
     monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
     _patch_httpx_client(monkeypatch, _FakeFetchResponse(text="<p>本文</p>"))
+    _patch_markitdown(monkeypatch, text_content="# 見出し\n\n本文です。")
     text = web_tools.fetch_and_extract("https://example.com/")
-    assert "本文" in text
+    assert "本文です" in text
+
+
+def test_fetch_and_extract_passes_content_type_and_url_to_markitdown(monkeypatch):
+    monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    _patch_httpx_client(monkeypatch, _FakeFetchResponse(content_type="text/html; charset=utf-8"))
+    capture = {}
+    _patch_markitdown(monkeypatch, text_content="本文", capture=capture)
+    web_tools.fetch_and_extract("https://example.com/page/")
+    assert capture["stream_info"].mimetype == "text/html"
+    assert capture["url"] == "https://example.com/page/"
+
+
+def test_fetch_and_extract_resolves_relative_links(monkeypatch):
+    """[BL-188] markitdownはconvert_stream(url=...)を渡しても相対リンクを自動解決しない
+    （実データで確認済み）ため、fetch_and_extract側で絶対URLへ解決する。"""
+    monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    _patch_httpx_client(monkeypatch, _FakeFetchResponse())
+    _patch_markitdown(
+        monkeypatch,
+        text_content="[永平寺町の事例](/case/eiheiji/) と [外部サイト](https://other.example.com/report.pdf)",
+    )
+    text = web_tools.fetch_and_extract("https://example.com/case/index.html")
+    assert "[永平寺町の事例](https://example.com/case/eiheiji/)" in text
+    assert "[外部サイト](https://other.example.com/report.pdf)" in text
 
 
 def test_fetch_and_extract_blocks_redirect(monkeypatch):
@@ -333,17 +359,52 @@ def test_fetch_and_extract_blocks_redirect(monkeypatch):
         web_tools.fetch_and_extract("https://example.com/")
 
 
-def test_fetch_and_extract_rejects_non_text_content_type(monkeypatch):
+def test_fetch_and_extract_rejects_non_text_non_pdf_content_type(monkeypatch):
+    """[BL-188] text/*とapplication/pdf以外（例: application/octet-stream）は引き続き拒否する。"""
+    monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    _patch_httpx_client(monkeypatch, _FakeFetchResponse(content_type="application/octet-stream"))
+    with pytest.raises(web_tools.SsrfBlockedError):
+        web_tools.fetch_and_extract("https://example.com/file.bin")
+
+
+def test_fetch_and_extract_accepts_pdf_content_type(monkeypatch):
+    monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    resp = _FakeFetchResponse(content_type="application/pdf")
+    resp.content = b"%PDF-1.4 fake bytes for test"
+    _patch_httpx_client(monkeypatch, resp)
+    capture = {}
+    _patch_markitdown(monkeypatch, text_content="PDF本文のMarkdown", capture=capture)
+    text = web_tools.fetch_and_extract("https://example.com/file.pdf")
+    assert "PDF本文のMarkdown" in text
+    assert capture["stream_info"].mimetype == "application/pdf"
+
+
+def test_fetch_and_extract_rejects_oversized_content(monkeypatch):
+    """[SAFETY] より厳密なパーサ（markitdown内部のpdfminer/BeautifulSoup等）へ渡す前提のため、
+    HTML/PDFいずれもバイト列の途中切り捨てはせず、上限超過時は明示エラーにする。"""
+    monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    resp = _FakeFetchResponse()
+    resp.content = b"x" * (web_tools._MAX_FETCH_BYTES + 1)
+    _patch_httpx_client(monkeypatch, resp)
+    with pytest.raises(web_tools.SsrfBlockedError):
+        web_tools.fetch_and_extract("https://example.com/huge")
+
+
+def test_fetch_and_extract_wraps_markitdown_exception(monkeypatch):
+    """[BL-188] markitdownが変換に失敗した場合（壊れたPDF等）、MarkItDownExceptionを
+    SsrfBlockedErrorへラップして返す（呼び出し元のweb_fetch_handlerが既存パターン通り
+    エラーレスポンスへ変換できるようにする）。"""
     monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
     _patch_httpx_client(monkeypatch, _FakeFetchResponse(content_type="application/pdf"))
+    _patch_markitdown(monkeypatch, exc=web_tools.MarkItDownException("broken PDF"))
     with pytest.raises(web_tools.SsrfBlockedError):
-        web_tools.fetch_and_extract("https://example.com/file.pdf")
+        web_tools.fetch_and_extract("https://example.com/broken.pdf")
 
 
 def test_fetch_and_extract_truncates_long_output(monkeypatch):
     monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
-    long_text = "<p>" + ("あ" * 20000) + "</p>"
-    _patch_httpx_client(monkeypatch, _FakeFetchResponse(text=long_text))
+    _patch_httpx_client(monkeypatch, _FakeFetchResponse())
+    _patch_markitdown(monkeypatch, text_content="あ" * 20000)
     text = web_tools.fetch_and_extract("https://example.com/")
     assert text.endswith("[Fetch Output truncated]")
     assert len(text) <= web_tools._MAX_OUTPUT_CHARS + len("\n[Fetch Output truncated]")

@@ -17,16 +17,19 @@ from __future__ import annotations
 
 import hashlib
 import html.parser
+import io
 import ipaddress
 import os
+import re
 import socket
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import httpx
+from markitdown import MarkItDown, MarkItDownException, StreamInfo
 
 # ---------------------------------------------------------------------------
 # 定数
@@ -38,8 +41,25 @@ _MAX_FETCH_BYTES = 2 * 1024 * 1024  # 2MB
 _MAX_OUTPUT_CHARS = 15000
 _MAX_READ_REFERENCE_CHARS = 10000
 _DDG_MIN_REQUEST_INTERVAL_SECONDS = 1.0
+# [BL-188] 公的機関・自治体の一次資料はPDF配布が多く、text/*限定ではweb_fetchで読めない
+# 実例が実ドライラン（log/2026-08-07/1244）で確認されたため、application/pdfを追加許可する。
 _ALLOWED_CONTENT_TYPE_PREFIXES = ("text/",)
+_PDF_CONTENT_TYPE = "application/pdf"
 _USER_AGENT = "Mozilla/5.0 (compatible; CELA-research-bot/1.0)"
+
+# [BL-188] HTML/PDFの本文抽出をMicrosoft markitdown（Markdown化）へ一本化する。
+# ユーザー指摘：pypdf/html.parserベースの独自抽出は表構造・見出し階層・リンクの文脈的位置を
+# 失い、実ドライランで表が単語の羅列になる実害を確認した。markitdownはHTML/PDFいずれも
+# 見出し（#/##）・表（|---|）・リンク（[text](url)、本文中の自然な位置に維持）を保った
+# Markdownへ変換できることを実データ（国交省PDF・RoAD to the L4のHTML）で検証済み。
+# 依存重量（onnxruntime/numpy/Pillow等、約100MB）は許容とユーザーが判断（情報取得の質を
+# 依存の軽さより優先）。MarkItDownインスタンスは状態を持たないため再利用可能、モジュール
+# レベルで1つだけ生成する。
+_MARKITDOWN = MarkItDown()
+# markitdown出力中の相対リンク（`](/path)`等）を絶対URLへ解決するための正規表現。
+# markitdownのconvert_stream(url=...)はソースURLをメタデータとして使うのみで相対リンクの
+# 自動解決は行わないため（実データで確認済み）、後処理で解決する。
+_MARKDOWN_LINK_RE = re.compile(r"\]\(([^)\s]+)")
 
 _DEFAULT_MAX_WEB_SEARCH_CALLS = 20
 _DEFAULT_MAX_WEB_FETCH_CALLS = 20
@@ -272,41 +292,30 @@ def validate_url_for_fetch(url: str) -> None:
             )
 
 
-class _HtmlTextExtractor(html.parser.HTMLParser):
-    """[BL-184] 標準ライブラリのみで実装する軽量HTML→テキスト変換。`<script>`/`<style>`
-    タグの内容は本文抽出の対象外とする（含めるとJS/CSSノイズでプロンプトが肥大化するため、
-    BL184_basic_design.mdの必須要件）。"""
+def _resolve_relative_markdown_links(markdown_text: str, base_url: str) -> str:
+    """[BL-188] markitdown出力中のMarkdownリンク/画像記法 `](url)` の相対URLを、fetch元の
+    base_urlを基準に絶対URLへ解決する。markitdownの`convert_stream(url=...)`はソースURLを
+    メタデータとして保持するのみで相対リンクの自動解決は行わないことを実データで確認済み
+    （相対のまま返すと、モデルがそのURLをそのままweb_fetchしても解決できない）。
+    """
+    def _replace(m: re.Match) -> str:
+        raw_url = m.group(1)
+        if raw_url.startswith(("http://", "https://", "data:", "mailto:", "tel:", "#")):
+            return m.group(0)
+        return "](" + urljoin(base_url, raw_url)
 
-    _SKIP_TAGS = {"script", "style"}
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._skip_depth = 0
-        self._parts: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in self._SKIP_TAGS:
-            self._skip_depth += 1
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in self._SKIP_TAGS and self._skip_depth > 0:
-            self._skip_depth -= 1
-
-    def handle_data(self, data: str) -> None:
-        if self._skip_depth == 0:
-            stripped = data.strip()
-            if stripped:
-                self._parts.append(stripped)
-
-    def get_text(self) -> str:
-        return "\n".join(self._parts)
+    return _MARKDOWN_LINK_RE.sub(_replace, markdown_text)
 
 
 def fetch_and_extract(url: str) -> str:
-    """[BL-184] URLを検証・取得し、HTML本文をプレーンテキストへ変換して返す。
+    """[BL-184][BL-188] URLを検証・取得し、本文をMarkdownへ変換して返す（見出し・表・
+    リンクの文脈的位置を保持する）。HTML/PDFいずれもMicrosoft markitdownで変換する
+    （独自のhtml.parser/pypdfベース抽出は、実ドライランで表構造が失われる実害が確認された
+    ため置き換えた。依存重量は増えるが情報取得の質を優先するとユーザーが判断）。
     リダイレクト（3xx）は追跡しない（リダイレクト先を明示的にweb_fetchすることを要求し、
     リダイレクト経由のSSRFバイパスを構造的に防ぐ）。失敗時はSsrfBlockedError/
-    httpx例外を送出する（呼び出し元でcatchしてエラーレスポンスへ変換すること）。
+    httpx例外/MarkItDownExceptionを送出する（呼び出し元でcatchしてエラーレスポンスへ
+    変換すること）。
     """
     validate_url_for_fetch(url)
     with httpx.Client(follow_redirects=False, timeout=_REQUEST_TIMEOUT_SECONDS) as client:
@@ -318,16 +327,30 @@ def fetch_and_extract(url: str) -> str:
         )
     resp.raise_for_status()
     content_type = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-    if not any(content_type.startswith(p) for p in _ALLOWED_CONTENT_TYPE_PREFIXES):
-        raise SsrfBlockedError(f"許可されていないContent-Typeです: {content_type!r}（text/*のみ許可）")
+    is_pdf = content_type == _PDF_CONTENT_TYPE
+    if not is_pdf and not any(content_type.startswith(p) for p in _ALLOWED_CONTENT_TYPE_PREFIXES):
+        raise SsrfBlockedError(
+            f"許可されていないContent-Typeです: {content_type!r}（text/*またはapplication/pdfのみ許可）"
+        )
     raw = resp.content
+    # [SAFETY] PDFはバイナリ構造（xrefテーブル等）を持つため途中切り捨てが安全でない
+    # （パース自体が失敗しうる）。HTMLも含め、markitdown（内部でpdfminer/BeautifulSoup等の
+    # より厳格なパーサを使う）に渡すバイト列は、切り捨てずサイズ上限超過時に明示エラーとする
+    # よう統一する（html.parserベースの旧実装は寛容だったが、より厳密なパーサでは壊れた
+    # 入力がエラーの原因になりうるため）。
     if len(raw) > _MAX_FETCH_BYTES:
-        raw = raw[:_MAX_FETCH_BYTES]
-    text = raw.decode(resp.encoding or "utf-8", errors="replace")
-    extractor = _HtmlTextExtractor()
-    extractor.feed(text)
-    extractor.close()
-    extracted = extractor.get_text()
+        raise SsrfBlockedError(
+            f"コンテンツのサイズが上限（{_MAX_FETCH_BYTES // (1024 * 1024)}MB）を超えています。"
+        )
+    try:
+        result = _MARKITDOWN.convert_stream(
+            io.BytesIO(raw),
+            stream_info=StreamInfo(mimetype=content_type),
+            url=url,
+        )
+    except MarkItDownException as e:
+        raise SsrfBlockedError(f"コンテンツの変換に失敗しました（{content_type}）: {e}")
+    extracted = _resolve_relative_markdown_links(result.text_content, url)
     if len(extracted) > _MAX_OUTPUT_CHARS:
         extracted = extracted[:_MAX_OUTPUT_CHARS] + "\n[Fetch Output truncated]"
     return extracted

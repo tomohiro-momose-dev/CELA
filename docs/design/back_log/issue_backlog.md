@@ -221,6 +221,9 @@
 | BL-188 | 中 | `cela_main.py`（`WRITE_AGREEMENT_TOOL`、`_commit_agreement_from_tool`、`_build_agreements_context`、`agreements`テーブルスキーマ、全ノードのシステムプロンプト）、`web_tools.py`（HTML/PDF抽出をmarkitdownへ統一） | ユーザーが「数字だけでなく全ての情報にソースを明示させたい。一次ソース・最新情報を優先し、web検索結果は批判的に評価させたい」と要望。調査の結果、`verified_facts.citations`はDB列として存在するが`_write_agreement_impl`内でtopic文字列が機械的に入るだけの実質未実装で、`agreements`テーブル本体には構造化ソース欄が皆無だった。AskUserQuestionで強制力（プロンプト誘導のみ、Detector未組込）と適用範囲（agreementsテーブルにも新規citations列追加）を確認し実装。`WRITE_AGREEMENT_TOOL`へ実際に引用元を渡せるcitationsパラメータを追加、`_build_agreements_context`へ表示反映（BL-064と同型の失敗再発防止）。詳細は[BL-188詳細](#bl-188-全ての情報にソースcitationsを明示させる)を参照。 | P2 |
 | BL-187 | 中 | `cela_main.py`（`get_verified_facts_from_db`, `_read_verified_fact_handler`） | ユーザーが「read_verified_factで探したいものが見つからない時が散見されます。ragを導入して意味検索をしてはどうか」と提案。調査の結果、`topic_keyword`検索は`variable_name LIKE '%keyword%' OR reason LIKE '%keyword%'`というフレーズ全体一致のみで、AIが渡すキーワードの言い回し・語順が保存済みの文言と一字一句噛み合わないと`not_found`になる構造的な弱点を確認。1run内のverified_facts件数は数十件程度でありembeddingベースのRAG導入はオーバーエンジニアリングと判断し、新規依存なしの段階的改善（①トークン分割OR検索、②difflibによる近似候補フォールバック）を提案、ユーザーが承認。詳細は[BL-187詳細](#bl-187-read_verified_factのtopic_keyword検索をトークン分割or検索と近似候補フォールバックで緩和する)を参照。**実装完了（`done`）**：フレーズ全体一致→トークンOR検索→`difflib.get_close_matches`による`did_you_mean`候補提示、の3段階フォールバックを実装。`variable_name`指定時（一意識別子）はトークン緩和の対象外。新規テスト`tests/test_bl187_verified_fact_fuzzy_search.py`13件、既存BL-093/094/095/104/148/162/167/168/169/186関連238件と合わせて無退行を確認。 | P2 |
 | BL-189 | 中 | `cela_main.py`（役割ごとのクライアント/モデル変数、`call_task_planner`/`call_task_plan_reviewer`/`call_detector`（両パス）/`call_decision_extractor`/`call_resource_arbiter`/`call_reflection`/`call_facilitator`/`call_integrator`/`call_reviewer_qa`/`call_goal_essence_analyst`/`call_expert`/`call_orchestrator`各関数のquery_AI呼び出し） | ユーザーから「各ノードで使用するモデルを指定したい。現在でも3〜4つほどに分けているが、ノードごとに指定したい」との要望。調査の結果、従来は`client_user`/`model_user`（User AI）、`client_agent`/`model_agent`（Expert・Orchestratorの2ノードが共有）、`client_auditor`/`model_auditor`（Task Planner・Detector両パス・Decision Extractor・Resource Arbiter・Reflection・Facilitator・Integrator・Reviewer QA・Goal Essence Analyst・Task Plan Reviewerの計10ノードが共有）、`client_summarizer`/`model_summarizer`の4変数のみで、特に`client_auditor`が10ノードに一括適用されておりノード単位の使い分けが不可能だった。AskUserQuestionでDetectorの2パス（ドメインレビュー／数値監査）を別々に指定したいか確認したところ「別々に指定」、モデル切り替えの方式は「コード内の変数を直接編集（現状踏襲）」との回答を得た。**実装完了（`done`）**：`client_agent`/`model_agent`と`client_auditor`/`model_auditor`を廃止し、ノードごとに独立した13組の`client_X`/`model_X`変数（`client_orchestrator`、`client_expert`、`client_task_planner`、`client_task_plan_reviewer`、`client_detector_domain`、`client_detector_numeric`、`client_decision_extractor`、`client_resource_arbiter`、`client_reflection`、`client_facilitator`、`client_integrator`、`client_reviewer_qa`、`client_goal_essence`、各対応する`model_X`）を新設し、各query_AI呼び出し箇所を対応する専用変数へ置き換えた。デフォルト値は全ノードとも従来通り`client_openrouter`/`nemotron_3_ultra`のままとしたため、ユーザーが該当行のclient/model値を書き換えない限り挙動は変わらない。`python -m py_compile`合格、フルオフラインスイート781件中780件Pass（1件はBL-173として既知のflakyテストで本修正と無関係、単体再実行では成功）。 | P2 |
+| BL-190 | 高 | `cela_main.py`（`task_planner_node`、`_get_current_task`、`_build_task_transition_blocked_notice`、`LineageState`。設計のみ、未実装） | ユーザーとのログレビュー（`log/2026-08-07/2355`）中に、task_plan_reviewerの指摘でtask_plannerが計画全体を再構成した（phase_7をphase_2位置へ移動、旧phase_2-6をphase_3-7へ繰り下げ）直後、`_get_current_task`が`current_task_id='task_2_1'がcurrent_phaseのタスク一覧に見つかりません`という警告を繰り返し出し、User AIのwrite_agreement(UPDATE, task_id='task_2_1')がBL-146ガードに拒否される事態を発見した。原因は`task_planner_node`（`cela_main.py:8850-8852`）が初回計画・ラン途中の再構成いずれの場合も無条件に`current_phase = phases[0]`へリセットする一方、`current_task_id`（BL-024により`_resolve_task_transition`のみが書き手）には一切触れないため、フェーズの並び順・phase_idが変わる規模の再構成では両者が不整合になることと特定した。今回はエラーメッセージがaction_type='SUPERSEDE'への切り替えを促し、User AIがそれに従って正常に処理を完了したため実害はなかったが、ユーザーへ報告したところ「これは予期していたが対処を考えていなかった。今、その時が来た。対処法を設計して」との指示があり、設計のみ実施した。詳細は[BL-190詳細](#bl-190-ラン途中の計画再構成後current_task_idcurrent_phaseが不整合になる問題への対処)を参照。**状態: `open`（設計完了、実装はユーザー指示待ち）**。 | P1 |
+| BL-191 | 高 | `cela_main.py`（`LineageState`、`SCHEDULE_TASK_FOCUS_TOOL`、`TOOL_DISPATCH`、`scheduling_drafts`テーブル+CRUD、`_resolve_task_transition`、`decision_extractor_node`、Stage4含む`generate_user_utterance`、`call_expert`、`call_detector`、`call_reflection`、`call_facilitator`。設計のみ、未実装） | BL-190のログレビュー後、ユーザーが「ゴールの再定義や再タスクプランが発火すると、過去のタスクで書いた成果物やDB内の確定値も整合が取れなくなる。一時的に過去タスクに戻り検討しなおす必要が生まれるが、現在の設計はUser AIへのプロンプト指示も含めて前へ進むようにしか設計されていない」と問題提起。BL-186で一度「(a)過去タスクへ戻る新ルートを作る／(b)前進のみで新フェーズを追加する」を検討し(b)を選んだ判断を、今回のストレステスト結果を踏まえて覆し、(a)実際にcurrent_task_idを過去タスクへ一時的に巻き戻す経路を新設することを決定。実装場所はユーザー指定により新規ノードではなくUser AIの既存Stage4（次タスクへ進むか現タスクを修正するかを判断する段階）を拡張する形とした（理由：バラバラなノードが独立に過去タスクの不整合に気づき混乱するより、Stage4という単一の意思決定点で「過去タスクへ明示的に戻る」か「前進しつつ過去タスクを併記対象として明示する」かを一度に宣言する方がスムーズなため）。3体のExploreエージェントによる既存メカニズム（SUPERSEDE、BL-163/168/186カスケード、issue DEFER機構、死んだ`phases_to_revise`、BL-041の未実装ドラフト）の棚卸しと1体のPlanエージェントによる詳細設計、さらにユーザー主導のユースケース通しトレース（早すぎる自動復帰・BL-190との相互作用による永久迷子等、6件のバグを発見）と別AIによる独立レビュー（7件反映・3件偽陽性）を経て設計を完成させた。新規ツール`schedule_task_focus`（decision_type: redirect_backward/joint_focus/clear_companion/force_resume）、新規state（`task_focus_stack`等6フィールド）、新規DBテーブル`scheduling_drafts`を導入し、`current_task_id`/`current_phase`の唯一の書き手という既存原則（BL-024）は保ちつつ、Stage4発の構造化決定を`_resolve_task_transition`へ新しい入力経路として渡す設計とした。詳細は[BL-191詳細](#bl-191-stage4駆動の過去タスク一時フォーカス切替併記対象タスクの明示)、および`docs/design/back_log/BL-191/BL191_basic_design.md`（Planエージェント原文＋ユースケーストレース＋独立レビュー対応、要約せず全文保存）を参照。**状態: `open`（設計完了・ユーザー承認済み、実装未着手。Phase 2はBL-190の実装完了が前提）**。 | P1 |
+| BL-192 | 中 | `cela_main.py`（Stage4含む`generate_user_utterance`のシステムプロンプト、非Stage4 User AIパスの`system_prompt_trailing`。プロンプト文言追記のみ、新規state/DB/ツールなし） | BL-191設計中、ユーザーから追加要望：「ユーザーAIプロンプトにも、過去タスクの洗い直しや依存関係にある過去タスクの同時検討の指示、agreementを書く際の注意（過去タスク書き換えにはSUPERSEDEが必要等）、次タスクで根拠があいまいな数値・前提がある場合はまずweb検索で調べて『もっともらしさ』を排除する指示など、単に『次はこれをやれ』ではなく、Expertへどういう思考で・どう行動してほしいかを網羅的に指示する部分を強化したい」。うち「過去タスク書き換え時のSUPERSEDE注意」はBL-191の`joint_focus`機能のcompanion表示ヘルパーへ直接組み込み、残る2点（①根拠不明な数値・前提のweb_search義務化、②期待される思考プロセスの網羅的な明示）はBL-191のスケジューリング機構の有無に関わらずStage4の指示文全般に当てはまる独立した関心事のためBL-192として分離した。BL-188が確立した「プロンプト誘導のみ（機械的な強制ゲートは追加しない）」という標準方針をそのまま踏襲し、新規の状態・ツール・DBスキーマは一切不要、Stage4のシステムプロンプトへの追記のみで完結する設計とした。独立レビューにより、User AIには差し戻しターン等でStage3/Stage4をスキップする非Stage4パス（`cela_main.py:8484`）が存在し、根拠不明値のweb_search義務化指示が差し戻しターンで一切適用されない見落としが発覚したため、両パスへ共通定数で同じ指示ブロックを注入する設計に修正した。詳細はBL-191と同じ`docs/design/back_log/BL-191/BL191_basic_design.md`内のBL-192セクションを参照（実装箇所がStage4で重なるため同一セッションで扱う想定だが、BL-191のような機構面の複雑さを持たないため独立したBLとして軽量に起票する）。**状態: `open`（設計完了、実装未着手）**。 | P2 |
 
 ---
 
@@ -5358,6 +5361,160 @@ AskUserQuestionで2つの設計分岐を確認：①citations未記載の強制�
 `client_agent`/`model_agent`と`client_auditor`/`model_auditor`を廃止し、ノードごとに独立した13組の`client_X`/`model_X`変数（`client_orchestrator`、`client_expert`、`client_task_planner`、`client_task_plan_reviewer`、`client_detector_domain`、`client_detector_numeric`、`client_decision_extractor`、`client_resource_arbiter`、`client_reflection`、`client_facilitator`、`client_integrator`、`client_reviewer_qa`、`client_goal_essence`、各対応する`model_X`）を新設し、各query_AI呼び出し箇所（`call_task_planner`、`call_detector`両パス、`call_decision_extractor`、`call_resource_arbiter`、`call_reflection`、`call_facilitator`、`call_integrator`、`call_reviewer_qa`、`call_goal_essence_analyst`、`call_task_plan_reviewer`、`call_expert`、`call_orchestrator`）を対応する専用変数へ置き換えた。デフォルト値は全ノードとも従来通り`client_openrouter`/`nemotron_3_ultra`のままとしたため、ユーザーが該当行のclient/model値を書き換えない限り挙動は変わらない。`client_user`/`model_user`（User AI）と`client_summarizer`/`model_summarizer`はそれぞれ元から単一ノード専用のため変更不要と判断した。
 
 `python -m py_compile`合格、フルオフラインスイート781件中780件Pass（1件はBL-173として既知のflakyテストで本修正と無関係、単体再実行では成功）。既存の全ノードのquery_AI呼び出しはlabel文字列（`MAX_TOKENS_BY_ROLE`/`LOW_TEMP_LABEL_KEYWORDS`等の判定基準）を変更していないため、モデル変更以外の副作用は無い。
+
+---
+
+### BL-190: ラン途中の計画再構成後、current_task_id/current_phaseが不整合になる問題への対処
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計完了、実装はユーザー指示待ち） |
+| 優先度 | P1 |
+| 関連 | [BL-126](#bl-126-bl-086の前提エスカレーションはexpertのリアクティブな経路に限定されておりfacilitatoruser-aiがゴール制約自体を能動的に問い直すプロアクティブな創造的議論モードが未設計)（Stage C: ラン途中の計画再構成機構そのもの）、[BL-024](#bl-024-current_phaseが初期化後フリーズしtask_id単位の状態追跡が存在しない)（`current_task_id`/`current_phase`の唯一の書き手原則の初出）、[BL-145](#bl-145-エスカレーションissue申し送りissueをdetectorreflectorの正当性監査を経てタスクプランナー経由で明示的にタスク化する)・[BL-186](#bl-186-ゴール改定時にtask_plannerへ強制的に過去タスク再検証を引き継ぐ)（既存の「加算のみ」の計画再構成パターン、本件で無退行確認が必要）、[BL-176](#bl-176-_resolve_task_transitionが離脱先task_idの承認成立を検証しておらずuserが1発言で承認と次タスク指示を同時に行うと状態が壊れうる)/[BL-181](#bl-181-bl-125のタスク遷移ブロックをorchestratorexpertが素通りしtask_idの誤登録データ破損を招く)/[BL-183](#bl-183-bl-181の機械的な第2防衛線がbl-125本来の未解決severe-issueブロックを見落とし素通りさせていた)（同じ「タスク遷移」領域だが、こちらは既存プラン内での遷移ブロック、本件は計画そのものの再構成という別種の問題） |
+
+**内容:**
+
+ユーザーとのログレビュー（`log/2026-08-07/2355`）中に、task_plan_reviewerが計画全体へ8件の
+major/medium指摘を出し、task_plannerが計画全体を再構成した（`phase_7`を`phase_2`の位置へ
+移動、旧`phase_2`〜`phase_6`を`phase_3`〜`phase_7`へ繰り下げ、新規`phase_8`を追加）直後、
+`_get_current_task`が`current_task_id='task_2_1'がcurrent_phaseのタスク一覧に見つかりません。
+先頭タスク'task_1_1'にフォールバックします。`という警告を繰り返し出し（同ログ内で12回）、
+User AIの`write_agreement(action_type="UPDATE", task_id="task_2_1")`がBL-146ガードに拒否される
+事態を発見した。
+
+調査の結果、`task_planner_node`（`cela_main.py:8850-8852`）が初回計画・ラン途中の再構成の
+いずれの場合も無条件に`state["current_phase"] = phases[0]`へリセットする一方、
+`current_task_id`（BL-024により`_resolve_task_transition`のみが書き手という原則）には
+一切触れないため、フェーズの並び順・phase_idが変わる規模の再構成が起きると、
+`current_phase`（新しい`phase_1`）と`current_task_id`（旧`task_2_1`、新計画にも文字列としては
+存在するが別のphase配下に移動している）が不整合になることを特定した。BL-145/BL-186の
+「既存phase・taskは変更せず新規phaseを追加するだけ」というこれまでの再構成パターンでは
+`current_phase`の内容自体が変わらないため問題化していなかったが、task_plan_reviewer指摘に
+よる全体再編という新しいパターンで初めて表面化した。
+
+今回はBL-146ガードのエラーメッセージが`action_type="SUPERSEDE"`への切り替えを促し、
+User AIがそれに従って正常に処理を完了したため、データ破損等の実害はなかった。ユーザーへ
+報告したところ「これは（task_plannerが再構築する経路があるので）予期していたが、対処を
+考えていなかった。今、その時が来た。対処法を設計して」との指示があり、Plan Modeで設計を
+実施した。基本設計を`docs/design/back_log/BL-190/BL190_basic_design.md`として原文保存。
+
+**設計概要（実装は未着手）**：`_get_current_task`の直後に新規ヘルパー
+`_reconcile_current_phase_after_replan`を追加し、`task_planner_node`が新しい`phases`を
+確定させた直後、`current_task_id`が新`phases`のどこに属するかを全phase横断で再探索して
+`current_phase`をそこへ追随させる（BL-024の「唯一の書き手」原則は`current_task_id`の値
+そのものへの書き込みに限定されるため、`current_phase`の再計算はこれに抵触しないと整理）。
+新旧`phases`の差分パターンを3通り（①加算のみ＝無害、②構造再編＝本件のバグ、③真の削除・
+統合＝`current_task_id`をクリアしone-shot通知でUser AIへ再判断を促す）に分類し、それぞれの
+挙動を設計済み。one-shot通知は新設の関数を作らず、既存の`_build_task_transition_blocked_notice`
+（BL-125/BL-176と同型のone-shot注入パターン）に3段目の分岐として追加することで、新規の
+呼び出し箇所を増やさずに済ませる設計とした。詳細（コード全文・各パターンの挙動確認・
+新規テスト方針）は上記設計書を参照。
+
+---
+
+### BL-191: Stage4駆動の過去タスク一時フォーカス切替＋併記対象タスクの明示
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計完了・ユーザー承認済み、実装未着手。Phase 2はBL-190の実装完了が前提） |
+| 優先度 | P1 |
+| 関連 | [BL-190](#bl-190-ラン途中の計画再構成後current_task_idcurrent_phaseが不整合になる問題への対処)（別レイヤーの問題、Phase 2はBL-190実装が前提）、[BL-186](#bl-186-ゴール改定時にtask_plannerへ強制的に過去タスク再検証を引き継ぐ)（本BLで覆した「前進のみ」判断の初出）、[BL-163](#bl-163-revise_goal成功時既に承認済みの過去タスクへ新ゴールとの整合性要再確認issueを機械的に起票する)/[BL-168](#bl-168-verified_factsテーブルにゴール改定を反映するsupersede機構が一切ない)/[BL-145](#bl-145-エスカレーションissue申し送りissueをdetectorreflectorの正当性監査を経てタスクプランナー経由で明示的にタスク化する)（既存の過去タスクフラグ付けメカニズム、本BLが初めて能動的に消費する）、[BL-025](#bl-025-expertがタスク境界を越えて他タスクのowns_variablesまで回答しツールループが非収束クラッシュする)（Expert/User AIのスコープガードレール、本BLが尊重する既存原則）、[BL-146](#bl-146-write_agreementがbl-125のタスク遷移ゲートcurrent_task_idを内容レベルで迂回できブロック中の他タスクへ実際にdeliverableを書き込めていた)（`current_task_id`一致ゲート、SUPERSEDEの適用除外）、[BL-192](#bl-192-user-ai-stage4の指示文を強化し根拠不明な数値のweb_search義務化期待される思考プロセスの明示を徹底する)（同じStage4に触れる独立BL） |
+
+**内容:**
+
+BL-190のログレビュー後、ユーザーが「ゴールの再定義や再タスクプランが発火すると、過去の
+タスクで書いた成果物やDB内の確定値も整合が取れなくなる。一時的に過去タスクに戻り検討し
+なおす必要が生まれるが、現在の設計はUser AIへのプロンプト指示も含めて前へ進むようにしか
+設計されていない」と問題提起。BL-186で一度「(a)過去タスクへ戻る新ルートを作る／
+(b)前進のみで新フェーズを追加する」を検討し(b)を選んだ判断を、今回のストレステスト結果を
+踏まえて覆し、**(a)実際にcurrent_task_idを過去タスクへ一時的に巻き戻す経路を新設する**
+ことを決定した。
+
+実装場所はユーザー指定により新規ノードではなく、User AIの既存Stage4（`generate_user_
+utterance`内、「次タスクへ進むか現タスクを修正するか」を判断する段階）を拡張する形とした。
+理由（ユーザー発言、要約）：「ユーザーが単に『task_x_xへ進んで』と指示すると、Detectorなど
+後続ノードが『task_y_yの成果物も直さないと』と別々に呟き始め、みんなの認識がバラバラのまま
+混乱が起きる。それより、Stage4という単一の意思決定点で『明示的に過去タスクtask_y_yへ戻る』
+か『task_x_xへ進みつつ、task_y_yも遡って影響を受けているので同時に検討せよ、と明示する』
+かを一度に宣言する方が根本的にスムーズ」。
+
+3体のExploreエージェントによる既存メカニズムの棚卸し（SUPERSEDE、BL-163/168/186
+カスケード、issue DEFER機構、Resource Arbiterの死んだ`phases_to_revise`、facilitator/
+Resource Arbiter再設計の未実装ドラフト`docs/design/r1_r2_r3b_core/cela_facilitator_
+arbiter_redesign_BL041.md`）と、1体のPlanエージェントによる詳細設計、さらにユーザー主導の
+ユースケース通しトレース（バグ①〜⑥を発見）と別AIによる独立レビュー（うち妥当7件・偽陽性
+3件を検証）を経て設計を完成させた。
+
+ユースケーストレースで発見した主要なバグ：①BL-163でフラグされた過去タスクはステータス上
+`Approved`のまま残るため、redirect直後に「もう完了している」と誤判定して即座に復帰し
+巻き戻しが無効化される早すぎる自動復帰バグ（`baseline_agreement_id`によるbaseline比較で
+対策）。②巻き戻し中にtask_plannerがフォーカス中のタスクを消すと、BL-190が`current_task_id`
+をクリアするため、スタックに積んだ元タスクへ二度と戻れなくなる永久迷子バグ（BL-190の
+パターン3分岐への強制pop処理追加で対策）。③〜⑤Detector/Reflection/Facilitatorが
+「意図的な手戻り中」を知らず無駄な差し戻しや誤判定を起こす恐れ（常設ステータス表示
+`_build_task_focus_state_text`の共有で対策）。独立レビューで発見した主要な指摘：
+`force_resume`（行き詰まり時の安全弁）をPhase 3からPhase 2へ前倒し（安全弁なしの
+デッドロックリスクのため）、ブリッジグローバルパターンの配線箇所の完全な列挙（6箇所）、
+`decision_extractor_node`がuser/expert両ノードで共用されることへのガード追加。
+
+新規ツール`schedule_task_focus`（decision_type: `redirect_backward`/`joint_focus`/
+`clear_companion`/`force_resume`）、新規state（`task_focus_stack`等6フィールド）、
+新規DBテーブル`scheduling_drafts`（`goal_drafts`と同型のrun_id単位append-only
+バージョニングだが、contentはLLMが手書きするdiffではなくシステムが構造化列から機械合成）を
+導入する。`current_task_id`/`current_phase`の唯一の書き手という既存原則（BL-024）は
+保ちつつ、Stage4発の構造化決定を`_resolve_task_transition`へ新しい明示的パラメータとして
+渡す（自由文脈の`advances_to_task_id`抽出とは独立した経路、構造化決定が優先）。段階的
+ロールアウト：Phase 1（`joint_focus`/`clear_companion`のみ、`current_task_id`に触れない
+最も低リスクなスライス）→ Phase 2（`redirect_backward`+`force_resume`同時実装、BL-190の
+実装完了が前提）。
+
+詳細（Planエージェント原文の実装計画、ユースケーストレース全記録、独立レビューへの
+全対応）は`docs/design/back_log/BL-191/BL191_basic_design.md`を参照（AGENTS.md §7に
+従い要約せず全文保存）。
+
+---
+
+### BL-192: User AI Stage4の指示文を強化し、根拠不明な数値のweb_search義務化・期待される思考プロセスの明示を徹底する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計完了、実装未着手） |
+| 優先度 | P2 |
+| 関連 | [BL-191](#bl-191-stage4駆動の過去タスク一時フォーカス切替併記対象タスクの明示)（同じStage4に触れる、実装タイミングを合わせる想定）、[BL-188](#bl-188-全ての情報にソースcitationsを明示させる)（「プロンプト誘導のみ」方針の初出、citations/web_searchの既存基盤）、[BL-094](#bl-094-read_verified_factread_deliverable_file等参照系ツールのノードプロンプトへのオリエンテーション追記)（「【最低限】」型ソフト必須プロンプトパターンの先例）、[BL-185](#bl-185-generate_user_utteranceuser-aiのsystem_promptを視座は上から下文脈は過去から現在の順に再構成し差し戻し通知が完了宣言に埋もれ無視される事故を防ぐ)（非Stage4パスの`system_prompt_trailing`並び順設計） |
+
+**内容:**
+
+BL-191設計中、ユーザーから追加の要望が出た（原文）：「ユーザーAIプロンプトにも、『過去
+タスクの洗い直しをする』とか『次のタスクと過去タスクは依存関係にあるから、過去タスクも
+同時に検討せよ』とか、agreementを書くときの注意、例えば過去タスクを書き換える時はSUPERSEDE
+にしないと、書き換えできないとか、次タスクでは根拠があいまいな数値や前提・条件があるから
+まずはweb検索を用いて情報をしらべて、『もっともらしさ』を排除しろとか、次のタスクのこれを
+やれ、だけではなくて、網羅的にエキスパートAIにどういう思考で、どう行動してほしいかを
+ユーザーAIが指示する部分も強化したい」。
+
+このうち「過去タスクを書き換える際のSUPERSEDE注意」はBL-191の`joint_focus`機能の
+companion表示ヘルパー（`_get_task_focus_companion_text`）へ直接組み込んだ（併記対象タスク
+自体を修正する場合はaction_type='SUPERSEDE'が必要という固定文言）。残る2点——①根拠不明な
+数値・前提のweb_search義務化、②期待される思考プロセスの網羅的な明示——はBL-191の
+スケジューリング機構（redirect_backward/joint_focus）の有無に関わらずStage4の指示文全般に
+当てはまる独立した関心事のため、ユーザーとの合意により**BL-192として分離**した。
+
+新規の状態・ツール・DBスキーマは一切不要。BL-188が既に確立した「プロンプト誘導のみ（機械的な
+強制ゲートは追加しない）」という標準方針（Detectorの硬直判定によるトークン浪費事故＝BL-042の
+再発防止という設計判断）をそのまま踏襲し、Stage4のシステムプロンプトへ2種類の指示ブロック
+（①依存する確定値に`type="web"`の裏付けがなければweb_searchでの検証をExpertへ具体的に
+名指しで指示する、②acceptance_criteriaの列挙に留まらず検討の順序・観点を明示する）を
+追加するのみで完結する設計とした。
+
+独立レビューにより、User AIには差し戻しターン等でStage3/Stage4をスキップする非Stage4パス
+（`cela_main.py:8484`）が存在し、根拠不明値のweb_search義務化指示が差し戻しターンで一切
+適用されない見落としが発覚したため、指示文をモジュール定数化し両パスへ共通で注入する設計へ
+修正した。
+
+詳細はBL-191と同じ`docs/design/back_log/BL-191/BL191_basic_design.md`内のBL-192セクションを
+参照（実装箇所がStage4で重なるためBL-191と同一セッションで扱う想定だが、BL-191のような
+機構面の複雑さ・状態機械・複数ノードにまたがる相互作用を持たないため、独立したBLとして
+軽量に起票した）。
 
 ---
 

@@ -38,6 +38,11 @@ import httpx
 from openai import OpenAI
 from openai import APIError, APIConnectionError, RateLimitError, APITimeoutError
 
+# [BL-184] cela_main.pyの肥大化を避けるため、web_search/web_fetch/read_reference_fileの
+# Provider抽象化・SSRF検証・HTML抽出・キャッシュ管理・ハンドラ本体は独立モジュールへ切り出す
+# （web_tools.py側はcela_main.pyを一切importしない、循環import回避）。
+import web_tools
+
 
 # [BL-175] ログ・checkpoint双方の時刻表示を日本時間（JST、UTC+9）へ統一する。
 # 実行環境のOSローカルタイムゾーン設定に依存せず、常に同じ時刻表示になるよう明示的に指定する。
@@ -241,6 +246,7 @@ gpt_5_6_luna = "gpt-5.6-luna"
 ling_3_flash = "ling-3.0-flash:free"
 laguna_S_2_1 ="laguna-s-2.1:free"
 mimo_2_5 = "mimo-v2.5"
+hy3 = "tencent/hy3"
 _gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
 _gemini_auditor_key = os.environ.get("GEMINI_API_KEY_AUDITOR", "")
 _deepseek_v4_flash_auditor_key = os.environ.get("DSEEK_V4_FLASH_AUDITOR_KEY", "")
@@ -290,16 +296,56 @@ model_auditor = gemini_3_1
 """
 
 client_summarizer = client_local
-model_summarizer = gpt_5_6_luna
+model_summarizer = gemma_local
 
 client_user = client_openrouter
 model_user = gpt_5_6_luna
 
-client_agent = client_openrouter
-model_agent = gpt_5_6_luna
+# [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
+# Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
+# Goal Essence Analyst/Task Plan Reviewerの計10ノードがclient_auditor/model_auditor1本を
+# 共有していたため、ノード単位でモデルを使い分けたくても不可能だった。ここから下はノードごとに
+# 個別の変数を持たせ、各query_AI呼び出し箇所（call_task_planner等）はそれぞれ専用の変数を参照する。
+# デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
+# ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
+client_orchestrator = client_openrouter
+model_orchestrator = gpt_5_6_luna
 
-client_auditor = client_openrouter
-model_auditor = gpt_5_6_luna
+client_expert = client_openrouter
+model_expert = nemotron_3_ultra
+
+client_task_planner = client_openrouter
+model_task_planner = nemotron_3_ultra
+
+client_task_plan_reviewer = client_openrouter
+model_task_plan_reviewer = nemotron_3_ultra
+
+client_detector_domain = client_openrouter
+model_detector_domain = nemotron_3_ultra
+
+client_detector_numeric = client_openrouter
+model_detector_numeric = gpt_5_6_luna
+
+client_decision_extractor = client_openrouter
+model_decision_extractor = gpt_5_6_luna
+
+client_resource_arbiter = client_openrouter
+model_resource_arbiter = nemotron_3_ultra
+
+client_reflection = client_openrouter
+model_reflection = nemotron_3_ultra
+
+client_facilitator = client_openrouter
+model_facilitator = nemotron_3_ultra
+
+client_integrator = client_openrouter
+model_integrator = nemotron_3_ultra
+
+client_reviewer_qa = client_openrouter
+model_reviewer_qa = nemotron_3_ultra
+
+client_goal_essence = client_openrouter
+model_goal_essence = nemotron_3_ultra
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -757,6 +803,111 @@ READ_ISSUES_TOOL = {
             }
         }
     }
+}
+
+
+# [BL-184] 現実世界の地理・費用相場等をグラウンディングするための3ツール。
+# 設計: docs/design/back_log/BL-184/BL184_basic_design.md
+WEB_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": (
+            "Search the public web (real-world facts: geography, distances, prices, "
+            "regulations, demographics, etc.) and get a list of {title, url, snippet} results. "
+            "Does NOT fetch page bodies -- call web_fetch on a promising url for the full text. "
+            "[BL-188] If you need a real-world fact you don't already know for certain, use this "
+            "tool to find it rather than estimating/guessing from memory -- do not silently assume "
+            "a plausible-sounding number. Before spending a new call here on a topic you may have "
+            "already researched earlier in this run, try read_reference_file with a keyword first "
+            "(it re-reads your own past web_fetch results and does not consume any call limit). "
+            "[BL-188] Snippets alone are not sufficient evidence -- treat them critically: prefer "
+            "results from authoritative primary sources (government/official statistics, primary "
+            "datasets, official documentation) over blogs/aggregators/SEO content, and prefer recent "
+            "results over stale ones when the fact is time-sensitive. For anything load-bearing, "
+            "web_fetch the primary page rather than citing the snippet as-is. "
+            "[BL-188] AVOID this anti-pattern: repeatedly calling web_search with ever-broader or "
+            "differently-worded queries while never calling web_fetch. If a result already looks "
+            "authoritative/relevant, web_fetch it BEFORE running another search -- one good page read "
+            "in full is worth more than ten more snippets, and this also wastes your call budget. "
+            "web_fetch now also extracts PDFs directly (common for government/municipal primary "
+            "sources), so do not skip a promising .pdf result and search again instead. "
+            "Run-scoped call limit applies (see error message if exceeded). "
+            "[BL-110] Optionally call `think` (with a `summary`) alongside this or any other tool call "
+            "to record your reasoning -- it is no longer required, and other tool calls are no "
+            "longer rejected for omitting it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query text."},
+                "max_results": {"type": "integer", "description": "Max results to return (1-10, default 5)."},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+WEB_FETCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_fetch",
+        "description": (
+            "Fetch a URL (http/https only) and return its body converted to Markdown (headings, "
+            "tables, and links preserved in place -- both HTML pages and PDF documents are "
+            "supported, including tables in government/municipal PDF primary sources; truncated "
+            "if very long). The result is automatically cached under "
+            "web_cache/<run_id>/ for later re-reading via read_reference_file, so you can cite it. "
+            "[BL-188] Links appear inline as normal Markdown links [text](url) wherever they occur in "
+            "the page -- use these to navigate from an index/landing page (e.g. a case-list or topic "
+            "page) to the specific sub-page you actually need, instead of only relying on web_search. "
+            "Follow at most 1-2 links deep per topic before deciding you have enough -- do not "
+            "chain-follow links indefinitely (same run-scoped call limit applies to every web_fetch "
+            "call regardless of whether it came from a search result or a link on a previously "
+            "fetched page). "
+            "[BL-188] Read the fetched content critically before treating it as fact -- check whether "
+            "it is the primary/official source or a secondary summary, and whether it appears current. "
+            "Redirects are NOT followed (fetch the redirect target url directly instead). "
+            "Run-scoped call limit applies; cache hits do not consume the limit. "
+            "[BL-110] Optionally call `think` (with a `summary`) alongside this or any other tool call "
+            "to record your reasoning -- it is no longer required, and other tool calls are no "
+            "longer rejected for omitting it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Full URL to fetch (http:// or https://)."},
+            },
+            "required": ["url"],
+        },
+    },
+}
+
+READ_REFERENCE_FILE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_reference_file",
+        "description": (
+            "Read back a previously web_fetch-cached page from web_cache/<run_id>/, either by exact "
+            "path (as returned/implied by web_fetch) or by keyword search over cached pages' source "
+            "URLs (useful to re-locate the source behind a citation URL you saw earlier). "
+            "[BL-188] Does not consume the web_search/web_fetch run-scoped call limits -- prefer "
+            "trying a keyword search here FIRST before calling web_search/web_fetch again for a "
+            "topic that may already have been researched earlier in this run (by you or another "
+            "role), to avoid redundant external calls. "
+            "Read-only; cannot access anything outside web_cache/<run_id>/. "
+            "[BL-110] Optionally call `think` (with a `summary`) alongside this or any other tool call "
+            "to record your reasoning -- it is no longer required, and other tool calls are no "
+            "longer rejected for omitting it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Exact cache filename if already known."},
+                "keyword": {"type": "string", "description": "Keyword to search for in cached pages' source URLs."},
+            },
+        },
+    },
 }
 
 
@@ -1295,6 +1446,15 @@ WRITE_AGREEMENT_TOOL = {
             "Save a decision, directive, or deliverable to the agreements database. "
             "Always separate What (decision_what) and Why (reason_why). "
             "For numeric claims, include Python REPL verification results in evidence (F-2.6). "
+            "[BL-188] Whenever a claim (this entry, or a confirmed_variables entry) is grounded in "
+            "something outside your own reasoning -- a web page, the goal text, a prior agreement, "
+            "the user's own words -- state that source in 'citations' (top-level) or "
+            "confirmed_variables[].citations, rather than leaving it implicit. Prefer authoritative "
+            "primary sources over secondary summaries, and prefer up-to-date sources over stale ones, "
+            "when multiple are available (cite the more authoritative/recent one, or both if they "
+            "disagree). Treat web_search results critically -- a single snippet is not proof; "
+            "cross-check surprising or load-bearing numbers against a second source or web_fetch the "
+            "primary page before citing it as settled. "
             "Expert can only use status='Proposed'. "
             "User AI can use all statuses. "
             "Detector/Reviewer/Arbiter/Integrator can only use status='Rejected'. "
@@ -1334,6 +1494,26 @@ WRITE_AGREEMENT_TOOL = {
                     )
                 },
                 "evidence": {"type": "string", "description": "Objective evidence (F-2.6: include Python REPL results for numeric claims)"},
+                "citations": {
+                    "type": "array",
+                    "description": (
+                        "[BL-188] Optional. Sources this whole entry (decision_what/reason_why) is "
+                        "grounded in, if any (e.g. a web page you fetched, a goal text quote, a prior "
+                        "agreements-DB entry, the user's own statement). Omit if this is your own "
+                        "reasoning/judgement with no external source."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["web", "goal_text", "prior_agreement", "expert_calculation", "user_input", "document"],
+                            },
+                            "detail": {"type": "string", "description": "URL (for 'web'), quoted text, agreement id, or a short description of the source."},
+                        },
+                        "required": ["type", "detail"],
+                    },
+                },
                 "entry_type": {
                     "type": "string",
                     "enum": ["Decision", "Directive", "Deliverable"]
@@ -1381,7 +1561,23 @@ WRITE_AGREEMENT_TOOL = {
                             "variable_name": {"type": "string", "description": "Must match one of the current task's owns_variables"},
                             "value": {"type": "string"},
                             "unit": {"type": "string", "default": ""},
-                            "confidence": {"type": "string", "enum": ["confirmed", "provisional"], "default": "provisional"}
+                            "confidence": {"type": "string", "enum": ["confirmed", "provisional"], "default": "provisional"},
+                            "citations": {
+                                "type": "array",
+                                "description": (
+                                    "[BL-188] Optional. Source(s) for this specific value, same shape as "
+                                    "the top-level 'citations' field. If omitted, this entry's topic is "
+                                    "recorded as a fallback (weak signal only -- prefer supplying a real source)."
+                                ),
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {"type": "string", "enum": ["web", "goal_text", "prior_agreement", "expert_calculation", "user_input", "document"]},
+                                        "detail": {"type": "string"},
+                                    },
+                                    "required": ["type", "detail"],
+                                },
+                            },
                         },
                         "required": ["variable_name", "value"]
                     }
@@ -2211,17 +2407,21 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
     # [R5 F-3.7] トークンコスト抑制のため全件記録はせず、status='Rejected'の場合のみ
     # 直前呼び出しのreasoningをスナップショット保存する。
     _agreement_thought = get_last_reasoning_text() if args.get("status") == "Rejected" else None
+    # [BL-188] citations（引用元: {"type": "web"/"goal_text"/"prior_agreement"/"expert_calculation"/
+    # "user_input"/"document", "detail": "URLや説明文"}のリスト）。プロンプト誘導のみで強制はしない
+    # （Detector等での機械的ゲートは設けない）ため、未指定なら空配列のまま。
+    citations_val = json.dumps(args.get("citations", []) or [], ensure_ascii=False)
     conn.execute(
         "INSERT INTO agreements (id, action_type, status, topic, decision_what, reason_why, proposed_by, "
         "entry_type, phase_id, task_id, depends_on, resource_claims, timestamp, "
-        "evidence, is_frozen, internal_thought_process, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "evidence, is_frozen, internal_thought_process, citations, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             f"AG-{int(time.time() * 1000)}", action_type, args.get("status", "Proposed"),
             topic, content, args.get("reason_why", ""),
             caller_role, entry_type,
             phase_id, tid,
             depends_on_val, resource_claims_val, time.time(),
-            args.get("evidence", ""), 0, _agreement_thought, run_id
+            args.get("evidence", ""), 0, _agreement_thought, citations_val, run_id
         )
     )
     print(f"  📝 [write_agreement] {caller_role}が{entry_type}（{action_type}, status={args.get('status', 'Proposed')}）を記録しました: topic={topic}")
@@ -2362,12 +2562,14 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
         var_name = cv.get("variable_name")
         if not var_name:
             continue
+        # [BL-188] cvがcitationsを供給していればそれを使う（プロンプト誘導のみ、強制はしない）。
+        # 未指定時はtopic文字列へのフォールバックを維持する（旧挙動との後方互換、弱いシグナルとして扱う）。
         upsert_verified_fact(
             conn, run_id, var_name, cv.get("value"), unit=cv.get("unit", ""),
             source_task_id=task_id, source_phase_id=args.get("phase_id", ""),
             confirmed_by=caller_role,
             reason=args.get("reason_why", ""),
-            citations=[args.get("topic", "")],
+            citations=cv.get("citations") or [args.get("topic", "")],
             confidence=cv.get("confidence", "provisional"),
         )
 
@@ -2920,6 +3122,14 @@ TOOL_DISPATCH = {
     "read_plan_draft": lambda args, state=None: _read_plan_draft_handler(args),
     "read_project_plan": lambda args, state=None: _read_project_plan_handler(args),
     "ask_user_question": lambda args, state=None: _ask_user_question_tool_impl(args, _CURRENT_CALLER_ROLE),
+    # [BL-184] web_search/web_fetchの呼び出し回数上限（max_web_search_calls/max_web_fetch_calls）は
+    # AppConfigからrun開始時にLineageStateへコピーされ、state自体に載っている（run_ai_vs_ai_loop
+    # 初期化ブロック参照）。TOOL_DISPATCH統一シグネチャは(args, state)の2引数しか渡さないため、
+    # web_tools側の`config`引数にもstateをそのまま渡す（state/configを分離運搬する新しい配線を
+    # 増やさず、既存のmax_turns等と同じ「state自身に上限値を持たせる」パターンを踏襲する）。
+    "web_search": lambda args, state=None: web_tools.web_search_handler(args, state or {}, state or {}),
+    "web_fetch": lambda args, state=None: web_tools.web_fetch_handler(args, state or {}, state or {}),
+    "read_reference_file": lambda args, state=None: web_tools.read_reference_file_handler(args, state or {}),
 }
 
 # BL-033: 直前のquery_AI呼び出しでLLMが実際に実行したpython_replの(code, result)記録。
@@ -3260,11 +3470,11 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                 # 戻したが、reasoning_effort_levelは元々`elif tools is not None`経由でしか付与
                 # されていなかったため、明示的にlabelへ追加しないとtools=None化の副作用として
                 # サイレントにreasoningが無効化されてしまう（実装時に発見・修正）。
-                reasoning_effort_level = "low"
-            elif label_lower == "reflection" or label_lower == "review" or label_lower == "detector" or label_lower == "except":
                 reasoning_effort_level = "medium"
+            elif label_lower == "reflection" or label_lower == "review" or label_lower == "detector" or label_lower == "except":
+                reasoning_effort_level = "high"
             elif tools is not None:
-                reasoning_effort_level = "low"
+                reasoning_effort_level = "medium"
 
             create_kwargs["max_tokens"] = get_max_tokens(label_lower)
             # 🌟 【追加部分】OpenRouter使用時のみ、高速プロバイダーを強制指定する
@@ -3289,7 +3499,8 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                             #"order": ["venice/fp8", "novita/fp8", "xiaomi/fp8", "baidu/fp8", "fireworks", "streamlake/fp8", "novita/fp8" ],
                             #"order": ["fireworks","novita/fp8", "siliconflow/fp8" ,"parasail/fp8"],
                             #"order": ["deepinfra/fp4", "deepseek/fp8", "gmicloud/fp8", "baseten/fp8"],
-                            "order":  ["xiaomi/fp8"], 
+                            #"order":  ["xiaomi/fp8"], 
+                            "order": ["tencent/fp8"],
                             #"order": ["gmicloud/fp8","deepseek/fp8","alibaba/fp8","novita/fp8"],
                                                       
                             "allow_fallbacks": False # 全滅した場合は空いている他プロバイダーへ迂回
@@ -3832,6 +4043,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         proposed_by TEXT, entry_type TEXT, phase_id TEXT,
         depends_on TEXT, resource_claims TEXT, timestamp REAL,
         evidence TEXT, is_frozen INTEGER DEFAULT 0, internal_thought_process TEXT,
+        citations TEXT DEFAULT '[]',
         run_id TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_agreements_run_topic ON agreements(run_id, topic);
@@ -3952,6 +4164,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_goal_drafts_run ON goal_drafts(run_id);
     """)
     _ensure_agreements_task_id_column(conn)
+    _ensure_agreements_citations_column(conn)
     _ensure_verified_facts_r3a_columns(conn)
     _ensure_issue_log_defer_column(conn)
 
@@ -3975,6 +4188,19 @@ def _ensure_agreements_task_id_column(conn: sqlite3.Connection) -> None:
     if "task_id" not in cols:
         print("  🛠️ [schema migration] agreementsへtask_id列を追加します（BL-023/BL-024）。")
         conn.execute("ALTER TABLE agreements ADD COLUMN task_id TEXT DEFAULT ''")
+        conn.commit()
+
+
+def _ensure_agreements_citations_column(conn: sqlite3.Connection) -> None:
+    """[BL-188] agreementsへcitations列（引用元JSON配列）を追加する。既存の
+    verified_facts.citations（F-3.9/R3a）はentry_type='Decision'等（confirmed_variables経由の
+    構造化ファクトのみ）に限られていたが、Decision/Deliverable本体そのものには構造化された
+    ソース欄が一切存在しなかった（自由記述のevidence列のみ）。
+    _ensure_agreements_task_id_columnと同型のマイグレーションパターン。"""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(agreements)").fetchall()}
+    if "citations" not in cols:
+        print("  🛠️ [schema migration] agreementsへcitations列を追加します（BL-188）。")
+        conn.execute("ALTER TABLE agreements ADD COLUMN citations TEXT DEFAULT '[]'")
         conn.commit()
 
 
@@ -4066,14 +4292,15 @@ def db_append_agreement(a: dict, conn: sqlite3.Connection, run_id: str) -> None:
     """
     depends_on_val = json.dumps(a.get("depends_on", []), ensure_ascii=False) if isinstance(a.get("depends_on"), (list, dict)) else (a.get("depends_on") or "[]")
     resource_claims_val = json.dumps(a.get("resource_claims", {}), ensure_ascii=False) if isinstance(a.get("resource_claims"), (list, dict)) else (a.get("resource_claims") or "{}")
+    citations_val = json.dumps(a.get("citations", []) or [], ensure_ascii=False)
     conn.execute(
         "INSERT INTO agreements (id, action_type, status, topic, decision_what, reason_why, proposed_by, "
         "entry_type, phase_id, task_id, depends_on, resource_claims, timestamp, "
-        "evidence, is_frozen, internal_thought_process, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "evidence, is_frozen, internal_thought_process, citations, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (a.get("id"), a.get("action_type"), a.get("status"), a.get("topic"),
          a.get("decision_what", ""), a.get("reason_why", ""), a.get("proposed_by"), a.get("entry_type"),
          a.get("phase_id"), a.get("task_id", ""),
-         depends_on_val, resource_claims_val, a.get("timestamp"), None, 0, None, run_id)
+         depends_on_val, resource_claims_val, a.get("timestamp"), None, 0, None, citations_val, run_id)
     )
     print(f"  📋 [DB] agreementsへINSERT: id={a.get('id')}, action={a.get('action_type')}, "
           f"status={a.get('status')}, topic={str(a.get('topic'))[:60]}")
@@ -4892,6 +5119,8 @@ class Agreement(TypedDict):
     task_id: str   # BL-023/BL-024: どのタスクに紐づく合意・成果物・先送りか
     # statusに"Deferred"を追加（既存: Proposed/Approved/Approved_with_Conditions/Rejected/Implicitly_Accepted）
     # "Deferred"の場合、topicは先送りされた論点名、reason_whyに「どのタスクで扱うか」を含める
+    citations: list[dict]  # [BL-188] 引用元: [{"type": "web"/"goal_text"/"prior_agreement"/
+                            # "expert_calculation"/"user_input"/"document", "detail": "..."}]
 
 class RiskRegister(TypedDict):
     """致命的リスクの専用台帳"""
@@ -4991,6 +5220,16 @@ class LineageState(TypedDict):
     # 追加が漏れており、値が常にFalse/None扱いになる実運用バグの原因だった。
     expert_wrote_agreement: bool
     user_wrote_agreement: bool
+    # [BL-184] web_search/web_fetchのrun単位の累積呼び出し回数。TOOL_DISPATCHのハンドラが
+    # 直接インクリメントする（_LAST_PYTHON_CALLS等と異なり、state自体が単一の真実源）。
+    web_search_call_count: int
+    web_fetch_call_count: int
+    # [BL-184] AppConfigのmax_web_search_calls/max_web_fetch_callsをrun開始時にコピーしたもの
+    # （max_turns/reflection_intervalと同じ「Appconfig→LineageStateへ複製」パターン）。
+    # TOOL_DISPATCHのweb_search/web_fetchハンドラは(args, state)の2引数しか受け取らないため、
+    # 上限値をstate自身に持たせることで、config専用の新しい配線を増やさずに済ませる。
+    max_web_search_calls: int
+    max_web_fetch_calls: int
     # [BL-158] 今回のUser AIターンでwrite_issue(RESOLVE/DEFER)が成功したか。detector_nodeが
     # 未解決の重大issueを残したままの前進を機械的に差し戻すかどうかの判定に使う。
     user_wrote_issue_resolution: bool
@@ -5033,7 +5272,8 @@ class LineageState(TypedDict):
     # 直後（消費「後」ではなく先頭）でクリアする（plan_reviewer_feedbackとは異なる箇所——
     # チェックポイント再開時の多重発火を避けるため、design.md §6/v2修正）。
     plan_revision_reason: str
-    # [BL-126 Stage C] ラン途中再構成の発生回数。plan_reviewer_retry_countと同型の上限（2回）で、
+    # [BL-126 Stage C] ラン途中再構成の発生回数。plan_reviewer_retry_countと同型の上限（5回、
+    # ユーザーが手動で2から変更）で、
     # 超えた場合はtask_plan_reviewerの差し戻し指摘が残っていても計画を承認して進行する。
     plan_revision_count: int
     # [BL-126 Stage C] ラン途中再構成で「削除」ではなく「supersede」されたタスクの記録
@@ -5061,7 +5301,10 @@ class Appconfig(TypedDict):
     agent_has_guardrail: bool
     chat_histry_window: int
     expert_history_window: int
- 
+    # [BL-184] web_search/web_fetchのrun単位の呼び出し回数上限（ユーザー確定値: 各30回/run）。
+    max_web_search_calls: int
+    max_web_fetch_calls: int
+
 
   
     
@@ -5175,7 +5418,27 @@ Filters out superseded or directive items and applies status-based formatting/la
         # [BL-064] evidenceは書き込まれるのみで表示に一切反映されていなかったため追加。
         evidence_preview = (a.get('evidence') or '')[:100]
         evidence_suffix = f"（根拠: {evidence_preview}）" if evidence_preview else ""
-        lines.append(f"[{agreement_id}] {icon}{type_label} {clean_topic}: {content_preview}{reason_suffix}{evidence_suffix}")
+        # [BL-188] citationsもevidenceと同じく表示へ反映する（書き込まれるのみで表示に一切
+        # 反映されない状態は、evidence自身がBL-064で一度経験済みの同型の失敗パターン）。
+        citations_raw = a.get('citations')
+        if isinstance(citations_raw, str):
+            try:
+                citations_list = json.loads(citations_raw) if citations_raw else []
+            except json.JSONDecodeError:
+                citations_list = []
+        else:
+            citations_list = citations_raw or []
+        if isinstance(citations_list, list) and citations_list:
+            citation_strs = []
+            for c in citations_list[:3]:
+                if isinstance(c, dict):
+                    citation_strs.append(f"{c.get('type', '?')}:{str(c.get('detail', ''))[:60]}")
+                else:
+                    citation_strs.append(str(c)[:60])
+            citations_suffix = f"（出典: {'; '.join(citation_strs)}）"
+        else:
+            citations_suffix = ""
+        lines.append(f"[{agreement_id}] {icon}{type_label} {clean_topic}: {content_preview}{reason_suffix}{evidence_suffix}{citations_suffix}")
 
         # [BL-050] 直近1件のSuperseded版（同一topic・同一entry_type）を差分として1行追記。
         # 全履歴を出すとトークンコストが膨らむため、直前版のみに絞る。
@@ -5556,8 +5819,19 @@ It serves as the initial planning layer for breaking down complex objectives acr
        read_plan_draft(task_id="...")を呼び、あなた自身が前回書いた記述とtask_plan_reviewerの
        個別指摘を確認してから、その部分だけを修正してください。指摘のないフェーズ・タスクを
        ゴール文から作り直す必要はありません。
+    12. [BL-188: web_search/web_fetch/read_reference_fileで現実世界の制約を検証する] あなた自身の
+       学習知識から導き出した判断も、必ずしも正確であるとは限らず、最新の情勢（法令・相場・規制等）
+       を反映しているとも限りません。ゴール文の前提（地理・距離・費用相場・法規制等）が現実的に
+       成立するか自分の知識だけで判断がつかない場合は、記憶からの推測で済ませず、必ずweb_search
+       で信頼できる一次情報を確認・裏取りしてください。既にこのrun内で調べた可能性がある
+       話題については、新規にweb_search/web_fetchを呼ぶ前にread_reference_file（keyword検索、
+       呼び出し回数上限を消費しない）で既存のキャッシュを先に確認してください。web検索結果は
+       鵜呑みにせず、一次ソース（公的統計・公式文書等）を優先し、二次的な要約より信頼性の高い
+       情報を採用してください。この分解で採用した数値・前提のうち外部情報に基づくものは、
+       write_agreementのcitations（type="web"等）で追跡可能な出典として明示してください。
        【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
-       read_plan_draft・write_agreement・thinkです。{_THINK_TRAILER_SENTENCE}
+       read_plan_draft・write_agreement・web_search・web_fetch・read_reference_file・think
+       です。{_THINK_TRAILER_SENTENCE}
 
     ■ 目標: {goal}
     {goal_essence_text}
@@ -5631,8 +5905,8 @@ It serves as the initial planning layer for breaking down complex objectives acr
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
     phases, parse_failed = _query_and_parse_with_retry(
-        prompt, client=client_auditor, model=model_auditor, label="Task Planner",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_PLAN_DRAFT_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL], fallback=fallback_phase,
+        prompt, client=client_task_planner, model=model_task_planner, label="Task Planner",
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_PLAN_DRAFT_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, THINK_TOOL], fallback=fallback_phase,
         state=state,
     )
     if parse_failed:
@@ -5736,7 +6010,7 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
     # のみで状態を変更しないため、write_agreement等の書き込み系ツールは意図的に与えない
     # （`_check_write_permission`のロール表にも"orchestrator"は存在しない）。
     res = query_AI(
-        [{"role": "user", "content": prompt}], client=client_agent, model=model_agent, label="Orchestrator",
+        [{"role": "user", "content": prompt}], client=client_orchestrator, model=model_orchestrator, label="Orchestrator",
         tools=[READ_PROJECT_PLAN_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_VERIFIED_FACT_TOOL, THINK_TOOL],
         state=state,
     )
@@ -5808,8 +6082,8 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         【重要：ゴール自体の文言が真の制約と矛盾していると気づいた場合（escalate_premise_concernツール）】\n
         上記の見極めの結果、問題が「あなたの提案の作り方」ではなく「ゴール文に書かれた制約や前提\n
         そのものの文言」にあり、その文言通りに満たそうとすると、その制約が本来仕えるべき真の目的\n
-        （例：高齢者の移動手段確保という目的に対して、需要密度と矛盾する車両サイズを固定してしまう\n
-        条件になっている等）とかえって矛盾してしまう、と具体的な根拠を持って判断した場合は、\n
+        （例：ゴールの対象者・受益者の実質的な便益に対して、手段の制約（規模・数量・稼働条件等）が\n
+        矛盾して固定されている等）とかえって矛盾してしまう、と具体的な根拠を持って判断した場合は、\n
         escalate_premise_concern ツールを呼び出してください。これは以下の点で他の対応と異なります：\n
         ・「制約が厳しくて達成できない」という一般的な泣き言・言い訳としては絶対に使わないこと。\n
         　あくまで「ゴールの文言そのものの矛盾」に限定した、狭く構造化された懸念提起です。\n
@@ -5851,6 +6125,23 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     )
 
     system_prompt += (
+        "\n【BL-188: 学習知識を無検証で断定しない（必須）】\n"
+        "あなた自身の学習知識から導き出した回答や思考も、必ずしも正確であるとは限らず、"
+        "最新の情勢（法令・相場・規制等）を反映しているとも限りません。ゴール文に直接記載の"
+        "ない数値・相場・法令・規制等（例：人件費単価、法令の条文番号、業界標準）を提示する際は、"
+        "記憶だけで断定せず、web_searchで信頼できる一次情報（公的統計・公式文書等）を確認・"
+        "裏取りしてください。新規に呼ぶ前に、このrun内で既に調べた可能性がある話題は"
+        "read_reference_fileで先に確認してください（呼び出し回数上限を消費しません）。"
+        "確認した内容は、write_agreementのcitations（type=\"web\", detail=<URL>等）で"
+        "追跡可能な出典として明示してください。"
+        "【最低限】今回の成果物がゴール文にない数値（単価・相場・法定基準値等）を新たに"
+        "前提として置く場合、confirmed_variablesのcitationsを`expert_calculation`のみで済ませず、"
+        "その主要な前提について最低1回はweb_searchを呼んでから確定値・暫定値を書いてください。"
+        "web_searchが実際にエラーになった（例：APIキー未設定）場合を除き、検索せずに独自の"
+        "「相場」「一般的な値」を断定して成果物の土台に使わないこと。\n"
+    )
+
+    system_prompt += (
         "\n【同じ検証・計算を繰り返さない（重要）】\n"
         "ツール呼び出しの回数には上限があります。同じ論点（例:「この数値は制約を満たすか」）を"
         "python_replで繰り返し再確認しないでください。各検証項目は2回計算・確認できれば十分です。"
@@ -5872,15 +6163,15 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
 
     system_prompt += (
         "\n【罠：部分的な要件の無根拠な拡大解釈（BL-134）】\n"
-        "「最低N名常駐」「常時M台稼働」のような部分的な要件を、時間帯・範囲・対象等の条件を明示"
-        "せずに拡大解釈して確定値化していないか自問してください。特に、ゴール文が運行時間・対象"
-        "範囲等を明示的に区切っている場合（例：運行時間帯が特定の時間範囲に限定され、それ以外は"
-        "「運行外」と明記されている等）、要件を無条件に24時間・全期間・全範囲へ一般化するのは"
-        "典型的な罠です（実例：「最低2名常駐」という要件を、ゴール文が明示する運行時間帯を無視して"
+        "「最低N名」「常時M台」のような部分的な要件を、時間帯・範囲・対象等の条件を明示"
+        "せずに拡大解釈して確定値化していないか自問してください。特に、ゴール文が稼働時間・対象"
+        "範囲等を明示的に区切っている場合（例：特定の時間帯に限定され、それ以外は"
+        "「対象外」と明記されている等）、要件を無条件に24時間・全期間・全範囲へ一般化するのは"
+        "典型的な罠です（実例：「最低N名」という要件を、ゴール文が明示する稼働時間帯を無視して"
         "24時間365日体制と解釈し、本来不要な人件費を確定値として計上してしまった）。拡大解釈する"
         "場合は、その根拠となるゴール文中の具体的な記述を明示してください。根拠がゴール文に無い場合、"
         "その値をconfirmed_variablesのconfidence=\"confirmed\"として扱わず、\"provisional\"とした上で、"
-        "解釈の分かれ目（例：「常駐」が運行時間帯限定か終日か）をwrite_issueで明示的に記録してください。\n"
+        "解釈の分かれ目（例：「常駐」が稼働時間帯限定か終日か）をwrite_issueで明示的に記録してください。\n"
     )
 
     # [BL-041] 「木を見て森を見ず」対策: 狭いタスクスコープ内で導出した数値が、
@@ -6099,7 +6390,19 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "write_agreementのconfirmed_variablesでconfidence=\"provisional\"として記録してください"
         "（他タスクの制約とまだ突き合わせが済んでいないため）。\n"
         "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
-        "read_project_plan・write_agreement・escalate_premise_concern・ask_user_question・thinkです。\n"
+        "read_project_plan・write_agreement・escalate_premise_concern・ask_user_question・"
+        "web_search・web_fetch・read_reference_file・thinkです。\n"
+        "[BL-188] あなた自身の学習知識から導き出した回答や思考も、必ずしも正確であるとは限らず、"
+        "最新の情勢（法令・相場・規制等）を反映しているとも限りません。ゴール文にない現実世界の"
+        "事実（地理・費用相場・法規制等）が必要な場合は、記憶からの推測で済ませず、必ずweb_search"
+        "で信頼できる一次情報を確認・裏取りしてください。既にこのrun内で調べた可能性がある話題は、"
+        "新規にweb_search/web_fetchを呼ぶ前にread_reference_file（keyword検索、呼び出し回数上限を"
+        "消費しない）で先に確認してください。web検索結果は鵜呑みにせず一次ソース（公的統計・"
+        "公式文書等）を優先し、確定値・暫定値としてconfirmed_variablesに書く際はcitations"
+        "（type=\"web\", detail=<URL>等）で追跡可能な出典を明示してください。"
+        "【最低限】ゴール文にない数値（単価・相場・法定基準値等）を新たに前提として置く場合、"
+        "citationsを`expert_calculation`のみで済ませず、その主要な前提について最低1回は"
+        "web_searchを呼んでから確定値・暫定値を書いてください。\n"
         "[BL-086] ゴール文の制約そのものが真の目的と矛盾していると具体的根拠を持って判断した場合のみ、"
         "escalate_premise_concernツールで懸念を提起できます（一般的な泣き言としては使用不可、"
         "今回のacceptance_criteriaは提起後も通常通り満たすこと）。\n"
@@ -6150,8 +6453,8 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     _CURRENT_CALLER_ROLE = "expert"
     _CURRENT_TASK_ID = state.get("current_task_id", "")
     _reset_think_scratchpad()  # [BL-093]
-    return query_AI(messages, client=client_agent, model=model_agent, label=f"Expert:{expert_name}",
-                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)
+    return query_AI(messages, client=client_expert, model=model_expert, label=f"Expert:{expert_name}",
+                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)
 
 
 #def call_detector(goal: str, user_input: str, expert_output: str, decisions: list[Decision], current_phase: dict) -> dict:
@@ -6278,12 +6581,12 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
 # [BL-049/BL-054] 検算（数値監査）とは別視点のドメイン妥当性レビュー用instruction。
     # F-2.6検算ゲート導入以降、role_specific_instructionが「検算結果」を主なmajorトリガーに
     # しているため、Detectorの注意力が数値の辻褄合わせに強く誘導され、法規制・物理的運用可能性
-    # 等の非数値的な論点（労基法上のシフト要件、予備車両の欠如等）が見落とされる事故が実機
+    # 等の非数値的な論点（法定のシフト・休憩要件、予備設備の欠如等）が見落とされる事故が実機
     # ドライランで確認された（log/2026-07-22/2336）。数値監査パスとは別のLLM呼び出しとして
     # ドメイン妥当性レビューを独立実行し、両者の判定を統合する（2段構成、D-041）。
     # [BL-054] さらに、ドメインレビューを検算より先に実行する順序へ変更した。検算を先に
     # 済ませてしまうと「数値は合っている」という結果に引きずられ、そもそもの前提・設計
-    # （台数・人数配置等）が現実的かというドメイン評価が後手になり軽視されやすいため、
+    # （設備・人員の規模・配置等）が現実的かというドメイン評価が後手になり軽視されやすいため、
     # 前提・設計そのものの妥当性確認を最初に行う（ユーザー指摘、2026-07-23）。
     if review_mode == "goal_change":
         # [BL-126 Stage B/§5] revise_goal（反応的経路・Essence Dialogue収束後の双方）による
@@ -6315,7 +6618,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
             "評価対象：User(発注者)の発言。数値の検算は既に別プロセス（数値監査）で完了しています。"
             "あなたはそれとは別の視点で、Userが承認・指示しようとしている計画に、"
             "数式としては辻褄が合っていても現実世界では成立しないドメイン的な問題"
-            "（労働基準法上のシフト・休憩要件、物理的な運用可能性、予備・冗長性の欠如、"
+            "（法定の休憩・シフト要件、物理的な運用可能性、予備・冗長性の欠如、"
             "安全規制等）が残っていないかを確認してください。"
             "Userがそれを見落として安易に承認・指示している場合はmajorとしてください。"
         )
@@ -6323,7 +6626,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         domain_role_instruction = (
             "評価対象：Agent(作業者)の発言。数値の検算は既に別プロセス（数値監査）で完了しています。"
             "あなたはそれとは別の視点で、Agentの提案の前提・結論が現実世界で本当に成立するか"
-            "（物理的な実現可能性、労働基準法等の法規制、予備・冗長性の欠如、安全性の運用面）を"
+            "（物理的な実現可能性、法定の労働・安全法規制、予備・冗長性の欠如、安全性の運用面）を"
             "評価してください。数式の辻褄を合わせるためだけに、元データに根拠のない内訳・仮定を"
             "その場ででっち上げていないか（例：制約を満たすよう逆算した都合の良い数値分割）も、"
             "特に注意して確認してください。"
@@ -6400,7 +6703,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
 
     # [BL-054] 第1段: ドメイン妥当性レビューを検算より先に実行する。
     # 検算を先に済ませると「数値は合っている」という結果に引きずられ、そもそもの前提・設計
-    # （台数・人数配置等）が現実的かというドメイン評価が後手・軽視されやすいため、まず前提・
+    # （設備・人員の規模・配置等）が現実的かというドメイン評価が後手・軽視されやすいため、まず前提・
     # 設計そのものの妥当性を検算とは無関係に確認する（ユーザー指摘、2026-07-23）。
     # この時点では数値監査パスはまだ実行していないため、その結果には言及しない。
     # [BL-104] プロンプトキャッシュのヒット率向上のため、実行中いつでも内容が同一の固定指示文
@@ -6415,7 +6718,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"あなたの役割は数値の検算（計算が合っているか）ではありません。数値の機械的検算は"
         f"この後、別の監査パスで独立して行われるため、ここでは検算する必要はありません"
         f"（結果に明らかな違和感がある場合を除き、python_replでの再計算は不要です）。\n"
-        f"まず最初に、そもそもの前提・設計（台数、人数配置、シフト、速度・距離の設定など）"
+        f"まず最初に、そもそもの前提・設計（設備・人員の規模、シフト、速度・距離の設定など）"
         f"自体に現実世界で無理がないかを確認してください。検算で数式のつじつまが合っていても、"
         f"前提そのものが現実的に成立しなければ意味がありません。\n\n"
         f"{domain_role_instruction}\n\n"
@@ -6433,8 +6736,21 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"{_observations_block}"
         f"{_issue_carryover_prefix}\n\n"
         f"【BL-093】必要であれば、thinkツールで検討過程を書き残しても構いません。\n\n"
+        f"[BL-188] Expertの主張がcitations（引用元）付きでweb由来の情報を根拠にしている場合、"
+        f"read_reference_fileでそのキャッシュ本文を確認し、実際に主張と一致しているか（数値の"
+        f"改変・拡大解釈がないか）を検証できます。\n\n"
+        f"[BL-188] 【根拠の実在性チェック（重要）】数値・相場・法令・規制等の主張について、"
+        f"内部の計算整合性だけでなく「その前提数値自体が現実の値として妥当か」も監査してください。"
+        f"citationsが`expert_calculation`や`prior_agreement`のみで、外部の一次情報（`type=\"web\"`）"
+        f"による裏付けが一切ない主張のうち、あなた自身の知識でも真偽の確信が持てないもの"
+        f"（例：人件費相場、法定基準値、業界標準）があれば、web_searchで実際に調べて検証して"
+        f"ください（Expertと同じくweb_fetchで一次資料を直接確認できます。既にこのrun内で"
+        f"調べた可能性がある話題はread_reference_fileで先に確認し、無駄な重複呼び出しを避けて"
+        f"ください）。検証の結果、前提数値が実態と乖離していると判明した場合は、それ自体を"
+        f"constraint_issueの根拠にしてください（自己参照のみの前提を鵜呑みにしないこと）。\n\n"
         f"【重要】あなたが使えるツールはread_verified_fact・read_deliverable_file・"
-        f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・thinkです。"
+        f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・"
+        f"web_search・web_fetch・read_reference_file・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
         f"{_get_frozen_agreements_text(get_active_conn(), state['run_id'])}"
         f"【BL-086: 🔒Freeze済み項目の扱い】上記に🔒が付いている項目があれば、それは人間の発注者が"
@@ -6459,8 +6775,8 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
     )
     _reset_think_scratchpad()  # [BL-093]
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
-        domain_prompt, client=client_auditor, model=model_auditor, label="Detector (Domain Review)",
-        tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, THINK_TOOL],
+        domain_prompt, client=client_detector_domain, model=model_detector_domain, label="Detector (Domain Review)",
+        tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, THINK_TOOL],
         fallback={"constraint_issue": "none", "comment": "", "target_excerpt": "", "observations": ""},
         state=state,
     )
@@ -6562,8 +6878,19 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"{_issue_carryover_prefix}"
         f"constraint_issue=\"major\"の場合も、既存のSUPERSEDE指示に加え、任意でwrite_issueを呼び"
         f"監査証跡を残して構いません（必須ではありません）。\n\n"
+        f"[BL-188] 検算対象の数値がcitations（引用元）付きでweb由来の情報を根拠にしている場合、"
+        f"read_reference_fileでそのキャッシュ本文を確認し、実際に主張と一致しているか（数値の"
+        f"改変・拡大解釈がないか）を検証できます。\n\n"
+        f"[BL-188] 【根拠の実在性チェック（重要）】python_replでの検算はあくまで「式が正しいか」"
+        f"しか保証しません。式に投入されている前提数値（単価・相場・法定基準値等）自体が"
+        f"citations=`expert_calculation`のみ（外部の一次情報`type=\"web\"`による裏付けなし）で、"
+        f"かつあなた自身の知識でも真偽の確信が持てない場合は、web_searchで実際に調べて検証して"
+        f"ください（web_fetchで一次資料を直接確認できます。既にこのrun内で調べた可能性がある"
+        f"話題はread_reference_fileで先に確認してください）。検算が内部整合的でも、前提数値が"
+        f"実態と乖離していれば、それ自体をconstraint_issueの根拠にしてください。\n\n"
         f"【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
-        f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・thinkです。"
+        f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・"
+        f"web_search・web_fetch・read_reference_file・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
 
         f"System Goal: {goal}\n"
@@ -6611,8 +6938,8 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
     )
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
-        prompt, client=client_auditor, model=model_auditor, label="Detector",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, THINK_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
+        prompt, client=client_detector_numeric, model=model_detector_numeric, label="Detector",
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, THINK_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
         state=state,
     )
     if parse_failed:
@@ -6867,7 +7194,7 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
     # 同水準の層2リトライ保護を追加する。
     _decision_extractor_fallback = {"extracted_events": []}
     parsed, _decision_extractor_parse_failed = _query_and_parse_with_retry(
-        prompt, client=client_auditor, model=model_auditor, label="Decision Extractor",
+        prompt, client=client_decision_extractor, model=model_decision_extractor, label="Decision Extractor",
         tools=None, fallback=_decision_extractor_fallback,
     )
     if _decision_extractor_parse_failed:
@@ -6950,7 +7277,7 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goa
     _CURRENT_CALLER_ROLE = "arbiter"
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Resource Arbiter", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL], state=state)
+    res = query_AI([{"role": "user", "content": prompt}], client=client_resource_arbiter, model=model_resource_arbiter, label="Resource Arbiter", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL], state=state)
     _arbiter_fallback = {}
     parsed = _safe_json_parse(res, fallback=_arbiter_fallback)
     if parsed is _arbiter_fallback:
@@ -7070,7 +7397,7 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
     上記の直近の会話の流れとタイムラインを俯瞰し、単発のDetectorでは見逃されがちな
     以下のパターンがないか確認してください。
     - 制約（時間・距離・予算等）が数式的に満たせないはずなのに、根拠のない前提や内訳
-      （例: 「AkmとBkmに分割すれば辻褄が合う」のような、元データにない都合の良い数値）を
+      （例: 「複数の区間に分割・按分すれば辻褄が合う」のような、元データにない都合の良い数値）を
       その場ででっち上げて帳尻を合わせている。
     - 都合の悪い制約に触れず、結論だけ急いで確定させようとしている。
     - Detector自身が「本当にこの前提は妥当か？」と一度疑いながらも、
@@ -7106,10 +7433,15 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
         """
 
     prompt += f"""
-        
+
        ⏳ 現在は **ラウンド{round_count}**（{reflection_interval}ラウンドごとに本監査を実施）です。
        ※「ターン」は内部のやり取り往復の途中で足踏みすることがあるため、ここでは代わりに
        「ラウンド」（発注者Userの発言サイクルの周回数）を進行状況の目安として用いています。
+
+       [BL-188] 上記の矛盾・懸念がweb由来のcitations（引用元URL）に基づく主張に関わる場合、
+       read_reference_fileでそのキャッシュ本文を確認し、実際に主張と一致しているかを検証できます
+       （新規のweb検索・取得はこのパスでは行いません）。
+       【重要】あなたが使えるツールはread_reference_fileのみです。
 
         Return ONLY JSON in the exact format below:
         {{
@@ -7129,8 +7461,11 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
     # という方針として引き続き妥当なため、フォールバック値そのものは変更しない）。
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
-        prompt, client=client_auditor, model=model_auditor, label="Reflection",
-        tools=None,
+        prompt, client=client_reflection, model=model_reflection, label="Reflection",
+        # [BL-184] BL-109でtools=None（単発判定、think無し）にした方針は維持しつつ、
+        # ユーザー指示により滞留issueの根拠（citations由来URL）をReflectorが自ら検証できるよう
+        # read_reference_fileのみ追加する（新規の外部通信は発生させない、既存キャッシュの参照専用）。
+        tools=[READ_REFERENCE_FILE_TOOL],
         fallback={"still_aligned": False, "discussion_status": "stagnant", "note": "Parse error."},
         state=state,
     )
@@ -7175,6 +7510,9 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
        topic="essence_dialogue_<簡潔な識別子>", decision_what="<結論の要約>",
        reason_why="<なぜこの結論に至ったか>")を呼び、本質対話の結論を確定提案として記録して
        ください（この提案はUser AIが承認するまで正式な合意にはなりません）。
+
+    【重要】あなたが使えるツールはthink・escalate_premise_concern・write_agreement・
+    read_reference_fileです。
 
     ■ プロジェクトの目標(Goal): {goal}
     {goal_essence_text}
@@ -7256,6 +7594,12 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     あると具体的な根拠を持って判断した場合、escalate_premise_concernツールで懸念を提起して
     ください（一般的な「厳しい」という感想では使わないこと。狭く構造化された懸念に限定）。
 
+    [BL-188] 上記のescalated_issuesや直近の会話がweb由来のcitations（引用元URL）に基づく
+    主張に関わる場合、read_reference_fileでそのキャッシュ本文を確認できます（新規のweb検索・
+    取得はこのノードでは行いません）。
+    【重要】あなたが使えるツールはthink・escalate_premise_concern・write_agreement・
+    read_reference_fileです。
+
     ■ プロジェクトの目標(Goal): {goal}
     {goal_essence_text}
     {reflection_block}
@@ -7269,8 +7613,8 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
     return query_AI(
-        [{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Facilitator",
-        tools=[THINK_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, WRITE_AGREEMENT_TOOL], state=state,
+        [{"role": "user", "content": prompt}], client=client_facilitator, model=model_facilitator, label="Facilitator",
+        tools=[THINK_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, WRITE_AGREEMENT_TOOL, READ_REFERENCE_FILE_TOOL], state=state,
     )
 
 def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "", state: dict | None = None) -> dict:
@@ -7318,7 +7662,7 @@ def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "", st
     _CURRENT_CALLER_ROLE = "integrator"
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    res = query_AI([{"role": "user", "content": prompt}], client=client_auditor, model=model_auditor, label="Integrator", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL], state=state)
+    res = query_AI([{"role": "user", "content": prompt}], client=client_integrator, model=model_integrator, label="Integrator", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL], state=state)
     _integrator_fallback = {"contradictions": False, "affected_phases": [], "details": ""}
     parsed = _safe_json_parse(res, fallback=_integrator_fallback)
     if parsed is _integrator_fallback:
@@ -7419,7 +7763,7 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
-        prompt, client=client_auditor, model=model_auditor, label="Reviewer QA",
+        prompt, client=client_reviewer_qa, model=model_reviewer_qa, label="Reviewer QA",
         tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL], fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"},
         state=state,
     )
@@ -7518,11 +7862,11 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"Detector（監査システム）がpython_replで独立して実行済みです。あなたが同じ検算を"
             f"繰り返す必要はなく、その検算結果を信頼してよいものとします。代わりに、Detectorの"
             f"数値監査だけでは拾えない「ドメイン的な妥当性」に重きを置いてレビューしてください:\n"
-            f"- その前提・計画は現実世界で本当に成立するか（労働基準法上の休憩・シフト要件、"
+            f"- その前提・計画は現実世界で本当に成立するか（法定の休憩・シフト要件、"
             f"物理的な運用可能性、予備・冗長性の欠如、安全規制等）。\n"
             f"- 数式としては辻褄が合っていても、現実の運用としては無理がある内訳・仮定をその場で"
             f"でっち上げていないか。\n"
-            f"- [BL-134] 「最低N名常駐」のような部分的な要件を、ゴール文が明示する時間帯・範囲等の"
+            f"- [BL-134] 「最低N名」のような部分的な要件を、ゴール文が明示する時間帯・範囲等の"
             f"条件を無視して無条件に拡大解釈していないか。拡大解釈の根拠がゴール文中に無いのに"
             f"confidence=\"confirmed\"として確定されている値があれば指摘してください。\n"
             f"計算結果そのものに強い違和感がある場合に限り、あなた自身もpython_replで検算して"
@@ -7859,11 +8203,11 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         "あなたが同じ検算をもう一度繰り返す必要はなく、その検算結果を信頼してよいものとします。\n"
         "その代わり、あなたはプロジェクトオーナーとして、Detectorの数値監査だけでは拾えない"
         "「ドメイン的な妥当性」に重きを置いてレビューしてください:\n"
-        "- その前提・計画は現実世界で本当に成立するか（労働基準法上の休憩・シフト要件、"
+        "- その前提・計画は現実世界で本当に成立するか（法定の休憩・シフト要件、"
         "物理的な運用可能性、予備・冗長性の欠如、安全規制等）。\n"
         "- 数式としては辻褄が合っていても、現実の運用としては無理がある内訳・仮定を"
         "その場ででっち上げていないか。\n"
-        "- [BL-134] 「最低N名常駐」のような部分的な要件を、ゴール文が明示する時間帯・範囲等の"
+        "- [BL-134] 「最低N名」のような部分的な要件を、ゴール文が明示する時間帯・範囲等の"
         "条件を無視して無条件に拡大解釈（例：特定時間帯限定の要件を24時間・全期間へ一般化）して"
         "いないか。拡大解釈の根拠がゴール文中に無いのにconfidence=\"confirmed\"として確定されて"
         "いる値があれば、その場で指摘してください。\n"
@@ -8337,8 +8681,8 @@ def call_goal_essence_analyst(goal: str, state: dict | None = None) -> dict:
     【観点2: 目標の本質の言語化】
     ゴール文に列挙されている個々の制約・条件は、あくまで「本来解決すべき本質的な課題」を
     実現するための手段・例示に過ぎない可能性があります。この目標が本当に達成しようとしている
-    本質的な課題は何か（例: 特定の手段そのものではなく、対象となる住民にとっての実質的な
-    利便性・安全性の確保等）を、ゴール文の個々の制約から一段抽象化して言語化してください。
+    本質的な課題は何か（例: 特定の手段そのものではなく、対象となる受益者・利用者にとっての
+    実質的な便益・安全性の確保等）を、ゴール文の個々の制約から一段抽象化して言語化してください。
     これは今後、個々のタスクが「手段の遂行」に没頭するあまり本質を見失った場合に立ち返る
     基準として、プロジェクト全体を通じて参照され続けます。
 
@@ -8378,7 +8722,7 @@ def call_goal_essence_analyst(goal: str, state: dict | None = None) -> dict:
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
-        prompt, client=client_auditor, model=model_auditor, label="Goal Essence Analyst",
+        prompt, client=client_goal_essence, model=model_goal_essence, label="Goal Essence Analyst",
         tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL],
         fallback={"true_essence": goal, "feasibility_notes": "(JSONパース失敗のため見立てなし)"},
         state=state,
@@ -8627,8 +8971,18 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     "SUPERSEDE", status="Rejected", target_topic="task_planner_phase_design", reason_why=
     "<何が誤りか>"）でその記録を無効化してください（既存のBL-062と同型のパターンです）。
     そうしないと、誤った判断根拠が「記録済み」として残り続け、後続タスクが誤ってそれを参照します。
+    [BL-188: web_search/web_fetch/read_reference_fileで現実世界の妥当性を検証する] あなた自身の
+    学習知識から導き出した判断も、必ずしも正確であるとは限らず、最新の情勢（法令・相場・規制等）
+    を反映しているとも限りません。計画中の前提（地理・距離・費用相場・法規制等）が現実的に成立
+    するか自分の知識だけで判断がつかない場合は、記憶からの推測で済ませず、必ずweb_searchで
+    信頼できる一次情報を確認・裏取りしてください。既にこのrun内で調べた可能性がある話題は、
+    新規にweb_search/web_fetchを呼ぶ前にread_reference_file（keyword検索、呼び出し回数上限を
+    消費しない）で先に確認してください。web検索結果は鵜呑みにせず一次ソースを優先してください。
+    計画中の主張がcitations（引用元）付きでweb由来の情報を根拠にしている場合は、
+    read_reference_fileでそのキャッシュ本文を確認し、実際に主張と一致しているか検証できます。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
-    diff_plan_draft_versions・write_agreement・thinkです。{_THINK_TRAILER_SENTENCE}
+    diff_plan_draft_versions・write_agreement・web_search・web_fetch・read_reference_file・
+    thinkです。{_THINK_TRAILER_SENTENCE}
 
     ■ 絶対目標: {goal}
     {goal_essence_text}
@@ -8651,8 +9005,8 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
-        prompt, client=client_auditor, model=model_auditor, label="Task Plan Reviewer",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL],
+        prompt, client=client_task_plan_reviewer, model=model_task_plan_reviewer, label="Task Plan Reviewer",
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, THINK_TOOL],
         fallback={"risk": "low", "constraint_issue": "none", "comment": "(JSONパース失敗のためnone扱い)",
                   "observations": "", "per_task_comments": []},
         state=state,
@@ -8691,7 +9045,8 @@ def _find_task_by_id(phases: list[dict], task_id: str) -> dict | None:
 
 def task_plan_reviewer_node(state: LineageState) -> LineageState:
     """[BL-087 Stage2] task_planner_node直後、実行が始まる前に1回だけ発火する計画レビュー
-    ゲート。majorと判定された場合はphasesをクリアしてtask_plannerへ差し戻す（最大2回まで、
+    ゲート。majorと判定された場合はphasesをクリアしてtask_plannerへ差し戻す（最大5回まで、
+    ユーザーが2026-08-07に手動で2から変更。
     上限到達後は指摘が残っていても計画を承認して進行する）。plan_review_doneはチェックポイント
     再開時に毎回レビューし直さないためのガード（task_planner_nodeのturn_count==1ガードと同型）。
     """
@@ -8730,15 +9085,16 @@ def task_plan_reviewer_node(state: LineageState) -> LineageState:
     combined_feedback = "\n".join(feedback_parts)
 
     retry_count = state.get("plan_reviewer_retry_count", 0)
-    if result.get("constraint_issue") == "major" and retry_count < 2:
+    if result.get("constraint_issue") == "major" and retry_count < 5:
         state["plan_reviewer_retry_count"] = retry_count + 1
         state["plan_reviewer_feedback"] = combined_feedback
         state["phases"] = []  # task_planner_nodeの`not state.get("phases")`ガードにより再生成される
         # [BL-126 Stage C/§11(3)] turn_count==1の初回計画パスは上記phases=[]だけで
         # task_planner_nodeの`not phases`ガードにより再発火するが、ラン途中の再構成
         # （turn_count!=1）ではこのガードが効かないため、plan_revision_reasonを再セットして
-        # 新設のガード（design.md §6）経由で再発火させる。上限（2回）は既存の
-        # plan_reviewer_retry_countのロジックをそのまま再利用する（新しい上限は設けない）。
+        # 新設のガード（design.md §6）経由で再発火させる。上限（5回、ユーザーが手動で2から
+        # 変更）は既存のplan_reviewer_retry_countのロジックをそのまま再利用する（新しい上限は
+        # 設けない）。
         if state.get("turn_count", 1) != 1:
             state["plan_revision_reason"] = combined_feedback or "task_plan_reviewerによる差し戻し"
         decision = make_decision("task_plan_reviewer", "初期計画を差し戻し", result.get("comment", ""))
@@ -9549,10 +9905,10 @@ def facilitator_node(state: LineageState) -> LineageState:
     # （意図的な合意形成プロセスであり、議論の停滞・逸脱の兆候ではないため）。
     if not state.get("essence_dialogue_active"):
         state["facilitation_count"] += 1
-        if state["facilitation_count"] > 3:
-            print(f"🛑 [Facilitator] facilitation_countが上限(3回)を超えた（{state['facilitation_count']}回目）ため、state['halt']=Trueで強制停止します。")
+        if state["facilitation_count"] > 5:
+            print(f"🛑 [Facilitator] facilitation_countが上限(5回)を超えた（{state['facilitation_count']}回目）ため、state['halt']=Trueで強制停止します。")
             state["halt"] = True
-            decision = make_decision("system", "強制停止", "ファシリテーションの上限回数(3回)を超えても議論が改善されませんでした。")
+            decision = make_decision("system", "強制停止", "ファシリテーションの上限回数(5回)を超えても議論が改善されませんでした。")
             db_append_decision(decision, get_active_conn(), state["run_id"])
             return state
 
@@ -10223,6 +10579,10 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
                 "task_transition_blocked_issue_topics": [],
                 "task_transition_blocked_unapproved_task_id": "",
                 "escalated_issue_first_seen_round": {},
+                "web_search_call_count": 0,
+                "web_fetch_call_count": 0,
+                "max_web_search_calls": config.get("max_web_search_calls", 30),
+                "max_web_fetch_calls": config.get("max_web_fetch_calls", 30),
                 "global_constraints": [],
                 "phases": [],
                 "current_phase": {
@@ -10461,7 +10821,7 @@ if __name__ == "__main__":
     TARGET_GOAL = (
         "過疎地域向け「AIオンデマンド自動運転バス」の導入計画と安全基準策定\n"
         "1. 初期導入予算は「上限1億円」、年間維持費（ランニングコスト）は「上限3,000万円」とする。\n"
-        "自動運転バス車両は1台あたり2,500万円。遠隔監視システムの構築費や、遠隔監視オペレーター（最低2名常駐）の人件費、車両のメンテナンス費もすべてこの予算内で賄うこと。\n"
+        "車両本体、遠隔監視システムの構築費や、遠隔監視オペレーター（最低2名常駐）の人件費、車両のメンテナンス費もすべてこの予算内で賄うこと。\n"
         "利用料金は「1乗車一律200円」とし、住民の負担を最小限に抑えること。\n"
         "2. 【ターゲット層とUXの制約】\n"
         "対象地域の住民の70%が65歳以上の高齢者であり、スマートフォンの所持率は30%未満である。\n"
@@ -10510,7 +10870,9 @@ if __name__ == "__main__":
         "user_always_remember": True,
         "agent_has_guardrail" : True,
         "chat_history_window": 4,
-        "expert_history_window": 6
+        "expert_history_window": 6,
+        "max_web_search_calls": 30,
+        "max_web_fetch_calls": 30,
     }
 
     run_ai_vs_ai_loop(

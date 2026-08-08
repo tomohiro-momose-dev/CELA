@@ -2,3 +2,10 @@
 # BL-105/D-086（docs/design/back_log/BL-105/BL105_basic_design.md）で、一時停止・再開機構を
 # LangGraph公式checkpointerへ移行するために追加。SqliteSaver/AsyncSqliteSaverを提供する。
 langgraph-checkpoint-sqlite
+
+# BL-188（docs/design/back_log/BL-188/BL188_basic_design.md）で、web_fetchのHTML/PDF本文抽出を
+# Microsoft markitdown（Markdown化）へ統一するために追加。当初はpypdf（純Python、依存軽量）を
+# 追加したが、実ドライランで表構造が失われる実害が確認されたため、見出し・表・リンクの文脈的
+# 位置を保持できるmarkitdownへ置き換えた（D-161）。依存重量（onnxruntime/numpy/Pillow等、
+# 約100MB）は増えるが、情報取得の質を優先するとユーザーが判断した。
+markitdown[pdf]

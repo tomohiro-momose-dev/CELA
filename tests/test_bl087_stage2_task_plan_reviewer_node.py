@@ -107,14 +107,15 @@ def test_reviewer_rejects_plan_and_clears_phases_for_regeneration(db_conn, monke
 
 
 def test_reviewer_gives_up_after_retry_limit_reached(db_conn, monkeypatch):
-    """retry_countが上限（2）に達した状態でmajorが出ても、無限ループにせず承認して進行する。"""
+    """retry_countが上限（5、ユーザーが手動で2から変更）に達した状態でmajorが出ても、
+    無限ループにせず承認して進行する。"""
     _, run_id = db_conn
     monkeypatch.setattr(
         cela_main, "call_task_plan_reviewer",
         lambda phases, goal, **kwargs: {"risk": "low", "constraint_issue": "major", "comment": "まだ懸念あり", "observations": ""},
     )
 
-    state = {"run_id": run_id, "goal": "テスト目標", "phases": SAMPLE_PHASES, "plan_reviewer_retry_count": 2}
+    state = {"run_id": run_id, "goal": "テスト目標", "phases": SAMPLE_PHASES, "plan_reviewer_retry_count": 5}
     result = cela_main.task_plan_reviewer_node(state)
 
     assert result["plan_review_done"] is True
