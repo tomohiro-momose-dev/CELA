@@ -650,3 +650,152 @@ DEFER の戻り値（`2951-2954`）を拡張し、`state["phases"]` から引け
 （自己先送り分）が actionable のまま残り、`stagnant` → `halt` の経路が再発し得る。実装時は
 本節の表・依存関係はそのまま参照してよいが、「S1–S6 を第1弾として単独リリースする」という
 判断は採用しないこと。**
+
+---
+
+## 8. 既存 BL との相互作用（要件どおり全件）
+
+- **BL-096（issue_log / `_get_escalated_issues` / 停滞の機械的上書き）**：`_get_escalated_issues` 自体は削除も変更もしない。「生の全件が要る用途」（`escalation_active`、reflection の completed 抑止一覧）は残り続けるため。BL-096 の「モデルのツール呼び出し判断に依存せず Python 側で必ず届ける」という思想（`3047-3050`）は保たれる——変わるのは *何を* 届けるかの述語だけ。
+- **BL-103（escalation pin）**：pin の存在意義（recency 窓の外でも懸念を保持する）は維持。「要対応」見出しの対象を actionable に絞り、DEFER 済みは新見出しへ分離、ACK 済みは第3見出しへ分離。**文脈は一切失われない**（3見出しの和集合＝従来の pin 集合）。
+- **BL-123（Detector Pass 1 への pin 注入）**：注入自体は維持。Pass 2（算術検算）が対象外である設計も維持。追加するのは「担当タスクが別に確定している懸念を理由に major と判定しない」という1文で、BL-123 の目的（他ロールが折り込み済みの懸念を知る）と矛盾せず、その逆方向の誤用のみを塞ぐ。
+- **BL-125（遷移ゲート）**：SQL・セマンティクス完全据え置き。BL-167 のリバイバルも ACK 抑制も持ち込まない。据え置きの理由をコード上のコメントとして明文化する（「離脱ゲートは救済経路ではなく安全装置であり、督促集合とは別の関心事である」）。これは §1 の不変条件の **例外** であり、例外である旨を明示的に記録する。
+- **BL-136（DEFER の導入・強制解決文）**：DEFER の中核設計（status を変えず `defer_to_task_id` だけ立てる）は維持。変わるのは「`defer_to_task_id` が立っている＝受け皿がある」という **素朴な読み替えを述語へ格上げ** した点のみ。BL-136 の「今このタスク・フェーズで対応すべきでないと判断した場合」という DEFER の定義文（`5121`、ツール description `736-737`）は、ACKNOWLEDGE の追加によって初めて **反対側の選択肢を持つ** ことになり、定義が実効的になる。
+- **BL-144（滞留3ラウンド閾値）**：閾値 `3`（`10618`）は変更しない（AGENTS.md §7 の対象定数でもある）。変えるのは母集合のみ。`_BL194_ACK_TTL_ROUNDS = 3` を同じ値に揃えることで両者の意味が接続される。
+- **BL-145（issue 駆動の計画化）**：`_formalizable_stale` のフィルタは上流へ移動（重複除去）。副作用として **自己先送り issue が計画化の対象に入る**——これは望ましい：「現在タスクの責務のはずだが acceptance_criteria に無い」懸念こそ、task_planner が計画へ正しく配置し直すべき対象である。ただし今回のログのように一度に6件が `plan_revision_reason` へ流れ込むと大規模な再計画を誘発するリスクがある（§9-R4）。
+- **BL-158（機械的差し戻し）**：判断源が `_get_blocking_issues_for_transition` である構造は維持。ACK 用の `exclude_acknowledged=True` をこの呼び出し元にのみ付与する。補正①のとおり本ゲートは既に Camp A であり、本 BL は BL-158 を **弱めない**（自己先送りを塞ぐことでむしろ強まる）。強まった分の正直な出口として ACKNOWLEDGE を用意する、という関係。
+- **BL-167（受け皿失効リバイバル）**：`_is_issue_effectively_deferred` の中に `_is_task_completed` 判定として **そのまま保存**。要件2が求める「過剰修正への歯止め」はこの1行が担う。加えて、リバイバル時に滞留カウントが 0 からやり直しになる挙動を BL-194 の注記として明文化。
+- **BL-191（`_build_task_focus_state_text`）**：注入先・注入形式の先例として全面的に踏襲。`_build_current_task_scope_brief` は同じ「state のみを読む常設ステータス表示」群に配置し、同じ2ロールへ同じ位置で注入する。BL-191 が `redirect_backward` で `current_task_id` を過去タスクへ動かすため、`_build_current_task_scope_brief` と自己先送り判定は自動的に「巻き戻し先タスク」を基準に動く——これは正しい（巻き戻し中は、その過去タスクが「今のタスク」である）。
+- **BL-192**：Stage4 のプロンプト文言にのみ触れる BL であり、本 BL の変更点（`generate_user_utterance` の `timeline_str` 組み立て部と `_get_forced_escalated_issues_text` の引数）とは行が重ならない。競合なし。
+- **D-079/D-080（severity↔status 不変条件）**：本 BL は **`status` にも `severity` にも一切書き込まない**。ACKNOWLEDGE も DEFER 同様 status を変えず、補助列のみを更新する。この不変条件を守ることが、`status='acknowledged'` 案を却下した唯一かつ十分な理由である。
+- **D-127（BL-157 の `detector_auto` 例外）**：`_bump_issue_occurrence` に ACK リセットの1行を足すが、`detector_auto` の昇格抑制ロジック（`2816`）には触れない。なお `detector_auto` 起票行は昇格しないため `escalated` にならず、本 BL の actionable 判定には元々乗らない。
+
+---
+
+## 9. リスクとガードレール
+
+**R1｜Reflection が `completed` を宣言してしまう過剰修正**
+DEFER/ACK 済み issue を reflection の一覧から落とすと、未解決のまま完了宣言できる。
+→ **対処**：`call_reflection` の一覧は全件維持し、行注記のみ（§2.3 / §5.5）。機械的な停滞上書きだけを actionable に絞る。この「一覧は全件・機械判定は絞込」という非対称は意図的であり、コメントに明記する。
+
+**R2｜BL-125 に BL-167 のリバイバルを持ち込んだ場合の新規デッドロック**
+完了済みタスクへ DEFER された issue が離脱ゲートに復活すると、現在タスクの担当者が解けない issue でタスクを出られなくなる。
+→ **対処**：A-2 を明示的に据え置き、理由をコードコメント化。統一の誘惑に対する明文の禁止事項とする。
+
+**R3｜ACKNOWLEDGE が万能の逃げ道になる**
+→ **対処（4重）**：(a) BL-125 離脱ゲートは解除しない、(b) TTL 3ラウンド、(c) 累計2回上限、(d) 同 topic の再検出（`_bump_issue_occurrence`）で即時失効。加えて Camp B の pin には残り続けるため、可視性も失われない。
+
+**R4｜自己先送り issue が一斉に BL-145 の計画化へ流れ込む**
+実ログのケースでは6件が同時に `plan_revision_reason` へ入り、大規模な計画再構成 → BL-190/BL-191 の `current_task_id` 不整合経路を刺激し得る。
+→ **対処**：本 BL では件数上限を **追加しない**（新機構を増やさない方針）。ただし `plan_revision_reason` 生成時のログに件数を出す既存 print（`10665-10668`）を確認し、ドライランで件数を観測する。5件超が常態化するなら別 BL として上限設計を起票する。
+
+**R5｜自己先送り拒否により User AI が RESOLVE を濫用する（嘘の解決）**
+ACKNOWLEDGE があってもモデルが RESOLVE を選ぶ可能性は残る。
+→ **対処**：拒否メッセージ（§3.2）で3択を明示し、ACKNOWLEDGE を「正直な選択肢」として言語化する。加えて RESOLVE 後に同じ topic が再検出されれば `_bump_issue_occurrence` により再度 escalated へ戻る既存機構（BL-096）が働くため、嘘の RESOLVE は永続しない。
+
+**R6｜"never halt" への傾斜**
+本 BL は停滞判定の母集合を縮小する方向の変更が多い。
+→ **対処**：halt へ至る経路は複数残る：(a) 未 triage の escalated が3ラウンド滞留、(b) BL-167 の受け皿失効リバイバル、(c) 自己先送りの actionable 復帰（本 BL で **新たに増える** 経路）、(d) ACK の TTL/回数切れ、(e) reflection 自身の LLM 判定（でっちあげ監査・迎合監査は無変更）、(f) `max_turns`。むしろ (c) により、これまで停滞として数えられていなかった一部の issue が正しく数えられるようになる。
+
+**R7｜`current_task_id` が空のとき**
+初回ターンや BL-190 のクリア経路では `current_task_id` が空になり得る。`_is_issue_effectively_deferred` は `current_task_id` が空なら自己先送り判定をスキップする（＝ BL-167 判定のみ）ため、従来挙動へ安全に縮退する。`_build_current_task_scope_brief` は `_get_current_task` が空 dict を返したら空文字を返す（BL-191 のヘルパーと同じフェイルソフト）。
+
+**R8｜チェックポイント再開との整合**
+`escalated_issue_first_seen_round` は `state` に保持され checkpoint に載る。母集合が変わることで再開直後に一部 id が辞書から掃除されるが、掃除ロジック（`10622-10624`）は id 集合の差分で動くため冪等であり、再開時の異常は生じない。`acknowledged_until_round` は DB 側に持つため、state 復元とは独立に正しく失効する（これも「state ではなく DB 列」を選んだ理由の一つ）。
+
+---
+
+## 10. テスト計画
+
+### 10.1 新規ファイル：`tests/test_bl194_deferred_issue_consistency.py`
+
+ハーネスは `tests/test_bl191_task_focus_scheduling.py` / `tests/test_bl167_defer_to_task_id_completed_target.py` に完全準拠：モジュール docstring（BL 番号・背景・「実 LLM API 呼び出しは伴わない」の明記）、`sys.path.insert`、`import cela_main`、`tmp_path` ベースの `db_conn` フィクスチャ（`get_db_connection` → `init_db` → `_DB_CONN`/`_CURRENT_RUN_ID` 差し込み → `finally` で復旧）、`_insert_deliverable` ヘルパー（BL-167 のものを踏襲、`_is_task_completed` を成立させるため）。
+
+**A. 述語 `_is_issue_effectively_deferred`（6件）**
+1. `defer_to_task_id` 空 → False
+2. 別タスクへ先送り・受け皿未完了 → True
+3. 別タスクへ先送り・受け皿完了済み（Approved Deliverable を投入）→ False（BL-167 保存）
+4. `current_task_id` と一致（自己先送り）→ False
+5. `current_task_id` が空文字のとき、自己先送りでも BL-167 判定のみに縮退 → True
+6. `Approved_with_Conditions` / `Implicitly_Accepted` でも受け皿完了扱い
+
+**B. `_get_actionable_escalated_issues`（3件）**
+7. 混在3件（未先送り／他タスク先送り／自己先送り）→ 未先送りと自己先送りの2件が返る
+8. `status='open'`/`'planned'`/`'resolved'` は返らない
+9. 全件が正当に先送り済み → 空リスト（**本事故の直接回帰テスト**）
+
+**C. 停滞判定（`reflection_node` の該当ブロック相当、4件）**
+10. 全件先送り済みで4ラウンド経過 → `discussion_status` が `stagnant` に上書きされない（**halt 再発防止の中核**）
+11. 未先送り1件が3ラウンド滞留 → `stagnant` へ上書きされる（BL-144 保存）
+12. 受け皿完了後にリバイバルし、その後3ラウンド滞留 → `stagnant`（BL-167 保存）
+13. 自己先送り1件が3ラウンド滞留 → `stagnant`（§3.4 の明示的な設計判断の固定）
+※ `reflection_node` 全体を呼ぶと `call_reflection`（LLM）に到達するため、`call_reflection` を `monkeypatch` で固定 dict を返すスタブへ差し替える（既存スイートの手法を実装時に確認して合わせる。困難な場合は該当ブロックを純関数ヘルパーへ切り出して直接テストする — 切り出しは §7 の S3 に含める）。
+
+**D. pin のトーン分離（4件）**
+14. `_build_escalation_pin_text` が DEFER 済みを含まない
+15. `_build_deferred_issue_pin_text` が DEFER 済みのみを含み、文字列に「対応不要」相当の非強制文言と `defer_to_task_id` を含む
+16. 両者の和集合が従来の `_get_escalated_issues` 集合と一致（**文脈が失われていないことの保証**）
+17. `inspect.getsource(cela_main.call_detector)` に BL-194 の Detector 向けガード文が含まれる（BL-123 の配線テストと同型）
+
+**E. スコープ注入（4件）**
+18. `_build_current_task_scope_brief` が `acceptance_criteria` と `owns_variables` を含む
+19. タスク未確定時は空文字
+20. `inspect.getsource(cela_main.call_reflection)` に `_build_current_task_scope_brief` と "BL-194" が含まれる
+21. `inspect.getsource(cela_main.call_facilitator)` について同上（通常モード・Essence モード双方）
+22. `_build_current_task_scope_brief` が DB 接続を引数に取らない＝ホワイトボード全文を含まないことの確認（`whiteboard_drafts` に巨大文字列を入れても戻り値長が一定以下）
+
+**F. DEFER のスコープ・エコーバック（2件）**
+23. DEFER 成功時の戻り値に `target_task_scope.acceptance_criteria` / `owns_variables` が含まれる
+24. 受け皿タスクが `phases` にあるが `acceptance_criteria` 未定義でもクラッシュしない
+
+### 10.2 新規ファイル：`tests/test_bl194_issue_acknowledge.py`（S7/S8 と同時）
+
+25. マイグレーション冪等性（`init_db` 2回で `PRAGMA table_info` に3列、重複エラーなし）
+26. 自己先送りが `success=False` で拒否され、エラー文に `ACKNOWLEDGE` の語を含む
+27. 拒否時に DB の `defer_to_task_id` が **書き換わっていない**
+28. 拒否時に `_append_deferred_note_to_plan` が呼ばれていない（plan_drafts が汚染されない）
+29. ACKNOWLEDGE 成功で `status='escalated'` / `severity='major'` が **不変**（D-079/D-080 の回帰テスト）
+30. ACKNOWLEDGE 有効中は `_get_forced_escalated_issues_text` に出ない
+31. ACKNOWLEDGE 有効中でも `_get_blocking_issues_for_transition`（既定引数）は返す（＝離脱ゲートは閉じたまま。**逃げ道化の防止テスト**）
+32. `exclude_acknowledged=True` では返らない（BL-158 の抑制）
+33. TTL 経過後（`round_count` を進める）に督促・停滞判定へ復帰
+34. 3回目の ACKNOWLEDGE が拒否され、エラー文が RESOLVE/DEFER を案内
+35. ACK 中に同 topic を CREATE（再発）すると `acknowledged_until_round` が 0 にリセットされる
+36. DEFER 成功時に `acknowledged_until_round` が 0 にリセットされる
+37. `open` 状態の issue への ACKNOWLEDGE が拒否される
+38. `user` 以外のロール（`detector` / `detector_auto` / `decision_extractor_auto` / `revise_goal_auto`）の ACKNOWLEDGE が権限拒否される
+
+### 10.3 グリーン維持が必須の既存スイート
+
+`tests/test_bl096_issue_log.py`、`test_bl103_hydrate_context_improvements.py`、`test_bl123_detector_escalation_pin.py`、`test_bl136_issue_visibility_and_transition_gate.py`、`test_bl144_escalated_issue_staleness_threshold.py`、`test_bl145_issue_driven_plan_formalization.py`、`test_bl154_decision_extractor_issue_log_bridge.py`、`test_bl157_detector_auto_occurrence_exemption.py`、`test_bl158_detector_rejects_premature_advancement.py`、`test_bl167_defer_to_task_id_completed_target.py`、`test_bl186_*`、`test_bl191_task_focus_scheduling.py`、`test_bl192_stage4_directive_quality.py`。
+
+**特に注意すべき退行点**：
+- `test_bl136_*` / `test_bl158_*` は「DEFER すればゲートが沈黙する」ことを検証している可能性が高い。そのフィクスチャで `defer_to_task_id` が **偶然 `current_task_id` と同一** に設定されていると、S8 導入で赤くなる。その場合はフィクスチャを別 task_id へ修正し、修正理由を BL-194 のコメントとして残す（テスト側の期待値を弱めるのではなく、フィクスチャが表現していた状況が実は自己先送りだった、と読み替える）。
+- `test_bl144_*` は無フィルタの母集合を前提にしている可能性がある。actionable への切替で期待値の更新が必要になり得る。
+
+**リリース判定基準**：`python -m py_compile cela_main.py` 合格、オフライン全スイート（現行 841 件＋新規約 38 件）Pass、`scripts/check_docs_consistency.py` 合格。
+
+---
+
+## 11. ドキュメント更新（AGENTS.md §4 に基づく必須作業）
+
+- `docs/design/back_log/BL-194/BL194_basic_design.md`：本文書を **要約せず逐語** 保存。
+- `docs/design/back_log/issue_backlog.md`：一覧表に `BL-194 | 高 | cela_main.py（...） | ... | P1` を追加し、詳細セクション `### BL-194: ...` を追記。関連 BL（096/103/123/125/136/144/145/158/167/191）へ相互リンク。
+- `docs/design/decision_log.md`：以下の D エントリを新規起票（`Reason for the decision` 必須）。
+  - 「督促集合と滞留集合を同一述語で決定する（BL-194 不変条件）。ただし BL-125 離脱ゲートは安全装置として明示的に例外とする」
+  - 「自己先送りを tool boundary で拒否し、その代償として ACKNOWLEDGE を同時導入する（片方のみのリリースを禁止する）」
+  - 「第3の issue 状態を `status` ではなく TTL 付き補助列で表現する（D-079/D-080 の不変条件保護）」
+  - 「DEFER のスコープ整合性は機械判定せず、受け皿スコープのエコーバックに留める」
+- `docs/design/decision_lineage.md`：本セッションの対話（ログ `1514` のレビュー、補正①〜③の発見、要件3と要件5の相互依存の特定）を1エントリとして記録。AI 発の提案（不変条件の定式化、ACKNOWLEDGE を列で表現する案、BL-125 を例外とする判断）は AI 発として明示的に帰属させる。
+- `docs/design/traceability.md`：新規テスト2ファイルを T-* として登録。
+- **`_BL194_ACK_TTL_ROUNDS` / `_BL194_ACK_MAX_GRANTS` は AGENTS.md §7 の対象定数**。実装着手前にユーザーへ値と根拠を提示し、書面での承認を得ること。承認前に S7/S8 を実装してはならない。
+
+**【2026-08-08 承認済み】上記の定数承認は完了した（`_BL194_ACK_TTL_ROUNDS=3` / `_BL194_ACK_MAX_GRANTS=2`）。**
+
+---
+
+### Critical Files for Implementation
+- C:\ai_work\CELA\cela_main.py
+- C:\ai_work\CELA\docs\design\back_log\issue_backlog.md
+- C:\ai_work\CELA\docs\design\decision_log.md
+- C:\ai_work\CELA\tests\test_bl167_defer_to_task_id_completed_target.py
+- C:\ai_work\CELA\tests\test_bl191_task_focus_scheduling.py
