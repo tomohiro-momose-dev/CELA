@@ -988,6 +988,45 @@ VERIFY_WHITEBOARD_EXCERPT_TOOL = {
 }
 
 
+# [BL-193] Expert専用。write_agreement(edits=...)のold_textを組み立てる前に、編集したい
+# 箇所の"現在の"実際の文字列だけをピンポイントで読めるようにする。1514ログ（task_2_1、
+# 50KB超に育ったホワイトボード）で、Expertがプロンプトに一度提示された全文の記憶だけを
+# 頼りにold_textを再構成し、Detector注釈の埋め込みなどで実際の内容と食い違ったまま
+# 同じ大きな不一致を8回連続で繰り返した事故を受けて追加。verify_whiteboard_excerpt
+# （BL-079、Detector専用・「一致するか検証のみ」）と判定ロジックは共通だが、目的が逆で
+# こちらは「実際に一致した周辺の中身を読む」ことが主眼。
+READ_WHITEBOARD_EXCERPT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_whiteboard_excerpt",
+        "description": (
+            "[BL-193] Before constructing old_text for write_agreement's edits parameter, use this to "
+            "fetch ONLY the current actual text around a specific heading/keyword in the current "
+            "task's whiteboard -- instead of relying on your memory of the full document shown "
+            "earlier in this conversation, which may already be stale (e.g. after a Detector "
+            "annotation was inserted). Your old_text MUST match the string this tool returns "
+            "verbatim, not your recollection of the original prompt. If the keyword matches more "
+            "than once, this returns the match count so you can pick a more specific keyword instead "
+            "of guessing which occurrence you meant."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "keyword": {
+                    "type": "string",
+                    "description": "Heading or phrase to locate in the current whiteboard (e.g. '### 3.6 時間帯別'). Exact match is tried first, falling back to whitespace/markdown-normalized loose match."
+                },
+                "context_chars": {
+                    "type": "integer",
+                    "description": "Characters of context to include before/after the match (default 800, max 3000)."
+                }
+            },
+            "required": ["keyword"],
+        },
+    },
+}
+
+
 # [BL-092] task_plan_reviewer専用。前ラウンドでmajor/minor判定した特定task_idの内容が、
 # 次のラウンドで実際に検算・訂正されたのか、単に記述ごと削除・抽象化されて見えなくなった
 # だけなのかを、LLMの主観的な印象ではなく機械的なdiffで確認できるようにする。task_planner_node
@@ -1470,6 +1509,86 @@ def _verify_whiteboard_excerpt_handler(args: dict) -> dict:
     else:
         reason = f"完全一致が{exact_count}件（一意でない）で、正規化後緩い一致も{loose_count}件でした。前後の文脈を含めて一意に特定できる長さまで引用を伸ばしてください。"
     return {"ok": False, "reason": reason, "exact_count": exact_count, "loose_count": loose_count}
+
+
+_WHITEBOARD_EXCERPT_DEFAULT_CONTEXT_CHARS = 800  # [BL-193]
+_WHITEBOARD_EXCERPT_MAX_CONTEXT_CHARS = 3000  # [BL-193] プロンプト肥大化防止の上限
+
+
+def _read_whiteboard_excerpt_handler(args: dict, state: dict | None = None) -> dict:
+    """[BL-193] write_agreement(edits=...)のold_textを組み立てる前に、Expertが編集対象箇所の
+    "現在の"実際の文字列だけをピンポイントで確認できるツール。1514ログ（task_2_1、50KB超の
+    ホワイトボード）で、Expertがプロンプトに一度提示された全文の記憶を頼りにold_textを
+    再構成し、Detector注釈の埋め込み等で実際の内容と食い違ったまま同じ大きな不一致を
+    8回連続で繰り返した事故を受けて追加した。verify_whiteboard_excerpt（BL-079、Detector専用）
+    と同じ完全一致→正規化緩い一致の判定を流用するが、あちらは「検証のみ」、こちらは
+    「一致した周辺の実際の中身を返す」点が異なる。current_task_id/current_phaseはstate経由で
+    取得する（call_expertは_CURRENT_PHASE_IDグローバルを更新しないため、_effective_current_task_id_from/
+    _phase_id_fromのstate優先パスに頼る必要がある）。
+    """
+    keyword = args.get("keyword", "")
+    if not keyword:
+        return {"ok": False, "reason": "keywordが空文字です"}
+    task_id = _effective_current_task_id_from(state)
+    phase_id = _phase_id_from(state)
+    if not task_id or not phase_id:
+        return {"ok": False, "reason": "現在のタスク/フェーズが特定できませんでした"}
+    latest = get_latest_whiteboard(get_active_conn(), _run_id_from(state), phase_id, task_id)
+    if not latest:
+        return {"ok": False, "reason": "現在のタスクのホワイトボードが存在しません"}
+    content = latest["content"]
+
+    raw_context_chars = args.get("context_chars") or _WHITEBOARD_EXCERPT_DEFAULT_CONTEXT_CHARS
+    try:
+        context_chars = max(1, min(int(raw_context_chars), _WHITEBOARD_EXCERPT_MAX_CONTEXT_CHARS))
+    except (TypeError, ValueError):
+        context_chars = _WHITEBOARD_EXCERPT_DEFAULT_CONTEXT_CHARS
+
+    exact_spans: list[tuple[int, int]] = []
+    search_start = 0
+    while True:
+        pos = content.find(keyword, search_start)
+        if pos == -1:
+            break
+        exact_spans.append((pos, pos + len(keyword) - 1))
+        search_start = pos + 1
+    match_type = "exact"
+    spans = exact_spans
+    if len(spans) != 1:
+        loose_spans = _find_loose_match_spans(content, keyword)
+        if len(loose_spans) == 1:
+            match_type = "loose"
+            spans = loose_spans
+        elif not spans:
+            spans = loose_spans
+            match_type = "loose"
+
+    if not spans:
+        return {
+            "ok": False,
+            "reason": f"keyword '{keyword}' は現在のホワイトボード内容に見つかりませんでした（完全一致0件・緩い一致0件）。",
+            "match_count": 0,
+        }
+    if len(spans) > 1:
+        return {
+            "ok": False,
+            "reason": (
+                f"keyword '{keyword}' は{len(spans)}箇所に一致し一意に特定できません。"
+                "より長く一意になる語句（例：見出し全文や前後の固有の文言を含める）で再度指定してください。"
+            ),
+            "match_count": len(spans),
+        }
+    start, end = spans[0]
+    window_start = max(0, start - context_chars)
+    window_end = min(len(content), end + 1 + context_chars)
+    prefix = "…（中略）" if window_start > 0 else ""
+    suffix = "…（以下省略）" if window_end < len(content) else ""
+    return {
+        "ok": True,
+        "match_type": match_type,
+        "version": latest["version"],
+        "excerpt": prefix + content[window_start:window_end] + suffix,
+    }
 
 
 # R3a/R3b共通: ツールハンドラのモジュールレベル変数（LangGraphの単一プロセス同期実行前提）
@@ -3268,6 +3387,7 @@ TOOL_DISPATCH = {
     "read_verified_fact": lambda args, state=None: _read_verified_fact_handler(args),
     "read_deliverable_file": lambda args, state=None: _read_deliverable_file_handler(args, state),
     "verify_whiteboard_excerpt": lambda args, state=None: _verify_whiteboard_excerpt_handler(args),
+    "read_whiteboard_excerpt": lambda args, state=None: _read_whiteboard_excerpt_handler(args, state),
     "diff_plan_draft_versions": lambda args, state=None: _diff_plan_draft_versions_handler(args),
     "think": lambda args, state=None: _think_handler(args),
     "write_agreement": lambda args, state=None: _write_agreement_impl(
@@ -5032,6 +5152,35 @@ def _get_escalation_status_text_for_expert(conn: sqlite3.Connection, run_id: str
 
 
 _TEXT_EDIT_SNIPPET_MAX_CHARS = 400  # [BL-151] 不一致時プレビューの上限（プロンプト肥大化を抑制）
+_EDIT_SNIPPET_MIN_MATCH_SIZE = 20  # [BL-193] この文字数未満の最長一致は「無関係」とみなし先頭スニペットへフォールバック
+
+
+def _nearest_content_snippet(content: str, old_text: str, max_chars: int = _TEXT_EDIT_SNIPPET_MAX_CHARS) -> str:
+    """[BL-193] old_text不一致エラーで見せるスニペットを、常に文書先頭固定ではなく、
+    old_textとcontentの間の最長共通部分（difflib.SequenceMatcher）周辺へ差し替える。
+
+    BL-151は「実際の格納内容を見せれば同ターン内で自己修復できる」という設計だったが、
+    スニペットが常にcontent[:max_chars]（文書先頭）固定だったため、数十KB規模のホワイト
+    ボード（1514ログ、task_2_1）で編集対象が先頭から遠い節にある場合、スニペットが一度も
+    その節の実際の中身を見せず、BL-151の自己修復が機能しないまま同じ不一致を繰り返す事故が
+    発生した（同一old_textでの8連続失敗）。old_textとの最長一致箇所の周辺を見せることで、
+    対象箇所がどこにあっても実際の現在の文言が見えるようにする。
+
+    old_textがcontentとほぼ無関係（有意な共通部分がない）な場合は、BL-151の元の挙動
+    （文書先頭のスニペット）にフォールバックする——完全に無関係なold_textに対しては
+    「近傍」という概念自体が意味を持たないため。
+    """
+    matcher = difflib.SequenceMatcher(None, content, old_text, autojunk=False)
+    match = matcher.find_longest_match(0, len(content), 0, len(old_text))
+    if match.size < _EDIT_SNIPPET_MIN_MATCH_SIZE:
+        snippet = content[:max_chars]
+        return snippet + ("…（以下省略）" if len(content) > max_chars else "")
+    half = max_chars // 2
+    window_start = max(0, match.a - half)
+    window_end = min(len(content), match.a + match.size + half)
+    prefix = "…（中略）" if window_start > 0 else ""
+    suffix = "…（以下省略）" if window_end < len(content) else ""
+    return prefix + content[window_start:window_end] + suffix
 
 
 def _apply_text_edits(
@@ -5058,6 +5207,10 @@ def _apply_text_edits(
     エラーメッセージにcontent_labelの実際の内容の先頭スニペットを含めることで、表示用装飾と
     格納内容の乖離といった原因不明なケースでも、モデルが同ターン内で実際の文言を見て自己修復
     できるようにする（content_labelは呼び出し元ごとに「現在のゴール文」等へ差し替え可能）。
+
+    ★修正（BL-193）: BL-151のスニペットは常に文書先頭固定だったため、編集対象が先頭から遠い
+    大規模文書（数十KB規模のホワイトボード）では機能しなかった。`_nearest_content_snippet`で
+    old_textとの最長一致箇所の周辺を見せる方式に変更した（詳細は同関数のdocstring参照）。
     """
     content = current_content
     for i, e in enumerate(edits):
@@ -5088,14 +5241,12 @@ def _apply_text_edits(
             continue
 
         if exact_count == 0:
-            snippet = content[:_TEXT_EDIT_SNIPPET_MAX_CHARS]
-            if len(content) > _TEXT_EDIT_SNIPPET_MAX_CHARS:
-                snippet += "…（以下省略）"
+            snippet = _nearest_content_snippet(content, old_text)
             print(f"  ⚠️ [edits失敗] edits[{i}]: old_textが{content_label}に見つかりませんでした（緩い一致{len(loose_spans)}件）。")
             return None, (
                 f"edits[{i}]: old_textが{content_label}に見つかりませんでした"
                 f"（正規化後の緩い一致も{len(loose_spans)}件でした）。一字一句正確な引用か確認してください。\n"
-                f"【参考：{content_label}の実際の先頭部分】\n{snippet}"
+                f"【参考：{content_label}のうち、あなたのold_textに最も近い実際の内容】\n{snippet}"
             )
         print(f"  ⚠️ [edits失敗] edits[{i}]: old_textが{content_label}内で{exact_count}箇所に一致し一意に特定できません（緩い一致{len(loose_spans)}件）。")
         return None, (
@@ -5972,7 +6123,17 @@ def _build_task_scope_context(state: LineageState, conn: sqlite3.Connection) -> 
             "【R4: 編集方針】上記を修正する場合、全文を書き直す必要はありません。write_agreementツールを"
             "action_type='UPDATE', entry_type='Deliverable'で呼び、editsパラメータに"
             "変更箇所のold_text/new_textのみを指定してください（old_textは上記本文と一字一句一致させること）。"
-            "大幅な構成変更の場合のみ、decision_whatに全文を渡してください。"
+            "大幅な構成変更の場合のみ、decision_whatに全文を渡してください。\n"
+            "【BL-193: old_textは最小限に】old_textには変更したい箇所そのものだけを含め、"
+            "無関係な前後（特にDetector指摘の注釈「> 🔴 [Detector指摘 #...]」ブロック全体など）を"
+            "巻き込んで1つの巨大なold_textにしないでください。注釈の削除が必要な場合は、"
+            "本文修正とは別のeditsの要素として、注釈のブロックだけを対象にした短いold_textで"
+            "個別に削除してください。1つのeditsが大きいほど、一字一句の不一致で全体が失敗する"
+            "リスクが上がります。また、このプロンプトに表示された本文は生成時点のスナップショット"
+            "であり、その後に変わっている可能性があります。old_textを組み立てる前に、"
+            "read_whiteboard_excerptツールで対象箇所の「現在の」実際の文字列を確認することを推奨します"
+            "（特に、上記本文が長く編集対象が後半にある場合や、前ターンでold_textが一度でも"
+            "不一致になった場合は必ず使ってください）。"
         )
     else:
         whiteboard_text = "(このタスクの成果物はまだホワイトボードに存在しません。初版はwrite_agreementのdecision_whatに全文を渡してください)"
@@ -6872,7 +7033,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     _CURRENT_TASK_ID = state.get("current_task_id", "")
     _reset_think_scratchpad()  # [BL-093]
     return query_AI(messages, client=client_expert, model=model_expert, label=f"Expert:{expert_name}",
-                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)
+                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)
 
 
 #def call_detector(goal: str, user_input: str, expert_output: str, decisions: list[Decision], current_phase: dict) -> dict:

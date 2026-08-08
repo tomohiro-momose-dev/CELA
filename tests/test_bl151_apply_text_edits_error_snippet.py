@@ -51,7 +51,9 @@ def test_bl151_custom_content_label_is_used_in_error():
     )
     assert merged is None
     assert "現在のゴール文に見つかりませんでした" in err
-    assert "【参考：現在のゴール文の実際の先頭部分】" in err
+    # [BL-193] スニペットの見出し文言が「実際の先頭部分」固定から「old_textに最も近い実際の内容」
+    # （文書サイズに応じてold_textとの最長一致箇所周辺へ差し替え）へ変更された。
+    assert "【参考：現在のゴール文のうち、あなたのold_textに最も近い実際の内容】" in err
 
 
 def test_bl151_snippet_is_truncated_for_long_content():
