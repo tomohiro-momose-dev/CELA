@@ -2311,6 +2311,56 @@
 
 ---
 
+### D-163: 督促する対象集合と、滞留＝停滞として数える対象集合は同一の述語で決定する（BL-125離脱ゲートは明示的例外）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | `log/2026-08-08/1514`（`facilitation_count>5`でhalt）のレビューで、停滞判定の引き金となった滞留escalated issue20件が全件`write_issue(DEFER)`済み（受け皿task_id設定済み）だったにもかかわらず`stagnant`と断罪されhaltに至った。調査の結果、`defer_to_task_id`を見て「受け皿あり」と沈黙する是正経路（BL-136強制解決文、BL-145計画化、BL-125/158遷移ゲート）と、`defer_to_task_id`を一切見ずに督促し続ける懲罰経路（BL-103 pin「要対応」、BL-096/144停滞判定）が併存しており、この2集合の乖離自体が事故の本質だった。 |
+| **決定理由** | 「督促されている」issueが「督促の必要が無いと既にみなされている」issueと異なる基準で数えられていることが根本原因であり、個別のバグ修正ではなく不変条件として明文化しないと同型の乖離が別箇所で再発する。ただしBL-125の遷移ゲート（タスク離脱時の安全弁）は、督促（是正を促す）ではなく安全装置（未解決のまま離脱させない）という異なる関心事であり、統一すると「完了済みタスクへDEFERされたissueが離脱ゲートに復活し現在タスクの担当者が解けないissueでタスクを出られなくなる」という新規デッドロックを招くため、明示的な例外として据え置く。 |
+| 決定内容 | `_is_issue_effectively_deferred`/`_get_actionable_escalated_issues`（BL-194）を新設し、`_get_forced_escalated_issues_text`（BL-136）・`reflection_node`の機械的停滞上書き（BL-096/144）・`facilitator_node`のescalated issue名指し（BL-096）・`_build_escalation_pin_text`（BL-103）・`_formalizable_stale`（BL-145）の5箇所が同一の述語を参照するよう統一する。`_get_blocking_issues_for_transition`（BL-125）のSQLはこの統一の**対象外**とし、その理由をコード上のコメントとして明文化する。`call_reflection`のプロンプトへ渡す一覧は全件維持し行ごとに注記のみ付す（除外すると未解決のまま`completed`を宣言できてしまうため）。 |
+| 影響 | `cela_main.py`（BL-194 §2、S1〜S4）。設計は`docs/design/back_log/BL-194/BL194_basic_design.md`参照。 |
+| 関連 BL | [BL-194](back_log/issue_backlog.md#bl-194-defer_to_task_idの解釈不統一と自己先送りによる偽の停滞判定強制停止) |
+
+---
+
+### D-164: 自己先送り（defer_to_task_id=実行中タスク自身）をtool boundaryで拒否し、代償としてACKNOWLEDGEを同時導入する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | `log/2026-08-08/1514`で、滞留escalated issue20件中6件が`task_2_1`自身への先送り（自己先送り）だった。DEFERの実装は受け皿task_idの実在チェックのみで自己参照を禁じておらず、自己先送りされたissueは「督促する経路（BL-103 pin・BL-096/144停滞判定）は点灯し続けるが、是正経路（BL-136/145/125/158）は全て沈黙する」という非対称状態になり、解消不能な滞留を生んでいた。これがtask_2_1のacceptance_criteria外の懸念（車両台数）をExpertのプロンプトへ「要対応」として刺し続けた直接原因。 |
+| **決定理由** | 自己先送りを単純に拒否するだけでは、BL-158の機械的差し戻しゲート（`_get_blocking_issues_for_transition`を判断源とする）が毎ターン再発火する状態に戻り、User AIは「嘘のRESOLVE」か「別タスクへの誤配DEFER」を強いられる。実ログのUser AI自身の`think`が、この種のジレンマ（現タスクの責務だが対応中、という状態を表現する手段が無い）を長文で自覚していたことから、正直な出口が必須と判断した。第3の状態を`issue_log.status`語彙の拡張として実装する案は却下した（D-165参照）。 |
+| 決定内容 | `_write_issue_impl`のDEFER分岐で、受け皿task_idが実行中タスク自身と一致する場合を拒否する（BL-194 §3）。拒否メッセージはRESOLVE/DEFER/ACKNOWLEDGEの3択を明示する。この拒否（S8）とACKNOWLEDGE（S7）は**片方のみのリリースを禁止**し、必ず同時にリリースする。 |
+| 影響 | `cela_main.py`（BL-194 §3・§5、S7・S8）。既存テストへの影響: `tests/test_bl136_issue_visibility_and_transition_gate.py`のフィクスチャは`current_task_id`/`defer_to_task_id`が別task_idのため自己先送りに該当せず、本決定の実装で赤くならないことを事前確認済み。 |
+| 関連 BL | [BL-194](back_log/issue_backlog.md#bl-194-defer_to_task_idの解釈不統一と自己先送りによる偽の停滞判定強制停止) |
+
+---
+
+### D-165: 第3のissue状態（ACKNOWLEDGE＝現在タスクの責務であり対応中）を`status`語彙の拡張ではなくTTL付き補助列で表現する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | D-164のACKNOWLEDGE（RESOLVEでもDEFERでもない第三の選択肢）を、`issue_log.status`へ新しい値（例: `'acknowledged'`）を追加する形で実装するか、既存の`status`/`severity`を変えず別の列で表現するかの選択。 |
+| **決定理由** | D-079/D-080の不変条件「`severity='major'`の行は常に`status='escalated'`を伴う」に、`_write_issue_impl`のCREATE分岐・`_bump_issue_occurrence`の再発昇格・BL-125ゲートのSQL・BL-096/136/145の全`_get_*_issues`ヘルパーが依存している。`major`の行を`escalated`以外の`status`へ動かすと、これら全経路から完全に不可視になり、BL-103 pinからもBL-125遷移ゲートからも消える——まさにBL-158を無効化する万能の逃げ道になってしまう。BL-145の`planned`は`_mark_issue_planned`という非LLM・内部専用の遷移でのみ到達するため先例として援用できない。 |
+| 決定内容 | `issue_log`へ`acknowledged_until_round`/`acknowledged_count`/`acknowledge_reason`の3列を追加する（`status`/`severity`は一切変更しない）。TTLラウンド数`_BL194_ACK_TTL_ROUNDS=3`（BL-144の3ラウンド滞留閾値と揃え「ACKは滞留カウントをちょうど1周期分止める」という意味を持たせる）、累計上限`_BL194_ACK_MAX_GRANTS=2`（最悪でも6ラウンドで必ず滞留判定へ復帰し不死身化しない）で承認した（AGENTS.md §7の事前承認対象定数）。BL-125の遷移ゲート本体はACK抑制の対象外とし（`exclude_acknowledged`は既定False）、「対応中」表明が離脱の免罪符にならないようにする。同一topicの再検出（`_bump_issue_occurrence`）時は`acknowledged_until_round`を即時0へリセットする。 |
+| 影響 | `cela_main.py`（BL-194 §5、S7）。`init_db`へのスキーマ移行1件、`WRITE_ISSUE_TOOL`の`action_type` enumへ`"ACKNOWLEDGE"`追加。 |
+| 関連 BL | [BL-194](back_log/issue_backlog.md#bl-194-defer_to_task_idの解釈不統一と自己先送りによる偽の停滞判定強制停止) |
+
+---
+
+### D-166: DEFERのスコープ整合性は機械判定せず、受け皿タスクのスコープをエコーバックするに留める
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | `log/2026-08-08/1514`で、`task1_3_budget_overrun_composite_service`（予算超過）が`task_2_1`（需要セグメント定義）へDEFERされ、スコープ外の内容がtask_2_1のplan_draftへ「正式に」貼り付いた。DEFER先が懸念の内容に対応したタスクかを機械的に検証すべきか。 |
+| **決定理由** | LLMジャッジによる整合性判定は、DEFERがドライラン中の頻出ホットパスであるためレイテンシ・コストが跳ね判定も非決定的になる上、D-164で自己先送りという逃げ道を塞いだ後では、誤判定（偽陰性）がUser AIの唯一のtriage手段をブロックし新種のデッドロックを生む。キーワード重なりによる機械判定も、`acceptance_criteria`が日本語自由文であり形態素解析器も未導入のため、BL-074/081/193が示した「緩い文字列一致」の誤判定リスクをそのまま引き継ぐ。BL-042/BL-188が確立した「プロンプト誘導のみ、機械的ゲートは追加しない」方針を踏襲する。 |
+| 決定内容 | DEFER成功時の戻り値へ、受け皿タスクの`acceptance_criteria`/`owns_variables`をそのまま含める（`target_task_scope`）。DB/LLM呼び出しは追加せず、`state["phases"]`から既に構築済みの`task_id_to_task`辞書を再利用する。ミスマッチの判断はモデル自身に委ね、同じtopicで再DEFERすれば最新の指定が有効になる旨をヒントとして返す。 |
+| 影響 | `cela_main.py`（BL-194 §6、S6）。`WRITE_ISSUE_TOOL`のdescriptionへ1文追記。 |
+| 関連 BL | [BL-194](back_log/issue_backlog.md#bl-194-defer_to_task_idの解釈不統一と自己先送りによる偽の停滞判定強制停止) |
+
 ---
 
 ## 未決定（pending）
