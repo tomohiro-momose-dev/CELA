@@ -776,6 +776,49 @@ WRITE_ISSUE_TOOL = {
     }
 }
 
+SCHEDULE_TASK_FOCUS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "schedule_task_focus",
+        "description": (
+            "[BL-191] 通常の『次タスクへ進む』指示とは別に、過去の承認済みタスクの手戻り対応が"
+            "必要になった場合に、そのスケジューリング判断を構造化して1回で明示するツール。"
+            "任意呼び出し（通常通り前進するだけの場合は呼ぶ必要はない）。"
+            "'redirect_backward': 今すぐ作業対象を過去タスクへ完全に切り替える（現在のフォワード"
+            "タスクは一時中断し、対象task_idのDeliverableが再承認され次第、自動的に元へ戻ります）。"
+            "深さ1固定（既に中断中のフォーカスがある間は使えません。force_resumeで先に解消してください）。"
+            "'joint_focus': 現在のタスクは変更しないが、指定した過去task_idを『今回のターンで"
+            "Expert/Detectorが併せて考慮すべき関連タスク』として明示する（current_task_idは動かない）。"
+            "'clear_companion': joint_focusで設定した companion を解除する。"
+            "'force_resume': redirect_backward中の過去タスクがまだ未解決でも、意図的に中断を"
+            "打ち切りフォワードタスクへ強制的に復帰する（安全弁。対象task_idには自動的に"
+            "整合性再確認issueが再起票されます）。"
+            "[BL-191] このツールを呼んでも、Expertへの通常の作業指示文（次タスク指示）は"
+            "別途書く必要があります。このツールはあくまでスケジューリング判断の記録であり、"
+            "会話の代わりにはなりません。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "decision_type": {
+                    "type": "string",
+                    "enum": ["redirect_backward", "joint_focus", "clear_companion", "force_resume"]
+                },
+                "target_task_id": {
+                    "type": "string",
+                    "description": "redirect_backward時必須。切替先の過去task_id（既存のDeliverableを持つtask_idのみ有効）"
+                },
+                "companion_task_id": {
+                    "type": "string",
+                    "description": "joint_focus時必須。今回併せて考慮すべき過去task_id"
+                },
+                "reason": {"type": "string", "description": "この判断の理由（必須）"}
+            },
+            "required": ["decision_type", "reason"]
+        }
+    }
+}
+
 READ_ISSUES_TOOL = {
     "type": "function",
     "function": {
@@ -1835,6 +1878,48 @@ def apply_goal_patch(conn: sqlite3.Connection, run_id: str, new_content: str,
     )
     print(f"  📝 [DB] goal_draftsへINSERT: version={new_version}, author={author_role}, "
           f"edit_summary={str(edit_summary)[:60]}")
+    return new_version
+
+
+def get_latest_scheduling_decision(conn: sqlite3.Connection, run_id: str) -> dict | None:
+    """[BL-191] scheduling_draftsの最新1件を返す（get_latest_goal_draftのミラー）。"""
+    row = conn.execute(
+        "SELECT * FROM scheduling_drafts WHERE run_id=? ORDER BY version DESC LIMIT 1", (run_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_scheduling_decision_history(conn: sqlite3.Connection, run_id: str, limit: int = 5) -> list[dict]:
+    """[BL-191] Stage4プロンプトへ表示する直近の過去のスケジューリング決定（新しい順）。"""
+    rows = conn.execute(
+        "SELECT * FROM scheduling_drafts WHERE run_id=? ORDER BY version DESC LIMIT ?", (run_id, limit)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def record_scheduling_decision(conn: sqlite3.Connection, run_id: str, decision_type: str,
+                                primary_task_id: str, primary_phase_id: str,
+                                companion_task_id: str, companion_phase_id: str,
+                                reason: str, author_role: str) -> int:
+    """[BL-191] apply_goal_patchのミラー。contentはLLMが手書きするdiffではなく、
+    decision_type/primary_task_id/companion_task_id/reasonからシステムが機械的に合成する
+    （BL-039のドット/アンダースコア混同バグを避けるため、machine-readable列を主、contentは
+    人間/LLMが読む副次的サマリーとして扱う）。バージョンは常に加算のみ（append-only）。"""
+    latest = get_latest_scheduling_decision(conn, run_id)
+    new_version = (latest["version"] + 1) if latest else 1
+    content = (
+        f"[v{new_version}] decision_type={decision_type} primary={primary_task_id} "
+        f"companion={companion_task_id or '(なし)'} reason={reason}"
+    )
+    conn.execute(
+        "INSERT INTO scheduling_drafts (draft_id, version, content, author_role, decision_type, "
+        "primary_task_id, primary_phase_id, companion_task_id, companion_phase_id, reason, "
+        "timestamp, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (f"SCHED-{int(time.time()*1000)}", new_version, content, author_role, decision_type,
+         primary_task_id, primary_phase_id, companion_task_id, companion_phase_id, reason,
+         time.time(), run_id)
+    )
+    print(f"  🗓️ [DB] scheduling_draftsへINSERT: version={new_version}, decision_type={decision_type}")
     return new_version
 
 
@@ -2987,6 +3072,12 @@ def _build_task_transition_blocked_notice(state: LineageState) -> str:
             "提出を指示する）まで、次タスクへの移行指示は行わないでください。\n"
         )
 
+    reassigned_notice = state.get("task_reassigned_after_replan_notice")
+    if reassigned_notice:
+        state["task_reassigned_after_replan_notice"] = ""
+        print(f"  📣 [BL-190] タスク再割当通知をLLMプロンプトへ注入します。")
+        return f"\n【🛑 {reassigned_notice}】\n"
+
     return ""
 
 
@@ -3089,6 +3180,89 @@ def _effective_current_task_id_from(state: dict | None) -> str:
     return ""
 
 
+_MAX_TASK_FOCUS_REDIRECTS = 5  # [BL-191] facilitation_count(5)/plan_revision_count(5)と揃える
+
+# [BL-191] 直前のquery_AI呼び出しのツールループ内でschedule_task_focusが成功した場合の構造化決定。
+# _LAST_GOAL_REVISIONと同型のブリッジパターン。
+_LAST_SCHEDULING_DECISION: dict | None = None
+
+
+def get_last_scheduling_decision() -> dict | None:
+    return dict(_LAST_SCHEDULING_DECISION) if _LAST_SCHEDULING_DECISION else None
+
+
+def _schedule_task_focus_tool_impl(args: dict, conn: sqlite3.Connection, run_id: str,
+                                    caller_role: str, state: dict | None) -> dict:
+    """[BL-191] schedule_task_focusの実体。userロールのみ許可（Stage4は_CURRENT_CALLER_ROLE=
+    "user"で動くため、facilitator等の別経路からの呼び出しは弾く）。
+    [BUG-1対策] redirect_backward/joint_focus双方でredirect/宣言時点の最新Deliverable
+    agreement_idを`baseline_agreement_id`として記録する。復帰／companion自動クリアの判定は
+    このbaselineとの比較で行う（`_is_task_completed`単独では、BL-163でフラグされただけで
+    ステータスがApprovedのまま残っている過去タスクにredirectした直後、Expertが何も手を
+    付けていない時点で即座に「完了済み」と誤判定してしまうため）。
+    """
+    global _LAST_SCHEDULING_DECISION
+    if caller_role != "user":
+        return {"success": False, "error": f"{caller_role}はschedule_task_focusを呼び出せません（userロールのみ許可）"}
+    decision_type = args.get("decision_type")
+    reason = args.get("reason", "")
+    if decision_type not in ("redirect_backward", "joint_focus", "clear_companion", "force_resume") or not reason:
+        return {"success": False, "error": "decision_type/reasonは必須です"}
+
+    phases = _phases_from(state)
+    current_task_id = _effective_current_task_id_from(state)
+    current_phase_id = _phase_id_from(state)
+
+    if decision_type == "redirect_backward":
+        target_task_id = args.get("target_task_id", "")
+        target = _find_task_by_id(phases, target_task_id)
+        if not target:
+            return {"success": False, "error": f"target_task_id '{target_task_id}' は計画に存在しません"}
+        if target_task_id == current_task_id:
+            return {"success": False, "error": "target_task_idは現在のタスクと同一です"}
+        target_phase_id = _find_phase_id_for_task(phases, target_task_id)
+        baseline_agreement = _find_active_deliverable_agreement(conn, run_id, target_phase_id, target_task_id)
+        if not baseline_agreement:
+            return {"success": False, "error": f"'{target_task_id}'にはまだDeliverableが存在しません（未着手タスクへはredirect_backwardではなく通常のタスク遷移を使ってください）"}
+        if state and state.get("task_focus_stack"):
+            return {"success": False, "error": "既に一時中断中のフォーカスがあります（深さ1固定）。force_resumeで先に解消してください"}
+        if state and state.get("task_focus_redirect_count", 0) >= _MAX_TASK_FOCUS_REDIRECTS:
+            return {"success": False, "error": f"redirect_backwardの上限（{_MAX_TASK_FOCUS_REDIRECTS}回/run）に達しました"}
+        record_scheduling_decision(conn, run_id, decision_type, current_task_id, current_phase_id,
+                                    "", "", reason, caller_role)
+        _LAST_SCHEDULING_DECISION = {
+            "decision_type": "redirect_backward", "target_task_id": target_task_id,
+            "target_phase_id": target_phase_id, "reason": reason,
+            "baseline_agreement_id": baseline_agreement.get("id", ""),
+        }
+        return {"success": True}
+
+    if decision_type == "joint_focus":
+        companion_task_id = args.get("companion_task_id", "")
+        if not _find_task_by_id(phases, companion_task_id):
+            return {"success": False, "error": f"companion_task_id '{companion_task_id}' は計画に存在しません"}
+        if companion_task_id == current_task_id:
+            return {"success": False, "error": "companion_task_idは現在のタスクと同一です"}
+        companion_phase_id = _find_phase_id_for_task(phases, companion_task_id)
+        baseline_agreement = _find_active_deliverable_agreement(conn, run_id, companion_phase_id, companion_task_id)
+        record_scheduling_decision(conn, run_id, decision_type, current_task_id, current_phase_id,
+                                    companion_task_id, companion_phase_id, reason, caller_role)
+        _LAST_SCHEDULING_DECISION = {
+            "decision_type": "joint_focus", "companion_task_id": companion_task_id,
+            "companion_phase_id": companion_phase_id, "reason": reason,
+            "baseline_agreement_id": baseline_agreement.get("id", "") if baseline_agreement else "",
+        }
+        return {"success": True}
+
+    if decision_type in ("clear_companion", "force_resume"):
+        record_scheduling_decision(conn, run_id, decision_type, current_task_id, current_phase_id,
+                                    "", "", reason, caller_role)
+        _LAST_SCHEDULING_DECISION = {"decision_type": decision_type, "reason": reason}
+        return {"success": True}
+
+    return {"success": False, "error": f"未知のdecision_type: {decision_type}"}
+
+
 TOOL_DISPATCH = {
     "python_repl": lambda args, state=None: _run_python_repl(args),
     "read_verified_fact": lambda args, state=None: _read_verified_fact_handler(args),
@@ -3117,6 +3291,9 @@ TOOL_DISPATCH = {
     "write_issue": lambda args, state=None: _write_issue_impl(
         args, get_active_conn(), _run_id_from(state), _CURRENT_CALLER_ROLE, _phase_id_from(state), _task_id_from(state),
         state=state
+    ),
+    "schedule_task_focus": lambda args, state=None: _schedule_task_focus_tool_impl(
+        args, get_active_conn(), _run_id_from(state), _CURRENT_CALLER_ROLE, state
     ),
     "read_issues": lambda args, state=None: _read_issues_handler(args),
     "read_plan_draft": lambda args, state=None: _read_plan_draft_handler(args),
@@ -3281,7 +3458,7 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
     [BL-131/TOOL_DISPATCH state化] `state`は_query_AI_liveへそのまま透過する（レコード/リプレイの
     キャッシュキーには影響しない）。
     """
-    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL
+    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION
     _LAST_PYTHON_CALLS = []
     _LAST_WRITE_AGREEMENT_SUCCEEDED = False
     _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED = False
@@ -3290,6 +3467,7 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
     _LAST_GOAL_REVISION = None
     _LAST_ASK_USER_QUESTION = None
     _LAST_ESSENCE_PROPOSAL = None
+    _LAST_SCHEDULING_DECISION = None  # [BL-191]
 
     call_seq = _call_seq_counter
     _call_seq_counter += 1
@@ -4162,6 +4340,19 @@ def init_db(conn: sqlite3.Connection) -> None:
         edit_summary TEXT, timestamp REAL, run_id TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_goal_drafts_run ON goal_drafts(run_id);
+
+    -- [BL-191] Stage4のschedule_task_focusツール呼び出しの構造化ログ兼版管理文書。goal_draftsと
+    -- 同型のrun_id単位append-onlyバージョニングだが、contentはLLMが手書きするdiffの結果ではなく、
+    -- decision_type/primary_task_id/companion_task_id/reasonからシステムが機械的に合成する
+    -- 監査可能な要約文（BL-039のドット/アンダースコア混同バグを避けるため、machine-readable
+    -- 列を主、contentは人間/LLMが読む副次的サマリーとして扱う）。
+    CREATE TABLE IF NOT EXISTS scheduling_drafts (
+        draft_id TEXT, version INTEGER, content TEXT, author_role TEXT,
+        decision_type TEXT NOT NULL, primary_task_id TEXT, primary_phase_id TEXT,
+        companion_task_id TEXT, companion_phase_id TEXT, reason TEXT,
+        timestamp REAL, run_id TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_scheduling_drafts_run ON scheduling_drafts(run_id);
     """)
     _ensure_agreements_task_id_column(conn)
     _ensure_agreements_citations_column(conn)
@@ -4632,6 +4823,104 @@ def _get_deferred_notes_text(conn: sqlite3.Connection, run_id: str, phase_id: st
     if not section or section == _PLAN_DEFERRED_PLACEHOLDER:
         return ""
     return f"【他タスクからの申し送り事項（先送り、要確認）】\n{section}\n"
+
+
+def _get_task_focus_companion_text(state: LineageState) -> str:
+    """[BL-191] task_focus_companionが設定されていれば、Expert/Detector/User AI Stage1へ
+    追加のコンテキストとして注入するブロックを返す。BL-025のスコープガードレールは維持する
+    （current_task_json等の「現在のタスク」定義自体は一切変更しない、あくまで並記情報）。
+    """
+    companion = state.get("task_focus_companion")
+    if not companion:
+        return ""
+    return (
+        f"🔗 【BL-191: 今回併せて考慮すべき関連タスク（あなたの担当タスクはあくまで現在のタスクのみです）】\n"
+        f"task_id={companion['companion_task_id']}: {companion['reason']}\n"
+        "このタスク自体の成果物を今すぐ書き換える必要はありません（それは発注者が別途"
+        "redirect_backwardで正式に指示します）。ただし、現在のタスクの検討・監査において"
+        "この関連タスクとの整合性を意識してください。もしこのタスクの成果物自体を修正する"
+        "必要がある場合は、action_type='SUPERSEDE'を使ってください（現在のタスクではないため"
+        "通常のUPDATEはBL-146ガードに拒否されます）。\n"
+    )
+
+
+def _build_task_focus_state_text(state: LineageState) -> str:
+    """[BL-191] task_focus_stack/task_focus_companionの"現在の状態"を毎ターン明示的に
+    描画する常設ステータス表示。state上に値があるだけではLLMのプロンプトには自動的に
+    現れないため、明示描画が必須。one-shotの_build_task_focus_transition_noticeとは別物で、
+    こちらはredirect_backward中は毎ターン繰り返し表示し続ける（Stage4・Detector・Reflection・
+    Facilitatorへ注入し、意図的な手戻り中であることを一貫して伝える）。
+    """
+    lines = []
+    stack = state.get("task_focus_stack") or []
+    if stack:
+        entry = stack[-1]
+        lines.append(
+            f"現在task_id='{state.get('current_task_id', '')}'（過去タスク）へ一時的にフォーカス中"
+            f"（理由: {entry.get('reason', '')}）。復帰待ちの元タスク: '{entry.get('task_id', '')}'。"
+        )
+    companion = state.get("task_focus_companion")
+    if companion:
+        lines.append(
+            f"companion: task_id='{companion.get('companion_task_id', '')}'が現在のタスク"
+            f"'{companion.get('primary_task_id', '')}'と併記対象（理由: {companion.get('reason', '')}）。"
+        )
+    if not lines:
+        return ""
+    return "【🧭 BL-191: 現在のタスクフォーカス状況】\n" + "\n".join(lines) + "\n"
+
+
+def _build_task_focus_transition_notice(state: LineageState) -> str:
+    """[BL-191] _apply_backward_redirect/_maybe_resume_forward_focus/_force_resume_forward_focusが
+    直後に発火した場合、次のExpert/User AIターンへ一度だけ明示する通知
+    （_build_task_transition_blocked_noticeと同じone-shot消費パターン、ただし別関心事のため
+    別関数として独立させる——あちらはBL-125/176/190の「遷移をブロックした」通知、こちらは
+    BL-191の「遷移を実際に行った/戻した」通知で意味が逆であり、混在させると読みにくくなる）。
+    """
+    redirect_notice = state.get("task_focus_redirect_notice")
+    if redirect_notice:
+        state["task_focus_redirect_notice"] = ""
+        print(f"  📣 [BL-191] タスクフォーカス切替通知をLLMプロンプトへ注入します。")
+        return f"\n【🧭 {redirect_notice}】\n"
+    resume_notice = state.get("task_focus_resume_notice")
+    if resume_notice:
+        state["task_focus_resume_notice"] = ""
+        print(f"  📣 [BL-191] タスクフォーカス復帰通知をLLMプロンプトへ注入します。")
+        return f"\n【🧭 {resume_notice}】\n"
+    return ""
+
+
+def _build_stale_past_tasks_text(conn: sqlite3.Connection, run_id: str) -> str:
+    """[BL-191] BL-163が起票したseverity="minor"の整合性再確認issue（
+    topic LIKE "goal_revision_consistency_check_%"）のうち、まだstatus='open'のものを
+    task_id単位で一覧化する。BL-186が発見した「read_issuesがpull型のため誰にも見られない」
+    問題への、Stage4限定の能動的サーフェシング（BL-186自体は無変更、並存させる）。
+    """
+    rows = conn.execute(
+        "SELECT * FROM issue_log WHERE run_id=? AND status='open' "
+        "AND topic LIKE 'goal_revision_consistency_check_%' ORDER BY task_id, id",
+        (run_id,)
+    ).fetchall()
+    if not rows:
+        return ""
+    lines = [f"- task_id={r['task_id']}: {r['description']}" for r in rows]
+    return (
+        "【🧭 BL-191/163: ゴール改定により整合性未確認のまま残っている過去タスク】\n"
+        "これらは強制ではありませんが、必要と判断すればschedule_task_focus"
+        "(decision_type=\"redirect_backward\")で今すぐ手戻り対応するか、"
+        "joint_focusで現在のタスクと併せて考慮対象にできます。\n"
+        + "\n".join(lines) + "\n"
+    )
+
+
+def _build_scheduling_history_text(conn: sqlite3.Connection, run_id: str) -> str:
+    """[BL-191] scheduling_draftsの直近5件をStage4向けに短い行としてレンダリングし、
+    ターンをまたいだ継続性を持たせる（「2ターン前にtask_2_3へリダイレクトした」等）。"""
+    rows = get_scheduling_decision_history(conn, run_id, limit=5)
+    if not rows:
+        return ""
+    lines = [r["content"] for r in reversed(rows)]
+    return "【🗓️ BL-191: 直近のスケジューリング決定履歴】\n" + "\n".join(lines) + "\n"
 
 
 def _get_frozen_agreements_text(conn: sqlite3.Connection, run_id: str) -> str:
@@ -5195,6 +5484,34 @@ class LineageState(TypedDict):
     # これらのissueをplanned状態へ遷移させる際に使う。plan_revision_reasonと常に対で
     # セット・クリアする不変条件を維持すること。
     plan_revision_issue_ids: list[str]
+    # [BL-190] _reconcile_current_phase_after_replanが「計画再構成後、current_task_idが新計画
+    # のどこにも存在しない」と判定した場合、次のUser AIターンへ一度だけ通知するためのフラグ。
+    task_reassigned_after_replan_notice: str
+    # [BL-191] Stage4駆動の過去タスクへの一時的フォーカス切替（decision_type="redirect_backward"）で、
+    # 中断したフォワードタスクへ戻るための復帰ポインタスタック。要素: {"task_id", "phase_id"（監査用の
+    # 参考情報のみ、復帰時は必ずtask_idから_find_phase_containing_taskで再解決する）, "reason",
+    # "pushed_at_round", "focused_task_id", "baseline_agreement_id"}。v1は深さ1に固定。
+    task_focus_stack: list[dict]
+    # [BL-191] Stage4がdecision_type="joint_focus"で宣言した「現在の主タスクと合わせて今回考慮すべき
+    # 過去タスク」。current_task_id/current_phaseは変更しない（BL-025のスコープガードレール意図を
+    # 尊重し、Expert/Detectorへは追加のコンテキストとしてのみ注入する）。None＝未設定。
+    # shape: {"companion_task_id", "companion_phase_id", "primary_task_id", "reason",
+    #         "declared_at_round", "baseline_agreement_id"}
+    task_focus_companion: dict | None
+    # [BL-191] generate_user_utterance_node（Stage4のschedule_task_focusツール成功直後）が
+    # 一度だけ書き込み、decision_extractor_nodeが同ターン内で消費・Noneへリセットする1ショット
+    # ブリッジ。call_decision_extractorの自由文脈抽出（advances_to_task_id）とは独立した経路。
+    pending_task_redirect: dict | None
+    # [BL-191] redirect_backwardの累積発火回数（facilitation_count/plan_revision_countと同型の
+    # run単位カウンタ、popしてもリセットしない）。schedule_task_focusツールが上限到達時に
+    # 新規redirect_backwardを拒否する。
+    task_focus_redirect_count: int
+    # [BL-191] _apply_backward_redirectが発火した直後、次のExpert/User AIターンへ一度だけ
+    # 「一時的に過去タスクへ切り替わった」ことを明示する通知。
+    task_focus_redirect_notice: str
+    # [BL-191] _maybe_resume_forward_focus/_force_resume_forward_focusが復帰を発火した直後、
+    # 次のターンへ一度だけ「中断していたフォワードタスクへ復帰した」ことを明示する通知。
+    task_focus_resume_notice: str
     # --- 以下を追加 ---
     global_constraints: list[GlobalConstraint]
     phases: list[Phase]
@@ -5525,6 +5842,79 @@ def _get_current_task(state: LineageState) -> dict:
     return tasks[0] if tasks else {}
 
 
+def _reconcile_current_phase_after_replan(state: LineageState, phases: list[dict]) -> None:
+    """[BL-190] task_planner_nodeが新しいphases配列を確定させた直後に呼ぶ。
+    current_task_id（BL-024の唯一の書き手は_resolve_task_transitionだが、値そのものは
+    ここでは変更せず参照のみ）が新phases内のどこに属するかを再探索し、current_phaseを
+    そのtask_idを含むphaseへ合わせる。
+
+    [CONSTRAINT] 従来はcurrent_phaseを無条件にphases[0]へリセットしていたため、ラン途中の
+    計画再構成でフェーズの並び順・phase_idが変わると（BL-186の加算のみのケースでは無害だが、
+    task_plan_reviewer指摘によるフェーズ全体の再編では実際に発生した）、current_task_idが
+    指すtaskが新phases[0]の中に存在せず、_get_current_taskが毎ターンフォールバック警告を出し、
+    BL-146ガードが正当なwrite_agreement(UPDATE)まで拒否する事故があった
+    （log/2026-08-07/2355で実見、SUPERSEDEへの切り替えで実害は回避されたが根本原因は未解消）。
+    """
+    current_task_id = state.get("current_task_id", "")
+    if not current_task_id:
+        # 初回計画（is_initial）、またはまだ一度もタスクに着手していない場合。
+        # 従来通りphases[0]を採用する。
+        state["current_phase"] = phases[0] if phases else {}
+        return
+
+    for phase in phases:
+        for t in phase.get("tasks", []):
+            if t.get("task_id") == current_task_id:
+                if phase.get("phase_id") != state.get("current_phase", {}).get("phase_id"):
+                    print(
+                        f"  📍 [BL-190] current_task_id='{current_task_id}'の追跡のため、"
+                        f"current_phaseを新phase_id='{phase.get('phase_id')}'へ更新しました"
+                        f"（計画再構成によるフェーズ位置変更に追随）。"
+                    )
+                state["current_phase"] = phase
+                return
+
+    # current_task_idが新phasesのどこにも存在しない（真の削除・統合パターン）。
+    # [BL-191バグ②対策] task_focus_stackが非空（＝現在Stage4のredirect_backwardで一時的に
+    # フォーカス中の過去タスクが、今回の計画再構成で消失した）場合、単純にcurrent_task_idを
+    # クリアするとtask_focus_stackに積まれた元のフォワードタスクへ二度と復帰できなくなる
+    # （BL-167と同型の永久迷子）。この場合はforce_resumeと同じ経路で強制的に元のフォワード
+    # タスクへ復帰させる。
+    if state.get("task_focus_stack"):
+        print(
+            f"  ⚠️ [BL-190/191] current_task_id='{current_task_id}'（redirect_backwardで"
+            "一時フォーカス中）は計画再構成により消失しました。中断中のフォワードタスクへ"
+            "強制的に復帰します。"
+        )
+        _force_resume_forward_focus(state)
+        # [CONSTRAINT] _force_resume_forward_focusの復帰先（スタック上のフォワードタスク）
+        # 自体も新計画から消えている場合、resume_phaseが見つからずスタックのみクリアされ
+        # current_task_id/current_phaseは古いまま変更されない（フォーカス中タスク・復帰先の
+        # 両方が消えた二重消失パターン）。この場合は下の「真の削除・統合」処理へフォール
+        # スルーさせ、current_task_idを確実にクリアする（無効なtask_idを指したまま
+        # 残り続ける事故を防ぐ）。
+        if not _find_phase_containing_task(phases, state.get("current_task_id", "")):
+            pass  # フォールスルー
+        else:
+            return
+
+    # phases[0]へフォールバックし、current_task_idもクリアして_get_current_taskの
+    # フォールバック警告が毎ターン出続ける状態を防ぐ。次のUser AIターンへ一度だけ
+    # 通知し、新計画のどのタスクを引き継ぐべきかLLM自身に確認させる。
+    print(
+        f"  ⚠️ [BL-190] current_task_id='{current_task_id}'は計画再構成後の新しい計画に"
+        f"存在しません（supersede済み）。current_phaseを先頭フェーズへ戻し、"
+        f"current_task_idをクリアします。"
+    )
+    state["current_phase"] = phases[0] if phases else {}
+    state["current_task_id"] = ""
+    state["task_reassigned_after_replan_notice"] = (
+        f"[BL-190] 直前まで進行していたタスク'{current_task_id}'は、直前の計画再構成により"
+        "廃止・統合されました。新しい計画（phases）を確認し、対応する新タスクへ改めて着手して"
+        "ください。"
+    )
+
+
 def _build_detector_observations_block(state: LineageState, limit: int = 3) -> str:
     """[BL-051軽量版] Detectorがconstraint_issueの判定に至らずとも書き残した気づき・懸念
     （detector_observations_log）を、User AI/Expertのプロンプトへ参考情報として毎ターン
@@ -5680,6 +6070,28 @@ def _build_retry_situation_label(state: LineageState, retry_count: int, max_retr
 _THINK_TRAILER_SENTENCE = (
     "think以外のいずれかを呼ぶ場合、必要に応じて同じ応答内でthink（summary付き）を呼んで"
     "検討過程を書き残しても構いません。"
+)
+
+# [BL-192] User AIがExpertへ次タスクを指示する際の指示文の質を強化する共通ブロック。
+# BL-188が確立した「プロンプト誘導のみ（機械的な強制ゲートは追加しない）」という標準方針を
+# 踏襲する（BL-042: Detectorの硬直判定によるトークン浪費事故の再発防止という設計判断）。
+# Stage4（generate_user_utteranceの4段階パイプライン内、次タスク指示ステージ）と、
+# 差し戻し・本質対話等でStage4をスキップする非Stage4パスの両方から参照する（文言の
+# 二重管理を避けるため、モジュール定数として1箇所に定義する）。
+_BL192_DIRECTIVE_QUALITY_BLOCK = (
+    "\n[BL-192] 次タスクの指示を書く際は、以下2点を徹底してください：\n"
+    "①【根拠不明な数値・前提のweb_search義務化】そのタスクが依存する確定値"
+    "（verified_facts/agreementsのcitations）に`type=\"web\"`の裏付けがなく"
+    "`expert_calculation`/`goal_text`のみの場合、指示文の中で「このタスクの前提となる"
+    "◯◯の数値はまだ一次情報での裏付けがないため、web_searchで検証してから進めること」と"
+    "具体的に名指しで指示してください。Expertが『もっともらしい』値を無検証のまま踏襲する"
+    "ことを許容しないでください。\n"
+    "②【期待される思考プロセスの明示】成果物の完成条件（acceptance_criteria）を並べる"
+    "だけでなく、どのような順序・観点で検討すべきかを明示してください。例：「まず◯◯の"
+    "実測/公的統計を確認し、次に△△との整合性を検算し、最後に□□の受入基準を満たすか"
+    "確認せよ」。直前のタスクや併記対象タスク（[BL-191] task_focus_companion）との"
+    "依存関係がある場合は、それらの確定値との整合性確認を思考プロセスの一部として"
+    "明記してください。\n"
 )
 # [BL-115] BL-094（read_verified_fact/read_deliverable_fileでの既存確定値との同期説明）は
 # 当初パラメータ化ヘルパーへの集約を試みたが、tests/test_bl094_read_tool_orientation.pyが
@@ -6288,6 +6700,12 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     if deferred_notes_text:
         system_prompt_trailing += f"\n📌 【BL-082: 他タスクからの申し送り事項（先送り）】\n{deferred_notes_text}\n"
 
+    # [BL-191] joint_focusで併記対象に指定された過去タスクがあれば追加コンテキストとして注入
+    # （current_task_json等の「現在のタスク」定義自体は変更しない、BL-025のスコープガードレール
+    # 意図を維持）。redirect_backwardで実際にフォーカスが切り替わった直後の一度きり通知も併記。
+    system_prompt_trailing += _get_task_focus_companion_text(state)
+    system_prompt_trailing += _build_task_focus_transition_notice(state)
+
     # [BL-086] これまでに提起したエスカレーションの状況（Open/Rejectedのみ）を提示し、
     # 同じ懸念の重複再提起を防ぐ。Acceptedはstate["goal"]自体が既に改定済みのため
     # ここでは表示しない（毎ターン再埋め込みされるgoal本文が既に反映済み）。
@@ -6770,7 +7188,22 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"noneの場合や、ホワイトボードが存在せず引用できない場合は空文字にしてください。\n\n"
         f"{write_agreement_status_block}\n"
         f"{deferred_notes_block}"
-        f"【今回評価するターンのやり取り】\n{history_text}\n\n"
+        f"{_get_task_focus_companion_text(state)}"
+        f"{_build_task_focus_state_text(state)}"
+        f"{_build_task_focus_transition_notice(state)}"
+        f"[BL-191] このタスクが発注者の判断で一時的に再検討中（フォーカス切替中）である場合、"
+        f"過去に承認済みであったことを理由に差し戻さないでください。判断すべきは、今回の"
+        f"再提出内容が切替の理由（reason）に応えているかどうかです。\n"
+        + (
+            f"[BL-191/バグ④対策] 発注者が今回のターンでschedule_task_focusを呼び、"
+            f"decision_type={state.get('pending_task_redirect', {}).get('decision_type', '')}, "
+            f"reason={state.get('pending_task_redirect', {}).get('reason', '')}"
+            f" というスケジューリング判断を行いました（まだ適用前）。この判断自体が妥当か"
+            f"（理由が具体的か、対象タスクが本当に影響を受けているか）も判定の一部としてください。"
+            f"ただしこれは監査対象の一部であり、機械的にmajor/minorを強制するものではありません。\n"
+            if target_role == "user" and state.get("pending_task_redirect") else ""
+        )
+        + f"【今回評価するターンのやり取り】\n{history_text}\n\n"
         f'Return ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用(無ければ空文字)", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
@@ -6931,6 +7364,9 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"入れてください（ホワイトボードへの注釈挿入に機械的に使うため、正確な引用が必須です）。"
         f"noneの場合や、ホワイトボードが存在せず引用できない場合は空文字にしてください。\n\n"
         f"{deferred_notes_block}"
+        f"{_get_task_focus_companion_text(state)}"
+        f"{_build_task_focus_state_text(state)}"
+        f"{_build_task_focus_transition_notice(state)}"
 
         f"【今回評価するターンのやり取り】\n"
         f"{history_text}\n"
@@ -7392,6 +7828,10 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
     ■ 【決定事項DB】（これまでに確定した要件）:\n{agreements_text}
     ■ これまでのシステム判断のタイムライン:\n{timeline_str}
     ■ 直近の実際の会話の流れ:\n{history_text}
+    {_build_task_focus_state_text(state)}
+    [BL-191] 上記のタスクフォーカス状況が「一時的に過去タスクへフォーカス中」等を示している場合、
+    それは発注者の意図的な手戻り対応です。同じタスクが繰り返し再提出されているように見えても、
+    それだけを理由にstagnant（膠着）や迎合と判定しないでください。
 
     【でっちあげ監査（★R5 F-2.1、cela_r5_design_v2.md §1.3）】
     上記の直近の会話の流れとタイムラインを俯瞰し、単発のDetectorでは見逃されがちな
@@ -7516,6 +7956,7 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
 
     ■ プロジェクトの目標(Goal): {goal}
     {goal_essence_text}
+    {_build_task_focus_state_text(state) if state else ""}
     ■ 直近の会話:
     {history_text}
     """
@@ -7604,6 +8045,7 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     {goal_essence_text}
     {reflection_block}
     {escalated_issues_block}
+    {_build_task_focus_state_text(state) if state else ""}
     ■ 直近の会話:
     {history_text}
     """
@@ -7826,14 +8268,19 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         _stage_reasoning_text = ""
         _stage_goal_revision = None
         _stage_essence_proposal = None
+        _stage_scheduling_decision = None  # [BL-191]
 
         def _absorb_stage_trackers():
-            nonlocal _stage_wrote_agreement, _stage_wrote_issue_resolution, _stage_reasoning_text, _stage_goal_revision, _stage_essence_proposal
+            nonlocal _stage_wrote_agreement, _stage_wrote_issue_resolution, _stage_reasoning_text, _stage_goal_revision, _stage_essence_proposal, _stage_scheduling_decision
             _stage_wrote_agreement = _stage_wrote_agreement or get_last_write_agreement_succeeded()
             _stage_wrote_issue_resolution = _stage_wrote_issue_resolution or get_last_write_issue_resolve_or_defer_succeeded()
             _stage_reasoning_text = get_last_reasoning_text() or _stage_reasoning_text
             _stage_goal_revision = get_last_goal_revision() or _stage_goal_revision
             _stage_essence_proposal = get_last_essence_proposal() or _stage_essence_proposal
+            # [BL-191] Stage4がschedule_task_focusを呼んでいれば、query_AI呼び出しごとにリセット
+            # される_LAST_SCHEDULING_DECISIONを、他の_stage_*トラッカーと同じOR/後勝ちパターンで
+            # 集約する。
+            _stage_scheduling_decision = get_last_scheduling_decision() or _stage_scheduling_decision
 
         _scope_ctx = _build_task_scope_context(state, _conn)
         current_task_json = _scope_ctx["current_task_json"]
@@ -8044,9 +8491,13 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             approval_status = "ApprovalRecordingFailed"
 
         # ===== Stage 4: 次タスク指示 / 現タスク修正指示 / 承認記録失敗の待機メッセージ =====
-        _transition_notice = _build_task_transition_blocked_notice(state)  # [BL-125/BL-176]
+        _transition_notice = _build_task_transition_blocked_notice(state)  # [BL-125/BL-176/BL-190]
         _escalation_resume_notice = _build_escalation_resume_notice(state)  # [BL-096]
+        _task_focus_transition_notice = _build_task_focus_transition_notice(state)  # [BL-191]
+        _task_focus_state_text = _build_task_focus_state_text(state)  # [BL-191]
         if approval_status in RESOLVING_DELIVERABLE_STATUSES:
+            _stale_past_tasks_text = _build_stale_past_tasks_text(_conn, state["run_id"])  # [BL-191]
+            _scheduling_history_text = _build_scheduling_history_text(_conn, state["run_id"])  # [BL-191]
             stage4_system_prompt = (
                 f"あなたは目標達成のプロジェクトオーナー（発注者）です。これは4段階レビューの"
                 f"第4段（最終段）です。第3段で成果物の承認（{approval_status}）が確定しました。"
@@ -8055,9 +8506,20 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
                 f"【絶対目標】{user_goal}\n"
                 f"{goal_essence_text}\n"
                 f"📊 [プロジェクト進行計画]\n{json.dumps(state.get('phases', []), ensure_ascii=False, indent=2)}\n\n"
+                f"{_task_focus_state_text}"
+                f"{_stale_past_tasks_text}"
+                f"{_scheduling_history_text}"
+                f"[BL-191] 過去の承認済みタスクの手戻りが必要だと判断した場合は、通常の次タスク"
+                f"指示文とは別に、schedule_task_focusツールで明示的にスケジューリング判断を"
+                f"記録してください。'redirect_backward'で今すぐ過去タスクへ完全に切り替えるか、"
+                f"'joint_focus'で現在のタスクを進めつつ過去タスクを併記対象として明示するかを"
+                f"選べます。schedule_task_focusを呼んでも、Expertへの通常の次タスク指示文は"
+                f"別途必ず書いてください（このツールは指示文の代わりにはなりません）。\n"
                 f"【承認理由（第3段）】{approval_reason}\n"
                 f"{_escalation_resume_notice}"
                 f"{_transition_notice}"
+                f"{_task_focus_transition_notice}"
+                f"{_BL192_DIRECTIVE_QUALITY_BLOCK}"
                 f"【同じ検証・計算を繰り返さない】必要な確認は既に前段で完了しています。ここでは"
                 f"次タスクへの具体的な指示文を簡潔に書いてください。\n"
             )
@@ -8091,7 +8553,8 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
                 f"示した修正指示を出してください。次タスクへの移行はまだ指示しないでください。\n"
             )
         stage4_system_prompt += (
-            f"\n【重要】あなたが使えるツールはthinkのみです。{_THINK_TRAILER_SENTENCE}\n"
+            f"\n【重要】あなたが使えるツールはthinkとschedule_task_focus（[BL-191]過去タスクの"
+            f"手戻りが必要な場合のみ）です。{_THINK_TRAILER_SENTENCE}\n"
         )
         _reset_think_scratchpad()
         stage4_messages = [{"role": "system", "content": stage4_system_prompt}]
@@ -8104,14 +8567,14 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             stage4_messages.append({"role": _role, "content": msg["content"]})
 
         content = query_AI(stage4_messages, client=client_user, model=model_user, label="User AI (Stage4)",
-                            tools=[THINK_TOOL], state=state)
+                            tools=[THINK_TOOL, SCHEDULE_TASK_FOCUS_TOOL], state=state)
         _absorb_stage_trackers()
         if content is None or content.strip() == "" or content == "(APIから空の応答が返されました)":
             for _retry in range(3):
                 print(f"⚠️ [User AI Stage4] 空応答を検知。リトライ {_retry + 1}/3...")
                 _reset_think_scratchpad()
                 content = query_AI(stage4_messages, client=client_user, model=model_user, label="User AI (Stage4)",
-                                    tools=[THINK_TOOL], state=state)
+                                    tools=[THINK_TOOL, SCHEDULE_TASK_FOCUS_TOOL], state=state)
                 _absorb_stage_trackers()
                 if content and content.strip() and content != "(APIから空の応答が返されました)":
                     break
@@ -8120,12 +8583,13 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
 
         # [BL-177 制約2] 集約したトラッカーをグローバルへ書き戻す（generate_user_utterance_nodeの
         # 既存の読み取りコードは無変更で正しく動作する）。
-        global _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ESSENCE_PROPOSAL
+        global _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION
         _LAST_WRITE_AGREEMENT_SUCCEEDED = _stage_wrote_agreement
         _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED = _stage_wrote_issue_resolution
         _LAST_REASONING_TEXT = _stage_reasoning_text
         _LAST_GOAL_REVISION = _stage_goal_revision
         _LAST_ESSENCE_PROPOSAL = _stage_essence_proposal
+        _LAST_SCHEDULING_DECISION = _stage_scheduling_decision  # [BL-191]
         return content
 
     # [BL-104] プロンプトキャッシュのヒット率向上のため、内容が変わらない固定の指示文を
@@ -8386,7 +8850,13 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     # [BL-185] エスカレーション再開通知・タスク遷移ブロック通知は、決定事項DB等と同じ
     # 「状況説明」寄りの情報のため、差し戻し・最終盤指示より前（trailing内の中盤）に置く。
     system_prompt_trailing += _build_escalation_resume_notice(state)  # [BL-096]
-    system_prompt_trailing += _build_task_transition_blocked_notice(state)  # [BL-125]
+    system_prompt_trailing += _build_task_transition_blocked_notice(state)  # [BL-125/BL-190]
+    system_prompt_trailing += _build_task_focus_transition_notice(state)  # [BL-191]
+    # [BL-192/独立レビュー指摘7-2] このパスは差し戻し（constraint_issue=="major"）・本質対話・
+    # Expert相談応答・終盤・初回ターン用であり、Stage4をスキップするため、Stage4側にのみ
+    # 指示を入れるとこれらの重要な場面でBL-192の指示（web_search義務化・思考プロセス明示）が
+    # 一切適用されなくなる。共通定数を参照し文言の二重管理を避ける。
+    system_prompt_trailing += _BL192_DIRECTIVE_QUALITY_BLOCK
 
     #system_prompt_trailing += f"""
     #    \n📋 【出力フォーマット（厳守）】\n"
@@ -8619,6 +9089,15 @@ def generate_user_utterance_node(state: LineageState) -> LineageState:
     # stateへ橋渡しする（facilitator_nodeがこのターンでの収束判定に使う。ツールハンドラは
     # stateへ直接触れられないため、他のブリッジ変数と同じパターン）。
     state["last_essence_proposal"] = get_last_essence_proposal()
+    # [BL-191] Stage4がschedule_task_focusを呼んでいれば、構造化決定をdecision_extractor_nodeへ
+    # 一度だけ橋渡しする（call_decision_extractorの自由文脈抽出をバイパスする経路）。
+    # [独立レビュー指摘6-3] 無条件で毎ターン上書きする（条件付き代入にすると、user_detectorが
+    # major判定で差し戻した後にUser AIがツールを呼び直さなかった場合、前回ターンの
+    # （撤回されたかもしれない）決定がpending_task_redirectに残留してしまう）。
+    _scheduling_decision = get_last_scheduling_decision()
+    state["pending_task_redirect"] = _scheduling_decision
+    if _scheduling_decision:
+        print(f"  🧭 [BL-191] Stage4がスケジューリング決定を行いました: {_scheduling_decision}")
     print(f"\n>>> 👤 User AIの発言:\n{user_input}")
     state["user_input"] = user_input
     state["chat_history"].append({"role": "user", "content": state["user_input"]})
@@ -8848,8 +9327,8 @@ Sets the starting phase for subsequent execution steps within the lineage state.
                 else:
                     print(f"  ⚠️ [BL-145] issue_id='{_issue_id}'は対象外でした（既にresolved等、冪等スキップ）。")
         if phases:
-            state["current_phase"] = phases[0]
-            print(f"  📍 [task_planner] current_phaseをphase_id={phases[0].get('phase_id')}に設定しました。")
+            _reconcile_current_phase_after_replan(state, phases)
+            print(f"  📍 [task_planner] current_phaseをphase_id={state['current_phase'].get('phase_id')}に設定しました。")
         # [BL-087 Stage2改善] task_plan_reviewer_nodeが動く前に、全タスク分のplan_draftsスケルトンを
         # 事前生成しておく（従来は_append_deferred_note_to_plan経由の遅延生成のみだったため、
         # レビュー時点では何も存在せず、レビュワーが指摘を書き込む先がなかった）。
@@ -9406,7 +9885,8 @@ def _get_blocking_issues_for_transition(conn: sqlite3.Connection, run_id: str, d
     return [dict(r) for r in rows]
 
 
-def _resolve_task_transition(state: LineageState, transition: dict) -> None:
+def _resolve_task_transition(state: LineageState, transition: dict,
+                              structured_redirect: dict | None = None) -> None:
     """[CONSTRAINT] BL-024: current_phase/current_task_idの唯一の書き手。
     LLMが返したphase_id/task_idがtask_planner確定済みのphases/tasksに実在しない場合は
     書き込みを拒否し、直前の値を維持する（check_docs_consistency.pyが存在しないリンクを
@@ -9414,7 +9894,25 @@ def _resolve_task_transition(state: LineageState, transition: dict) -> None:
     [BL-125] さらに、離脱しようとしているtaskに未解決・未先送りのsevere issueが残っている場合も
     同様に遷移を拒否する（BL-134の実例: severity=major・status=escalatedのissueが未解決のまま
     task_1_1→task_1_2の遷移が起きてしまった問題への対応）。
+    [BL-191] `structured_redirect`（Stage4のschedule_task_focusツールが構造化して渡す決定）が
+    非Noneの場合、call_decision_extractorの自由文脈`advances_to_task_id`抽出より優先される。
+    `redirect_backward`/`force_resume`はここでcurrent_task_id/current_phaseを確定させその場で
+    returnする（以降の自由文脈抽出ロジックは無視）。`joint_focus`/`clear_companion`は
+    current_task_idを変更しないため、適用後も既存の自由文脈遷移ロジックへそのまま処理を続ける。
     """
+    if structured_redirect:
+        decision_type = structured_redirect.get("decision_type")
+        if decision_type == "redirect_backward":
+            _apply_backward_redirect(state, structured_redirect)
+            return
+        if decision_type == "joint_focus":
+            _apply_joint_focus(state, structured_redirect)
+        elif decision_type == "clear_companion":
+            state["task_focus_companion"] = None
+        elif decision_type == "force_resume":
+            _force_resume_forward_focus(state)
+            return
+
     next_phase_id = transition.get("advances_to_phase_id")
     next_task_id = transition.get("advances_to_task_id")
     if not next_phase_id and not next_task_id:
@@ -9481,6 +9979,177 @@ def _resolve_task_transition(state: LineageState, transition: dict) -> None:
         print(f"  ➡️ [decision_extractor] current_phase を '{next_phase_id}' に更新しました。")
 
 
+def _find_phase_containing_task(phases: list[dict], task_id: str) -> dict | None:
+    """[BL-191] task_idを含むphaseオブジェクトそのものを返す（_find_task_by_idはtask本体を返すが、
+    ここではcurrent_phaseへ丸ごと差し替えるためphase側が必要、_find_phase_id_for_taskはphase_idの
+    文字列のみを返す）。BL-190の_reconcile_current_phase_after_replanと同型の全フェーズ線形探索。"""
+    for phase in phases:
+        for t in phase.get("tasks", []):
+            if t.get("task_id") == task_id:
+                return phase
+    return None
+
+
+def _apply_backward_redirect(state: LineageState, redirect: dict) -> None:
+    """[BL-191] schedule_task_focus(decision_type="redirect_backward")による構造化された
+    過去タスクへの一時的フォーカス切替を適用する。[CONSTRAINT] BL-125/BL-176のdeparting-task
+    ゲート（未解決severe issue・未承認Deliverable）は意図的に適用しない——これは「離脱」では
+    なく「一時中断」であり、_maybe_resume_forward_focus経由で必ず元タスクへ復帰する前提のため
+    （中断中のフォワードタスク自身の未解決issue/未承認状態は、復帰後に本来の遷移として改めて
+    BL-125/176のチェックを受ける）。
+    """
+    target_task_id = redirect.get("target_task_id", "")
+    target_phase = _find_phase_containing_task(state.get("phases", []), target_task_id)
+    if not target_phase:
+        print(f"  ⚠️ [BL-191] 存在しないtask_id '{target_task_id}' へのredirect_backward要求を無視しました。")
+        return
+    stack = state.get("task_focus_stack", [])
+    if stack:
+        print("  ⚠️ [BL-191] 既に一時中断中のフォーカスがあるため、二重のredirect_backwardを無視しました（ツール側の深さ1ガードのはずが漏れています）。")
+        return
+    current_task_id = state.get("current_task_id", "")
+    current_phase = state.get("current_phase", {})
+    stack.append({
+        "task_id": current_task_id, "phase_id": current_phase.get("phase_id", ""),
+        "reason": redirect.get("reason", ""), "pushed_at_round": state.get("round_count", 0),
+        "focused_task_id": target_task_id,
+        "baseline_agreement_id": redirect.get("baseline_agreement_id", ""),
+    })
+    state["task_focus_stack"] = stack
+    state["current_task_id"] = target_task_id
+    state["current_phase"] = target_phase
+    state["task_focus_redirect_count"] = state.get("task_focus_redirect_count", 0) + 1
+    state["task_focus_redirect_notice"] = (
+        f"[BL-191] 発注者の判断により、作業対象を一時的に過去タスク'{target_task_id}'へ切り替えました"
+        f"（理由: {redirect.get('reason', '')}）。このタスクの成果物が再承認され次第、"
+        f"自動的に'{current_task_id}'へ復帰します。"
+    )
+    print(f"  ⏪ [BL-191] current_task_idを一時的に'{target_task_id}'へ切替えました（元: '{current_task_id}'、resume待ち）。")
+
+
+def _apply_joint_focus(state: LineageState, redirect: dict) -> None:
+    """[BL-191] schedule_task_focus(decision_type="joint_focus")の適用。current_task_id/
+    current_phaseは変更しない（BL-025のスコープガードレール意図を尊重）。"""
+    companion_task_id = redirect.get("companion_task_id", "")
+    if not _find_phase_containing_task(state.get("phases", []), companion_task_id):
+        print(f"  ⚠️ [BL-191] 存在しないtask_id '{companion_task_id}' へのjoint_focus要求を無視しました。")
+        return
+    state["task_focus_companion"] = {
+        "companion_task_id": companion_task_id,
+        "companion_phase_id": redirect.get("companion_phase_id", ""),
+        "primary_task_id": state.get("current_task_id", ""),
+        "reason": redirect.get("reason", ""),
+        "declared_at_round": state.get("round_count", 0),
+        "baseline_agreement_id": redirect.get("baseline_agreement_id", ""),
+    }
+    print(f"  🔗 [BL-191] task_focus_companionを設定しました: {companion_task_id}")
+
+
+def _force_resume_forward_focus(state: LineageState) -> None:
+    """[BL-191] schedule_task_focus(decision_type="force_resume")の適用。
+    task_focus_stackが未完了のままでも強制的にポップし、元のフォワードタスクへ戻る安全弁。
+    対象の過去タスクへは、放置されたまま失われないようBL-163と同型の軽微issueを再起票する。"""
+    stack = state.get("task_focus_stack", [])
+    if not stack:
+        print("  ⚠️ [BL-191] force_resume要求を受けましたが、中断中のフォーカスがありません。")
+        return
+    abandoned_task_id = state.get("current_task_id", "")
+    entry = stack[-1]
+    resume_phase = _find_phase_containing_task(state.get("phases", []), entry["task_id"])
+    state["task_focus_stack"] = stack[:-1]
+    if not resume_phase:
+        print(f"  ⚠️ [BL-191] 復帰先task_id '{entry['task_id']}'が計画に存在しません。スタックのみクリアします。")
+        return
+    state["current_task_id"] = entry["task_id"]
+    state["current_phase"] = resume_phase
+    state["task_focus_resume_notice"] = (
+        f"[BL-191] 過去タスク'{abandoned_task_id}'は未解決のまま、意図的にフォーカスを"
+        f"打ち切り'{entry['task_id']}'へ復帰しました。'{abandoned_task_id}'は整合性再確認issueとして"
+        "再度記録されています。"
+    )
+    if abandoned_task_id:
+        _write_issue_impl(
+            {"action_type": "CREATE", "topic": f"task_focus_force_resume_unresolved_{abandoned_task_id}",
+             "severity": "minor",
+             "description": f"[BL-191] '{abandoned_task_id}'への一時フォーカスはforce_resumeにより未解決のまま打ち切られました。改めて対応が必要です。"},
+            get_active_conn(), state["run_id"], "revise_goal_auto", "", abandoned_task_id,
+        )
+    print(f"  ⏩⚠️ [BL-191] force_resume: '{abandoned_task_id}'を未解決のまま'{entry['task_id']}'へ復帰しました。")
+
+
+def _maybe_resume_forward_focus(state: LineageState, conn: sqlite3.Connection, run_id: str) -> None:
+    """[BL-191] task_focus_stack末尾（中断中のフォワードタスク）が存在し、現在フォーカス中の
+    過去タスクの成果物がredirect時点（baseline_agreement_id）から更新され、かつApproved相当
+    （BL-167のis_task_completed）に達していれば、自動的にポップしてcurrent_task_id/
+    current_phaseを復帰させる。LLM判断を経由しない機械的トリガー。
+
+    [BUG-1対策] `_is_task_completed`だけを条件にすると、BL-163でフラグされた過去タスクは
+    ステータス上まだApprovedのまま残っているため、redirect直後・Expertが何も手を付けていない
+    次の呼び出しの時点で即座に「完了済み」と誤判定し、redirectがその場で無効化されてしまう。
+    baseline_agreement_idと現在の最新Deliverable agreement_idを比較し、実際に新しい成果物が
+    承認された場合のみ復帰する。
+    [BUG-2対策] task_focus_stackが非空なのにcurrent_task_idが空文字列（BL-190のパターン3で
+    フォーカス中タスク自体が計画再構成により消失しクリアされた場合）は、_is_task_completed("")
+    が恒久的にFalseを返すため、通常の完了待ちでは永久にスタックが残ってしまう。この場合は
+    force_resumeと同じロジックで強制的に復帰させる（防御的な二重の安全網。主たる対策は
+    _reconcile_current_phase_after_replan側に実装済み）。
+    """
+    stack = state.get("task_focus_stack", [])
+    if not stack:
+        return
+    focused_task_id = state.get("current_task_id", "")
+    if not focused_task_id:
+        print("  ⚠️ [BL-191] task_focus_stackが非空のままcurrent_task_idが空になっています"
+              "（計画再構成でフォーカス中タスクが消失した可能性）。強制的に復帰します。")
+        _force_resume_forward_focus(state)
+        return
+    entry = stack[-1]
+    if not _is_task_completed(conn, run_id, focused_task_id):
+        return
+    baseline_agreement_id = entry.get("baseline_agreement_id", "")
+    current_agreement = _find_active_deliverable_agreement(
+        conn, run_id, _find_phase_id_for_task(state.get("phases", []), focused_task_id), focused_task_id
+    )
+    current_agreement_id = current_agreement.get("id", "") if current_agreement else ""
+    if current_agreement_id == baseline_agreement_id:
+        # redirect時点から成果物が更新されていない（BL-163でフラグされただけの、まだ着手前の
+        # 過去タスク等）。まだ「手戻りが完了した」とは言えないため復帰しない。
+        return
+    resume_phase = _find_phase_containing_task(state.get("phases", []), entry["task_id"])
+    state["task_focus_stack"] = stack[:-1]
+    if not resume_phase:
+        print(f"  ⚠️ [BL-191] 復帰先task_id '{entry['task_id']}'が計画に存在しません（再構成で消失した可能性）。スタックのみクリアします。")
+        return
+    state["current_task_id"] = entry["task_id"]
+    state["current_phase"] = resume_phase
+    state["task_focus_resume_notice"] = (
+        f"[BL-191] 一時中断していた過去タスク'{focused_task_id}'が再承認されたため、"
+        f"'{entry['task_id']}'へ自動復帰しました。"
+    )
+    print(f"  ⏩ [BL-191] '{focused_task_id}'が承認済みになったため、中断していた'{entry['task_id']}'へ復帰しました。")
+
+
+def _maybe_clear_resolved_companion(state: LineageState, conn: sqlite3.Connection, run_id: str) -> None:
+    """[BL-191] joint_focusで設定されたcompanionが、宣言時点（baseline_agreement_id）から
+    実際に更新されApproved相当に達したら自動的にクリアする（_maybe_resume_forward_focusと
+    同型のbaseline比較つき機械的トリガー、BUG-1と同型の早期クリア防止）。"""
+    companion = state.get("task_focus_companion")
+    if not companion:
+        return
+    companion_task_id = companion["companion_task_id"]
+    if not _is_task_completed(conn, run_id, companion_task_id):
+        return
+    baseline_agreement_id = companion.get("baseline_agreement_id", "")
+    current_agreement = _find_active_deliverable_agreement(
+        conn, run_id, _find_phase_id_for_task(state.get("phases", []), companion_task_id), companion_task_id
+    )
+    current_agreement_id = current_agreement.get("id", "") if current_agreement else ""
+    if current_agreement_id == baseline_agreement_id:
+        return
+    print(f"  ✅ [BL-191] companion task '{companion_task_id}'が解決済みのためtask_focus_companionをクリアしました。")
+    state["task_focus_companion"] = None
+
+
 def decision_extractor_node(state: LineageState) -> LineageState:
     """【SLM要約】
     Extraction and formalization of decisions, agreements, and deliverables from conversational history into the system state.
@@ -9495,6 +10164,16 @@ def decision_extractor_node(state: LineageState) -> LineageState:
         last_msg_role = state["chat_history"][-1]["role"]
         # APIの仕様上、"user"なら発注者(User AI)、"assistant"なら作業者(Expert AI)
         target_role = "user" if last_msg_role == "user" else "expert"
+
+    # [BL-191] pending_task_redirectはUser AIのStage4が設定するものであり、
+    # decision_extractor_nodeはuser_decision_extractor/expert_decision_extractorの両方の
+    # グラフノードで共用されているため、target_role=="user"の場合のみ消費する
+    # （独立レビュー指摘6-3。expert_decision_extractor側で誤って消費してしまうと、Expertの
+    # ターンで意図せずredirect/joint_focusが適用されてしまう）。
+    _pending_redirect = None
+    if target_role == "user":
+        _pending_redirect = state.get("pending_task_redirect")
+        state["pending_task_redirect"] = None  # [BL-191] one-shot consume
 
     existing_topics = list({a["topic"] for a in get_agreements_from_db(_conn, _run_id) if a.get("status") != "Superseded"})
     current_task_for_extraction = _get_current_task(state)
@@ -9720,7 +10399,9 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                 )
                 break
 
-    _resolve_task_transition(state, transition)
+    _resolve_task_transition(state, transition, structured_redirect=_pending_redirect)
+    _maybe_resume_forward_focus(state, _conn, _run_id)
+    _maybe_clear_resolved_companion(state, _conn, _run_id)
 
     if state["chat_history"]:
         last_user_msg = next((m["content"] for m in reversed(state["chat_history"]) if m["role"] == "user"), "")
@@ -10618,6 +11299,13 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
                 "plan_revision_issue_ids": [],
                 "plan_revision_count": 0,
                 "phases_superseded": [],
+                "task_reassigned_after_replan_notice": "",
+                "task_focus_stack": [],
+                "task_focus_companion": None,
+                "pending_task_redirect": None,
+                "task_focus_redirect_count": 0,
+                "task_focus_redirect_notice": "",
+                "task_focus_resume_notice": "",
                 "essence_dialogue_active": False,
                 "essence_dialogue_round": 0,
                 "essence_dialogue_max_rounds": 5,
