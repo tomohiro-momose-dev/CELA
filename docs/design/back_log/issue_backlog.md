@@ -5475,6 +5475,20 @@ arbiter_redesign_BL041.md`）と、1体のPlanエージェントによる詳細�
 全対応）は`docs/design/back_log/BL-191/BL191_basic_design.md`を参照（AGENTS.md §7に
 従い要約せず全文保存）。
 
+**実装完了（`done`）**：設計通りBL-190を先に実装した上で、Phase 1・Phase 2を一括実装した。
+実装中、設計時点では見つからなかった2件の追加不具合を発見・修正：(1) `_force_resume_
+forward_focus`の復帰先自体も新計画から消えている「二重消失」パターンで`current_task_id`が
+無効な値のまま残ってしまう問題を発見し、`_reconcile_current_phase_after_replan`のバグ②
+対策ブロックに、force_resume後も復帰先が見つからない場合は「真の削除・統合」処理へ
+フォールスルーしてcurrent_task_idを確実にクリアする分岐を追加した。(2) `pending_task_
+redirect`が`decision_extractor_node`内で読み取られるだけで明示的にクリアされていなかった
+問題（設計書の「one-shot消費」という記述と実装が一致していなかった）を発見し、
+`state["pending_task_redirect"] = None`を追加した。新規テスト`tests/test_bl191_task_focus_
+scheduling.py`34件（ツール実装7件、redirect/resume6件、joint_focus/companion5件、
+decision_extractor_node統合3件、DB CRUD/コンテキストヘルパー6件、BL-190×BL-191結合3件、
+その他）、既存の関連テスト138件（BL-024/125/126/145/146/163/167/176/181/183/186/190系）と
+合わせて無退行を確認。`python -m py_compile`合格、フルオフラインスイート825件Pass。
+
 ---
 
 ### BL-192: User AI Stage4の指示文を強化し、根拠不明な数値のweb_search義務化・期待される思考プロセスの明示を徹底する
