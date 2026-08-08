@@ -225,6 +225,7 @@
 | BL-191 | 高 | `cela_main.py`（`LineageState`、`SCHEDULE_TASK_FOCUS_TOOL`、`TOOL_DISPATCH`、`scheduling_drafts`テーブル+CRUD、`_resolve_task_transition`、`decision_extractor_node`、Stage4含む`generate_user_utterance`、`call_expert`、`call_detector`、`call_reflection`、`call_facilitator`、実装済み） | BL-190のログレビュー後、ユーザーが「ゴールの再定義や再タスクプランが発火すると、過去のタスクで書いた成果物やDB内の確定値も整合が取れなくなる。一時的に過去タスクに戻り検討しなおす必要が生まれるが、現在の設計はUser AIへのプロンプト指示も含めて前へ進むようにしか設計されていない」と問題提起。BL-186で一度「(a)過去タスクへ戻る新ルートを作る／(b)前進のみで新フェーズを追加する」を検討し(b)を選んだ判断を、今回のストレステスト結果を踏まえて覆し、(a)実際にcurrent_task_idを過去タスクへ一時的に巻き戻す経路を新設することを決定。実装場所はユーザー指定により新規ノードではなくUser AIの既存Stage4（次タスクへ進むか現タスクを修正するかを判断する段階）を拡張する形とした（理由：バラバラなノードが独立に過去タスクの不整合に気づき混乱するより、Stage4という単一の意思決定点で「過去タスクへ明示的に戻る」か「前進しつつ過去タスクを併記対象として明示する」かを一度に宣言する方がスムーズなため）。3体のExploreエージェントによる既存メカニズム（SUPERSEDE、BL-163/168/186カスケード、issue DEFER機構、死んだ`phases_to_revise`、BL-041の未実装ドラフト）の棚卸しと1体のPlanエージェントによる詳細設計、さらにユーザー主導のユースケース通しトレース（早すぎる自動復帰・BL-190との相互作用による永久迷子等、6件のバグを発見）と別AIによる独立レビュー（7件反映・3件偽陽性）を経て設計を完成させた。新規ツール`schedule_task_focus`（decision_type: redirect_backward/joint_focus/clear_companion/force_resume）、新規state（`task_focus_stack`等6フィールド）、新規DBテーブル`scheduling_drafts`を導入し、`current_task_id`/`current_phase`の唯一の書き手という既存原則（BL-024）は保ちつつ、Stage4発の構造化決定を`_resolve_task_transition`へ新しい入力経路として渡す設計とした。詳細は[BL-191詳細](#bl-191-stage4駆動の過去タスク一時フォーカス切替併記対象タスクの明示)、および`docs/design/back_log/BL-191/BL191_basic_design.md`（Planエージェント原文＋ユースケーストレース＋独立レビュー対応、要約せず全文保存）を参照。**実装完了（`done`）**：BL-190（`_reconcile_current_phase_after_replan`）を先に実装した上で、Phase 1（`joint_focus`/`clear_companion`）とPhase 2（`redirect_backward`/`force_resume`）を一括実装した。実装中に設計時点では見つからなかった2件の追加不具合を発見・修正：(1) `_force_resume_forward_focus`の復帰先自体も新計画から消えている「二重消失」パターンで`current_task_id`が無効な値のまま残る問題（`_reconcile_current_phase_after_replan`のフォールスルー処理を追加）、(2) `pending_task_redirect`が`decision_extractor_node`内で読み取られるだけで明示的にクリアされていなかった問題（one-shot消費として`None`へ明示リセット）。新規テスト`tests/test_bl191_task_focus_scheduling.py`34件（ツール実装・redirect/resume・joint_focus/companion・decision_extractor_node統合・DB CRUD・BL-190×BL-191結合）、既存の関連テスト138件（BL-024/125/126/145/146/163/167/176/181/183/186/190系）と合わせて無退行を確認。`python -m py_compile`合格、フルオフラインスイート825件Pass。 | P1 |
 | BL-192 | 中 | `cela_main.py`（Stage4含む`generate_user_utterance`のシステムプロンプト、非Stage4 User AIパスの`system_prompt_trailing`。プロンプト文言追記のみ、新規state/DB/ツールなし、実装済み） | BL-191設計中、ユーザーから追加要望：「ユーザーAIプロンプトにも、過去タスクの洗い直しや依存関係にある過去タスクの同時検討の指示、agreementを書く際の注意（過去タスク書き換えにはSUPERSEDEが必要等）、次タスクで根拠があいまいな数値・前提がある場合はまずweb検索で調べて『もっともらしさ』を排除する指示など、単に『次はこれをやれ』ではなく、Expertへどういう思考で・どう行動してほしいかを網羅的に指示する部分を強化したい」。うち「過去タスク書き換え時のSUPERSEDE注意」はBL-191の`joint_focus`機能のcompanion表示ヘルパーへ直接組み込み、残る2点（①根拠不明な数値・前提のweb_search義務化、②期待される思考プロセスの網羅的な明示）はBL-191のスケジューリング機構の有無に関わらずStage4の指示文全般に当てはまる独立した関心事のためBL-192として分離した。BL-188が確立した「プロンプト誘導のみ（機械的な強制ゲートは追加しない）」という標準方針をそのまま踏襲し、新規の状態・ツール・DBスキーマは一切不要、Stage4のシステムプロンプトへの追記のみで完結する設計とした。独立レビューにより、User AIには差し戻しターン等でStage3/Stage4をスキップする非Stage4パス（`cela_main.py:8484`）が存在し、根拠不明値のweb_search義務化指示が差し戻しターンで一切適用されない見落としが発覚したため、両パスへ共通定数で同じ指示ブロックを注入する設計に修正した。詳細はBL-191と同じ`docs/design/back_log/BL-191/BL191_basic_design.md`内のBL-192セクションを参照（実装箇所がStage4で重なるためBL-191と同一セッションで実装した）。**実装完了（`done`）**：共通定数`_BL192_DIRECTIVE_QUALITY_BLOCK`（web_search義務化＋思考プロセス明示の2指示）を新設し、Stage4の承認済み分岐と非Stage4パス（`system_prompt_trailing`）の両方から参照する形で実装（文言の二重管理を回避）。新規テスト`tests/test_bl192_stage4_directive_quality.py`4件、既存Stage4関連テストと合わせて無退行を確認。 | P2 |
 | BL-193 | 高 | `cela_main.py`（`_apply_text_edits`/`_nearest_content_snippet`、`READ_WHITEBOARD_EXCERPT_TOOL`/`_read_whiteboard_excerpt_handler`/`TOOL_DISPATCH`、`call_expert`のtools一覧、`_build_task_scope_context`のR4編集方針プロンプト、実装済み） | ユーザーが`log/2026-08-08/1514`のレビュー中、「ホワイトボードの書き換えが失敗しまくっています。どうにかなりませんか？」と報告。調査の結果、task_2_1のホワイトボードが50KB超に育った状態で、Expertがwrite_agreement(edits=...)のold_textとしてDetector注釈ブロックごと巻き込んだ数千文字の巨大な引用を組み立て、実際の格納内容と一字一句一致せず、同一パターンの失敗を8回連続（他の時間帯にも複数回）繰り返していたことを特定。根本原因はBL-151で追加された「不一致時に実際の格納内容を見せて同ターン内で自己修復させる」機構（`_apply_text_edits`）のスニペットが、文書サイズに関わらず**常にcontent[:400]（文書先頭）固定**だったため、編集対象が先頭から遠い節にある大規模文書では一度もその節の実際の中身が見えず、自己修復が機能していなかったことと判明。ユーザーとの議論で「Claude Code等の実際のエージェントがdiff編集をどう行っているか」を参照し、(1) Editツールは編集直前に必ず現物を読み直す、(2) old_stringは最小限・一意な範囲に留め無関係な周辺を巻き込まない、という2原則を確認。ユーザーから「ファイル化してgrepのような汎用コマンドを使わせた方が早いか」との提案があったが、R4設計が「DBが正、`.md`ファイルはベストエフォートの副産物」と明記済みであり、ファイルを読み取り主経路にすると2つ目の正本を生み二重管理の同型事故を招くこと、また汎用grep/シェル的ツールは`read_deliverable_file`が既に慎重に実装しているパストラバーサル対策等を作り直す必要があることから、**DB直参照のまま**既存のBL-079（`verify_whiteboard_excerpt`、Detector専用の事前検証ツール）と同じ判定ロジックを流用した新ツールを追加する方針で合意した。**実装完了（`done`）**：3点を実装。①`_nearest_content_snippet`：不一致時のスニペットを、`old_text`との最長共通部分（`difflib.SequenceMatcher`）の周辺へ差し替える（有意な一致が無ければBL-151の元の「文書先頭」挙動へフォールバック）。②`read_whiteboard_excerpt`ツール（Expert専用、BL-079の`verify_whiteboard_excerpt`と同じ完全一致→正規化緩い一致の判定を流用するが目的が逆で「実際の中身を返す」）：old_textを組み立てる前にキーワード指定で対象箇所の現在の実際の文字列をピンポイント取得できる。③R4編集方針プロンプト（`_build_task_scope_context`）へ、old_textを最小限に保つ（Detector注釈ブロック等の無関係な周辺を巻き込まない）指示と`read_whiteboard_excerpt`の使用推奨を追記。新規テスト`tests/test_bl193_whiteboard_edit_reliability.py`16件（スニペット近傍化4件、ツールハンドラ8件、配線確認4件）、既存BL-151テスト1件を新しいスニペット文言に合わせて更新、既存BL-081/151/079系と合わせて無退行を確認。`python -m py_compile`合格、フルオフラインスイート841件Pass、`check_docs_consistency.py`合格。 | P1 |
+| BL-194 | 高 | `cela_main.py`（`_get_escalated_issues`/`_is_issue_effectively_deferred`/`_get_actionable_escalated_issues`新設、`_get_forced_escalated_issues_text`/`_get_blocking_issues_for_transition`/`reflection_node`/`facilitator_node`/`_build_escalation_pin_text`/`call_reflection`/`call_facilitator`/`_write_issue_impl`/`WRITE_ISSUE_TOOL`、実装中） | ユーザーが`log/2026-08-08/1514`（09:17–21:41、`facilitation_count>5`でhalt）のレビュー中、「なぜtask_2_1はここまで伸びたのか、なぜエキスパートは修正しきれなかったのか」を調査依頼。調査の結果、halt判定に使われた滞留escalated issue20件は**全件がwrite_issue(DEFER)によりtriage済み**（受け皿task_id設定済み）であり、未対応のissueは1件も無かったことが判明。原因は`defer_to_task_id`の解釈が呼び出し箇所ごとに不統一で、是正経路（BL-136強制解決文・BL-145計画化・BL-125/158遷移ゲート）は「受け皿あり」として沈黙する一方、懲罰経路（BL-103 pin「要対応」・BL-096/144停滞判定）だけがDEFER済みかどうかを一切見ず点灯し続けていたこと。さらに20件中6件は`task_2_1`自身へのDEFER（自己先送り、DEFER実装は受け皿task_idの実在チェックのみで自己参照を禁じていない）で、これがtask_2_1のacceptance_criteria外（車両台数・フリート実現可能性、本来task_2_2の責務）の懸念をExpertのプロンプトへ「⚠️要対応」として刺し続け、Ver.1→Ver.41の空転を引き起こした直接原因と特定。ユーザーからの追加質問「ゴール改定は効いていないのか」「なぜUser AIは1度気づいたのに直らなかったのか」「なぜReflector/Facilitatorが整理できなかったのか」に対しては、①ゴール改定はtask_2_2の計画には正しく反映されていた（矛盾のない解が既に存在）、②User AIは`write_issue(DEFER)`で正しく行動していたが是正経路が沈黙する非対称構造のため効果が消えた、③`call_reflection`/`call_facilitator`は現在タスクのacceptance_criteria/owns_variablesを一切受け取っておらずスコープ判定の材料が構造的に存在しなかった、と実コード・実ログの両方で確認。Planエージェントによる設計中に、私（Claude）の当初診断への3点の補正（BL-158ゲートは既にDEFER済みを除外する側だった等）と、Planエージェント自身の§7段階リリース推奨（S1〜S6を先行リリース）への私による訂正（自己先送り6件はS1〜S6だけではactionableのまま残り、halt経路が再発し得るため段階分割の前提が成り立たない）を経て設計を確定。詳細は[BL-194詳細](#bl-194-defer_to_task_idの解釈不統一と自己先送りによる偽の停滞判定強制停止)、および`docs/design/back_log/BL-194/BL194_basic_design.md`（Planエージェント原文＋Claudeによる事実検証・補正、要約せず全文保存）を参照。**状態: `open`（設計完了・`_BL194_ACK_TTL_ROUNDS=3`/`_BL194_ACK_MAX_GRANTS=2`のユーザー承認済み、実装はユーザー指示待ち）**。 | P1 |
 
 ---
 
@@ -5603,6 +5604,83 @@ Expertのtools一覧・R4プロンプトへの結線確認4件）を追加。既
 スニペット文言を直接検証していた1件を、新しい文言（「実際の先頭部分」固定→「old_textに
 最も近い実際の内容」）に合わせて更新。既存BL-081/151/079系と合わせて無退行を確認。
 `python -m py_compile`合格、フルオフラインスイート841件Pass、`check_docs_consistency.py`合格。
+
+---
+
+### BL-194: `defer_to_task_id`の解釈不統一と自己先送りによる偽の停滞判定・強制停止
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計完了・定数承認済み、実装はユーザー指示待ち） |
+| 優先度 | P1 |
+| 関連 | [BL-096](#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)（`_get_escalated_issues`・停滞の機械的上書きの初出）、[BL-103](#bl-103-hydrateノード間コンテキスト引き継ぎの改善)（`_build_escalation_pin_text`の初出、本BLがトーン分離）、[BL-123](#bl-123-call_detectorだけがescalated-issueの強制注入_build_escalation_pin_textbl-103を受け取っておらず他ロールが既に折り込み済みの懸念を独立に再判定してしまう)（Detector Pass 1への pin 注入）、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)（`_get_blocking_issues_for_transition`遷移ゲート、本BLでは意図的に例外として据え置き）、[BL-136](#bl-136-issue_logが起票されるが解決されない状態だった可視性強制力の非対称性)（DEFERの導入、`defer_to_task_id`は status を変えない設計の初出）、[BL-144](#bl-144-reflection_nodeのbl-096機械的stagnant上書きがescalated-issueの単なる存在で無条件発火しreflection自身が健全な進捗と判定した回まで停滞扱いしていた)（3ラウンド滞留閾値、本BLのACK TTLと値を揃える）、[BL-145](#bl-145-エスカレーションissue申し送りissueをdetectorreflectorの正当性監査を経てタスクプランナー経由で明示的にタスク化する)（`_formalizable_stale`計画化、フィルタ重複の解消対象）、[BL-158](#bl-158-detectorの-user-レビューパスに未解決issueを残したままの前進を機械的に却下する仕組みを追加)（機械的差し戻しゲート、補正①で既にDEFERフィルタ済みと判明）、[BL-167](#bl-167-reflection内のstagnant-issue滞留検知がdefer_to_task_idの受け皿タスク完了後もissueを永久に見落とし続ける)（受け皿失効リバイバル、本BLの述語に統合保存） |
+
+**内容:**
+
+ユーザーが`log/2026-08-08/1514`（09:17–21:41、`facilitation_count>5`でhalt）のレビュー中、
+「なぜtask_2_1はここまで伸びたのか、なぜエキスパートは修正しきれなかったのか」を調査依頼。
+
+調査の結果、halt判定に使われた滞留escalated issue20件は**全件が`write_issue(DEFER)`により
+triage済み**（受け皿task_id設定済み）であり、未対応のissueは1件も無かったことが判明した。
+原因は`defer_to_task_id`の解釈が呼び出し箇所ごとに不統一だったこと：是正経路（BL-136の強制
+解決文、BL-145の計画化、BL-125/158の遷移ゲート）は`defer_to_task_id`を見て「受け皿あり」と
+沈黙する一方、懲罰経路（BL-103の pin「⚠️要対応」、BL-096/144の停滞判定）は`defer_to_task_id`
+の有無を一切見ずに全件を「未対応」として扱い続けていた。さらに20件中6件は`task_2_1`自身への
+DEFER（自己先送り）で、DEFERの実装（`_write_issue_impl`）は受け皿task_idの実在チェックのみで
+自己参照を禁じていなかったため、is「督促する集合」と「先送りされたとみなす集合」が完全に
+非対称になり、督促されるが解消不能な＝不死身のissueを生んでいた。
+
+自己先送りされた6件（`task2_1_vehicle_count_discrepancy`等）は、task_2_1のacceptance_criteria
+（需要マトリクス作成・優先順位付け・サービス需要マッピングの3項目のみ、車両台数は含まれない）
+の外側にある論点だったが、DEFER後もExpertのプロンプトへ「⚠️要対応」として毎ターン刺さり続け、
+Expertが本来task_2_2の責務である車両台数・フリート実現可能性の証明をtask_2_1の中で繰り返し
+試み、ホワイトボードがVer.1→Ver.41まで空転する直接の機械的原因になっていたことを特定した。
+
+ユーザーからの3つの追加質問——「ゴール改定は効いていないのか」「User AIは1度気づいたのに
+なぜ直らなかったのか」「なぜReflector/Facilitatorが指摘・整理できなかったのか」——に対しては、
+実ログ・実コードの両方を検証して回答した：①ゴール改定はtask_2_2の計画（乗合2台＋デマンド2台
+＝供給48人/時、生活必須需要27人/時に対し余裕率78%）には正しく反映されており、矛盾のない解が
+既に存在していた。②User AIは`think`で「現タスクのacceptance_criteriaは需要モデリングと
+サービス需要マッピングであり、全費目のコスト積算はtask_5_1の責務である」と正しく判断し
+`write_issue(DEFER)`を実行していたが、前述の非対称構造により是正効果が消えていた。
+③`call_reflection`/`call_facilitator`は`_build_task_scope_context`を一度も呼んでおらず、
+現在タスクのacceptance_criteria/owns_variablesを構造的に受け取っていないため、「この懸念は
+そもそも現在タスクの守備範囲か」を判定する材料が存在しなかった（実ログのFacilitator自身の
+`think`も「需要モデリングには7〜8台の車両が必要」とtask_2_2の問いをtask_2_1の義務として
+誤って取り込んでいた）。
+
+Planエージェントによる設計中に、私（Claude）の当初診断への3点の補正が判明した：
+①BL-158の機械的差し戻しゲートは`_get_blocking_issues_for_transition`を判断源としており、
+**既にDEFER済みを除外する側（是正経路）に属していた**——「User AIが毎ターン嘘のRESOLVEを
+強いられていた」という当初の説明は不正確で、正しくは「1回DEFERすれば恒久的にゲートが沈黙する」
+だった。②`_get_forced_escalated_issues_text`（BL-136）は`_get_escalated_issues`を呼ばず自前で
+同じSQLを再実行しており、フィルタの重複は3箇所ではなく4箇所存在した。③`reflection_node`の
+内部不整合は「停滞と断罪する集合」と「是正のため計画へ渡す集合」が**同一`if`ブロック内**で
+食い違っていた（30行離れた別関数ではなかった）。
+
+さらに、Planエージェント自身の設計書§7が推奨した段階リリース（S1〜S6を第1弾として先行
+リリース、S7のACKNOWLEDGE・S8の自己先送り拒否を第2弾）について、ユーザーからの問い
+（「全体の稼働にはS7,8も必要ととれるが」）を受けて私が再検証した結果、**この推奨は誤り**と
+判明した：S1〜S6適用後も、自己先送りされた6件は意図的に「先送りされていない」と判定される
+設計のためactionable集合に残り続け、停滞判定のトリガー（`if _stale_escalated:`、1件でも
+あれば発火）を発火させ続けるため、halt経路はS1〜S6だけでは再発し得る。S7・S8は「あれば
+望ましい追加機能」ではなく、本事故を実際に解決するための必須要素であると訂正した。
+
+設計は、①述語の単一化（`_is_issue_effectively_deferred`/`_get_actionable_escalated_issues`の
+新設、既存4箇所の重複フィルタの解消）、②自己先送りのtool boundary拒否（DEFER分岐に追加、
+ただし正直な出口が無いとBL-158のゲートが再発火するため単独リリース不可）、③Reflection/
+Facilitatorへの軽量タスクスコープ注入（`_build_current_task_scope_brief`新設、既存の
+`_build_task_scope_context`はホワイトボード全文を含み無関係かつBL-170の再現リスクがあるため
+再利用せず新設）、④第3のissue状態`ACKNOWLEDGE`（`issue_log.status`語彙は増やさずTTL付き
+補助列で表現——D-079/D-080の`severity='major'⇒status='escalated'`不変条件を保護するため）、
+⑤DEFERのスコープ整合性チェック（機械判定は却下し受け皿タスクのスコープをエコーバックする
+のみ、LLMジャッジ・キーワード一致は新種のデッドロックを招くため不採用）の5点で構成される。
+詳細は`docs/design/back_log/BL-194/BL194_basic_design.md`（Planエージェント原文＋Claudeによる
+事実検証・3点の補正・§7への訂正、要約せず全文保存）を参照。
+
+**状態: `open`（設計完了）**。`_BL194_ACK_TTL_ROUNDS=3`/`_BL194_ACK_MAX_GRANTS=2`は
+BL-144の3ラウンド滞留閾値と揃える形でユーザー承認済み（AGENTS.md §7）。実装はS1〜S8が
+因果的に結合しており分割の前提が成り立たないため、一括実装が前提となる。
 
 ---
 
