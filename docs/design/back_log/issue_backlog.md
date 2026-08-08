@@ -5495,9 +5495,9 @@ decision_extractor_node統合3件、DB CRUD/コンテキストヘルパー6件�
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（設計完了、実装未着手） |
+| 状態 | `done`（実装完了） |
 | 優先度 | P2 |
-| 関連 | [BL-191](#bl-191-stage4駆動の過去タスク一時フォーカス切替併記対象タスクの明示)（同じStage4に触れる、実装タイミングを合わせる想定）、[BL-188](#bl-188-全ての情報にソースcitationsを明示させる)（「プロンプト誘導のみ」方針の初出、citations/web_searchの既存基盤）、[BL-094](#bl-094-read_verified_factread_deliverable_file等参照系ツールのノードプロンプトへのオリエンテーション追記)（「【最低限】」型ソフト必須プロンプトパターンの先例）、[BL-185](#bl-185-generate_user_utteranceuser-aiのsystem_promptを視座は上から下文脈は過去から現在の順に再構成し差し戻し通知が完了宣言に埋もれ無視される事故を防ぐ)（非Stage4パスの`system_prompt_trailing`並び順設計） |
+| 関連 | [BL-191](#bl-191-stage4駆動の過去タスク一時フォーカス切替併記対象タスクの明示)（同じStage4に触れる、BL-191と同一セッションで実装）、[BL-188](#bl-188-全ての情報にソースcitationsを明示させる)（「プロンプト誘導のみ」方針の初出、citations/web_searchの既存基盤）、[BL-094](#bl-094-read_verified_factread_deliverable_file等参照系ツールのノードプロンプトへのオリエンテーション追記)（「【最低限】」型ソフト必須プロンプトパターンの先例）、[BL-185](#bl-185-generate_user_utteranceuser-aiのsystem_promptを視座は上から下文脈は過去から現在の順に再構成し差し戻し通知が完了宣言に埋もれ無視される事故を防ぐ)（非Stage4パスの`system_prompt_trailing`並び順設計） |
 
 **内容:**
 
