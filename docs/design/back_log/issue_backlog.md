@@ -230,6 +230,7 @@
 | BL-196 | 中 | `cela_main.py`（`call_task_planner`のプロンプト、実装済み） | BL-195のゴール実データ化後の初回ドライラン（`log/2026-08-09/1230`）で、`task_1_1`がホワイトボードVer.19・round 16まで空転しているのをユーザーが発見。調査の結果、acceptance_criteriaが「OSM PBFファイルからの区間別標高・冬季リスクの実測抽出」に相当する水準を要求しており、Expertの実行環境（python_replはmath/statistics等の許可リストのみのサンドボックスで、zlib/struct等バイナリ解析用モジュールもファイル読み込みも不可。web_fetchもtext/*とapplication/pdfのみ対応）では原理的に満たせないことが判明。「仮定の帳尻合わせ」とは別種の、達成不能な受入条件による足踏みと特定した。**実装完了（`done`）**：`call_task_planner`のプロンプトへ、実測データの収集・抽出・生成をacceptance_criteriaに書く際はExpertが実際に使えるツールで到達可能な水準に留めるよう誘導する項目を追加。特定ドメイン（GIS等）に依存しない一般的な表現とし（ユーザー指示）、ゴール文で与えられた背景データ・公的な二次情報・根拠を明記した合理的仮定の組み合わせで満たせる水準にすること、既にゴール文にある数値データで確立されている「実測値と計画仮定を分離して明記する」扱いを他の種類のデータにも適用することを明示した。詳細は[BL-196詳細](#bl-196-task_plannerが実行環境に無い専用処理能力を前提としたacceptance_criteriaを書いてしまう)を参照。 | P2 |
 | BL-197 | 高 | `cela_main.py`（`generate_user_utterance`のStage3統合承認判断・Stage4差し戻し修正指示・非Stage4パスの`system_prompt_trailing`、実装済み） | BL-196実装後もGIS実測要求が再発したため`log/2026-08-09/1230`を再調査したところ、**要求を吊り上げていたのはtask_plannerではなくUser AI自身**と判明。Stage2で正当に`write_issue(DEFER)`した懸念を同じターンのStage3が無視して`Rejected`とし、Stage4が「発注者への照会で作業を停止することは認めない」としてGeofabrik配布のOSM PBFファイル・国土地理院標高タイル・OSMnx/osmium/QGISでの抽出・ハッシュ値記録までを具体的に義務付けていた（`log/2026-08-09/1230/log_no_prompt.md:27838-27929`）。ユーザーの評価「stage3は数値監査なので、数字的なそもそもの信頼性を上げるために元情報を要求したのでは。これはこれで監査層としてはよい仕事をしているが、オーバーに振舞っている」を受け、監査の厳格さ自体は否定せず要求水準の上限だけを画す方針とした。**実装完了（`done`）**：3つのコードパス全てへガードレールを追加。①Stage3（承認判断）：「妥協なきスタンス」は絶対目標のハード制約を緩めない意味であり、そのタスク自身のacceptance_criteriaを超える検証水準・特定のデータ取得手段を新たに義務付けてよいという意味ではないこと、第2段で正当にDEFERされた懸念を却下理由にしないことを明記。②Stage4（差し戻し修正指示）：特定のデータ取得元・ファイル形式・解析ソフトウェア・取得日時/ハッシュ値等の記録項目を新規に義務付けないことを明記。③非Stage4パス（初回ターン等、`chat_history`が空でStage3/4を通らない別経路。当初②までしか入れておらず`log/2026-08-09/1733`で初回ターン自身がGIS実測を要求したため追加）：acceptance_criteriaの文言を「特定のツール・形式・検証ログの提出まで義務付けてよい」と拡大解釈しないよう明記。ドライラン`log/2026-08-09/1744`で効果を検証し、User AI自身が思考ブロックで「GIS実体ファイルや再実行ハッシュ等を今回の必須条件に追加する案」を「現在タスクの受入条件を超える手段指定であり、BL-023/BL-197に反するため」として明示的に却下する挙動を確認した。詳細は[BL-197詳細](#bl-197-user-aiの承認指示がタスクのacceptance_criteriaを超える手段検証水準を後付けで積み増す)を参照。 | P1 |
 | BL-198 | 中 | `geo_tools.py`（新規）、`cela_main.py`（ツールスキーマ4件・`TOOL_DISPATCH`・`LineageState`/`Appconfig`・`call_expert`・`call_detector`両パス）、参照キャッシュ`docs/refs/gsi_api/api_notes.md`・`docs/refs/openrouteservice/api_notes.md`新設 | BL-197のガードレールは「実測できないものを要求しない」という抑止としては機能した（`log/2026-08-09/1744`で検証済み）が、それだけでは「実測できるものを実測する」余地は広がらず、同ログではweb_searchが30回/run上限に30箇所以上到達し、個別地点の座標・標高を汎用検索で都度探すことに検索予算を浪費していた。ユーザーが国土地理院のAPI（測量計算・標高）とGeminiによる道路距離API調査結果（OSMnx/OSRM/OpenRouteService/GraphHopper/Google Maps）を提示し「BL化してまとめて」と指示。**実装完了（`done`）**：新規モジュール`geo_tools.py`（`web_tools.py`と同型の構成、cela_main.pyへ非依存、Provider抽象化）に4ハンドラを実装。①`gsi_geocode`（住所→緯度経度、GSI住所検索API）②`gsi_get_elevation`（緯度経度→標高、GSI標高API）③`gsi_calc_distance_bearing`（2点→測地線距離・方位角、GSI測量計算API）④`calc_road_route`（2点→道路距離・所要時間、OpenRouteService）。①〜③は認証不要（1秒間隔の簡易スロットリングのみ）、④は`CELA_ORS_API_KEY`必須でrun単位30回の呼び出し上限付き。全エンドポイントの実レスポンスをライブ疎通で確認してから実装した（AGENTS.md §9）。最重要の誤用防止として、③が返すのは直線距離であり道路距離ではない旨を返り値の`note`・ツール説明文・Expert/Detector双方のプロンプトの計4箇所で重ねて明記し、テストでも常時含まれることを検証している（山間部で直線距離を道路距離として扱うと所要時間・SLA判定が楽観側へ歪むため）。あわせてExpert/Detectorのプロンプトへ「実測できるものは専用ツールで実測する。ただしこれらで取得できない種類のデータ（道路区間単位の積雪・凍結の実測記録等）まで実測値で揃える必要はない」という、BL-197と対になる誘導を追加した。新規テスト`tests/test_bl198_geo_tools.py`29件。詳細は[BL-198詳細](#bl-198-国土地理院apiopenrouteserviceによる地理データの実測化)を参照。 | P2 |
+| BL-199 | 中 | `web_tools.py`（`read_goal_reference_handler`新規）、`cela_main.py`（ツールスキーマ・`TOOL_DISPATCH`・`LineageState`/`Appconfig`への`goal_reference_dir`・`call_expert`/`call_detector`両パス・`max_web_search_calls`を30→50へ緩和） | `log/2026-08-09/2222`で、地理ツール（BL-198）は正常に発火していたが、Expertが茅野駅・市役所・病院・大学等の公式住所をweb_searchで繰り返し検索し、`web_searchの呼び出し上限（30回/run）に達しました`エラーで動作停止していた（同ログ:457,3079,3082,3085）。調査の結果、探していた情報の一部（茅野駅の緯度経度・大学の住所等）はBL-195で既に`docs/refs/chino_city/chino_city_data.md`へキャッシュ済みだったが、既存の`read_reference_file`はweb_cache（当該run内のweb_fetch結果）専用でdocs/refsを読めず、Expert/Detectorに開発者事前収集の参照データへアクセスする手段が無かったことが真因と判明。**実装完了（`done`）**：`read_reference_file`と同型（resolve-and-containによるパス脱出防止、`path`/`keyword`指定、run単位の呼び出し回数制限を消費しない）の新規ツール`read_goal_reference`を実装し、`state["goal_reference_dir"]`（本ゴールでは`docs/refs/chino_city`）配下のみを対象に、Expert・Detector（Pass1/Pass2）へ付与した。プロンプトで「web_searchの前にread_goal_referenceを確認し、`not_found`/`not_configured`の場合のみweb_searchを使う」優先順位を明記。参照データに無い項目（番地までの実住所等）は依然として正当なweb_search用途のため、`max_web_search_calls`も30→50へ緩和した（ユーザー承認、AGENTS.md §7の定数変更に該当）。同ログでは`calc_road_route`が`環境変数CELA_ORS_API_KEYが設定されていません`エラーを返し続けていたことも判明したが、これはWindowsのユーザー環境変数がVSCode起動後に設定されたため、VSCode自体（統合ターミナルの親プロセス）が古い環境を保持し続けていたことが原因で、ターミナルの再起動だけでは解決せず、VSCode本体の再起動が必要と判断した（コード変更なし、運用上の注意として記録）。新規テスト`tests/test_bl199_goal_reference.py`16件。詳細は[BL-199詳細](#bl-199-web_searchの前に開発者事前収集の参照データdocsrefsを確認せず同じ事実の再検索で呼び出し上限を使い果たす)を参照。 | P2 |
 
 ---
 
@@ -5939,6 +5940,69 @@ Plan Modeによる設計原文（要約せず全文保存、AGENTS.md §7）は
 **ユーザー側の準備事項**：`calc_road_route`のみ環境変数`CELA_ORS_API_KEY`の設定が必要
 （https://openrouteservice.org/dev/#/signup で無料登録）。未設定でも他3ツールは動作し、
 `calc_road_route`は取得方法を案内するエラーを返して直線距離へフォールバックできる。
+
+---
+
+### BL-199: web_searchの前に開発者事前収集の参照データ（docs/refs）を確認せず、同じ事実の再検索で呼び出し上限を使い果たす
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| 関連 | [BL-184](#bl-184-web_searchweb_fetchread_reference_file-ツールの新設現実世界の地理数値をグラウンディングする)（`read_reference_file`の先例、本BLの`read_goal_reference`が構成を踏襲）、[BL-195](#bl-195-ゴール文の実データ化長野県茅野市実在precedentのらざあ等発見時の無derivation転記防止ガードレール)（`docs/refs/chino_city/chino_city_data.md`の初出）、[BL-198](#bl-198-国土地理院apiopenrouteserviceによる地理データの実測化)（地理データ実測ツール、本BLが再検索を防ぐ対象の主因） |
+
+**内容:**
+
+ユーザーが`log/2026-08-09/2222`のレビューを依頼。地理ツール（BL-198）は正常に発火して
+いたが、Expertが茅野駅・茅野市役所・諏訪中央病院・公立諏訪東京理科大学・蓼科湖等の
+公式住所を求めてweb_searchを繰り返し呼び、`web_searchの呼び出し上限（30回/run）に
+達しました`エラーで動作停止していた
+（`log/2026-08-09/2222/log_no_prompt.md:457, 3079, 3082, 3085`）。同時に`calc_road_route`も
+`環境変数CELA_ORS_API_KEYが設定されていません`エラーを返し続けていた
+（同ログ:3243以降、10回連続）。
+
+調査の結果、以下2点が判明した：
+
+1. Expertが探していた情報の一部（茅野駅の正確な緯度経度`35.99412399, 138.15233655`、
+   公立諏訪東京理科大学の住所`茅野市豊平5000-1`等）は、BL-195で既に
+   `docs/refs/chino_city/chino_city_data.md`へ出典URL付きでキャッシュ済みだった。
+   しかし既存の`read_reference_file`ツールは`web_cache/<run_id>/`（当該run内で
+   web_fetchした結果のキャッシュ）専用に設計されており（BL184_basic_design.md）、
+   `docs/refs/`（開発者がAGENTS.md §9に従い事前収集した静的参照データ）を読む手段が
+   Expert/Detectorに一切与えられていなかった。そのためExpertは既知の情報を毎回
+   web_searchで再検索するしかなく、run単位の呼び出し上限を無駄に消費していた。
+2. `gsi_geocode`は施設名（例：「長野県茅野市役所」）だけでは低精度の市中心点しか
+   返さず（実レスポンス:`{'title': '長野県茅野市', 'lon': 138.15889, 'lat': 35.995556}`
+   ——市役所・病院・大学いずれも同一座標が返っていた）、正確な座標を得るには番地までの
+   実住所が必要だった。この実住所の発見自体は正当なweb_search用途だが、
+   `docs/refs/chino_city/chino_city_data.md`に既にある情報（大学の住所等）まで
+   重複して検索していたことが呼び出し上限の枯渇を早めていた。
+
+**実装完了（`done`）**：
+
+1. 新規ツール`read_goal_reference`（`web_tools.py`の`read_goal_reference_handler`）を
+   `read_reference_file`と同型（resolve-and-containによるパス脱出防止、`path`/`keyword`
+   指定）で実装。ベースディレクトリは`state["goal_reference_dir"]`（`AppConfig`から
+   run開始時にコピー、本ゴールでは`docs/refs/chino_city`）に限定し、`web_cache`ではなく
+   開発者事前キュレーションの参照データを対象とする点が`read_reference_file`と異なる。
+   run単位の呼び出し回数制限は消費しない。`docs/refs/`はサブディレクトリを持ち得るため
+   `read_reference_file`の`glob("*.md")`ではなく`rglob("*.md")`で再帰検索する。
+2. `cela_main.py`へツールスキーマ・`TOOL_DISPATCH`登録・`LineageState`/`Appconfig`への
+   `goal_reference_dir`追加・`call_expert`と`call_detector`（Pass1・Pass2両方）への
+   ツール付与を実装。ツール説明文・Expert/Detectorのプロンプト双方に「web_searchを呼ぶ前に
+   まずread_goal_referenceで確認し、`not_found`/`not_configured`の場合のみweb_searchを
+   使う」という優先順位を明記した。
+3. **呼び出し上限の緩和**：`read_goal_reference`導入後も、参照データに無い項目（施設の
+   番地までの実住所等）は正当にweb_searchが必要になるため、`max_web_search_calls`を
+   30→50へ緩和した（ユーザー承認済み、AGENTS.md §7の定数変更に該当）。
+
+新規テスト`tests/test_bl199_goal_reference.py`（16件）：`read_goal_reference_handler`の
+正常系（`path`/`keyword`指定、サブディレクトリ再帰検索）・異常系（`goal_reference_dir`
+未設定、ディレクトリ不在、パス脱出、キーワード不一致、引数無し）、`web_search_call_count`を
+一切消費しないことの確認、`TOOL_DISPATCH`登録と`call_expert`/`call_detector`両パスへの
+配線確認、`max_web_search_calls`が50であることの確認。既存の`test_bl198_geo_tools.py`
+（29件）・`test_bl184_web_tools.py`と合わせて無退行を確認（計91件通過）。
+`python -m py_compile`合格。
 
 ---
 

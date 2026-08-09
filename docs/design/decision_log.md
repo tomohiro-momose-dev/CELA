@@ -2428,6 +2428,19 @@
 
 ---
 
+### D-172: 開発者事前収集の参照データ（docs/refs）へのアクセス手段が無かったため、既知の事実の再検索でweb_search上限が枯渇した
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | `log/2026-08-09/2222`で、BL-195が`docs/refs/chino_city/chino_city_data.md`へ既にキャッシュした施設住所・座標をExpertが知らずweb_searchで再検索し、30回/run上限を使い果たしていた。既存の`read_reference_file`はweb_cache（当該run内のweb_fetch結果）専用でdocs/refsを読めない。上限を上げるだけで十分か、根本的に参照経路が欠けているのではないか。 |
+| **決定理由** | 上限を上げるだけでは同じ無駄な再検索が続くだけで、単に猶予が伸びるにすぎない。真因はAGENTS.md §9が定める「開発者が事前収集した参照データ」をExpert/Detectorが読む手段自体が存在しなかったことであり、`read_reference_file`と`docs/refs`は用途が異なる（前者はrun内の一時キャッシュ、後者は開発者キュレーションの静的データ）ため、既存ツールの対象ディレクトリを広げるのではなく別ツールとして新設する方が責務が明確になる。ただし参照データに無い項目（番地までの実住所等）は依然として正当なweb_search用途であり続けるため、上限緩和自体も安全弁として併用する。 |
+| 決定内容 | 新規ツール`read_goal_reference`（`web_tools.py`）を追加し、`state["goal_reference_dir"]`（run開始時に`AppConfig`からコピー）配下のみを読める形でExpert・Detector（Pass1/Pass2）へ付与する。プロンプトで「web_searchの前にread_goal_referenceを確認する」優先順位を明記する。あわせて`max_web_search_calls`を30→50へ緩和する（ユーザー承認済み、AGENTS.md §7の定数変更に該当）。 |
+| 影響 | `web_tools.py`、`cela_main.py`、`tests/test_bl199_goal_reference.py`。 |
+| 関連 BL | [BL-199](back_log/issue_backlog.md#bl-199-web_searchの前に開発者事前収集の参照データdocsrefsを確認せず同じ事実の再検索で呼び出し上限を使い果たす) |
+
+---
+
 ## 未決定（pending）
 
 ---
