@@ -2389,6 +2389,45 @@
 
 ---
 
+### D-169: 達成不能な受入条件の抑止は、task_planner側とUser AI側の両方へ入れる（片方では足りない）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | `log/2026-08-09/1230`で`task_1_1`がVer.19まで空転した原因は、実行環境で原理的に達成不能な実測要求（OSM PBFの直接処理等）だった。抑止をどこへ入れるべきか。 |
+| **決定理由** | 当初はtask_plannerがacceptance_criteriaへ過剰な水準を書いたことが原因と考え、そちら（BL-196）だけを直した。しかし再発したため実ログを追い直したところ、acceptance_criteria自体は妥当であり、**User AI（Stage3承認判断・Stage4差し戻し指示・初回ターンの非Stage4パス）が後付けで要求を積み増していた**ことが真因と判明した。要求水準を吊り上げうる主体が複数あるため、生成側（task_planner）と評価側（User AI）の双方へ入れないと塞ぎきれない。さらにUser AI側は3つの独立したコードパスを持ち、Stage3/4だけへ入れた時点では初回ターン（`chat_history`が空でStage3/4を通らない経路）が素通りして事故が再現した（`log/2026-08-09/1733`）ため、3経路全てへ同じ趣旨の文言を入れる必要があった。 |
+| 決定内容 | BL-196として`call_task_planner`へ、BL-197として`generate_user_utterance`のStage3・Stage4・非Stage4パス（`system_prompt_trailing`）へ、それぞれ「実行環境で到達可能な水準を超える手段・検証水準を要求しない」旨のガードレールを追加する。監査の厳格さ自体（数値の裏付けを求めること）は否定せず、要求水準の上限だけを画す。 |
+| 影響 | `cela_main.py`（`call_task_planner`、`generate_user_utterance`の3経路）。効果は`log/2026-08-09/1744`で検証済み。 |
+| 関連 BL | [BL-196](back_log/issue_backlog.md#bl-196-task_plannerが実行環境に無い専用処理能力を前提としたacceptance_criteriaを書いてしまう)、[BL-197](back_log/issue_backlog.md#bl-197-user-aiの承認指示がタスクのacceptance_criteriaを超える手段検証水準を後付けで積み増す) |
+
+---
+
+### D-170: 実測手段の不足は、要求を抑止するだけでなく実際に使えるAPIを与えて解消する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | D-169のプロンプト誘導により過剰要求は止まったが、`log/2026-08-09/1744`ではweb_searchが30回/run上限に30箇所以上到達し、個別地点の座標・標高を汎用検索で都度探すことに検索予算を浪費していた。「実測できないものを要求しない」だけで十分か。 |
+| **決定理由** | プロンプト誘導は抑止しかできず、「実測できるものを実測する」余地を広げない。調査の結果、標高・住所ジオコーディング・2点間の測地線距離は国土地理院の無料・無認証APIで、道路距離・所要時間はOpenRouteServiceの無料枠APIで、いずれも正面から取得可能と判明した。抑止（BL-196/197）と供給（BL-198）は対の関係にあり、両方揃って初めて「取得できるものは実測し、取得できないものは仮定として明記する」という健全な状態になる。 |
+| 決定内容 | 新規モジュール`geo_tools.py`に4ツール（`gsi_geocode`/`gsi_get_elevation`/`gsi_calc_distance_bearing`/`calc_road_route`）を実装し、Expert・Detector（Pass1/Pass2）へ付与する。道路距離の提供元は、OSMnx+NetworkX（重量級依存が規模に不相応）・OSRM公開デモサーバ（評価用途限定）・GraphHopper（無料枠が少ない）・Google Maps（クレジットカード必須で最も重いロックイン）を却下し、BL-184のBrave Search API選定と同じ「軽量な正式APIを優先する」方針でOpenRouteServiceを採用する。 |
+| 影響 | `geo_tools.py`（新規）、`cela_main.py`、`docs/refs/gsi_api/api_notes.md`、`docs/refs/openrouteservice/api_notes.md`。`calc_road_route`のみ環境変数`CELA_ORS_API_KEY`が必要。 |
+| 関連 BL | [BL-198](back_log/issue_backlog.md#bl-198-国土地理院apiopenrouteserviceによる地理データの実測化) |
+
+---
+
+### D-171: 直線距離と道路距離の取り違えは、単一の注記ではなく4箇所の重複明記で防ぐ
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | `gsi_calc_distance_bearing`（GSI測量計算API）が返すのは測地線＝直線距離であり道路距離ではない。これを道路距離として扱われると、山間部の屈曲した道路では所要時間・SLA達成判定が楽観側へ大きく歪む。どこで誤用を防ぐか。 |
+| **決定理由** | 本プロジェクトはこれまで、単一箇所のみの注意書きが読み飛ばされる事故を繰り返し観測してきた（BL-178: 差し戻し通知がchat_historyに埋没、BL-188初回実装: light_system_promptにしか指示が無くフルsystem_promptで素通り、BL-197: Stage3/4に入れたが初回ターンの別経路が素通り）。「精度の高そうな実測値」であるがゆえに、誤用された場合の害は推測値よりむしろ大きい。冗長性のコストは低く、事故のコストは高い。 |
+| 決定内容 | ①ハンドラ返り値の`note`フィールド（毎回必ず同梱、テストで常時含まれることを検証）、②ツールスキーマのdescription、③Expertのプロンプト、④Detectorのプロンプト（監査観点として「直線距離を道路距離として提示していないか」を重点確認項目に指定）、の計4箇所で重ねて明記する。 |
+| 影響 | `geo_tools.py`、`cela_main.py`、`tests/test_bl198_geo_tools.py`。 |
+| 関連 BL | [BL-198](back_log/issue_backlog.md#bl-198-国土地理院apiopenrouteserviceによる地理データの実測化) |
+
+---
+
 ## 未決定（pending）
 
 ---

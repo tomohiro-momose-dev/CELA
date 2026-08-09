@@ -227,6 +227,9 @@
 | BL-193 | 高 | `cela_main.py`（`_apply_text_edits`/`_nearest_content_snippet`、`READ_WHITEBOARD_EXCERPT_TOOL`/`_read_whiteboard_excerpt_handler`/`TOOL_DISPATCH`、`call_expert`のtools一覧、`_build_task_scope_context`のR4編集方針プロンプト、実装済み） | ユーザーが`log/2026-08-08/1514`のレビュー中、「ホワイトボードの書き換えが失敗しまくっています。どうにかなりませんか？」と報告。調査の結果、task_2_1のホワイトボードが50KB超に育った状態で、Expertがwrite_agreement(edits=...)のold_textとしてDetector注釈ブロックごと巻き込んだ数千文字の巨大な引用を組み立て、実際の格納内容と一字一句一致せず、同一パターンの失敗を8回連続（他の時間帯にも複数回）繰り返していたことを特定。根本原因はBL-151で追加された「不一致時に実際の格納内容を見せて同ターン内で自己修復させる」機構（`_apply_text_edits`）のスニペットが、文書サイズに関わらず**常にcontent[:400]（文書先頭）固定**だったため、編集対象が先頭から遠い節にある大規模文書では一度もその節の実際の中身が見えず、自己修復が機能していなかったことと判明。ユーザーとの議論で「Claude Code等の実際のエージェントがdiff編集をどう行っているか」を参照し、(1) Editツールは編集直前に必ず現物を読み直す、(2) old_stringは最小限・一意な範囲に留め無関係な周辺を巻き込まない、という2原則を確認。ユーザーから「ファイル化してgrepのような汎用コマンドを使わせた方が早いか」との提案があったが、R4設計が「DBが正、`.md`ファイルはベストエフォートの副産物」と明記済みであり、ファイルを読み取り主経路にすると2つ目の正本を生み二重管理の同型事故を招くこと、また汎用grep/シェル的ツールは`read_deliverable_file`が既に慎重に実装しているパストラバーサル対策等を作り直す必要があることから、**DB直参照のまま**既存のBL-079（`verify_whiteboard_excerpt`、Detector専用の事前検証ツール）と同じ判定ロジックを流用した新ツールを追加する方針で合意した。**実装完了（`done`）**：3点を実装。①`_nearest_content_snippet`：不一致時のスニペットを、`old_text`との最長共通部分（`difflib.SequenceMatcher`）の周辺へ差し替える（有意な一致が無ければBL-151の元の「文書先頭」挙動へフォールバック）。②`read_whiteboard_excerpt`ツール（Expert専用、BL-079の`verify_whiteboard_excerpt`と同じ完全一致→正規化緩い一致の判定を流用するが目的が逆で「実際の中身を返す」）：old_textを組み立てる前にキーワード指定で対象箇所の現在の実際の文字列をピンポイント取得できる。③R4編集方針プロンプト（`_build_task_scope_context`）へ、old_textを最小限に保つ（Detector注釈ブロック等の無関係な周辺を巻き込まない）指示と`read_whiteboard_excerpt`の使用推奨を追記。新規テスト`tests/test_bl193_whiteboard_edit_reliability.py`16件（スニペット近傍化4件、ツールハンドラ8件、配線確認4件）、既存BL-151テスト1件を新しいスニペット文言に合わせて更新、既存BL-081/151/079系と合わせて無退行を確認。`python -m py_compile`合格、フルオフラインスイート841件Pass、`check_docs_consistency.py`合格。 | P1 |
 | BL-194 | 高 | `cela_main.py`（`_get_escalated_issues`/`_is_issue_effectively_deferred`/`_get_actionable_escalated_issues`/`_is_issue_acknowledged_active`新設、`_get_forced_escalated_issues_text`/`_get_blocking_issues_for_transition`/`reflection_node`/`facilitator_node`/`_build_escalation_pin_text`/`_build_deferred_issue_pin_text`/`_build_acknowledged_issue_pin_text`/`_build_current_task_scope_brief`/`call_reflection`/`call_facilitator`/`call_expert`/`call_detector`/`generate_user_utterance`/`_write_issue_impl`/`WRITE_ISSUE_TOOL`/`init_db`、実装済み） | ユーザーが`log/2026-08-08/1514`（09:17–21:41、`facilitation_count>5`でhalt）のレビュー中、「なぜtask_2_1はここまで伸びたのか、なぜエキスパートは修正しきれなかったのか」を調査依頼。調査の結果、halt判定に使われた滞留escalated issue20件は**全件がwrite_issue(DEFER)によりtriage済み**（受け皿task_id設定済み）であり、未対応のissueは1件も無かったことが判明。原因は`defer_to_task_id`の解釈が呼び出し箇所ごとに不統一で、是正経路（BL-136強制解決文・BL-145計画化・BL-125/158遷移ゲート）は「受け皿あり」として沈黙する一方、懲罰経路（BL-103 pin「要対応」・BL-096/144停滞判定）だけがDEFER済みかどうかを一切見ず点灯し続けていたこと。さらに20件中6件は`task_2_1`自身へのDEFER（自己先送り、DEFER実装は受け皿task_idの実在チェックのみで自己参照を禁じていない）で、これがtask_2_1のacceptance_criteria外（車両台数・フリート実現可能性、本来task_2_2の責務）の懸念をExpertのプロンプトへ「⚠️要対応」として刺し続け、Ver.1→Ver.41の空転を引き起こした直接原因と特定。ユーザーからの追加質問「ゴール改定は効いていないのか」「なぜUser AIは1度気づいたのに直らなかったのか」「なぜReflector/Facilitatorが整理できなかったのか」に対しては、①ゴール改定はtask_2_2の計画には正しく反映されていた（矛盾のない解が既に存在）、②User AIは`write_issue(DEFER)`で正しく行動していたが是正経路が沈黙する非対称構造のため効果が消えた、③`call_reflection`/`call_facilitator`は現在タスクのacceptance_criteria/owns_variablesを一切受け取っておらずスコープ判定の材料が構造的に存在しなかった、と実コード・実ログの両方で確認。Planエージェントによる設計中に、私（Claude）の当初診断への3点の補正（BL-158ゲートは既にDEFER済みを除外する側だった等）と、Planエージェント自身の§7段階リリース推奨（S1〜S6を先行リリース）への私による訂正（自己先送り6件はS1〜S6だけではactionableのまま残り、halt経路が再発し得るため段階分割の前提が成り立たない）を経て設計を確定。詳細は[BL-194詳細](#bl-194-defer_to_task_idの解釈不統一と自己先送りによる偽の停滞判定強制停止)、および`docs/design/back_log/BL-194/BL194_basic_design.md`（Planエージェント原文＋Claudeによる事実検証・補正、要約せず全文保存）を参照。**実装完了（`done`）**：S1〜S8を一括実装した（設計書§7の「S1〜S6を先行リリース」という段階リリース推奨は、私が実装前に誤りと訂正済みだったため採用せず、S1〜S8を因果的に結合したまま一体で実装）。①述語の単一化（`_is_issue_effectively_deferred`/`_get_actionable_escalated_issues`）を新設し、Camp A（BL-136強制解決文・BL-145計画化）とCamp B（BL-096/144停滞判定・facilitator名指し）の重複フィルタ4箇所を一元化（BL-125遷移ゲートのみ安全装置として明示的に例外で据え置き）。②自己先送りをtool boundaryで拒否（`_write_issue_impl`のDEFER分岐）。③Reflection/Facilitatorへ軽量スコープ要約`_build_current_task_scope_brief`を新設・注入（`_build_task_scope_context`は無関係な50KB超のホワイトボード全文を含むため再利用せず却下）。④第3のissue状態`ACKNOWLEDGE`をstatus語彙拡張ではなくTTL付き補助列（`acknowledged_until_round`等3列）で実装（D-079/D-080の不変条件保護）、定数は承認済み値（TTL=3ラウンド・累計上限2回）どおり。⑤DEFER成功時に受け皿タスクのスコープをエコーバック（機械的ゲートは追加せずプロンプト誘導のみ）。⑥BL-103 pinを「要対応」「対応予定確定済み」「対応中」の3見出しへ分離（和集合で従来の可視性を保存）。実装中に、既存テスト2件（`test_bl145_*`/`test_bl167_*`）のフィクスチャが偶然「自己先送り」または「BL-194が意図的に変更する挙動」を検証していたことが判明し、コメント付きで修正（テスト側の期待値を弱めるのではなく、フィクスチャの実態を読み替える形）。新規テスト`tests/test_bl194_deferred_issue_consistency.py`26件、`tests/test_bl194_issue_acknowledge.py`18件を追加。オフライン全テストスイート885件通過、`python -m py_compile`合格、`check_docs_consistency.py`合格。 | P1 |
 | BL-195 | 中 | `cela_main.py`（`TARGET_GOAL`、`call_expert`のsystem_prompt/light_system_prompt、`call_detector`のPass1ドメイン妥当性レビュー/Pass2数値監査、実装済み）。参照キャッシュ`docs/refs/chino_city/chino_city_data.md`新設 | ユーザーが「今回からゴールのお題を変えました。地理モデルは実在の長野県茅野市ですが、茅野市は『のらざあ』というデマンドバスを導入しており、回答のカンニングとなり得てしまう。どうすればよいか」と相談。検討の結果、地名の匿名化（「八ヶ嶺市（仮名）」）は駅標高・JR中央本線・人口規模等の地理的特徴から実際には特定可能であり答えの隠蔽に失敗する一方、`task_1_1`の成果物（`log/2026-08-09/1100`）が「架空都市のため実測値ではない」という長い留保に分量を割く無駄なコストだけを生んでいたことが判明。ユーザーとの議論の末、方針を転換：①実在事例（のらざあ等）へ計画が自律的に収束すること自体は現実グラウンディングされた推論能力の望ましい検証シグナルであり、地理を伏せることは検証目的と矛盾する、②残る唯一のリスクはweb_searchで実例を発見した際にその具体的運用数値を検証・独自導出なしに転記することのみ、と整理。ユーザー指示によりAIが長野県茅野市の実データ（人口・高齢化率・面積・標高・主要拠点アクセス・大学等）をweb検索で収集・整理し、地名を「茅野市」と明記のうえゴール文へ反映。さらにユーザーが「2022年10月の路線バス13路線廃止→のらざあ移行、を背景説明にすると答えそのものを書くことになりそうだ」と指摘したため、「問題」（路線バス廃止の事実）と「解決」（のらざあへの移行）を明確に分離し、後者はゴール文に一切含めない方針とした。残るリスク（web_search発見時の無検証転記）にはBL-042/BL-188/BL-194が確立した標準方針（プロンプト誘導のみ、機械的な強制ゲートは追加しない）を踏襲したガードレールで対処。**実装完了（`done`）**：①`TARGET_GOAL`を「茅野市」実データへ全面差し替え（人口56,400人・高齢化率30.7%・面積266.41km²・茅野駅標高789m等、`docs/refs/chino_city/chino_city_data.md`に出典URL・取得日付きでキャッシュ）、新設セクション「## 2.5 実例の参照について」を追加。②`call_expert`のsystem_prompt・light_system_promptの両経路に、web由来の実例数値をそのまま転記せず本課題の制約から独自導出するよう義務づける文言を追加。③`call_detector`のPass1（ドメイン妥当性）・Pass2（数値監査）の両パスに、実例citations付きの主張が独自導出の形跡を伴わない場合はminor以上の指摘対象とするよう追加。新規テスト`tests/test_bl195_precedent_citation_derivation.py`8件（配線確認＋ゴール文の問題/解決分離の直接検証）を追加、既存のBL-188/BL-192/BL-123/BL-194関連60件と合わせて無退行を確認。`python -m py_compile`合格。詳細は[BL-195詳細](#bl-195-ゴール文の実データ化長野県茅野市実在precedentのらざあ等発見時の無derivation転記防止ガードレール)を参照。 | P2 |
+| BL-196 | 中 | `cela_main.py`（`call_task_planner`のプロンプト、実装済み） | BL-195のゴール実データ化後の初回ドライラン（`log/2026-08-09/1230`）で、`task_1_1`がホワイトボードVer.19・round 16まで空転しているのをユーザーが発見。調査の結果、acceptance_criteriaが「OSM PBFファイルからの区間別標高・冬季リスクの実測抽出」に相当する水準を要求しており、Expertの実行環境（python_replはmath/statistics等の許可リストのみのサンドボックスで、zlib/struct等バイナリ解析用モジュールもファイル読み込みも不可。web_fetchもtext/*とapplication/pdfのみ対応）では原理的に満たせないことが判明。「仮定の帳尻合わせ」とは別種の、達成不能な受入条件による足踏みと特定した。**実装完了（`done`）**：`call_task_planner`のプロンプトへ、実測データの収集・抽出・生成をacceptance_criteriaに書く際はExpertが実際に使えるツールで到達可能な水準に留めるよう誘導する項目を追加。特定ドメイン（GIS等）に依存しない一般的な表現とし（ユーザー指示）、ゴール文で与えられた背景データ・公的な二次情報・根拠を明記した合理的仮定の組み合わせで満たせる水準にすること、既にゴール文にある数値データで確立されている「実測値と計画仮定を分離して明記する」扱いを他の種類のデータにも適用することを明示した。詳細は[BL-196詳細](#bl-196-task_plannerが実行環境に無い専用処理能力を前提としたacceptance_criteriaを書いてしまう)を参照。 | P2 |
+| BL-197 | 高 | `cela_main.py`（`generate_user_utterance`のStage3統合承認判断・Stage4差し戻し修正指示・非Stage4パスの`system_prompt_trailing`、実装済み） | BL-196実装後もGIS実測要求が再発したため`log/2026-08-09/1230`を再調査したところ、**要求を吊り上げていたのはtask_plannerではなくUser AI自身**と判明。Stage2で正当に`write_issue(DEFER)`した懸念を同じターンのStage3が無視して`Rejected`とし、Stage4が「発注者への照会で作業を停止することは認めない」としてGeofabrik配布のOSM PBFファイル・国土地理院標高タイル・OSMnx/osmium/QGISでの抽出・ハッシュ値記録までを具体的に義務付けていた（`log/2026-08-09/1230/log_no_prompt.md:27838-27929`）。ユーザーの評価「stage3は数値監査なので、数字的なそもそもの信頼性を上げるために元情報を要求したのでは。これはこれで監査層としてはよい仕事をしているが、オーバーに振舞っている」を受け、監査の厳格さ自体は否定せず要求水準の上限だけを画す方針とした。**実装完了（`done`）**：3つのコードパス全てへガードレールを追加。①Stage3（承認判断）：「妥協なきスタンス」は絶対目標のハード制約を緩めない意味であり、そのタスク自身のacceptance_criteriaを超える検証水準・特定のデータ取得手段を新たに義務付けてよいという意味ではないこと、第2段で正当にDEFERされた懸念を却下理由にしないことを明記。②Stage4（差し戻し修正指示）：特定のデータ取得元・ファイル形式・解析ソフトウェア・取得日時/ハッシュ値等の記録項目を新規に義務付けないことを明記。③非Stage4パス（初回ターン等、`chat_history`が空でStage3/4を通らない別経路。当初②までしか入れておらず`log/2026-08-09/1733`で初回ターン自身がGIS実測を要求したため追加）：acceptance_criteriaの文言を「特定のツール・形式・検証ログの提出まで義務付けてよい」と拡大解釈しないよう明記。ドライラン`log/2026-08-09/1744`で効果を検証し、User AI自身が思考ブロックで「GIS実体ファイルや再実行ハッシュ等を今回の必須条件に追加する案」を「現在タスクの受入条件を超える手段指定であり、BL-023/BL-197に反するため」として明示的に却下する挙動を確認した。詳細は[BL-197詳細](#bl-197-user-aiの承認指示がタスクのacceptance_criteriaを超える手段検証水準を後付けで積み増す)を参照。 | P1 |
+| BL-198 | 中 | `geo_tools.py`（新規）、`cela_main.py`（ツールスキーマ4件・`TOOL_DISPATCH`・`LineageState`/`Appconfig`・`call_expert`・`call_detector`両パス）、参照キャッシュ`docs/refs/gsi_api/api_notes.md`・`docs/refs/openrouteservice/api_notes.md`新設 | BL-197のガードレールは「実測できないものを要求しない」という抑止としては機能した（`log/2026-08-09/1744`で検証済み）が、それだけでは「実測できるものを実測する」余地は広がらず、同ログではweb_searchが30回/run上限に30箇所以上到達し、個別地点の座標・標高を汎用検索で都度探すことに検索予算を浪費していた。ユーザーが国土地理院のAPI（測量計算・標高）とGeminiによる道路距離API調査結果（OSMnx/OSRM/OpenRouteService/GraphHopper/Google Maps）を提示し「BL化してまとめて」と指示。**実装完了（`done`）**：新規モジュール`geo_tools.py`（`web_tools.py`と同型の構成、cela_main.pyへ非依存、Provider抽象化）に4ハンドラを実装。①`gsi_geocode`（住所→緯度経度、GSI住所検索API）②`gsi_get_elevation`（緯度経度→標高、GSI標高API）③`gsi_calc_distance_bearing`（2点→測地線距離・方位角、GSI測量計算API）④`calc_road_route`（2点→道路距離・所要時間、OpenRouteService）。①〜③は認証不要（1秒間隔の簡易スロットリングのみ）、④は`CELA_ORS_API_KEY`必須でrun単位30回の呼び出し上限付き。全エンドポイントの実レスポンスをライブ疎通で確認してから実装した（AGENTS.md §9）。最重要の誤用防止として、③が返すのは直線距離であり道路距離ではない旨を返り値の`note`・ツール説明文・Expert/Detector双方のプロンプトの計4箇所で重ねて明記し、テストでも常時含まれることを検証している（山間部で直線距離を道路距離として扱うと所要時間・SLA判定が楽観側へ歪むため）。あわせてExpert/Detectorのプロンプトへ「実測できるものは専用ツールで実測する。ただしこれらで取得できない種類のデータ（道路区間単位の積雪・凍結の実測記録等）まで実測値で揃える必要はない」という、BL-197と対になる誘導を追加した。新規テスト`tests/test_bl198_geo_tools.py`29件。詳細は[BL-198詳細](#bl-198-国土地理院apiopenrouteserviceによる地理データの実測化)を参照。 | P2 |
 
 ---
 
@@ -5755,6 +5758,174 @@ Expertの唯一の成果物提出手段をブロックしてBL-158型のデッ�
 「問題」（路線バス廃止）は含むが「解決」（のらざあ）は含まないことの直接検証、実例参照
 セクションの存在確認。既存のBL-188/BL-192/BL-123/BL-194関連テスト60件と合わせて無退行を
 確認。`python -m py_compile`合格。
+
+---
+
+### BL-196: task_plannerが実行環境に無い専用処理能力を前提としたacceptance_criteriaを書いてしまう
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| 関連 | [BL-023](#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)（acceptance_criteriaの初出）、[BL-195](#bl-195-ゴール文の実データ化長野県茅野市実在precedentのらざあ等発見時の無derivation転記防止ガードレール)（ゴール実データ化、本BLの発見契機）、[BL-197](#bl-197-user-aiの承認指示がタスクのacceptance_criteriaを超える手段検証水準を後付けで積み増す)（同じ事故の、User AI側の真因）、[BL-198](#bl-198-国土地理院apiopenrouteserviceによる地理データの実測化)（実測手段そのものを与える対の施策） |
+
+**内容:**
+
+BL-195のゴール実データ化後の初回ドライラン（`log/2026-08-09/1230`）で、`task_1_1`が
+ホワイトボードVer.19・round 16まで進んでも承認に至らず空転しているのをユーザーが発見した。
+
+調査の結果、acceptance_criteriaが実質的に「OSM PBFファイルからの区間別標高・冬季リスクの
+実測抽出」に相当する水準を要求していた一方、Expertの実行環境ではこれが原理的に達成不能で
+あることが判明した：`python_repl`は`math`/`statistics`/`datetime`/`json`/`fractions`/
+`decimal`/`itertools`/`functools`/`collections`/`operator`/`re`のみを許可するサンドボックス
+であり、PBFのデコードに必要な`zlib`（ブロブ展開）・`struct`（バイナリ解析）はもちろん
+`open()`によるファイル読み込みも禁止されている。`web_fetch`も`text/*`と`application/pdf`
+のみ対応のため、そもそもPBFファイルのダウンロード自体が拒否される。
+
+これはユーザーが本来懸念していた「仮定の数値をこねくり回す帳尻合わせ」（BL-134/BL-194）とは
+別種の問題であり、**達成不能な受入条件を課したことによる足踏み**と整理した。
+
+**実装完了（`done`）**：`call_task_planner`のプロンプトへ項目13を追加。acceptance_criteria/
+descriptionに「実測データの収集・抽出・生成」を書く際は、Expertが実際に使えるツールで
+到達可能な水準に留めることを明示した。ユーザー指示により、記述は特定ドメイン（地理・GIS等）に
+依存しない一般的な表現とし、「専用の解析・変換ツール、特殊形式のデータ処理、実測機器による
+現地計測などが無ければ原理的に満たせない要求は、たとえそのドメインにおいて理想的な精度で
+あっても課さない」「ゴール文で与えられた背景データ・公的な二次情報・そこから導出した合理的な
+仮定（仮定である旨を明記）の組み合わせで満たせる水準にする」「ゴール文に既にある数値データ
+（人口統計等）で確立されている『実測値と計画仮定を分離して明記する』扱いを、他の種類のデータ
+にも同じ基準で適用する」と記載した。
+
+---
+
+### BL-197: User AIの承認・指示が、タスクのacceptance_criteriaを超える手段・検証水準を後付けで積み増す
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | [BL-023](#bl-023-task_plannerの分解粒度が粗く複合タスクの検証コストが乗算的に増大する)（指示スコープをacceptance_criteriaに限定する原則の初出）、[BL-177](#bl-177-全ノードのプロンプトを複数の責務を1回のllm呼び出しに詰め込む構造からdetectorの2段監査パスと同型の段階化構造へ一般化するuser-ai部分は実装完了他ノードは未着手)（Stage1〜4パイプラインの初出）、[BL-196](#bl-196-task_plannerが実行環境に無い専用処理能力を前提としたacceptance_criteriaを書いてしまう)（同じ事故の、当初誤って真因と考えた側）、[BL-198](#bl-198-国土地理院apiopenrouteserviceによる地理データの実測化)（本BLと対になる「実測できるものは実測する」施策） |
+
+**内容:**
+
+BL-196実装後もGIS実測要求が再発したため`log/2026-08-09/1230`を再調査したところ、
+**要求水準を吊り上げていたのはtask_plannerではなくUser AI自身**であることが判明した。
+`task_1_1`のacceptance_criteria自体は「地図ベースで整理」程度の妥当な記述であり、
+PBF直接抽出までは要求していなかった。実際の経緯は以下の通り：
+
+1. Expertが公開情報＋合理的仮定に基づく成果物を提出
+2. User AIのStage2（issue確認）が「実測成果物が未提出」として`write_issue(DEFER, task_1_2へ)`
+   を実行——ここまでは正常な triage
+3. **同じターンのStage3（統合承認判断）が、そのDEFERを無視して`approval_status="Rejected"`
+   を返す**（`log/2026-08-09/1230/log_no_prompt.md:27838`）
+4. Stage4が「発注者への照会で作業を停止することは認めない」とし、Geofabrik配布のOSM PBF
+   ファイル・国土地理院標高タイル・OSMnx/osmium/QGISでの抽出・ファイルサイズ/ハッシュ値の
+   記録までを具体的に義務付ける指示を出す（同ログ`27852-27929`）
+
+ユーザーはこれを見て「stage3は数値監査なので、数字的なそもそもの信頼性を上げるために元情報を
+要求したのではと思います。これはこれで、監査層としてはよい仕事をしていますが、オーバーに
+振舞っていますね」と評価した。この評価に沿い、**監査の厳格さ自体は否定せず、要求水準の上限
+だけを画す**方針を採った。
+
+**実装完了（`done`）**：User AIが発言を生成する3つのコードパス全てへガードレールを追加した。
+
+1. **Stage3（統合承認判断）**：既存の「🔥 発注者としての絶対的なスタンス」の直後に、それが
+   絶対目標のハードな数値制約（予算・SLA等）を安易に緩めないという意味であり、そのタスク
+   自身のacceptance_criteriaを超える独自の検証水準や特定のデータ取得手段・ソフトウェア・
+   ファイル形式を新たに義務付けてよいという意味ではないこと、第2段でAgent AIが正当にDEFER
+   した懸念をこのタスクの未解決懸念として承認却下の理由にしないことを明記。
+2. **Stage4（差し戻し時の修正指示）**：特定のデータ取得元・ファイル形式・解析ソフトウェアを
+   新たに義務付けたり、取得日時・ハッシュ値等の記録項目を追加要求したりしないこと、Agent AIが
+   選んだ実現手段が要求項目を満たしているかで判断し手段そのものを指定しないことを明記。
+3. **非Stage4パス（`system_prompt_trailing`）**：初回ターン等、`chat_history`が空で
+   Stage3/4を通らない別経路。当初は1・2のみ実装していたが、ドライラン`log/2026-08-09/1733`で
+   **初回ターンのUser AI自身が独力で「一次資料およびGIS実測に基づく初版成果物」を要求した**
+   ため追加した。既存のBL-023「指示のスコープ」ブロックの直後に、acceptance_criteriaの文言
+   （「マトリクス化し確定する」「地図上に明示する」等）を特定のデータ取得元・専用ソフトウェア・
+   ファイル形式・検証ログの提出まで義務付けてよいという意味に拡大解釈しないこと、要求項目の
+   充足は提示された結論の妥当性で判断することを明記。
+
+**効果の検証**：ドライラン`log/2026-08-09/1744`で、User AIがTurn 1冒頭の思考ブロックにおいて
+「GIS実体ファイルや再実行ハッシュ等を今回の必須条件に追加する案」を`rejected`とし、理由を
+「現在タスクの受入条件を超える手段指定であり、BL-023/BL-197に反するため」と明示的に述べる
+挙動を確認した。同ログではDetectorも「情報不足自体をmajorの根拠にしない」ルールを一貫して
+適用し、Reflectionも当該の足踏みを停滞ではなく正当なブロッキング依存関係と正しく判定していた。
+
+**この事故で判明した副次的な運用上の注意**：LangGraphのチェックポイント巻き戻し（`--resume`
+＋`--checkpoint-id`）は会話状態（`chat_history`・`phases`等）のみを戻し、`cela.db`側の
+ホワイトボード・agreements・issue_log・verified_factsは**run_id単位で別管理のため巻き戻らない**。
+そのため、汚染された成果物を残したまま再開すると、`chat_history`が空でもUser AIがDB上の
+旧成果物を読んで同じ指示を再生産する。本件では該当task_idのDB行を明示的に削除してから
+再開する対応を取った（`cela.db`はバックアップの上で操作）。
+
+---
+
+### BL-198: 国土地理院API＋OpenRouteServiceによる地理データの実測化
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| 関連 | [BL-184](#bl-184-web_searchweb_fetchread_reference_file-ツールの新設現実世界の地理数値をグラウンディングする)（`web_tools.py`の先例、本BLの`geo_tools.py`が構成を踏襲）、[BL-188](#bl-188-全ての情報にソースcitationsを明示させる)（現実グラウンディングとcitations）、[BL-196](#bl-196-task_plannerが実行環境に無い専用処理能力を前提としたacceptance_criteriaを書いてしまう)・[BL-197](#bl-197-user-aiの承認指示がタスクのacceptance_criteriaを超える手段検証水準を後付けで積み増す)（「実測できないものを要求しない」側の対の施策） |
+
+**内容:**
+
+BL-197のプロンプト誘導は「実測できないものを要求しない」という抑止としては実際に機能した
+（`log/2026-08-09/1744`で検証済み）。しかしそれは裏を返せば**「実測できるものを実測する」
+余地を広げるものではなく**、同ログではweb_searchが30回/runの上限に30箇所以上到達し、個別
+地点の座標・標高を汎用検索で都度探すことに検索予算を浪費していた。
+
+ユーザーが国土地理院のAPI（測量計算サイト・標高API）を提示し、あわせてGeminiに調査させた
+道路距離取得手段の候補（OSMnx+NetworkX／OSRM／OpenRouteService／GraphHopper／Google Maps）を
+共有した上で「BL化してまとめて」と指示した。
+
+**API調査結果**（全てAGENTS.md §9に従い一次資料を確認し、実エンドポイントへのライブ疎通で
+レスポンス構造を検証。詳細は`docs/refs/gsi_api/api_notes.md`・
+`docs/refs/openrouteservice/api_notes.md`）：
+
+| 用途 | API | 認証 |
+|---|---|---|
+| 住所→緯度経度 | GSI住所検索API | 不要 |
+| 緯度経度→標高 | GSI標高API（DEM） | 不要 |
+| 2点→測地線（直線）距離・方位角 | GSI測量計算API | 不要 |
+| 2点→道路距離・所要時間 | OpenRouteService Directions API | 要APIキー（無料登録） |
+
+道路距離の手段としてOSMnx+NetworkX（geopandas/shapely/fiona/pyproj等の重量級依存が今回の
+規模に見合わない）、OSRM公開デモサーバ（評価用途限定の共有サーバであり反復自動呼び出しに
+不適）、GraphHopper（無料枠がORSより少ない）、Google Maps（クレジットカード登録必須で最も
+重いベンダーロックイン）を比較検討の上で却下し、BL-184でDuckDuckGo→Brave Search APIを
+選定した際と同じ「軽量な正式APIを優先する」方針でOpenRouteServiceを採用した。
+
+**実装完了（`done`）**：
+
+1. 新規モジュール`geo_tools.py`（`web_tools.py`と同型：cela_main.pyへ非依存、Provider
+   抽象化、`(args, state, config)`統一シグネチャ）に4ハンドラを実装。対象ドメインが固定の
+   公式エンドポイントのみでユーザー入力URLを受け付けないため、`web_fetch`のような汎用SSRF
+   検証は不要と判断した。GSI系3ツールは各公式ページの「サーバに過度の負担を与えないで
+   ください」という注意書きに対応し1秒間隔の簡易スロットリングを実装（BL-184のDuckDuckGo
+   スロットリングと同型）。`calc_road_route`は無料枠の過剰消費を防ぐためrun単位の呼び出し
+   回数上限（`max_road_route_calls`、既定30回/run）を`web_search`と同型に実装した。
+2. `cela_main.py`へツールスキーマ4件・`TOOL_DISPATCH`登録・`LineageState`/`Appconfig`拡張・
+   `call_expert`と`call_detector`（Pass1・Pass2両方）へのツール付与を実装。
+3. **最重要の誤用防止**：`gsi_calc_distance_bearing`が返すのは直線距離であり道路距離では
+   ない旨を、①ハンドラ返り値の`note`、②ツールスキーマのdescription、③Expertのプロンプト、
+   ④Detectorのプロンプト、の計4箇所で重ねて明記し、テストでも`note`に常時含まれることを
+   検証している。山間部の屈曲した道路で直線距離を道路距離として扱うと、所要時間・SLA達成
+   判定が楽観側へ大きく歪むため。
+4. BL-197と対になる誘導をExpert/Detectorへ追加：「実測できるものは専用ツールで実測する
+   （推測やweb_searchスニペットの間接的な言及で代用しない）。ただしこれらのツールで取得
+   できない種類のデータ（例：道路区間単位の積雪・凍結の実測記録）まで実測値で揃えようと
+   する必要はなく、公的情報の定性的な参照と根拠を明記した工学的仮定で扱ってよい」。
+   Detector側には「Expertの地理データ主張をこれらのツールで実測照合できる」という監査
+   観点も追加した（BL-188の根拠実在性チェックと同じ位置づけ）。
+
+新規テスト`tests/test_bl198_geo_tools.py`（29件）：4ハンドラの正常系・異常系（`elevation`が
+`"-----"`、APIキー未設定、通信エラー、呼び出し上限超過）、座標が[経度, 緯度]順で送られること、
+直線距離の注記が常に含まれること、`TOOL_DISPATCH`登録と`call_expert`/`call_detector`両パスへの
+配線確認。
+
+**ユーザー側の準備事項**：`calc_road_route`のみ環境変数`CELA_ORS_API_KEY`の設定が必要
+（https://openrouteservice.org/dev/#/signup で無料登録）。未設定でも他3ツールは動作し、
+`calc_road_route`は取得方法を案内するエラーを返して直線距離へフォールバックできる。
 
 ---
 
