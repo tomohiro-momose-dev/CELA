@@ -233,6 +233,7 @@
 | BL-199 | 中 | `web_tools.py`（`read_goal_reference_handler`新規）、`cela_main.py`（ツールスキーマ・`TOOL_DISPATCH`・`LineageState`/`Appconfig`への`goal_reference_dir`・`call_expert`/`call_detector`両パス・`max_web_search_calls`を30→50へ緩和） | `log/2026-08-09/2222`で、地理ツール（BL-198）は正常に発火していたが、Expertが茅野駅・市役所・病院・大学等の公式住所をweb_searchで繰り返し検索し、`web_searchの呼び出し上限（30回/run）に達しました`エラーで動作停止していた（同ログ:457,3079,3082,3085）。調査の結果、探していた情報の一部（茅野駅の緯度経度・大学の住所等）はBL-195で既に`docs/refs/chino_city/chino_city_data.md`へキャッシュ済みだったが、既存の`read_reference_file`はweb_cache（当該run内のweb_fetch結果）専用でdocs/refsを読めず、Expert/Detectorに開発者事前収集の参照データへアクセスする手段が無かったことが真因と判明。**実装完了（`done`）**：`read_reference_file`と同型（resolve-and-containによるパス脱出防止、`path`/`keyword`指定、run単位の呼び出し回数制限を消費しない）の新規ツール`read_goal_reference`を実装し、`state["goal_reference_dir"]`（本ゴールでは`docs/refs/chino_city`）配下のみを対象に、Expert・Detector（Pass1/Pass2）へ付与した。プロンプトで「web_searchの前にread_goal_referenceを確認し、`not_found`/`not_configured`の場合のみweb_searchを使う」優先順位を明記。参照データに無い項目（番地までの実住所等）は依然として正当なweb_search用途のため、`max_web_search_calls`も30→50へ緩和した（ユーザー承認、AGENTS.md §7の定数変更に該当）。同ログでは`calc_road_route`が`環境変数CELA_ORS_API_KEYが設定されていません`エラーを返し続けていたことも判明したが、これはWindowsのユーザー環境変数がVSCode起動後に設定されたため、VSCode自体（統合ターミナルの親プロセス）が古い環境を保持し続けていたことが原因で、ターミナルの再起動だけでは解決せず、VSCode本体の再起動が必要と判断した（コード変更なし、運用上の注意として記録）。新規テスト`tests/test_bl199_goal_reference.py`16件。詳細は[BL-199詳細](#bl-199-web_searchの前に開発者事前収集の参照データdocsrefsを確認せず同じ事実の再検索で呼び出し上限を使い果たす)を参照。 | P2 |
 | BL-200 | 中 | `web_tools.py`（`cache_file_path`から`run_id`引数を除去、URLキーの全run共有キャッシュへ変更）、`cela_main.py`（Expert/Detector両プロンプトを「refs→web_cache→web_search」の3段階順序へ統合） | ユーザーが「web_cacheももったいないので、runが変わっても永続的に読めるようにして」「プロンプト指示はrefs探索→web_cache探索→webサーチの順で手元資料を生かせるように」と指示。BL-184の`web_cache/<run_id>/`という設計は、同一URLの取得結果をrun単位に分離しており、runが変わるたびに既に取得済みのページを再度web_fetchし直す構造だった。**実装完了（`done`）**：`cache_file_path`/`read_reference_file_handler`から`run_id`スコープを除去し、`web_cache/<sha256(url)[:16]>.md`をURLキーで全run共有するよう変更（過去の別runで取得済みのURLは呼び出し回数を消費せず即座に再利用できる）。あわせて、従来2つの独立パラグラフだった「web_searchの前にread_reference_fileを確認」（BL-188）と「web_searchの前にread_goal_referenceを確認」（BL-199）を、「①read_goal_reference→②read_reference_file→③web_search」という単一の3段階順序へ統合し、Expert（system_prompt・light_system_prompt）・Detector（Pass1・Pass2）の全プロンプトへ反映した。新規テスト2件（`test_bl184_web_tools.py`）・配線確認3件（`test_bl199_goal_reference.py`）。詳細は[BL-200詳細](#bl-200-web_cacheがrun単位で分離されており別runで既に取得済みのページも無駄に再取得していた)を参照。 | P2 |
 | BL-201 | 高 | `cela_main.py`（`run_ai_vs_ai_loop`のresume分岐、`state = snapshot.values`直後の4フィールド再同期） | BL-199/200実装後もユーザーが「web_searchの呼び出し上限（30回/run）に達しました。50回に緩和しませんでしたか？」と報告。調査の結果、新しいログ`log/2026-08-09/2313`はBL-199実装前から続く`run_id=1786246233-0d2e0184`への`--resume`であり、resume分岐がチェックポイントのstateをそのまま復元するのみで現在の`config`引数（緩和後の`max_web_search_calls=50`等）を一切再同期していなかったことが真因と判明。BL-197で発見した「チェックポイント巻き戻しがcela.db側を巻き戻さない」問題の逆方向（config変更側がresume済みstateへ反映されない）に相当する。**実装完了（`done`）**：resume分岐で`state = snapshot.values`の直後に、呼び出し回数上限3種（`max_web_search_calls`/`max_web_fetch_calls`/`max_road_route_calls`）と`goal_reference_dir`を現在の`config`の値へ明示的に再同期する処理を追加（会話履歴は上書きせず、実行時設定のみ）。新規テスト1件（`tests/test_checkpoint_resume.py`、既存の`_FakeCompiledGraph`スタブパターンを再利用）。**運用上の注意**：この修正はコード側のみのため、既に起動済みのプロセスには反映されない。プロセスを再起動して改めて`--resume`する必要がある。詳細は[BL-201詳細](#bl-201---resumeしたrunのstateがresume時点のconfig変更呼び出し回数上限等を一切反映しない)を参照。 | P1 |
+| BL-202 | 高 | `cela_main.py`（`_query_AI_live`のリトライループ、`call_expert`の差し戻しブロック2箇所、`_build_task_scope_context`の編集方針、`WRITE_AGREEMENT_TOOL`/`READ_WHITEBOARD_EXCERPT_TOOL`のスキーマ、`_apply_text_edits`のエラーメッセージ） | ユーザーが`log/2026-08-09/2348`（`task_1_1`が20ラウンド以上Rejectedを繰り返した回）の膠着理由の調査を依頼。Reflection自身はBL-191に基づき正しく「正当なブロッキングでありstagnantではない」と判定しており、停滞判定の不具合ではなかった。実ログ精査により2つの独立した機械的原因が判明。**原因A**：`_query_AI_live`がAPIリトライを使い切ると`"(サーバー高負荷によるAPIエラー)"`という固定文字列を返し、これがExpertの発言としてDetectorへ渡って却下されるため、**Expertが1文字も編集していないのにラウンドと版番号だけが消費される**空転が、確認できたDetector指摘7件中4件で発生していた。**原因B**：edits失敗が58回発生し、その全てが`edits[0]`（1件目で失敗し後続は未評価）。失敗したold_textは節見出しからDetector注釈ブロックまでを含む数千字規模で、`read_whiteboard_excerpt`の窓の外側を記憶で補って再構成していた。根本原因は、BL-076が「**注釈行ごと含めて**old_textに入れよ」と指示し、BL-193が「**注釈ブロックを巻き込むな**」と指示する**相互矛盾がプロンプト内に同時に存在**していたこと（Expertは前者に忠実に従い後者に違反していた）。**実装完了（`done`）**：①リトライループを`while`化し、プレースホルダー返却の前に`loop_messages`（思考ログ全履歴）を保持したまま**ノードをやり直す**分岐を追加（`_MAX_NODE_REDO_ON_API_EXHAUSTION=2`・`_NODE_REDO_COOLDOWN_SECONDS=180`、AGENTS.md §7の新規定数としてユーザー承認待ち。BL-171の日次上限即時停止経路が手前に残ることをテストで固定）。②BL-076側の旧指示を撤回し、本文修正と注釈削除を別々のeditsへ分けるBL-193整合の指示へ置換（両プロンプト経路）。③編集方針を「推奨」から手順の明示へ強化：**必ず**read_whiteboard_excerptで現在の文字列を取得→**1箇所ずつ**修正→old_textは最短にし`（中略）`/`（以下省略）`の先は含めない。④複数箇所の矛盾を指摘された場合は、見出しではなく**問題の文言そのもの**をkeywordに`match_count`で残り箇所を確認し全箇所を直す。⑤不一致エラーメッセージへold_textの実文字数と具体的な次の手順3点を追加。新規テスト`tests/test_bl202_edit_reliability_and_node_redo.py`14件、関連既存テストと合わせ計53件で無退行を確認。詳細は[BL-202詳細](#bl-202-サーバーエラーのプレースホルダー応答によるラウンド空転とdetector注釈を巻き込んだ巨大old_textによるedits失敗の連鎖)を参照。 | P1 |
 
 ---
 
@@ -6102,6 +6103,98 @@ configの新しい値へ更新されることを確認。既存のcheckpoint関�
 **運用上の注意**：この修正はコード側のみのため、**既に起動済みのPythonプロセスには反映
 されない**。2313のrunを続ける場合は、一度プロセスを停止し、この修正を含む状態で改めて
 `--resume`する必要がある。
+
+---
+
+### BL-202: サーバーエラーのプレースホルダー応答によるラウンド空転と、Detector注釈を巻き込んだ巨大old_textによるedits失敗の連鎖
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | [BL-076](#bl-076-detectorのmajor指摘をホワイトボード本文に永続的な注釈として埋め込むwordpdfコメント方式)（本BLが指示文言を是正した側）、[BL-193](#bl-193-write_agreementeditsによるホワイトボード書き換えが大規模文書で繰り返し失敗する)（old_text最小化・read_whiteboard_excerptの初出。BL-076と矛盾していた）、[BL-122](#bl-122-apiエラー時のツールループ全体巻き戻しリトライbl-009bl-046がモデル変更nemotron後に発生頻度が明らかに増加し実害が拡大している)（loop_messagesをリトライ間で保持する設計。本BLのノードやり直しはこれに乗る）、[BL-171](#bl-171-openrouter無料枠の日次上限エラーが他の一時的apiエラーと同じリトライ経路に乗り無意味なリトライと偽のフェイルクローズmajorを延々と繰り返して進行を破壊する)（リトライで解消しないエラーを別経路へ逃がす先例） |
+
+**内容:**
+
+ユーザーが`log/2026-08-09/2348`（`run_id=1786246233-0d2e0184`、`task_1_1`が20ラウンド以上
+Rejectedを繰り返した回）について「なぜ膠着している？」と調査を依頼。Reflection自身は
+BL-191に基づき正しく「外部依存による正当なブロッキングでありstagnantではない」と
+判定しており、停滞判定ロジックの不具合ではなかった。実ログの精査により、**2つの独立した
+機械的原因**が判明した。
+
+**原因A：サーバーエラーのプレースホルダーが「Expertの回答」として下流へ流れる**
+
+`_query_AI_live`はAPIリトライ（`delays=[8,16,32,64,128]`、計6回）を使い切ると
+`"(サーバー高負荷によるAPIエラー)"`という固定文字列を返していた。この文字列がそのまま
+Expertの発言としてDetectorへ渡り、Detectorは当然「Agentの応答が『(サーバー高負荷による
+APIエラー)』のみで、Userの詳細な修正指示に一切応えていない」として却下する。結果、
+**Expertが1文字も編集していないのにラウンドと版番号だけが消費される**空転が、確認できた
+Detector指摘7件のうち4件で発生していた。
+
+**原因B：Detector注釈を巻き込んだ巨大old_textによるedits失敗（58回）**
+
+同ログでedits失敗が58回発生し、**その全てが`edits[0]`**（＝1件目で失敗し後続のeditsは
+一度も評価されない）だった。失敗した`old_text`を実際に取り出して確認したところ、節見出しから
+`> 🔴 **[Detector指摘 #D-...]**:` の長大な注釈ブロックまでを丸ごと含む数千字規模の文字列で
+あり、`read_whiteboard_excerpt`の窓（`…（中略）`／`…（以下省略）`で切られている）の外側を
+記憶で補って再構成していた。
+
+さらに調査の結果、**プロンプト内に相互に矛盾する2つの指示が同時に存在していた**ことが
+根本原因と判明した：
+
+- BL-076（`call_expert`の差し戻しブロック）：「write_agreementのedits（old_text/new_text）で、
+  **注釈行ごと含めて**該当箇所のみを部分修正してください（old_textに注釈を含めることで、
+  修正と同時に注釈も自然に消えます）」
+- BL-193（`_build_task_scope_context`の編集方針）：「old_textには変更したい箇所そのものだけを
+  含め、無関係な前後（**特にDetector指摘の注釈ブロック全体など**）を巻き込んで1つの巨大な
+  old_textにしないでください」
+
+Expertは前者に忠実に従っており、その結果として後者に違反して失敗し続けていた。BL-193は
+後から追加されたが、BL-076側の旧指示が残置されたままだった。
+
+**実装完了（`done`）**：
+
+1. **原因A**：`_query_AI_live`のリトライループを`for attempt in range(...)`から`while True`へ
+   変更し（ループ本体は一切変更なし。`attempt`は例外処理ブロック内でしか参照されないため、
+   インデント変更を伴わない最小の改変）、`delays`消尽時にプレースホルダーを返す前に
+   **ノード自体をやり直す**分岐を追加した。やり直しは`loop_messages`（それまでのreasoning・
+   ツール結果の全履歴。BL-122により関数冒頭で初期化されリトライ間で保持される）を保持した
+   まま`attempt`カウンタのみを巻き戻すため、思考ログは失われない。やり直し回数は
+   `_MAX_NODE_REDO_ON_API_EXHAUSTION=2`、やり直し前のクールダウンは
+   `_NODE_REDO_COOLDOWN_SECONDS=180`（AGENTS.md §7の新規定数、ユーザー承認待ち）。
+   BL-171の日次上限即時停止経路は、やり直し分岐より手前に位置することをテストで固定した。
+2. **原因B（矛盾の解消）**：BL-076側の「注釈行ごと含めて」という指示を撤回し、
+   **本文の修正と注釈の削除を必ず別々のeditsの要素に分ける**という、BL-193と整合した指示へ
+   置き換えた（フル`system_prompt`側・`light_system_prompt`側の2箇所）。
+3. **原因B（手順の明文化）**：`_build_task_scope_context`の編集方針を「推奨」から手順の
+   明示へ強化した。①old_text組み立て前に**必ず**`read_whiteboard_excerpt`で現在の実際の
+   文字列を取得する（記憶やプロンプトのスナップショットから再構成しない）、②1回の
+   write_agreementで何箇所も書き換えず**1箇所ずつ**修正する、③old_textは一意に特定できる
+   最短の文字列にし、抜粋の`（中略）`／`（以下省略）`の先は**見えていないので絶対に
+   old_textへ含めない**（不一致の最大要因）。
+4. **同一文言が複数箇所にある場合の探し方**：Detector/ユーザーから「複数セクションで矛盾」と
+   指摘された場合、セクション見出しではなく**問題の文言そのもの**（例：「通年運行可能」）を
+   keywordにして`read_whiteboard_excerpt`を呼び、`match_count`で残り箇所数を確認してから
+   全箇所を（1箇所ずつ、または同一文言なら`replace_all=true`で）修正するよう明記した。
+   1箇所だけ直すと残りが次ラウンドで再び矛盾として差し戻されるため。
+5. **ツールスキーマ・失敗時エラーメッセージ**：`WRITE_AGREEMENT_TOOL`の`edits`と
+   `READ_WHITEBOARD_EXCERPT_TOOL`の説明文へ上記を反映。`_apply_text_edits`の不一致
+   エラーメッセージには、「正確に引用しろ」の繰り返しではなく**old_textの実文字数と
+   具体的な次の手順3点**を返すようにした（2348ログでは同一ターン内に20回連続で同じ
+   不一致を繰り返しており、従来のメッセージでは自己修復できていなかったため）。
+
+新規テスト`tests/test_bl202_edit_reliability_and_node_redo.py`（14件）：やり直し分岐が
+プレースホルダー返却より手前にあること、やり直しが`loop_messages`/`iteration_start`を
+再初期化しないこと、やり直しが有界であること、BL-171経路が維持されていること、
+BL-076の旧文言が消えBL-193と整合した文言に置き換わっていること（両プロンプト経路）、
+編集手順4点の明記、ツールスキーマ2件、エラーメッセージの実効性、正常系の無変更。
+既存の`test_bl193`/`test_bl076`/`test_bl151`/`test_bl081`/`test_checkpoint_resume`と
+合わせて計53件、無退行を確認。`python -m py_compile`合格。
+
+なお実装中、`_apply_text_edits`のエラーメッセージへ省略マーカーを完全な形（先頭の三点
+リーダ付き）で書いたところ、「スニペット自体が切り詰められていないこと」を検証する
+BL-151の既存テストと文字列が衝突して失敗した。テスト側を緩めるとBL-151の検証意図が
+損なわれるため、エラーメッセージ側をマーカーの括弧部分のみの引用へ書き換えて解消した。
 
 ---
 
