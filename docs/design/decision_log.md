@@ -2441,6 +2441,19 @@
 
 ---
 
+### D-173: web_cacheはrun単位で分離せず、URLキーでrunをまたいで共有する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | BL-184の`web_cache/<run_id>/<sha256(url)[:16]>.md`は、同一URLの取得結果をrun単位で分離していた。ユーザーが「web_cacheももったいないので、runが変わっても永続的に読めるようにして」と指摘。run単位の分離を維持すべきか。 |
+| **決定理由** | 同一URLをweb_fetchするコスト（呼び出し回数消費・応答待ち）はrunが変わっても同じであり、run単位の分離はそのコストを毎回リセットして無駄にしているだけだった。BL-199で新設した`read_goal_reference`（開発者事前収集データ）とは異なり、`web_cache`はエージェント自身がrun中に集めた一次資料であり、後続のrunにとっても等しく有用な情報である。キャッシュの鮮度が問題になるほど内容が短期間で変化するURLは想定されていない（AGENTS.md §9のdocs/refs運用と同様、静的な公的情報・一次資料が主対象）。 |
+| 決定内容 | `cache_file_path`から`run_id`引数を除去し、`web_cache/<sha256(url)[:16]>.md`（URLキーの全run共有）へ変更する。あわせて、Expert/Detectorのプロンプトにおける外部情報の参照優先順位を「①read_goal_reference（開発者事前収集）→②read_reference_file（web_fetchキャッシュ、全run共有）→③web_search（最終手段）」という単一の3段階順序として明記する（ユーザー指示「refs探索→web_cache探索→webサーチの順で」に対応）。 |
+| 影響 | `web_tools.py`、`cela_main.py`、`tests/test_bl184_web_tools.py`、`tests/test_bl199_goal_reference.py`。 |
+| 関連 BL | [BL-200](back_log/issue_backlog.md#bl-200-web_cacheがrun単位で分離されており別runで既に取得済みのページも無駄に再取得していた) |
+
+---
+
 ## 未決定（pending）
 
 ---
