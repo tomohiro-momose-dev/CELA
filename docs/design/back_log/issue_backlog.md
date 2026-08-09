@@ -5759,6 +5759,9 @@ Expertの唯一の成果物提出手段をブロックしてBL-158型のデッ�
 セクションの存在確認。既存のBL-188/BL-192/BL-123/BL-194関連テスト60件と合わせて無退行を
 確認。`python -m py_compile`合格。
 
+匿名化案の撤回から「問題」「解決」分離の合意に至る往復議論の詳細は
+`docs/design/back_log/BL-195/BL195_investigation.md`を参照。
+
 ---
 
 ### BL-196: task_plannerが実行環境に無い専用処理能力を前提としたacceptance_criteriaを書いてしまう
