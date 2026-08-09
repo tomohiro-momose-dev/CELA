@@ -6004,6 +6004,11 @@ Plan Modeによる設計原文（要約せず全文保存、AGENTS.md §7）は
 （29件）・`test_bl184_web_tools.py`と合わせて無退行を確認（計91件通過）。
 `python -m py_compile`合格。
 
+**運用上の注意（コード変更なし）**：同ログで`calc_road_route`が`CELA_ORS_API_KEY`未検出
+エラーを返し続けていた件は、Windowsのユーザー環境変数を設定した後、ターミナルの再起動
+だけでなくVSCode本体（統合ターミナルの親プロセス）の再起動が必要という運用知識として
+記録した。詳細な調査経緯は`docs/design/back_log/BL-199/BL199_investigation.md`を参照。
+
 ---
 
 | 日付 | 内容 |
