@@ -5932,6 +5932,10 @@ BL-197のプロンプト誘導は「実測できないものを要求しない�
 直線距離の注記が常に含まれること、`TOOL_DISPATCH`登録と`call_expert`/`call_detector`両パスへの
 配線確認。
 
+Plan Modeによる設計原文（要約せず全文保存、AGENTS.md §7）は
+`docs/design/back_log/BL-198/BL198_basic_design.md`を参照。同ファイルには実装後の
+ライブAPI疎通確認結果（道路距離15,358.5m vs 直線距離12,020.841m）も追記済み。
+
 **ユーザー側の準備事項**：`calc_road_route`のみ環境変数`CELA_ORS_API_KEY`の設定が必要
 （https://openrouteservice.org/dev/#/signup で無料登録）。未設定でも他3ツールは動作し、
 `calc_road_route`は取得方法を案内するエラーを返して直線距離へフォールバックできる。
