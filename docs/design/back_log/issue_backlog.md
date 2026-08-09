@@ -232,6 +232,7 @@
 | BL-198 | 中 | `geo_tools.py`（新規）、`cela_main.py`（ツールスキーマ4件・`TOOL_DISPATCH`・`LineageState`/`Appconfig`・`call_expert`・`call_detector`両パス）、参照キャッシュ`docs/refs/gsi_api/api_notes.md`・`docs/refs/openrouteservice/api_notes.md`新設 | BL-197のガードレールは「実測できないものを要求しない」という抑止としては機能した（`log/2026-08-09/1744`で検証済み）が、それだけでは「実測できるものを実測する」余地は広がらず、同ログではweb_searchが30回/run上限に30箇所以上到達し、個別地点の座標・標高を汎用検索で都度探すことに検索予算を浪費していた。ユーザーが国土地理院のAPI（測量計算・標高）とGeminiによる道路距離API調査結果（OSMnx/OSRM/OpenRouteService/GraphHopper/Google Maps）を提示し「BL化してまとめて」と指示。**実装完了（`done`）**：新規モジュール`geo_tools.py`（`web_tools.py`と同型の構成、cela_main.pyへ非依存、Provider抽象化）に4ハンドラを実装。①`gsi_geocode`（住所→緯度経度、GSI住所検索API）②`gsi_get_elevation`（緯度経度→標高、GSI標高API）③`gsi_calc_distance_bearing`（2点→測地線距離・方位角、GSI測量計算API）④`calc_road_route`（2点→道路距離・所要時間、OpenRouteService）。①〜③は認証不要（1秒間隔の簡易スロットリングのみ）、④は`CELA_ORS_API_KEY`必須でrun単位30回の呼び出し上限付き。全エンドポイントの実レスポンスをライブ疎通で確認してから実装した（AGENTS.md §9）。最重要の誤用防止として、③が返すのは直線距離であり道路距離ではない旨を返り値の`note`・ツール説明文・Expert/Detector双方のプロンプトの計4箇所で重ねて明記し、テストでも常時含まれることを検証している（山間部で直線距離を道路距離として扱うと所要時間・SLA判定が楽観側へ歪むため）。あわせてExpert/Detectorのプロンプトへ「実測できるものは専用ツールで実測する。ただしこれらで取得できない種類のデータ（道路区間単位の積雪・凍結の実測記録等）まで実測値で揃える必要はない」という、BL-197と対になる誘導を追加した。新規テスト`tests/test_bl198_geo_tools.py`29件。詳細は[BL-198詳細](#bl-198-国土地理院apiopenrouteserviceによる地理データの実測化)を参照。 | P2 |
 | BL-199 | 中 | `web_tools.py`（`read_goal_reference_handler`新規）、`cela_main.py`（ツールスキーマ・`TOOL_DISPATCH`・`LineageState`/`Appconfig`への`goal_reference_dir`・`call_expert`/`call_detector`両パス・`max_web_search_calls`を30→50へ緩和） | `log/2026-08-09/2222`で、地理ツール（BL-198）は正常に発火していたが、Expertが茅野駅・市役所・病院・大学等の公式住所をweb_searchで繰り返し検索し、`web_searchの呼び出し上限（30回/run）に達しました`エラーで動作停止していた（同ログ:457,3079,3082,3085）。調査の結果、探していた情報の一部（茅野駅の緯度経度・大学の住所等）はBL-195で既に`docs/refs/chino_city/chino_city_data.md`へキャッシュ済みだったが、既存の`read_reference_file`はweb_cache（当該run内のweb_fetch結果）専用でdocs/refsを読めず、Expert/Detectorに開発者事前収集の参照データへアクセスする手段が無かったことが真因と判明。**実装完了（`done`）**：`read_reference_file`と同型（resolve-and-containによるパス脱出防止、`path`/`keyword`指定、run単位の呼び出し回数制限を消費しない）の新規ツール`read_goal_reference`を実装し、`state["goal_reference_dir"]`（本ゴールでは`docs/refs/chino_city`）配下のみを対象に、Expert・Detector（Pass1/Pass2）へ付与した。プロンプトで「web_searchの前にread_goal_referenceを確認し、`not_found`/`not_configured`の場合のみweb_searchを使う」優先順位を明記。参照データに無い項目（番地までの実住所等）は依然として正当なweb_search用途のため、`max_web_search_calls`も30→50へ緩和した（ユーザー承認、AGENTS.md §7の定数変更に該当）。同ログでは`calc_road_route`が`環境変数CELA_ORS_API_KEYが設定されていません`エラーを返し続けていたことも判明したが、これはWindowsのユーザー環境変数がVSCode起動後に設定されたため、VSCode自体（統合ターミナルの親プロセス）が古い環境を保持し続けていたことが原因で、ターミナルの再起動だけでは解決せず、VSCode本体の再起動が必要と判断した（コード変更なし、運用上の注意として記録）。新規テスト`tests/test_bl199_goal_reference.py`16件。詳細は[BL-199詳細](#bl-199-web_searchの前に開発者事前収集の参照データdocsrefsを確認せず同じ事実の再検索で呼び出し上限を使い果たす)を参照。 | P2 |
 | BL-200 | 中 | `web_tools.py`（`cache_file_path`から`run_id`引数を除去、URLキーの全run共有キャッシュへ変更）、`cela_main.py`（Expert/Detector両プロンプトを「refs→web_cache→web_search」の3段階順序へ統合） | ユーザーが「web_cacheももったいないので、runが変わっても永続的に読めるようにして」「プロンプト指示はrefs探索→web_cache探索→webサーチの順で手元資料を生かせるように」と指示。BL-184の`web_cache/<run_id>/`という設計は、同一URLの取得結果をrun単位に分離しており、runが変わるたびに既に取得済みのページを再度web_fetchし直す構造だった。**実装完了（`done`）**：`cache_file_path`/`read_reference_file_handler`から`run_id`スコープを除去し、`web_cache/<sha256(url)[:16]>.md`をURLキーで全run共有するよう変更（過去の別runで取得済みのURLは呼び出し回数を消費せず即座に再利用できる）。あわせて、従来2つの独立パラグラフだった「web_searchの前にread_reference_fileを確認」（BL-188）と「web_searchの前にread_goal_referenceを確認」（BL-199）を、「①read_goal_reference→②read_reference_file→③web_search」という単一の3段階順序へ統合し、Expert（system_prompt・light_system_prompt）・Detector（Pass1・Pass2）の全プロンプトへ反映した。新規テスト2件（`test_bl184_web_tools.py`）・配線確認3件（`test_bl199_goal_reference.py`）。詳細は[BL-200詳細](#bl-200-web_cacheがrun単位で分離されており別runで既に取得済みのページも無駄に再取得していた)を参照。 | P2 |
+| BL-201 | 高 | `cela_main.py`（`run_ai_vs_ai_loop`のresume分岐、`state = snapshot.values`直後の4フィールド再同期） | BL-199/200実装後もユーザーが「web_searchの呼び出し上限（30回/run）に達しました。50回に緩和しませんでしたか？」と報告。調査の結果、新しいログ`log/2026-08-09/2313`はBL-199実装前から続く`run_id=1786246233-0d2e0184`への`--resume`であり、resume分岐がチェックポイントのstateをそのまま復元するのみで現在の`config`引数（緩和後の`max_web_search_calls=50`等）を一切再同期していなかったことが真因と判明。BL-197で発見した「チェックポイント巻き戻しがcela.db側を巻き戻さない」問題の逆方向（config変更側がresume済みstateへ反映されない）に相当する。**実装完了（`done`）**：resume分岐で`state = snapshot.values`の直後に、呼び出し回数上限3種（`max_web_search_calls`/`max_web_fetch_calls`/`max_road_route_calls`）と`goal_reference_dir`を現在の`config`の値へ明示的に再同期する処理を追加（会話履歴は上書きせず、実行時設定のみ）。新規テスト1件（`tests/test_checkpoint_resume.py`、既存の`_FakeCompiledGraph`スタブパターンを再利用）。**運用上の注意**：この修正はコード側のみのため、既に起動済みのプロセスには反映されない。プロセスを再起動して改めて`--resume`する必要がある。詳細は[BL-201詳細](#bl-201---resumeしたrunのstateがresume時点のconfig変更呼び出し回数上限等を一切反映しない)を参照。 | P1 |
 
 ---
 
@@ -6056,6 +6057,51 @@ run単位のディレクトリへ分離して保存しており、runが変わ�
 3段階順序の明記を確認する配線確認テスト3件を追加。既存`test_bl198_geo_tools.py`・
 `test_bl195_precedent_citation_derivation.py`と合わせて計101件、無退行を確認。
 `python -m py_compile`合格。
+
+---
+
+### BL-201: --resumeしたrunのstateが、resume時点のconfig変更（呼び出し回数上限等）を一切反映しない
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | [BL-199](#bl-199-web_searchの前に開発者事前収集の参照データdocsrefsを確認せず同じ事実の再検索で呼び出し上限を使い果たす)（`max_web_search_calls`30→50緩和の適用対象）、[BL-197](#bl-197-user-aiの承認指示がタスクのacceptance_criteriaを超える手段検証水準を後付けで積み増す)（チェックポイントとcela.dbの分離を先に発見した回、本BLは逆方向＝config変更側の分離） |
+
+**内容:**
+
+BL-199/200の実装完了を報告した直後、ユーザーが「web_searchの呼び出し上限（30回/run）に
+達しました。エラーになっています。50回に緩和しませんでしたか？」と報告。既存の
+`log/2026-08-09/2222`（BL-199実装前のログ）を見ていたのではなく、新しいログディレクトリ
+`log/2026-08-09/2313`が実際に生成されており、そこでも同じエラーが再発していたことを確認した
+（`log_no_prompt.md:1026`）。
+
+調査の結果、`2313`は`run_id=1786246233-0d2e0184`への**resume**（`--resume`、BL-199実装前から
+継続していたrun）であり、`run_ai_vs_ai_loop`のresume分岐は`state = snapshot.values`で
+チェックポイントの内容をそのままstateとして復元するのみで、**現在の`config`引数の値を
+一切再同期していなかった**ことが判明した。`max_web_search_calls`等の呼び出し回数上限は
+run開始時（初回のみ）に`config`から`state`へコピーされる設計（BL-184由来）だったため、
+コード側で30→50へ緩和しても、既に走っているrunをresumeする限り、チェックポイントに
+固定された古い値（30）がそのまま使われ続けていた。BL-197で発見した「チェックポイントの
+巻き戻しはcela.db側を巻き戻さない」問題の**逆方向**（＝config変更側がresume済みstateへ
+反映されない）に相当する。
+
+**実装完了（`done`）**：`run_ai_vs_ai_loop`のresume分岐、`state = snapshot.values`の直後に、
+呼び出し回数上限3種（`max_web_search_calls`/`max_web_fetch_calls`/`max_road_route_calls`）と
+`goal_reference_dir`の計4フィールドを、現在の`config`引数の値へ明示的に再同期する処理を追加。
+これらは会話の履歴（`chat_history`・ホワイトボード等）ではなく実行時設定であるため、resumeの
+たびに最新のconfigへ追従させるのが正しい。呼び出し済みカウンタ自体（`web_search_call_count`
+等）は実際に消費済みの実績であるためリセットしない。
+
+新規テスト`test_resume_refreshes_config_derived_limits_from_current_config`
+（`tests/test_checkpoint_resume.py`、既存の`_FakeCompiledGraph`/`_FakeSnapshot`スタブパターンを
+再利用）：`halt=True`のstateをresumeし、グラフ実行・DB接続を発生させずに、4フィールドが
+configの新しい値へ更新されることを確認。既存のcheckpoint関連テスト計12件と合わせて無退行を
+確認。`python -m py_compile`合格。
+
+**運用上の注意**：この修正はコード側のみのため、**既に起動済みのPythonプロセスには反映
+されない**。2313のrunを続ける場合は、一度プロセスを停止し、この修正を含む状態で改めて
+`--resume`する必要がある。
 
 ---
 

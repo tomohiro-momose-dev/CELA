@@ -2454,6 +2454,19 @@
 
 ---
 
+### D-174: resumeしたrunのstateは、呼び出し回数上限等の実行時設定をチェックポイントからではなく現在のconfigから再同期する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | BL-199で`max_web_search_calls`を30→50へ緩和した後も、既に走っていたrunを`--resume`すると相変わらず30回で頭打ちになっていた（`log/2026-08-09/2313`で実機確認）。チェックポイントから復元した`state`が、run開始時点の古い`config`値を固定して持ち続けていたことが原因。会話履歴（chat_history等）と同じ扱いで良いのか。 |
+| **決定理由** | 呼び出し回数上限・参照ディレクトリのようなフィールドは、Expert/User AIの発言や合意事項のような「会話の履歴」ではなく「実行時設定」であり、意味的に別カテゴリに属する。BL-197で発見した「チェックポイント巻き戻しはcela.db側を巻き戻さない」問題は、古い会話状態が新しい成果物汚染を引き起こす方向だったが、本件はその逆（開発者が加えた設定改善が、走行中のresumeに反映されない）であり、両方とも「チェックポイントは会話状態のスナップショットであり、それ以外の“今の正しい設定”の情報源ではない」という同じ性質から生じている。resumeのたびに実行時設定側だけ現在のconfigへ揃えるのは、会話の一貫性を損なわない安全な変更である。 |
+| 決定内容 | `run_ai_vs_ai_loop`のresume分岐、`state = snapshot.values`の直後に、`max_web_search_calls`/`max_web_fetch_calls`/`max_road_route_calls`/`goal_reference_dir`の4フィールドを現在の`config`引数の値へ明示的に上書きする。呼び出し済みカウンタ自体（`web_search_call_count`等）は実際の消費実績のためリセットしない。 |
+| 影響 | `cela_main.py`、`tests/test_checkpoint_resume.py`。 |
+| 関連 BL | [BL-201](back_log/issue_backlog.md#bl-201---resumeしたrunのstateがresume時点のconfig変更呼び出し回数上限等を一切反映しない) |
+
+---
+
 ## 未決定（pending）
 
 ---
