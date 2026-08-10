@@ -240,6 +240,7 @@
 | BL-206 | 中 | `cela_main.py`（`_commit_agreement_from_tool`のUPDATE/edits分岐、`_find_active_deliverable_agreement`、`_apply_text_edits`） | `log/2026-08-10/1905`・`log/2026-08-10/2100`のドライラン精査で、`write_agreement`のUPDATE（edits指定）が同一タスクに対し連続6〜16回失敗する事例をそれぞれ1件ずつ発見。表面上はBL-193（記憶で継ぎ足したold_textが窓の外へドリフトする）の再発に見えたが、実DB（`cela.db`のwhiteboard_drafts）に残る当該run・当該versionの実データと突き合わせたところ、失敗したold_text（144文字・14文字等）は**version=1の保存内容へ一字一句正確に、しかも直前の`read_whiteboard_excerpt`が`match_type: exact`で発見できている文言だった**。にもかかわらず`_apply_text_edits`は「緩い一致も0件」で失敗し、エラーメッセージに添えるはずの近傍スニペット（`_nearest_content_snippet`、cela_main.py:6108）が**完全に空文字**だった。同関数の実装上、空スニペットは比較対象の`content`自体が空文字のときにしか発生しない。つまり実際の不具合は「old_textの引用ミス」ではなく、**edit照合に渡された「現在のホワイトボード内容」がその時点で空文字だった**ことを示している。2件とも最終的にはBL-080のSUPERSEDE（全文置換）へExpertが自律的に切り替えて成功しており、BL-076/193のような回答不能までの完全な膠着には至っていないが、2100ログでは12回の無駄な`write_agreement`呼び出し（約15分、tool_iter予算の相当部分）を空費した。`_commit_agreement_from_tool`のUPDATE分岐（cela_main.py:3062以降）を読むと、`_find_active_deliverable_agreement`が対象のDeliverable agreementを見つけられなかった場合に`old_content`が空文字のまま初期化された値を使い続け、`is_whiteboard = old_content.startswith("WHITEBOARD:")`がFalseとなって`base_content = old_content`（空文字）を編集対象にしてしまう経路が疑わしいが、当該run・当該時点のDB上は`_find_active_deliverable_agreement`が対象を発見できるはずの条件（status≠Superseded、phase_id/task_id一致）を満たしており、なぜこの経路に入ったのかはログ調査だけでは特定できていない。`open`のまま、再現条件を絞る追加調査が必要。詳細は[BL-206詳細](#bl-206-write_agreementのedits照合が実際には空のホワイトボード内容に対して行われ本来一致するはずのold_textが繰り返し不一致になる)を参照。 | P2 |
 | BL-207 | 高 | `cela_main.py`（`call_detector`のuser向け`role_specific_instruction`、BL-181節） | ユーザーの依頼で`log/2026-08-10/2100`（ライブ中のドライラン）のtask_2_3→task_3_1移行の膠着を調査。DBを確認すると該当issue（`winter_vehicle_capex_conflict`）は`defer_to_task_id=task_3_1`が既に設定済みだったにもかかわらず、Userが承認・移行を試みるたびにDetectorが`constraint_issue=major`（BL-181名指し）で差し戻しを繰り返し、ラウンド31から36以上にわたり同じサイクル（承認→差し戻し→撤回→Expertがほぼ同内容を再提出→minor判定→再度承認→また差し戻し）が続いていたことを発見。原因は、`write_issue(DEFER)`が仕様上`status`を`'escalated'`のまま変更せず`defer_to_task_id`のみを記録する設計（BL-136）に対し、実際の遷移をブロックする機械的ゲート（`_get_blocking_issues_for_transition`、BL-125/158）は`defer_to_task_id`の有無を正しく見て先送り済みissueを除外しているのに、**Detector自身のLLM判定に渡すBL-181のプロンプト指示だけが`defer_to_task_id`を一切見ず、`status='escalated'`の残存だけを根拠にし、しかも「今回の発言内で」RESOLVE/DEFERが実行されたことを要求していた**こと。DEFERは一度実行すれば恒久的に記録が残るのに、承認を試みるたびに同じラウンド内での再実行を求める基準になっており、機械的ゲート（正しい）とDetectorの自然文判定（過剰に厳しい）が矛盾し、無限ループを生んでいた。BL-076/BL-193（BL-202/D-176）と同型の「同じ規則を複数箇所に書いた結果、一方だけ更新漏れが起きる」パターン。**実装完了（`done`）**：BL-181の指示文を、`defer_to_task_id`が（いつ設定されたかに関わらず）既に設定済みであれば正式に先送り済みとみなし`major`としないよう修正。`defer_to_task_id`が未設定のまま残るissueがある場合のみ、従来通り`major`で差し戻す。新規テスト`tests/test_bl207_defer_gate_ignores_prior_round.py`5件、既存の`test_bl181_task_transition_block_stops_orchestrator.py`・`test_bl183_task_transition_block_severe_issue_flag.py`を含め無退行、オフライン全テストスイート1037件通過。詳細は[BL-207詳細](#bl-207-bl-181のdetectorプロンプトがdefer_to_task_id設定済みのissueにも毎ラウンド再deferを要求し無限に差し戻し続ける)を参照。 | P1 |
 | BL-208 | 低 | `web_tools.py`（`_MAX_FETCH_BYTES`定数） | ユーザーが「web検索のpdfが2MBに引っかかることがしばしばある」と報告し、「5MB〜10MB程度まで増やしてください」と定数変更を承認（AGENTS.md §7）。政府・自治体配布のPDF一次資料はページ数・図表が多く2MBを超える例が実運用で頻発していた。**実装完了（`done`）**：`_MAX_FETCH_BYTES`を2MB→8MB（要求範囲5〜10MBの中間値）へ変更。HTML/PDF共通の上限であり、この定数を参照する`tests/test_bl184_web_tools.py`のサイズ上限拒否テストは`web_tools._MAX_FETCH_BYTES`を動的参照しているため無改修で追随、47件通過。`python -m py_compile`合格。 | P3 |
+| BL-209 | 高 | `cela_main.py`（`call_orchestrator`のプロンプト、BL-078の`focus_guidance`指示ブロック直後） | ユーザーが「0016のログを見るとまたtask_2_3で空転しています」と報告。BL-207修正後もtask_2_3が承認に至らない空転が続いていたため調査したところ、今回はBL-181差し戻し（`major`）は再発しておらず、別種の空転と判明。決定的だったのは、Detector自身が受入基準3項目すべてを`criteria_status: [true, true, true]`で**充足済みと判定した後も**User AIが承認せず、Orchestratorが次のExpertへ渡す`focus_guidance`が「各路線で『予約到着数→実効供給力→予約処理能力→SLA内処理件数→超過・補完・重大未充足量』を時間帯別に接続」「補完交通は…複数シナリオで算定」「冬季は…通常運行、区間短縮、運休、再開を再現可能に」と、**task_2_3のacceptance_criteria（3項目：同一単位での比較／未充足需要と補完手段の明示／採用根拠の説明）に一切書かれていない新規の成果物・分析・モデルを要求していた**こと。BL-196（task_planner）・BL-197（User AI Stage3/4）で同種の「要求水準の青天井」は既に塞いでいたが、**Orchestratorの`focus_guidance`だけが素通しのまま残っていた**（BL-078導入時にこの観点が存在しなかったため）。ラウンドを重ねるたびに要求が具体化・高度化し、受入基準を満たしても完了しない構造になっていた。**実装完了（`done`）**：`call_orchestrator`のプロンプトのBL-078ブロック直後へ、focus_guidanceはacceptance_criteriaを**達成しやすくするための着眼点**であり**新しい要求項目を追加する場所ではない**旨のガードレールを追加。受入基準に無い成果物・分析・モデル（時間帯別シミュレーション、複数シナリオの感度分析、状態遷移モデル、追加の判定軸等）を新たに義務付けないこと、既に充足済みの項目にさらに高い水準を求めないことを明記し、実ログ（`log/2026-08-11/0016`）を根拠として併記した。配置はBL-104/BL-114のプロンプトキャッシュ方針（固定指示文を先頭・動的内容を末尾）を壊さない位置を選定。新規テスト`tests/test_bl209_orchestrator_focus_guidance_scope.py`6件、オフライン全テストスイート1043件通過。詳細は[BL-209詳細](#bl-209-orchestratorのfocus_guidanceに要求水準の上限が無くacceptance_criteriaを超える要求を毎ラウンド積み増す)を参照。 | P1 |
 
 ---
 
@@ -6637,6 +6638,88 @@ BL-181のプロンプト指示を、`defer_to_task_id`が（いつ設定され�
 参照する`tests/test_bl184_web_tools.py`のサイズ上限拒否テストは`web_tools._MAX_FETCH_BYTES`
 を動的に参照する実装（ハードコード値との比較ではない）のため無改修で追随し、同ファイル
 47件通過。`python -m py_compile`合格。
+
+---
+
+### BL-209: Orchestratorのfocus_guidanceに要求水準の上限が無く、acceptance_criteriaを超える要求を毎ラウンド積み増す
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | [BL-196](#bl-196-task_plannerが実行環境に無い専用処理能力を前提としたacceptance_criteriaを書いてしまう)（task_planner側の同種ガードレール）、[BL-197](#bl-197-user-aiの承認指示がタスクのacceptance_criteriaを超える手段検証水準を後付けで積み増す)（User AI側の同種ガードレール）、BL-078（`focus_guidance`の導入）、[BL-207](#bl-207-bl-181のdetectorプロンプトがdefer_to_task_id設定済みのissueにも毎ラウンド再deferを要求し無限に差し戻し続ける)（直前に修正した別種の空転） |
+
+**内容:**
+
+ユーザーが「0016のログを見るとまたtask_2_3で空転しています」と報告。BL-207の修正後も
+task_2_3が承認に至らない空転が続いていた。
+
+調査の結果、**BL-207の修正自体は効いており**、BL-181名指しの`major`差し戻しは再発して
+いなかった（今回のDetector判定は一貫して`minor`/`none`）。別種の空転である。
+
+**決定的な観測**：Detector自身が、Expertの再提出に対して受入基準3項目すべてを
+充足済みと判定した瞬間があった。
+
+```
+criteria_status: [True, True, True]
+```
+
+それにもかかわらず次のラウンドでUser AIは承認せず、「路線別判定と財務適合判定が完了する
+までは、task_2_3を承認せず、次タスクへの移行も指示しません」と続けた。
+
+**task_2_3の実際のacceptance_criteria（task_plannerが確定したもの）：**
+
+1. 候補路線ごとに需要仮説、輸送力仮説、所要時間仮説、待ち時間仮説が同じ単位で比較されていること
+2. ピーク帯の需要に対して供給不足が発生する場合、未充足需要と補完手段が明示されていること
+3. 路線採用の根拠が、優先利用者への効果、SLA、安全性、費用の比較で説明されていること
+
+**一方、同ログでOrchestratorがExpertへ渡していた`focus_guidance`：**
+
+> 各路線で「予約到着数→実効供給力→予約処理能力→SLA内処理件数→超過・補完・重大未充足量」を
+> 時間帯別に接続し、通常時・境界時・未達時の数値シナリオを示すこと。補完交通は0〜全量補完の
+> 仮置きに留めず、容量・SLA内対応量・費用・受入不能量を保守的な複数シナリオで算定すること。
+> 冬季は積雪・凍結等の判定閾値から通常運行、区間短縮、運休、再開を再現可能にし…
+
+これは実質的に**時間帯別の予約シミュレーション＋複数シナリオの補完交通モデル＋冬季運休の
+状態遷移モデル**を要求しており、上記3項目の受入基準をはるかに超えている。
+
+**根本原因：**
+
+`call_orchestrator`のプロンプト（BL-078で`focus_guidance`を導入した箇所）には、
+**要求水準の上限を画す指示が一切無かった**。プロンプトは「実行可能な指示として1〜3点書け」
+とだけ指示しており、`current_task_json`（acceptance_criteriaを含む）をコンテキストとして
+見せてはいるものの、それを**上限として使え**という制約がなかった。
+
+BL-196は`task_planner`側（acceptance_criteriaを書く側）、BL-197はUser AI側
+（Stage3の承認判断・Stage4の差し戻し指示）に同種のガードレールを入れていたが、
+**Orchestratorの`focus_guidance`という第3の経路だけが素通しのまま残っていた**
+（BL-078導入時にはまだこの観点が確立されていなかったため）。結果として、ラウンドを
+重ねるたびにfocus_guidanceが要求を具体化・高度化させ、Expertが受入基準を満たしても
+承認されない水準まで作業を広げ続ける構造になっていた。
+
+**実装完了（`done`）**：
+
+`call_orchestrator`のプロンプトのBL-078ブロック直後へ、以下を明記したガードレールを追加した。
+
+- focus_guidanceはacceptance_criteriaを**達成しやすくするための着眼点**であり、
+  **新しい要求項目を追加する場所ではない**。
+- acceptance_criteriaに書かれていない成果物・分析・モデル（時間帯別シミュレーション、
+  複数シナリオの感度分析、状態遷移モデル、追加の判定軸等）を新たに義務付けない。
+- 「〜も算定すること」「〜を再現可能にすること」のような受入基準に無い新規の作業指示を
+  書くと、Expertは受入基準を満たしても承認されない水準まで作業を広げ続け、タスクが
+  完了しなくなる（実ログ`log/2026-08-11/0016`を根拠として併記）。
+- 既に受入基準を満たしている項目にさらに高い水準を求めない。書くべきなのは
+  「その受入基準を満たすうえで、この課題では特にどこを見落としやすいか」。
+
+配置は、focus_guidanceを指示しているBL-078ブロックの直後（離れた位置では書く時点で
+参照されない恐れがあるため）かつ、BL-104/BL-114のプロンプトキャッシュ方針
+（固定指示文を先頭・動的内容を末尾）を壊さない位置を選定した。
+
+新規テスト`tests/test_bl209_orchestrator_focus_guidance_scope.py`（6件）：ガードレールの
+存在、acceptance_criteriaを上限として明示していること、新規要求の追加禁止を明記して
+いること、BL-078ブロック直後かつ動的ブロックより前という配置、実ログ根拠の併記、
+BL-078本来の意図（1〜3点の着眼点出力）を壊していないこと。オフライン全テストスイート
+1043件通過、`python -m py_compile`合格。
 
 ---
 
