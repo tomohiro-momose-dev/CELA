@@ -6521,6 +6521,22 @@ LangGraphのcheckpoint resumeとの相互作用など他の要因も考えられ
 が、2100ログでは12回・約15分のtool_iter予算を空費しており、tool_iter上限に余裕のない
 ケースではBL-076/193型の完全な膠着に発展するリスクがある。
 
+**追記（別AI「cline」による独立調査、2026-08-11）：** ユーザーがclineへ独立調査を依頼した
+結果、「`call_expert`が`_CURRENT_PHASE_ID`を設定しないため`write_agreement`呼び出しで
+`phase_id`が空になり、`_find_active_deliverable_agreement`が対象を発見できず
+`old_content`/`base_content`が空文字になる」という仮説が提示された。実コード・実ログで
+検証した結果、**この仮説は反証された**：①`_commit_agreement_from_tool`
+（`cela_main.py:3010`）は`phase_id = args.get("phase_id") or phase_id`で
+`args.get("phase_id")`を最優先し、これはまさに過去に同じ症状（Expertが`phase_id`を
+省略し11回連続失敗）を修正した**BL-161（実装済み）そのもの**である。②さらに実データで
+確認すると、今回の失敗呼び出し（1905ログ7件・2100ログ12回超）は**全て`args`に
+`"phase_id": "phase_1"`/`"phase_2"`が明示されており、省略されていなかった**
+（`args.get("phase_id")`が真値のため、`_CURRENT_PHASE_ID`側の値は使われない）。
+DB側も該当`phase_id`/`task_id`で`status≠Superseded`の行が実在することを確認済み。
+したがってCline提案の修正（`call_expert`への`_CURRENT_PHASE_ID`設定追加）は今回の
+症状には効果がなく、実装しない。「症状の特定（空文字への照合）」は妥当だったが、
+「原因の特定」は誤りだった、として記録する。根本原因は引き続き未特定、`open`のまま。
+
 ---
 
 ### BL-207: BL-181のDetectorプロンプトがdefer_to_task_id設定済みのissueにも毎ラウンド再DEFERを要求し、無限に差し戻し続ける
