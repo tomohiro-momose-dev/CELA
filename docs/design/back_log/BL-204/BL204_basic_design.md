@@ -113,13 +113,16 @@ CREATE TABLE IF NOT EXISTS entity_attributes (
     attr_name       TEXT NOT NULL,   -- 自由（address / coordinates / elevation_m / ...）
     value           TEXT NOT NULL,
     unit            TEXT DEFAULT '',
-    confidence      TEXT DEFAULT 'provisional',  -- confirmed | provisional | assumption
+    -- [2.1.1] verified_factsと同じ2値のみ。「工学的仮定」はcitations.type=expert_calculationで表す
+    confidence      TEXT DEFAULT 'provisional',  -- confirmed | provisional
     citations       TEXT DEFAULT '[]',           -- verified_facts.citationsと同形式
     reason          TEXT DEFAULT '',             -- どう取得・導出したか
     source_task_id  TEXT,
     source_phase_id TEXT,
-    recorded_by     TEXT,
-    recorded_at     REAL,
+    -- [Clineレビュー中2] verified_factsの列名（confirmed_by/confirmed_at）へ揃える。
+    -- 初版のrecorded_by/recorded_atは、2.1「既存語彙に揃える」方針に反する独自語彙だった。
+    confirmed_by    TEXT,
+    confirmed_at    REAL,
     PRIMARY KEY (run_id, entity_id, attr_name)
 );
 ```
