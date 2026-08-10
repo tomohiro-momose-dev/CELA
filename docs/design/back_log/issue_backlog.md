@@ -236,6 +236,7 @@
 | BL-202 | 高 | `cela_main.py`（`_query_AI_live`のリトライループ、`call_expert`の差し戻しブロック2箇所、`_build_task_scope_context`の編集方針、`WRITE_AGREEMENT_TOOL`/`READ_WHITEBOARD_EXCERPT_TOOL`のスキーマ、`_apply_text_edits`のエラーメッセージ） | ユーザーが`log/2026-08-09/2348`（`task_1_1`が20ラウンド以上Rejectedを繰り返した回）の膠着理由の調査を依頼。Reflection自身はBL-191に基づき正しく「正当なブロッキングでありstagnantではない」と判定しており、停滞判定の不具合ではなかった。実ログ精査により2つの独立した機械的原因が判明。**原因A**：`_query_AI_live`がAPIリトライを使い切ると`"(サーバー高負荷によるAPIエラー)"`という固定文字列を返し、これがExpertの発言としてDetectorへ渡って却下されるため、**Expertが1文字も編集していないのにラウンドと版番号だけが消費される**空転が、確認できたDetector指摘7件中4件で発生していた。**原因B**：edits失敗が58回発生し、その全てが`edits[0]`（1件目で失敗し後続は未評価）。失敗したold_textは節見出しからDetector注釈ブロックまでを含む数千字規模で、`read_whiteboard_excerpt`の窓の外側を記憶で補って再構成していた。根本原因は、BL-076が「**注釈行ごと含めて**old_textに入れよ」と指示し、BL-193が「**注釈ブロックを巻き込むな**」と指示する**相互矛盾がプロンプト内に同時に存在**していたこと（Expertは前者に忠実に従い後者に違反していた）。**実装完了（`done`）**：①リトライループを`while`化し、プレースホルダー返却の前に`loop_messages`（思考ログ全履歴）を保持したまま**ノードをやり直す**分岐を追加（`_MAX_NODE_REDO_ON_API_EXHAUSTION=2`・`_NODE_REDO_COOLDOWN_SECONDS=180`、AGENTS.md §7の新規定数としてユーザー承認待ち。BL-171の日次上限即時停止経路が手前に残ることをテストで固定）。②BL-076側の旧指示を撤回し、本文修正と注釈削除を別々のeditsへ分けるBL-193整合の指示へ置換（両プロンプト経路）。③編集方針を「推奨」から手順の明示へ強化：**必ず**read_whiteboard_excerptで現在の文字列を取得→**1箇所ずつ**修正→old_textは最短にし`（中略）`/`（以下省略）`の先は含めない。④複数箇所の矛盾を指摘された場合は、見出しではなく**問題の文言そのもの**をkeywordに`match_count`で残り箇所を確認し全箇所を直す。⑤不一致エラーメッセージへold_textの実文字数と具体的な次の手順3点を追加。新規テスト`tests/test_bl202_edit_reliability_and_node_redo.py`14件、関連既存テストと合わせ計53件で無退行を確認。詳細は[BL-202詳細](#bl-202-サーバーエラーのプレースホルダー応答によるラウンド空転とdetector注釈を巻き込んだ巨大old_textによるedits失敗の連鎖)を参照。 | P1 |
 | BL-203 | 高 | `geo_tools.py`（`_classify_geocode_precision`新設・`gsi_geocode_handler`の警告）、`cela_main.py`（`GSI_GEOCODE_TOOL`スキーマ、Expert/Detector両経路のプロンプト、`set_runtime_tool_limits`/`_tool_config`とTOOL_DISPATCH配線）、`docs/refs/gsi_api/api_notes.md` | ユーザーが`log/2026-08-10/0901`で「諏訪中央病院（標高1,239m）と長野大学（標高1,475m）」というハルシネーションを報告。実エンドポイントで再検証した結果、**`gsi_geocode`は住所ジオコーダであり施設名を完全に無視する**ことが判明（BL-198の調査漏れ）。「豊平 長野大学」「豊平 公立諏訪東京理科大学」「豊平」はいずれも同一座標＝大字の代表点を返し、番地まで指定すれば正しい地点が返る。この誤座標を標高APIへ渡すと「**誤った場所の正しい実測値**」（GSI 1m DEM レーザ測量という本物の出典付き）になり、Detectorが同じ座標で検算する限り発見できない。平地の大学（正しくは894.2m）が1,475mとされ「山間部・冬季高リスク・初期対象外」と誤判定され、設計判断が誤った前提に乗った。あわせて、ゴール文に`公立諏訪東京理科大学`と明記されているのにExpertが記憶から「長野大学」（実在するが上田市の無関係な大学）と書き、数値だけ流用していたことも判明。さらに調査中、**BL-201の修正が中断runに一切効いていなかった**ことが判明（`app.stream(None,...)`経路ではローカルstateがLangGraphへ渡らない）。**実装完了（`done`）**：①返却titleに`番地`/`丁目`/`番`/`号`が含まれるかで解決粒度を判定し`precision`として返し、`area_centroid`なら警告必須（座標自体は返し続け、機械的禁止はしない）。クエリではなくtitleを見るのは、施設名が無視される以上titleだけが客観的手掛かりだから。②Expert/Detector両経路へ「必ず番地までの住所を渡す」「`area_centroid`は施設位置として使わない」「拠点名はゴール文の表記をそのまま使う」を追加。③実行時設定を`TOOL_DISPATCH`で注入する方式へ変更（`app.update_state()`案は中断中のpending tasksを乱すリスクのため却下）。④`docs/refs/gsi_api/api_notes.md`へ`[CONSTRAINT]`節を追加。新規テスト19件、関連既存と合わせ160件で無退行を確認。詳細は[BL-203詳細](#bl-203-gsi_geocodeが施設名を無視して大字の代表点を返し誤った場所の正しい実測値が成果物へ混入するおよびbl-201の修正漏れ)を参照。 | P1 |
 | BL-204 | 高 | `cela_main.py`（`entities`/`entity_attributes`スキーマ、`seed_entities_from_goal`、ツール4本、`TOOL_DISPATCH`配線、Expert/Detectorプロンプト4箇所、`_revise_goal_tool_impl`拡張） | ユーザー提案「登場する事物をDBで構造的に管理しなければならない。webでいくらでも情報が取れる分、ハルシネーションリスクが跳ね上がった」を受けて設計。`log/2026-08-10/0901`（BL-203）で、ゴール文に`公立諏訪東京理科大学`とあるのにExpertが記憶から「長野大学」と書いた事故は、数値は`verified_facts`にあったが**名称そのものが事実として登録されていなかった**ことが根本原因と判明。**実装完了（`done`）**：`entities`/`entity_attributes`の2テーブルを新設し、`task_planner`内で（専用ノードは新設せず）ゴール文から事物を抽出し、**ゴール文中に文字列として実在するかを機械的に検証**してから`origin='goal_text'`で登録（これ1つで「長野大学」の登録を客観的に拒否できる）。未登録名への属性書き込みは`did_you_mean`付きで拒否する同一性ガードを実装。属性の出典封筒（confidence/citations/reason等）は`verified_facts`の既存語彙をそのまま踏襲。ツール4本（register_entity/write_entity_attribute/read_entity/verify_entity_geo）をExpert・Detector（Pass1/Pass2）へ配線し、プロンプト誘導はドメイン非依存で追加。独立レビュー（Cline）の指摘4件を実コードと突き合わせて検証し、`confidence`への`assumption`追加（既存の2値方針との自己矛盾）は正当化せず削除、`read_entity`は属性名指定を持たせず全属性を返す形にするなど、指摘の多くを「緩和」ではなく「原因の除去」で解消した。新規テスト31件、関連既存と合わせ191件で無退行を確認。**運用上の注意**：ゴール文からの初期登録はrunが計画未確定の時点でしか発火しないため、既にタスク分解が確定済みのrunを`--resume`しても遡って登録されない（恩恵を受けるには新規run）。詳細は[BL-204詳細](#bl-204-実世界事物レジストリentities-entity_attributesの新設)を参照。 | P1 |
+| BL-205 | 中 | `cela_main.py`（`READ_ENTITY_TOOL`スキーマ、`_read_entity_handler`のヒント付与、`read_entity`を持つ全ノードのプロンプト本文） | ユーザーが`log/2026-08-10/1829`で「read_entityとread_entityで混乱が生まれています」（意図はread_verified_factとの混乱）と報告。BL-204でread_entityを全ノードへ展開した後、モデルが空クエリでread_verified_factを呼び、さらにread_entityも`entity=""`で呼んで名前一覧のみ（属性なし）を得る、という非効率な探索呼び出しを繰り返す事例が複数回観測された。User AI (Stage4)の思考ログに原因（read_entityが「真実の源」としか伝わっておらず、read_verified_factとの役割分担が説明されていなかったこと）がそのまま現れていた。正典名チェック自体は正常に機能しており（12件正しく登録、unknown_entity拒否0件）、ハルシネーション防止という主目的への影響はない。**実装完了（`done`）**：①`READ_ENTITY_TOOL`のスキーマ説明とentityパラメータへ、read_verified_factとの境界を明記。②一覧モード（entity未指定）の返り値へ、次に取るべき行動のhintを追加（登録0件時は付けない）。③ユーザー指摘「プロンプト説明にも書かないと見落とされます」を受け、read_entityを付与した全ノード（call_expert・call_detector Pass1/Pass2・call_task_planner・call_task_plan_reviewer・call_reviewer・call_reflection・call_facilitator・generate_user_utterance4段階）それぞれのプロンプト本文へ境界説明を追記（read_verified_fact非搭載ノードにはその旨も明記）。新規テスト15件、関連既存と合わせ計1032件で無退行を確認。詳細は[BL-205詳細](#bl-205-read_entityとread_verified_factの役割分担が伝わらず無駄な探索呼び出しが繰り返される)を参照。 | P2 |
 
 ---
 
@@ -6400,6 +6401,59 @@ Stage4修正指示・非Stage4の初回ターン等、計6箇所）。特にStag
 対象外とした。書き込み系ツールはExpert専用のまま拡大していない。
 新規テスト9件（`test_bl204_entity_registry.py`へ追加、計40件）。関連の既存テストと
 合わせて計1017件、無退行を確認。
+
+---
+
+### BL-205: read_entityとread_verified_factの役割分担が伝わらず、無駄な探索呼び出しが繰り返される
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| 関連 | [BL-204](#bl-204-実世界事物レジストリentities-entity_attributesの新設)（本BLが誘導文を補強した対象）、[BL-197](#bl-197-user-aiの承認指示がタスクのacceptance_criteriaを超える手段検証水準を後付けで積み増す)（Stage3/4で同種の「要求水準が伝わらない」問題を扱った先例） |
+
+**内容:**
+
+ユーザーが`log/2026-08-10/1829`について「read_entityとread_verified_factで混乱が
+生まれています」と報告。BL-204でread_entityを全ノードへ展開した後、モデルが
+「何か確認したい」→`read_verified_fact`を空クエリで呼ぶ→`not_found`→`read_entity`も
+`entity=""`で呼ぶ→名前一覧のみ（属性なし）が返る、という探索的だが非効率な呼び出しを
+複数回（User AI Stage4含む）繰り返す事例が観測された。User AI (Stage4)の思考ログに
+原因がそのまま現れている：
+
+> "The developer mentioned that the source of truth requires using the read_entity
+> function. So it seems like I should call the function to list all entities."
+
+正典名チェック自体は正しく機能しており（ゴール文から12件の事物が正しく登録され、
+`unknown_entity`拒否は0件）、ハルシネーション防止という本来の目的は損なわれていない。
+問題は`read_entity`（名前を持つ事物の属性専用）と`read_verified_fact`（どの事物にも
+属さない単独の値）という2つの事実ストアの役割分担を、BL-204導入時の誘導文が一切
+説明していなかったこと。加えて、`read_entity`を空引数で呼んだ場合の返り値（名前一覧の
+み、属性なし）が次に何をすべきかを示さないため、空振りに気づきにくかった。
+
+**実装完了（`done`）**：
+
+1. `READ_ENTITY_TOOL`のスキーマ説明へ、`read_verified_fact`との境界（read_entityは
+   名前を持つ事物専用、対象を持たない単独の値はread_verified_fact）を明記。`entity`
+   パラメータの説明にも、空引数時の挙動（名前のみ・属性なし）を明記した。
+2. `_read_entity_handler`の一覧モード（entity未指定）の返り値へ、次に取るべき行動の
+   `hint`を追加（1件以上登録済みの場合のみ。0件の場合は再試行の助けにならないため
+   付けない）。
+3. **ユーザー指摘**「read_entityを使用するノードのプロンプト説明にも書かないと、
+   見落とされます」を受け、スキーマ説明1箇所への追記だけでは不十分と判断。BL-204で
+   `read_entity`を付与した全ノード（`call_expert`・`call_detector`のPass1/Pass2・
+   `call_task_planner`・`call_task_plan_reviewer`・`call_reviewer`・`call_reflection`・
+   `call_facilitator`・`generate_user_utterance`の4経路）**それぞれのプロンプト本文**へ、
+   同じ境界説明を追記した。読み取り対象のツールを持たないノード（`call_reflection`・
+   `call_facilitator`はread_verified_fact非搭載）には、その旨も明記し誤った代替を
+   示さないようにした。特にStage4は実際に混乱が発生した箇所であり、「entity=\"\"で
+   『とりあえず全部見る』ために呼ばないでください」と具体的に明記した。
+
+新規テスト`tests/test_bl205_entity_verified_fact_disambiguation.py`（15件）：一覧モードの
+ヒント付与・非付与条件、個別取得結果にヒントが混入しないこと、スキーマ説明の境界明記、
+`read_entity`を持つ全ノード（7ノード・Expert/Detector両経路・User AI4段階）のプロンプト
+本文に境界説明があることの直接検証、1829ログの実際の呼び出しパターンの回帰確認。
+関連の既存テストと合わせて計1032件、無退行を確認。`python -m py_compile`合格。
 
 ---
 
