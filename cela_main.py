@@ -2956,18 +2956,32 @@ def _check_issue_permission(args: dict, caller_role: str) -> str | None:
 
 
 def _find_active_deliverable_agreement(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str) -> dict | None:
-    """[BL-084] entry_type="Deliverable"のagreementを、topic文字列ではなく(phase_id, task_id)で
-    一意に識別する（whiteboard_draftsと同じ識別子）。BL-074で発覚した「Expertが呼び出しごとに
+    """[BL-084] entry_type="Deliverable"のagreementを、topic文字列ではなくtask_idで一意に
+    識別する（whiteboard_draftsと同じ識別子）。BL-074で発覚した「Expertが呼び出しごとに
     topicの言い回しを変え、target_topic省略時のフォールバック（=自分自身のtopic）が既存行と
     一致せずold_content/supersede対象を見失う」問題は、target_excerptの緩い一致（BL-081）を
     いくら強化しても直らない（比較対象のbase_contentがそもそも空文字になるため）。1459ドライラン
     で同一task_2_4に対しUPDATE呼び出しごとにtopicが変化し（"...確率論的リスク反映版"→
     "...結論部の数値整合性修正"→"...確率論的リスク反映・修正版"）、2回とも`edits`が
     「完全一致0件・緩い一致も0件」で失敗する実害を確認した。
+
+    ★修正（BL-206）: 従来は`phase_id`も完全一致条件に含めていたため、呼び出し元が渡す
+    phase_idが（decision_extractor_node側のフォールバック欠陥等により）空文字や別値へ
+    ドリフトすると、実在するアクティブなDeliverableを発見できずtarget=None・
+    old_content=""のまま以降のeditsが必ず0件一致で失敗し続けていた（実ログでentry_type
+    ドリフトと合わせ計3タスクで確認）。`get_latest_whiteboard`（BL-131）が既に採用している
+    「task_idはrun_id内で一意という規約を前提に、phase_idはWHERE句に含めず、食い違いが
+    あれば警告のみ行う」という同じ設計へ揃え、phase_idドリフトがあっても孤児化しないよう
+    フェイルセーフ化する。
     """
     for a in reversed(get_agreements_from_db(conn, run_id)):
-        if (a.get("entry_type") == "Deliverable" and a.get("phase_id") == phase_id
-                and a.get("task_id") == task_id and a.get("status") != "Superseded"):
+        if (a.get("entry_type") == "Deliverable" and a.get("task_id") == task_id
+                and a.get("status") != "Superseded"):
+            if phase_id and a.get("phase_id") and a.get("phase_id") != phase_id:
+                print(f"  ⚠️ [Deliverable phase_id不一致] task_id='{task_id}'の既存Deliverableは"
+                      f"phase_id='{a.get('phase_id')}'で保存されていますが、今回'{phase_id}'が"
+                      f"渡されました。task_idの命名規約により正しい版として扱いますが、"
+                      f"呼び出し元の引数を確認してください。")
             return a
     return None
 
@@ -11986,7 +12000,10 @@ def decision_extractor_node(state: LineageState) -> LineageState:
         defer_to_task_id = item.get("defer_to_task_id", "")
         
         current_phase = state.get("current_phase", {})
-        phase_id = item.get("phase_id", current_phase.get("phase_id", "unknown"))
+        # [BL-206] dict.get(key, default)はキーが欠落した時しかdefaultを使わないため、
+        # LLMが"phase_id": ""（空文字）を返すとそのまま採用されていた。tid（1行下）と同じ
+        # `or`パターンへ揃える（BL-161がwrite_agreement経路で修正した同型のバグ）。
+        phase_id = item.get("phase_id") or current_phase.get("phase_id", "unknown")
         task_id = item.get("task_id") or state.get("current_task_id", "")
         depends_on = item.get("depends_on", [])
         resource_claims = item.get("resource_claims", {})
@@ -12035,8 +12052,15 @@ def decision_extractor_node(state: LineageState) -> LineageState:
             if action_type == "UPDATE" or status == "Approved_with_Conditions":
                 target_topic = item.get("target_topic", topic)
                 old_content = ""
+                # [BL-206] entry_type不一致（例: 却下がentry_type='Decision'として抽出された）でも
+                # topicが一致するだけでこのループがDeliverable行をsuperseded化してしまい、
+                # _find_active_deliverable_agreement（entry_type='Deliverable'必須）が二度と
+                # 発見できない識別子で置き換わる「孤児化」バグの原因になっていた（実ログで
+                # edits失敗が空文字への照合として観測された、log/2026-08-11/0016で確定）。
+                # supersede対象は同じentry_typeの行に限定する。
                 for a in reversed(get_agreements_from_db(_conn, _run_id)):
-                    if a["topic"] == target_topic and a.get("status") != "Superseded":
+                    if (a["topic"] == target_topic and a.get("entry_type") == entry_type
+                            and a.get("status") != "Superseded"):
                         old_content = a["decision_what"]
                         db_supersede_agreement(a["id"], _conn, _run_id)
                         if proposed_by == "Unknown" or not proposed_by:
