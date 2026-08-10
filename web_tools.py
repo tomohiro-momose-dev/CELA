@@ -37,7 +37,7 @@ from markitdown import MarkItDown, MarkItDownException, StreamInfo
 
 WEB_CACHE_DIR = "web_cache"
 _REQUEST_TIMEOUT_SECONDS = 10.0
-_MAX_FETCH_BYTES = 2 * 1024 * 1024  # 2MB
+_MAX_FETCH_BYTES = 8 * 1024 * 1024  # 8MB [BL-208] 政府・自治体PDFが2MBに頻繁に抵触したためユーザー承認のもと緩和
 _MAX_OUTPUT_CHARS = 15000
 _MAX_READ_REFERENCE_CHARS = 10000
 _DDG_MIN_REQUEST_INTERVAL_SECONDS = 1.0
