@@ -239,6 +239,7 @@
 | BL-205 | 中 | `cela_main.py`（`READ_ENTITY_TOOL`スキーマ、`_read_entity_handler`のヒント付与、`read_entity`を持つ全ノードのプロンプト本文） | ユーザーが`log/2026-08-10/1829`で「read_entityとread_entityで混乱が生まれています」（意図はread_verified_factとの混乱）と報告。BL-204でread_entityを全ノードへ展開した後、モデルが空クエリでread_verified_factを呼び、さらにread_entityも`entity=""`で呼んで名前一覧のみ（属性なし）を得る、という非効率な探索呼び出しを繰り返す事例が複数回観測された。User AI (Stage4)の思考ログに原因（read_entityが「真実の源」としか伝わっておらず、read_verified_factとの役割分担が説明されていなかったこと）がそのまま現れていた。正典名チェック自体は正常に機能しており（12件正しく登録、unknown_entity拒否0件）、ハルシネーション防止という主目的への影響はない。**実装完了（`done`）**：①`READ_ENTITY_TOOL`のスキーマ説明とentityパラメータへ、read_verified_factとの境界を明記。②一覧モード（entity未指定）の返り値へ、次に取るべき行動のhintを追加（登録0件時は付けない）。③ユーザー指摘「プロンプト説明にも書かないと見落とされます」を受け、read_entityを付与した全ノード（call_expert・call_detector Pass1/Pass2・call_task_planner・call_task_plan_reviewer・call_reviewer・call_reflection・call_facilitator・generate_user_utterance4段階）それぞれのプロンプト本文へ境界説明を追記（read_verified_fact非搭載ノードにはその旨も明記）。新規テスト15件、関連既存と合わせ計1032件で無退行を確認。詳細は[BL-205詳細](#bl-205-read_entityとread_verified_factの役割分担が伝わらず無駄な探索呼び出しが繰り返される)を参照。 | P2 |
 | BL-206 | 中 | `cela_main.py`（`_commit_agreement_from_tool`のUPDATE/edits分岐、`_find_active_deliverable_agreement`、`_apply_text_edits`） | `log/2026-08-10/1905`・`log/2026-08-10/2100`のドライラン精査で、`write_agreement`のUPDATE（edits指定）が同一タスクに対し連続6〜16回失敗する事例をそれぞれ1件ずつ発見。表面上はBL-193（記憶で継ぎ足したold_textが窓の外へドリフトする）の再発に見えたが、実DB（`cela.db`のwhiteboard_drafts）に残る当該run・当該versionの実データと突き合わせたところ、失敗したold_text（144文字・14文字等）は**version=1の保存内容へ一字一句正確に、しかも直前の`read_whiteboard_excerpt`が`match_type: exact`で発見できている文言だった**。にもかかわらず`_apply_text_edits`は「緩い一致も0件」で失敗し、エラーメッセージに添えるはずの近傍スニペット（`_nearest_content_snippet`、cela_main.py:6108）が**完全に空文字**だった。同関数の実装上、空スニペットは比較対象の`content`自体が空文字のときにしか発生しない。つまり実際の不具合は「old_textの引用ミス」ではなく、**edit照合に渡された「現在のホワイトボード内容」がその時点で空文字だった**ことを示している。2件とも最終的にはBL-080のSUPERSEDE（全文置換）へExpertが自律的に切り替えて成功しており、BL-076/193のような回答不能までの完全な膠着には至っていないが、2100ログでは12回の無駄な`write_agreement`呼び出し（約15分、tool_iter予算の相当部分）を空費した。`_commit_agreement_from_tool`のUPDATE分岐（cela_main.py:3062以降）を読むと、`_find_active_deliverable_agreement`が対象のDeliverable agreementを見つけられなかった場合に`old_content`が空文字のまま初期化された値を使い続け、`is_whiteboard = old_content.startswith("WHITEBOARD:")`がFalseとなって`base_content = old_content`（空文字）を編集対象にしてしまう経路が疑わしいが、当該run・当該時点のDB上は`_find_active_deliverable_agreement`が対象を発見できるはずの条件（status≠Superseded、phase_id/task_id一致）を満たしており、なぜこの経路に入ったのかはログ調査だけでは特定できていない。`open`のまま、再現条件を絞る追加調査が必要。詳細は[BL-206詳細](#bl-206-write_agreementのedits照合が実際には空のホワイトボード内容に対して行われ本来一致するはずのold_textが繰り返し不一致になる)を参照。 | P2 |
 | BL-207 | 高 | `cela_main.py`（`call_detector`のuser向け`role_specific_instruction`、BL-181節） | ユーザーの依頼で`log/2026-08-10/2100`（ライブ中のドライラン）のtask_2_3→task_3_1移行の膠着を調査。DBを確認すると該当issue（`winter_vehicle_capex_conflict`）は`defer_to_task_id=task_3_1`が既に設定済みだったにもかかわらず、Userが承認・移行を試みるたびにDetectorが`constraint_issue=major`（BL-181名指し）で差し戻しを繰り返し、ラウンド31から36以上にわたり同じサイクル（承認→差し戻し→撤回→Expertがほぼ同内容を再提出→minor判定→再度承認→また差し戻し）が続いていたことを発見。原因は、`write_issue(DEFER)`が仕様上`status`を`'escalated'`のまま変更せず`defer_to_task_id`のみを記録する設計（BL-136）に対し、実際の遷移をブロックする機械的ゲート（`_get_blocking_issues_for_transition`、BL-125/158）は`defer_to_task_id`の有無を正しく見て先送り済みissueを除外しているのに、**Detector自身のLLM判定に渡すBL-181のプロンプト指示だけが`defer_to_task_id`を一切見ず、`status='escalated'`の残存だけを根拠にし、しかも「今回の発言内で」RESOLVE/DEFERが実行されたことを要求していた**こと。DEFERは一度実行すれば恒久的に記録が残るのに、承認を試みるたびに同じラウンド内での再実行を求める基準になっており、機械的ゲート（正しい）とDetectorの自然文判定（過剰に厳しい）が矛盾し、無限ループを生んでいた。BL-076/BL-193（BL-202/D-176）と同型の「同じ規則を複数箇所に書いた結果、一方だけ更新漏れが起きる」パターン。**実装完了（`done`）**：BL-181の指示文を、`defer_to_task_id`が（いつ設定されたかに関わらず）既に設定済みであれば正式に先送り済みとみなし`major`としないよう修正。`defer_to_task_id`が未設定のまま残るissueがある場合のみ、従来通り`major`で差し戻す。新規テスト`tests/test_bl207_defer_gate_ignores_prior_round.py`5件、既存の`test_bl181_task_transition_block_stops_orchestrator.py`・`test_bl183_task_transition_block_severe_issue_flag.py`を含め無退行、オフライン全テストスイート1037件通過。詳細は[BL-207詳細](#bl-207-bl-181のdetectorプロンプトがdefer_to_task_id設定済みのissueにも毎ラウンド再deferを要求し無限に差し戻し続ける)を参照。 | P1 |
+| BL-208 | 低 | `web_tools.py`（`_MAX_FETCH_BYTES`定数） | ユーザーが「web検索のpdfが2MBに引っかかることがしばしばある」と報告し、「5MB〜10MB程度まで増やしてください」と定数変更を承認（AGENTS.md §7）。政府・自治体配布のPDF一次資料はページ数・図表が多く2MBを超える例が実運用で頻発していた。**実装完了（`done`）**：`_MAX_FETCH_BYTES`を2MB→8MB（要求範囲5〜10MBの中間値）へ変更。HTML/PDF共通の上限であり、この定数を参照する`tests/test_bl184_web_tools.py`のサイズ上限拒否テストは`web_tools._MAX_FETCH_BYTES`を動的参照しているため無改修で追随、47件通過。`python -m py_compile`合格。 | P3 |
 
 ---
 
@@ -6610,6 +6611,32 @@ BL-181のプロンプト指示を、`defer_to_task_id`が（いつ設定され�
 時点で新しい文言が使われる）。ただし調査時点でライブだった`log/2026-08-10/2100`の
 プロセス自体は既に起動済みのため、修正の効果はそのプロセスの次回Detector呼び出しで
 確認する必要がある。
+
+---
+
+### BL-208: web_fetchのコンテンツサイズ上限（2MB）に政府・自治体PDFがしばしば抵触する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P3 |
+| 関連 | BL-184（`_MAX_FETCH_BYTES`の新設）、BL-188（PDF許可の追加） |
+
+**内容:**
+
+ユーザーが「次にweb検索のpdfですが、2MBに引っかかることがしばしばあるようです」と報告し、
+「5MB〜10MB程度まで増やしてください」と定数変更を承認した（AGENTS.md §7の定数変更手続、
+ユーザー明示承認）。`web_tools.py`の`_MAX_FETCH_BYTES`（BL-184で新設、`fetch_and_extract`
+がHTML/PDF共通で用いるダウンロード時の生バイト列サイズ上限）は2MBに設定されており、
+政府・自治体配布のPDF一次資料はページ数・図表が多く、これを超える例が実運用で頻発して
+いた。
+
+**実装完了（`done`）**：
+
+`_MAX_FETCH_BYTES`を2MB→8MB（ユーザー指定の5〜10MBの中間値）へ変更した。この定数を
+参照する`tests/test_bl184_web_tools.py`のサイズ上限拒否テストは`web_tools._MAX_FETCH_BYTES`
+を動的に参照する実装（ハードコード値との比較ではない）のため無改修で追随し、同ファイル
+47件通過。`python -m py_compile`合格。
 
 ---
 
