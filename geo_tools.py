@@ -53,9 +53,34 @@ def _throttle_gsi() -> None:
 
 _GSI_GEOCODE_URL = "https://msearch.gsi.go.jp/address-search/AddressSearch"
 
+# [BL-203] 返却titleに現れる「地点まで特定できた」ことを示すトークン。
+# GSI住所検索APIは**住所ジオコーダであり施設（POI）ジオコーダではない**。施設名を含む
+# クエリを投げても施設名は完全に無視され、住所部分だけで解決した結果が返る。
+# 実測（2026-08-10、log/2026-08-10/0901の事故調査時に確認）:
+#   "長野県茅野市豊平 長野大学"           -> title="長野県茅野市豊平"      (36.008595, 138.295898)
+#   "長野県茅野市豊平 公立諏訪東京理科大学" -> title="長野県茅野市豊平"      (36.008595, 138.295898) 同一
+#   "長野県茅野市豊平"                    -> title="長野県茅野市豊平"      (36.008595, 138.295898) 同一
+#   "長野県茅野市豊平5000-1"              -> title="長野県茅野市豊平５０００番地" (36.009003, 138.184799)
+# 大字止まりの場合に返るのは**大字の代表点**であり、大字が山側へ広がる地域では施設の実位置と
+# 数km・標高で数百m離れる。0901では豊平の代表点の標高1,475m（GSI実測値そのものではある）を
+# 大学の標高として採用してしまい、平地の施設が「山間部・冬季高リスク・初期対象外」と誤判定
+# され、設計判断そのものが誤った前提の上に乗った。
+# ハルシネーションが「実測値」として洗浄されるため、推測値より危険度が高い。
+_GSI_PRECISE_TITLE_TOKENS = ("番地", "丁目", "番", "号")
+
+
+def _classify_geocode_precision(title: str) -> str:
+    """[BL-203] 返却titleから解決粒度を判定する。番地・丁目まで含んでいれば地点、
+    含んでいなければ大字（町丁目より粗い区画）の代表点。クエリ文字列との突き合わせでは
+    なくtitle自体を見るのは、APIが実際に何を解決したかを示す唯一の客観的な手掛かりが
+    titleだからである（クエリ側の施設名は無視されるため比較材料にならない）。"""
+    return "point" if any(t in title for t in _GSI_PRECISE_TITLE_TOKENS) else "area_centroid"
+
 
 def gsi_geocode_handler(args: dict, state: dict, config: dict) -> dict:
-    """[BL-198] `gsi_geocode`ツールのハンドラ。住所文字列から緯度経度候補を取得する。"""
+    """[BL-198] `gsi_geocode`ツールのハンドラ。住所文字列から緯度経度候補を取得する。
+    [BL-203] 施設名では解決できない（住所ジオコーダである）ため、返却titleの粒度を
+    判定し、大字止まりの場合は警告を必ず添える。"""
     query = (args.get("query") or "").strip()
     if not query:
         return {"status": "error", "message": "queryは必須です。"}
@@ -74,12 +99,34 @@ def gsi_geocode_handler(args: dict, state: dict, config: dict) -> dict:
     results = []
     for f in features[:5]:
         coords = (f.get("geometry") or {}).get("coordinates") or [None, None]
+        title = (f.get("properties") or {}).get("title", "")
         results.append({
-            "title": (f.get("properties") or {}).get("title", ""),
+            "title": title,
             "lon": coords[0],
             "lat": coords[1],
+            # [BL-203] "point"=番地・丁目まで解決した地点。"area_centroid"=大字の代表点。
+            "precision": _classify_geocode_precision(title),
         })
-    return {"results": results}
+
+    response: dict = {"results": results}
+    # [BL-203] 先頭候補が大字止まりなら、黙って粗い座標を返さず必ず警告する。
+    # 「施設名を入れたのに無視された」ことはtitleを見れば分かるが、0901では
+    # Expertがtitleを読まずに施設の位置として採用したため、明示的に注意を返す。
+    if results and results[0]["precision"] == "area_centroid":
+        response["warning"] = (
+            f"【重要】このAPIは住所ジオコーダであり、施設名（病院名・学校名・駅名等）では位置を"
+            f"特定できません。施設名を含めても無視され、住所部分だけで解決されます。"
+            f"返却された座標は「{results[0]['title']}」という区画の代表点であり、"
+            f"特定の施設の位置ではありません。区画が広い場合、実際の施設とは数km、"
+            f"標高で数百m離れることがあります（この座標をgsi_get_elevationや距離計算へ"
+            f"そのまま渡すと、実測値の形をした誤った数値になります）。"
+            f"施設の位置が必要な場合は、まずweb_search／read_goal_reference／"
+            f"read_reference_fileでその施設の**番地までの住所**を確認し、"
+            f"住所そのもの（例：「長野県茅野市豊平5000-1」）をqueryに指定し直してください。"
+            f"住所が確認できない場合、この座標を施設の位置として使わず、"
+            f"位置未確認として扱ってください。"
+        )
+    return response
 
 
 # ---------------------------------------------------------------------------

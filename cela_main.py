@@ -17,6 +17,7 @@ import uuid
 import hashlib
 import unicodedata
 import difflib
+import math  # [BL-204] verify_entity_geoの座標乖離の概算に使用
 import ast
 import subprocess
 import threading
@@ -977,6 +978,132 @@ READ_REFERENCE_FILE_TOOL = {
 # をrun単位の呼び出し回数制限を消費せずに読む。web_searchより先に確認することで、既に
 # キャッシュ済みの事実（施設住所・座標等）の再検索によるweb_search予算の浪費を防ぐ。
 # 設計: docs/design/back_log/issue_backlog.md BL-199。
+# [BL-204] 実世界事物レジストリのツール4本。
+# 設計: docs/design/back_log/BL-204/BL204_basic_design.md
+# 説明文はドメイン非依存の一般的表現で書く（ユーザー決定3。特定ゴール向けの記述を
+# システム側プロンプトへ焼き付けないというBL-196で確立した規律）。
+REGISTER_ENTITY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "register_entity",
+        "description": (
+            "Register a real-world thing (a place, organization, service, facility, route, "
+            "product ... anything with a proper name) that appears in this project but was NOT "
+            "in the goal statement -- e.g. something you legitimately discovered via web_search. "
+            "Things named in the goal statement are ALREADY registered at run start; do not "
+            "re-register them. [BL-204] citations are REQUIRED here: if you are introducing a "
+            "name that the goal statement does not contain, you must be able to say where you "
+            "found it. Returns the entity_id to use with write_entity_attribute."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "canonical_name": {"type": "string", "description": "The thing's name, exactly as written in your source."},
+                "entity_type": {"type": "string", "description": "Free-form category, e.g. 'place', 'organization', 'service', 'facility'."},
+                "citations": {
+                    "type": "array",
+                    "description": "Where you found this thing. Same shape as write_agreement citations.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["web", "goal_text", "prior_agreement", "expert_calculation", "user_input", "document"]},
+                            "detail": {"type": "string"},
+                        },
+                    },
+                },
+            },
+            "required": ["canonical_name", "entity_type", "citations"],
+        },
+    },
+}
+
+WRITE_ENTITY_ATTRIBUTE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "write_entity_attribute",
+        "description": (
+            "Record one fact about one registered thing (its address, a coordinate, a count, a "
+            "capacity, a schedule ... attribute names are entirely up to you). [BL-204] This is "
+            "the durable store for facts about named things -- prefer it over re-deriving the "
+            "same fact every round, and over burying a table of facts inside prose. "
+            "The thing must already be registered: goal-statement things are registered at run "
+            "start, and anything else must go through register_entity first. If you pass a name "
+            "that is not registered, this returns did_you_mean candidates -- that usually means "
+            "you used a remembered or abbreviated name instead of the one in the goal statement. "
+            "confidence is 'confirmed' or 'provisional' only; express 'this is an engineering "
+            "assumption I derived' with citations type='expert_calculation', not with confidence."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "entity": {"type": "string", "description": "The thing's registered name (use the goal statement's exact wording)."},
+                "attr_name": {"type": "string", "description": "Free-form attribute name, e.g. 'address', 'coordinates', 'elevation_m'."},
+                "value": {"type": "string", "description": "The value."},
+                "unit": {"type": "string", "description": "Unit if applicable, e.g. 'm', '人'."},
+                "confidence": {"type": "string", "enum": ["confirmed", "provisional"], "default": "provisional"},
+                "reason": {"type": "string", "description": "How you obtained or derived this value."},
+                "citations": {
+                    "type": "array",
+                    "description": "Sources. REQUIRED when confidence='confirmed'.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["web", "goal_text", "prior_agreement", "expert_calculation", "user_input", "document"]},
+                            "detail": {"type": "string"},
+                        },
+                    },
+                },
+            },
+            "required": ["entity", "attr_name", "value"],
+        },
+    },
+}
+
+READ_ENTITY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_entity",
+        "description": (
+            "Read a registered thing together with ALL of its recorded attributes (each with its "
+            "own source and confidence). Call with no 'entity' to list every thing registered in "
+            "this project. [BL-204] Use this INSTEAD of reconstructing facts from memory or from "
+            "the deliverable text -- the registry is the source of truth and the deliverable is "
+            "the presentation of it. There is deliberately no attribute-name filter: you always "
+            "get everything, so you never have to guess an attribute's exact spelling."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "entity": {"type": "string", "description": "The thing's registered name. Omit to list all registered things."},
+                "entity_type": {"type": "string", "description": "When listing, optionally filter by category."},
+            },
+        },
+    },
+}
+
+VERIFY_ENTITY_GEO_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "verify_entity_geo",
+        "description": (
+            "[BL-204] Audit check for things that have BOTH an 'address' and a 'coordinates' "
+            "attribute: re-geocodes the stored address and reports how far it lands from the "
+            "stored coordinates. Use it when a thing's elevation or distance looks off. "
+            "A large gap means the stored coordinates are probably a district centroid rather "
+            "than the actual place, which makes every elevation and distance derived from them a "
+            "real measurement of the wrong location -- the hardest kind of error to spot, because "
+            "the measurement itself is genuine. Returns not_applicable if the thing has no address."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "entity": {"type": "string", "description": "The thing's registered name."},
+            },
+            "required": ["entity"],
+        },
+    },
+}
+
 READ_GOAL_REFERENCE_TOOL = {
     "type": "function",
     "function": {
@@ -1012,15 +1139,33 @@ GSI_GEOCODE_TOOL = {
     "function": {
         "name": "gsi_geocode",
         "description": (
-            "Look up latitude/longitude candidates for a Japanese address string, using the "
+            "Look up latitude/longitude candidates for a Japanese ADDRESS string, using the "
             "official Geospatial Information Authority of Japan (GSI) address search API "
-            "(no API key required). Returns up to 5 {title, lat, lon} candidates. Use this "
-            "instead of guessing coordinates from memory or from a web_search snippet."
+            "(no API key required). Returns up to 5 {title, lat, lon, precision} candidates. Use "
+            "this instead of guessing coordinates from memory or from a web_search snippet. "
+            "[BL-203] CRITICAL: this is an ADDRESS geocoder, NOT a place/POI search. Facility "
+            "names (hospitals, schools, stations) in your query are SILENTLY IGNORED -- querying "
+            "'<district> <facility name>' returns exactly the same coordinates as '<district>' "
+            "alone, namely the centroid of that district, which can be kilometres away and "
+            "hundreds of metres different in elevation from the facility itself. You MUST pass a "
+            "street address down to the banchi (e.g. '長野県茅野市豊平5000-1'), not a facility "
+            "name. Look the address up first (read_goal_reference / read_reference_file / "
+            "web_search) if you do not know it. Check the returned 'precision' field: 'point' "
+            "means it resolved to an actual address point; 'area_centroid' means it only resolved "
+            "to a district and the coordinates are NOT a specific place -- do not feed those into "
+            "gsi_get_elevation or distance calculations, because the result would be a real "
+            "measurement of the wrong location."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Japanese address string to geocode."},
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Japanese street address, down to the banchi if possible "
+                        "(e.g. '長野県茅野市豊平5000-1'). NOT a facility name -- facility names are ignored."
+                    ),
+                },
             },
             "required": ["query"],
         },
@@ -1553,6 +1698,195 @@ def _read_verified_fact_handler(args: dict) -> dict | list:
             message += f" もしかして次のvariable_nameではありませんか: {', '.join(suggestions)}"
         return {"status": "not_found", "message": message, "did_you_mean": suggestions}
     return results
+
+
+# ---------------------------------------------------------------------------
+# [BL-204] 実世界事物レジストリのツールハンドラ
+# ---------------------------------------------------------------------------
+
+def _register_entity_handler(args: dict, state: dict | None = None) -> dict:
+    """[BL-204] `register_entity`ハンドラ。ゴール文に無い事物（web_search等で正当に
+    発見したもの）を`origin='discovered'`として登録する。
+    [CONSTRAINT] alias引数は持たない。モデルが自由にaliasを追加できると、未登録名を拒否する
+    同一性ガードがそこから抜けるため（設計書§2.4、Clineレビュー指摘・軽4）。"""
+    conn = get_active_conn()
+    run_id = _CURRENT_RUN_ID
+    canonical_name = (args.get("canonical_name") or "").strip()
+    entity_type = (args.get("entity_type") or "").strip() or "unknown"
+    citations = args.get("citations") or []
+    if not canonical_name:
+        return {"status": "error", "message": "canonical_nameは必須です。"}
+    # [BL-204] discovered事物は出典必須。ゴール文に無い名前を持ち込む以上、
+    # どこで見つけたのかを示せない登録は認めない（BL-188のcitations方針と同じ考え方）。
+    if not citations:
+        return {"status": "error",
+                "message": "ゴール文に無い事物を登録するには、citations（出典）が必須です。"
+                           "web_search/web_fetch/read_goal_reference等で確認した出典を添えてください。"}
+    existing = resolve_entity(conn, run_id, canonical_name)
+    if existing:
+        return {"status": "already_registered", "entity_id": existing["entity_id"],
+                "canonical_name": existing["canonical_name"], "origin": existing["origin"]}
+    try:
+        entity_id = register_entity_in_db(conn, run_id, canonical_name, entity_type,
+                                          origin="discovered", created_by=_CURRENT_CALLER_ROLE)
+    except ValueError as e:
+        return {"status": "error", "message": str(e)}
+    print(f"  🗂️ [BL-204] 事物を登録しました（discovered）: {canonical_name}（{entity_type}）")
+    return {"status": "registered", "entity_id": entity_id, "origin": "discovered"}
+
+
+def _write_entity_attribute_handler(args: dict, state: dict | None = None) -> dict:
+    """[BL-204] `write_entity_attribute`ハンドラ。未登録の事物名は`did_you_mean`付きで
+    拒否する（`_read_verified_fact_handler`の返却形式に揃える）。これが
+    log/2026-08-10/0901の「長野大学」を止める同一性ガードの実体。"""
+    conn = get_active_conn()
+    run_id = _CURRENT_RUN_ID
+    name = (args.get("entity") or "").strip()
+    attr_name = (args.get("attr_name") or "").strip()
+    if not name or not attr_name:
+        return {"status": "error", "message": "entityとattr_nameは必須です。"}
+    if "value" not in args:
+        return {"status": "error", "message": "valueは必須です。"}
+
+    ent = resolve_entity(conn, run_id, name)
+    if not ent:
+        suggestions = suggest_similar_entities(conn, run_id, name)
+        return {
+            "status": "unknown_entity",
+            "message": f"'{name}' はこの課題に登録された事物ではありません。"
+                       f"ゴール文に登場する事物はrun開始時に登録済みです。"
+                       f"ゴール文の表記をそのまま使ってください。"
+                       f"web_search等で新たに発見した事物であれば、先にregister_entityで"
+                       f"出典付きで登録してください。",
+            "did_you_mean": suggestions,
+        }
+
+    confidence = (args.get("confidence") or "provisional").strip()
+    if confidence not in _ENTITY_CONFIDENCE_VALUES:
+        return {"status": "error",
+                "message": f"confidenceは{list(_ENTITY_CONFIDENCE_VALUES)}のいずれかです。"
+                           f"工学的仮定・導出値であることは、confidenceではなく"
+                           f"citationsのtype=\"expert_calculation\"で表してください。"}
+    citations = args.get("citations") or []
+    # [BL-204] confirmedを名乗るなら出典が要る（BL-041「暫定値を確定扱いにしない」の延長）。
+    if confidence == "confirmed" and not citations:
+        return {"status": "error",
+                "message": "confidence=\"confirmed\"にはcitations（出典）が必須です。"
+                           "出典を示せない場合はconfidence=\"provisional\"にしてください。"}
+
+    is_new_attr = upsert_entity_attribute(
+        conn, run_id, ent["entity_id"], attr_name, args.get("value"),
+        args.get("unit", "") or "", confidence, citations, args.get("reason", "") or "",
+        _task_id_from(state), _phase_id_from(state), _CURRENT_CALLER_ROLE,
+    )
+    result = {"status": "ok", "entity_id": ent["entity_id"],
+              "canonical_name": ent["canonical_name"], "attr_name": attr_name}
+    if is_new_attr:
+        # [BL-204] 新しい属性名を作ったときだけ既存一覧を返し、表記ゆれによる
+        # 重複作成（coordinates と coordinate が併存する等）に気づけるようにする
+        # （設計書§2.4、Clineレビュー指摘・軽3）。
+        existing_names = [
+            r["attr_name"] for r in conn.execute(
+                "SELECT attr_name FROM entity_attributes WHERE run_id=? AND entity_id=? "
+                "ORDER BY attr_name", (run_id, ent["entity_id"])
+            ).fetchall()
+        ]
+        result["created_new_attribute"] = True
+        result["all_attribute_names"] = existing_names
+        result["note"] = ("新しい属性名を作成しました。同じ意味の属性が別名で既に存在しないか、"
+                          "all_attribute_namesを確認してください。")
+    return result
+
+
+def _read_entity_handler(args: dict, state: dict | None = None) -> dict:
+    """[BL-204] `read_entity`ハンドラ。事物と**全属性**を返す。
+    [CONSTRAINT] attr_name指定の絞り込みは提供しない。属性名が完全に自由である以上、
+    読み取り側で名前を推測させると表記ゆれで空振りするため、推測が発生しない形にする
+    （設計書§2.4、Clineレビュー指摘・軽3）。"""
+    conn = get_active_conn()
+    run_id = _CURRENT_RUN_ID
+    name = (args.get("entity") or "").strip()
+    if not name:
+        return {"entities": list_entities_from_db(conn, run_id, (args.get("entity_type") or "").strip())}
+    ent = resolve_entity(conn, run_id, name)
+    if not ent:
+        return {"status": "not_found",
+                "message": f"'{name}' はこの課題に登録された事物ではありません。",
+                "did_you_mean": suggest_similar_entities(conn, run_id, name)}
+    full = get_entity_with_attributes(conn, run_id, ent["entity_id"])
+    return full or {"status": "not_found", "message": "属性の取得に失敗しました。"}
+
+
+def _verify_entity_geo_handler(args: dict, state: dict | None = None) -> dict:
+    """[BL-204] `verify_entity_geo`ハンドラ（Detector向け）。事物に保存された住所を
+    再ジオコーディングし、保存座標と突き合わせる。BL-203で追加した`precision`と併用し、
+    「誤った場所の正しい実測値」（大字の代表点を施設の位置として採用した状態）を
+    機械的に検出する。住所と座標の両方を持つ事物にのみ適用できる。"""
+    conn = get_active_conn()
+    run_id = _CURRENT_RUN_ID
+    name = (args.get("entity") or "").strip()
+    if not name:
+        return {"status": "error", "message": "entityは必須です。"}
+    ent = resolve_entity(conn, run_id, name)
+    if not ent:
+        return {"status": "not_found",
+                "message": f"'{name}' はこの課題に登録された事物ではありません。",
+                "did_you_mean": suggest_similar_entities(conn, run_id, name)}
+    full = get_entity_with_attributes(conn, run_id, ent["entity_id"]) or {}
+    attrs = {a["attr_name"]: a["value"] for a in full.get("attributes", [])}
+
+    address = ""
+    for key in ("address", "住所"):
+        if attrs.get(key):
+            address = attrs[key]
+            break
+    if not address:
+        return {"status": "not_applicable",
+                "message": "この事物には住所（address）属性が無いため、座標の照合はできません。"}
+
+    geo = geo_tools.gsi_geocode_handler({"query": address}, state or {}, _tool_config(state))
+    if "results" not in geo or not geo["results"]:
+        return {"status": "error", "message": f"住所の再ジオコーディングに失敗しました: {geo}"}
+    top = geo["results"][0]
+    out = {
+        "status": "checked", "entity": ent["canonical_name"], "address": address,
+        "geocoded": {"title": top.get("title"), "lat": top.get("lat"), "lon": top.get("lon"),
+                     "precision": top.get("precision")},
+    }
+    if "warning" in geo:
+        out["warning"] = geo["warning"]
+
+    stored = attrs.get("coordinates") or attrs.get("座標") or ""
+    if not stored:
+        out["note"] = ("この事物にはcoordinates属性が無いため比較できませんでした。"
+                       "上記geocodedの結果を座標として記録できます。")
+        return out
+    # 保存座標は "35.99, 138.15" のような自由書式なので、数値2つを機械的に取り出す
+    nums = re.findall(r"-?\d+\.?\d*", str(stored))
+    if len(nums) < 2:
+        out["note"] = f"保存されたcoordinates（{stored}）から緯度経度を読み取れませんでした。"
+        return out
+    try:
+        s_lat, s_lon = float(nums[0]), float(nums[1])
+    except ValueError:
+        out["note"] = f"保存されたcoordinates（{stored}）を数値化できませんでした。"
+        return out
+    # 緯度1度≒111km。概算で十分（乖離が数km規模かどうかを見たいだけ）。
+    dlat_km = abs(s_lat - float(top["lat"])) * 111.0
+    dlon_km = abs(s_lon - float(top["lon"])) * 111.0 * math.cos(math.radians(s_lat))
+    gap_km = math.hypot(dlat_km, dlon_km)
+    out["stored_coordinates"] = {"lat": s_lat, "lon": s_lon}
+    out["gap_km"] = round(gap_km, 3)
+    if gap_km > 1.0:
+        out["verdict"] = "mismatch"
+        out["message"] = (
+            f"保存座標と、保存住所を引き直した座標が約{gap_km:.1f}km離れています。"
+            f"保存座標が施設の位置ではなく区画の代表点である可能性が高く、"
+            f"この座標から得た標高・距離は「誤った場所の正しい実測値」になっている恐れがあります。"
+        )
+    else:
+        out["verdict"] = "consistent"
+    return out
 
 
 def _resolve_deliverable_pointer(task_id: str, topic_keyword: str) -> str | None:
@@ -2412,6 +2746,33 @@ def _revise_goal_tool_impl(args: dict, conn: sqlite3.Connection, run_id: str, ca
             _marked_count += 1
         if _marked_count:
             print(f"  🧭 [BL-168] ゴール改定に伴い、承認済み過去タスクのverified_facts {_marked_count}件へ整合性未確認の警告を付記しました。")
+
+        # [BL-204] entity_attributesもverified_factsと同じ性質（UPSERTで上書きされない限り
+        # 「現在の確定値」として返り続ける）を持つため、BL-168と同じ扱いを適用する。
+        # 新しい扱いを発明せず先例へ揃える（設計書§6決定4）。valueは過去の事実として
+        # 正しいので改変せず、reasonへ警告を付記するだけに留めるのも同じ。
+        _attr_rows = conn.execute(
+            f"SELECT entity_id, attr_name, source_task_id, reason FROM entity_attributes "
+            f"WHERE run_id=? AND source_task_id IN ({_placeholders})",
+            (run_id, *_flagged_task_ids),
+        ).fetchall()
+        _marked_attrs = 0
+        for _row in _attr_rows:
+            _old_reason = _row["reason"] or ""
+            if _old_reason.startswith(_stale_marker):
+                continue
+            _new_reason = (
+                f"{_stale_marker}このtask_id（{_row['source_task_id']}）で記録した属性は"
+                f"ゴール改定（Escalation {escalation_id}）前の前提に基づいています。"
+                f"無条件に信頼せず、整合性を再確認してください。\n{_old_reason}"
+            )
+            conn.execute(
+                "UPDATE entity_attributes SET reason=? WHERE run_id=? AND entity_id=? AND attr_name=?",
+                (_new_reason, run_id, _row["entity_id"], _row["attr_name"]),
+            )
+            _marked_attrs += 1
+        if _marked_attrs:
+            print(f"  🧭 [BL-204] ゴール改定に伴い、entity_attributes {_marked_attrs}件へ整合性未確認の警告を付記しました。")
 
     return {
         "success": True, "escalation_id": escalation_id,
@@ -3765,6 +4126,50 @@ def _schedule_task_focus_tool_impl(args: dict, conn: sqlite3.Connection, run_id:
     return {"success": False, "error": f"未知のdecision_type: {decision_type}"}
 
 
+# [BL-201→BL-203] 呼び出し回数上限・参照ディレクトリのような「会話の履歴ではなく実行時設定」を、
+# チェックポイントに保存された古い値ではなく常に現在のAppConfigから供給するための上書き辞書。
+#
+# BL-201は「resume時にローカルのstateを書き換える」実装だったが、ラウンド途中で中断したrunでは
+# `app.stream(None, ...)`が呼ばれ、そのローカルstateがLangGraphへ渡らないため一切効かなかった
+# （log/2026-08-10/0901で、web_searchが50ではなく30、calc_road_routeが30ではなく20のまま動作）。
+# これらの値を実際に読むのはツールハンドラの`config`引数だけなので、ここで注入すれば
+# LangGraphのチェックポイント意味論（中断中のpending tasks）に一切触れずに済む。
+# カウンタ側（web_search_call_count等）はrunの実消費実績なのでstateに置いたまま上書きしない。
+_RUNTIME_TOOL_LIMITS: dict = {}
+
+_RUNTIME_TOOL_LIMIT_KEYS = (
+    "max_web_search_calls",
+    "max_web_fetch_calls",
+    "max_road_route_calls",
+    "goal_reference_dir",
+)
+
+
+def _resume_config_overrides_from(config: dict) -> dict:
+    """[BL-203] AppConfigから実行時設定4フィールドを取り出す（既定値はLineageState初期化と同値）。"""
+    return {
+        "max_web_search_calls": config.get("max_web_search_calls", 30),
+        "max_web_fetch_calls": config.get("max_web_fetch_calls", 30),
+        "max_road_route_calls": config.get("max_road_route_calls", 30),
+        "goal_reference_dir": config.get("goal_reference_dir", ""),
+    }
+
+
+def set_runtime_tool_limits(config: dict) -> None:
+    """[BL-203] run開始時（新規・resumeとも）に呼び、以後のツール呼び出しへ現在のconfigの
+    実行時設定を供給する。"""
+    global _RUNTIME_TOOL_LIMITS
+    _RUNTIME_TOOL_LIMITS = _resume_config_overrides_from(config)
+
+
+def _tool_config(state: dict | None) -> dict:
+    """[BL-203] ツールハンドラへ渡す`config`引数。stateの内容（カウンタ・run_id等）を土台に、
+    実行時設定だけを現在のAppConfig由来の値で上書きした**新しい辞書**を返す。
+    [CONSTRAINT] 返り値はコピーなので、ハンドラがここへ書き込んでもstateには反映されない。
+    カウンタを加算するハンドラには必ず本物の`state`を`state`引数として渡すこと。"""
+    return {**(state or {}), **_RUNTIME_TOOL_LIMITS}
+
+
 TOOL_DISPATCH = {
     "python_repl": lambda args, state=None: _run_python_repl(args),
     "read_verified_fact": lambda args, state=None: _read_verified_fact_handler(args),
@@ -3807,15 +4212,21 @@ TOOL_DISPATCH = {
     # 初期化ブロック参照）。TOOL_DISPATCH統一シグネチャは(args, state)の2引数しか渡さないため、
     # web_tools側の`config`引数にもstateをそのまま渡す（state/configを分離運搬する新しい配線を
     # 増やさず、既存のmax_turns等と同じ「state自身に上限値を持たせる」パターンを踏襲する）。
-    "web_search": lambda args, state=None: web_tools.web_search_handler(args, state or {}, state or {}),
-    "web_fetch": lambda args, state=None: web_tools.web_fetch_handler(args, state or {}, state or {}),
+    "web_search": lambda args, state=None: web_tools.web_search_handler(args, state or {}, _tool_config(state)),
+    "web_fetch": lambda args, state=None: web_tools.web_fetch_handler(args, state or {}, _tool_config(state)),
     "read_reference_file": lambda args, state=None: web_tools.read_reference_file_handler(args, state or {}),
-    "read_goal_reference": lambda args, state=None: web_tools.read_goal_reference_handler(args, state or {}),
+    "read_goal_reference": lambda args, state=None: web_tools.read_goal_reference_handler(args, _tool_config(state)),
+    # [BL-204] 実世界事物レジストリ。conn/run_idはモジュールレベル変数から取得するため
+    # （_read_verified_fact_handler等と同じ）、stateはtask_id/phase_idの解決にのみ使う。
+    "register_entity": lambda args, state=None: _register_entity_handler(args, state),
+    "write_entity_attribute": lambda args, state=None: _write_entity_attribute_handler(args, state),
+    "read_entity": lambda args, state=None: _read_entity_handler(args, state),
+    "verify_entity_geo": lambda args, state=None: _verify_entity_geo_handler(args, state),
     # [BL-198] 地理データ実測ツール。web_search/web_fetchと同型に、stateをstate/config兼用で渡す。
-    "gsi_geocode": lambda args, state=None: geo_tools.gsi_geocode_handler(args, state or {}, state or {}),
-    "gsi_get_elevation": lambda args, state=None: geo_tools.gsi_get_elevation_handler(args, state or {}, state or {}),
-    "gsi_calc_distance_bearing": lambda args, state=None: geo_tools.gsi_calc_distance_bearing_handler(args, state or {}, state or {}),
-    "calc_road_route": lambda args, state=None: geo_tools.calc_road_route_handler(args, state or {}, state or {}),
+    "gsi_geocode": lambda args, state=None: geo_tools.gsi_geocode_handler(args, state or {}, _tool_config(state)),
+    "gsi_get_elevation": lambda args, state=None: geo_tools.gsi_get_elevation_handler(args, state or {}, _tool_config(state)),
+    "gsi_calc_distance_bearing": lambda args, state=None: geo_tools.gsi_calc_distance_bearing_handler(args, state or {}, _tool_config(state)),
+    "calc_road_route": lambda args, state=None: geo_tools.calc_road_route_handler(args, state or {}, _tool_config(state)),
 }
 
 # BL-033: 直前のquery_AI呼び出しでLLMが実際に実行したpython_replの(code, result)記録。
@@ -4896,6 +5307,46 @@ def init_db(conn: sqlite3.Connection) -> None:
         timestamp REAL, run_id TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_scheduling_drafts_run ON scheduling_drafts(run_id);
+
+    -- [BL-204] 実世界事物レジストリ。verified_factsが「変数名→値」の平坦なストアなのに対し、
+    -- こちらは「名前を持つ実世界の事物」を一級市民として保持する。log/2026-08-10/0901で、
+    -- ゴール文に`公立諏訪東京理科大学`とあるのにExpertが記憶から「長野大学」（実在するが
+    -- 無関係な大学）と書き、ゴール文由来の学生数だけを流用する事故が起きた。数値は
+    -- verified_factsにあったが**名称そのものが事実として登録されていなかった**ため、
+    -- すり替わりを検出する対象が存在しなかったことが原因。
+    -- 設計: docs/design/back_log/BL-204/BL204_basic_design.md
+    CREATE TABLE IF NOT EXISTS entities (
+        run_id TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        canonical_name TEXT NOT NULL,   -- 正典表記（ゴール文の表記をそのまま）
+        entity_type TEXT NOT NULL,      -- "place"/"organization"/"service"等、自由
+        aliases TEXT DEFAULT '[]',      -- [BL-204] v1はゴール文初期登録のみが設定する
+        origin TEXT NOT NULL,           -- "goal_text" | "discovered"
+        created_by TEXT, created_at REAL,
+        PRIMARY KEY (run_id, entity_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_entities_run ON entities(run_id);
+
+    -- [BL-204] 事物の属性。attr_nameは完全に自由（対象・要件により可変）だが、出典封筒
+    -- （value/unit/confidence/citations/reason/source_task_id）は必須とする。構造化の価値は
+    -- 属性名の統制ではなく「1属性ごとに出典と確度が付くこと」にあるため。
+    -- [CONSTRAINT] confidenceはverified_factsと同じ confirmed|provisional の2値のみ。
+    -- 「工学的仮定」は citations[].type="expert_calculation" で表す（確定度と出所は直交する
+    -- 2軸であり、confidenceへassumptionを足すのは語彙の二重化になる。BL204設計書§2.1.1）。
+    CREATE TABLE IF NOT EXISTS entity_attributes (
+        run_id TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        attr_name TEXT NOT NULL,
+        value TEXT NOT NULL,
+        unit TEXT DEFAULT '',
+        confidence TEXT DEFAULT 'provisional',
+        citations TEXT DEFAULT '[]',
+        reason TEXT DEFAULT '',
+        source_task_id TEXT, source_phase_id TEXT,
+        confirmed_by TEXT, confirmed_at REAL,
+        PRIMARY KEY (run_id, entity_id, attr_name)
+    );
+    CREATE INDEX IF NOT EXISTS idx_entity_attributes_run ON entity_attributes(run_id, entity_id);
     """)
     _ensure_agreements_task_id_column(conn)
     _ensure_agreements_citations_column(conn)
@@ -5997,6 +6448,165 @@ def suggest_similar_verified_facts(conn: sqlite3.Connection, run_id: str, query:
                 if v not in matched_vars:
                     matched_vars.append(v)
     return matched_vars[:limit]
+
+
+# ---------------------------------------------------------------------------
+# [BL-204] 実世界事物レジストリ（entities / entity_attributes）
+# 設計: docs/design/back_log/BL-204/BL204_basic_design.md
+# ---------------------------------------------------------------------------
+
+# [BL-204] confidenceはverified_factsと同じ2値のみ（設計書§2.1.1）。「工学的仮定」は
+# citations[].type="expert_calculation"で表す——確定度（どれだけ動かないか）と出所
+# （どこから来たか）は直交する2軸であり、confidenceへassumptionを足すと語彙が二重化する。
+_ENTITY_CONFIDENCE_VALUES = ("confirmed", "provisional")
+
+
+def _entity_id_from_name(canonical_name: str) -> str:
+    """[BL-204] 正典名から安定した内部IDを作る。日本語名は英数字化できないため、
+    「名前のハッシュ」ではなく正規化した名前そのものをIDに使う（DBのPRIMARY KEYとしては
+    十分で、ログに出たときに人間が読めるという利点がある）。空白・記号のみ落とす。"""
+    return re.sub(r"[\s　]+", "", canonical_name).strip()
+
+
+def register_entity_in_db(conn: sqlite3.Connection, run_id: str, canonical_name: str,
+                          entity_type: str, origin: str, created_by: str,
+                          aliases: list[str] | None = None) -> str:
+    """[BL-204] 事物を登録し entity_id を返す。既存なら上書きせずそのまま返す（冪等）。
+    [CONSTRAINT] aliasesを設定してよいのはゴール文初期登録（origin='goal_text'）のみ。
+    モデルからのalias入力を受け付けると、未登録名を拒否する同一性ガードがそこから
+    抜けてしまうため（設計書§2.4、Clineレビュー指摘・軽4）。"""
+    entity_id = _entity_id_from_name(canonical_name)
+    if not entity_id:
+        raise ValueError("canonical_nameが空です。")
+    existing = conn.execute(
+        "SELECT entity_id FROM entities WHERE run_id=? AND entity_id=?", (run_id, entity_id)
+    ).fetchone()
+    if existing:
+        return entity_id
+    conn.execute(
+        "INSERT INTO entities (run_id, entity_id, canonical_name, entity_type, aliases, "
+        "origin, created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        (run_id, entity_id, canonical_name, entity_type,
+         json.dumps(aliases or [], ensure_ascii=False), origin, created_by, time.time()),
+    )
+    conn.commit()
+    return entity_id
+
+
+def resolve_entity(conn: sqlite3.Connection, run_id: str, name_or_id: str) -> dict | None:
+    """[BL-204] entity_id・正典名・aliasのいずれかで事物を引く。見つからなければNone。"""
+    key = _entity_id_from_name(name_or_id)
+    row = conn.execute(
+        "SELECT * FROM entities WHERE run_id=? AND (entity_id=? OR canonical_name=?)",
+        (run_id, key, name_or_id),
+    ).fetchone()
+    if row:
+        return dict(row)
+    # aliasは件数が少ない（runあたり数十件）ため素直に走査する
+    for r in conn.execute("SELECT * FROM entities WHERE run_id=?", (run_id,)).fetchall():
+        try:
+            aliases = json.loads(r["aliases"] or "[]")
+        except json.JSONDecodeError:
+            aliases = []
+        if name_or_id in aliases or key in [_entity_id_from_name(a) for a in aliases]:
+            return dict(r)
+    return None
+
+
+def suggest_similar_entities(conn: sqlite3.Connection, run_id: str, query: str,
+                             limit: int = 3) -> list[str]:
+    """[BL-204] 未登録名が渡されたときに正典名の候補を提示する。
+    `suggest_similar_verified_facts`（BL-187）と同じ`difflib.get_close_matches`方式を
+    踏襲する（同関数はverified_factsテーブル固定のため直接は流用できない）。
+    新規依存は追加しない。"""
+    if not query:
+        return []
+    rows = conn.execute(
+        "SELECT canonical_name FROM entities WHERE run_id=?", (run_id,)
+    ).fetchall()
+    names = [r["canonical_name"] for r in rows]
+    if not names:
+        return []
+    close = difflib.get_close_matches(query, names, n=limit, cutoff=0.4)
+    if close:
+        return close
+    # 近似一致が無い場合でも、登録済み一覧そのものを提示した方がモデルは復帰しやすい
+    return names[:limit]
+
+
+def upsert_entity_attribute(conn: sqlite3.Connection, run_id: str, entity_id: str,
+                            attr_name: str, value, unit: str, confidence: str,
+                            citations: list | None, reason: str,
+                            source_task_id: str, source_phase_id: str,
+                            confirmed_by: str) -> bool:
+    """[BL-204] 属性を保存し、「新規属性名だったか」を返す（Trueなら新規作成）。
+    返り値を使って、呼び出し元が既存属性名一覧をレスポンスへ添える
+    （属性名の表記ゆれによる重複作成を抑止する。設計書§2.4、Clineレビュー指摘・軽3）。"""
+    existing = conn.execute(
+        "SELECT attr_name FROM entity_attributes WHERE run_id=? AND entity_id=? AND attr_name=?",
+        (run_id, entity_id, attr_name),
+    ).fetchone()
+    conn.execute(
+        "INSERT INTO entity_attributes (run_id, entity_id, attr_name, value, unit, confidence, "
+        "citations, reason, source_task_id, source_phase_id, confirmed_by, confirmed_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(run_id, entity_id, attr_name) DO UPDATE SET value=excluded.value, "
+        "unit=excluded.unit, confidence=excluded.confidence, citations=excluded.citations, "
+        "reason=excluded.reason, source_task_id=excluded.source_task_id, "
+        "source_phase_id=excluded.source_phase_id, confirmed_by=excluded.confirmed_by, "
+        "confirmed_at=excluded.confirmed_at",
+        (run_id, entity_id, attr_name, str(value), unit, confidence,
+         json.dumps(citations or [], ensure_ascii=False), reason,
+         source_task_id, source_phase_id, confirmed_by, time.time()),
+    )
+    conn.commit()
+    return existing is None
+
+
+def get_entity_with_attributes(conn: sqlite3.Connection, run_id: str, entity_id: str) -> dict | None:
+    """[BL-204] 事物と**全属性**を返す。attr_name指定の絞り込みは提供しない——属性名が
+    完全に自由である以上、読み取り側で名前を推測させると表記ゆれで空振りするため、
+    そもそも推測が発生しない形にする（設計書§2.4）。1事物あたり数〜十数属性で
+    全件返してもコストは無視できる。"""
+    ent = conn.execute(
+        "SELECT * FROM entities WHERE run_id=? AND entity_id=?", (run_id, entity_id)
+    ).fetchone()
+    if not ent:
+        return None
+    result = dict(ent)
+    try:
+        result["aliases"] = json.loads(result.get("aliases") or "[]")
+    except json.JSONDecodeError:
+        result["aliases"] = []
+    attrs = conn.execute(
+        "SELECT * FROM entity_attributes WHERE run_id=? AND entity_id=? ORDER BY attr_name",
+        (run_id, entity_id),
+    ).fetchall()
+    result["attributes"] = []
+    for a in attrs:
+        d = dict(a)
+        try:
+            d["citations"] = json.loads(d.get("citations") or "[]")
+        except json.JSONDecodeError:
+            d["citations"] = []
+        result["attributes"].append(d)
+    return result
+
+
+def list_entities_from_db(conn: sqlite3.Connection, run_id: str,
+                          entity_type: str = "") -> list[dict]:
+    """[BL-204] 事物の一覧（属性は含めない軽量版）。"""
+    if entity_type:
+        rows = conn.execute(
+            "SELECT entity_id, canonical_name, entity_type, origin FROM entities "
+            "WHERE run_id=? AND entity_type=? ORDER BY canonical_name", (run_id, entity_type)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT entity_id, canonical_name, entity_type, origin FROM entities "
+            "WHERE run_id=? ORDER BY canonical_name", (run_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -7263,12 +7873,46 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     )
 
     system_prompt += (
+        "\n【BL-204: 課題に登場する事物の事実はレジストリで管理する】\n"
+        "この課題に登場する事物（固有の名前を持つ実世界の対象——施設・場所・組織・路線・"
+        "制度・サービス等、種類は問いません）についての事実は、read_entity／"
+        "write_entity_attributeで読み書きしてください。**レジストリが真実の源であり、"
+        "成果物本文はその提示**です。事物の事実を、記憶や成果物本文からの再構成で"
+        "組み立てないでください（同じ事実を毎ラウンド取り直して、前回より劣化した値に"
+        "置き換わる事故が実際に起きています）。\n"
+        "1. 事実を書く前に、まずread_entityでその事物に既に何が記録されているかを確認する。\n"
+        "2. 判明した事実はwrite_entity_attributeで記録する。属性名は自由ですが、"
+        "**値には必ずcitations（出典）とconfidenceを添えてください**。"
+        "confidenceは\"confirmed\"（他タスクと突き合わせても動かない）と\"provisional\"の2値です。"
+        "「自分で導出した工学的仮定である」ことは、confidenceではなく"
+        "citationsのtype=\"expert_calculation\"で表してください（確定度と出所は別の軸です）。\n"
+        "3. **事物の名称は、ゴール文に書かれた表記をそのまま使ってください。**"
+        "記憶による言い換え・略称・類似名を使わないでください。ゴール文に登場する事物は"
+        "run開始時に登録済みであり、未登録の名前を渡すと候補付きで差し戻されます。"
+        "ゴール文に無い事物をweb_search等で新たに発見した場合のみ、register_entityで"
+        "出典を添えて登録してください。\n"
+    )
+
+    system_prompt += (
         "\n【BL-198: 実測できる地理データは実測する】\n"
         "地点の標高、2点間の直線距離、住所の緯度経度、道路距離・所要時間は、専用ツール"
         "（gsi_geocode→gsi_get_elevation／gsi_calc_distance_bearing／calc_road_route）で"
         "実際に取得できます。これらを記憶からの推測やweb_searchスニペットの間接的な言及で"
         "代用せず、専用ツールの実測値を使ってください（住所しか分からない場合は、まず"
-        "gsi_geocodeで緯度経度を得てから他のツールへ渡します）。ただしgsi_calc_distance_bearing"
+        "gsi_geocodeで緯度経度を得てから他のツールへ渡します）。\n"
+        "[BL-203: gsi_geocodeには必ず「番地までの住所」を渡す] gsi_geocodeは住所ジオコーダで"
+        "あり、施設検索ではありません。施設名（病院名・学校名・駅名等）を入れても**完全に無視**"
+        "され、住所部分だけで解決されます（「◯◯町 △△病院」と「◯◯町」は同じ座標を返します）。"
+        "大字止まりで解決すると、返るのはその区画の代表点であり、区画が山側へ広がる地域では"
+        "施設の実位置と数km・標高で数百m離れます。その座標をgsi_get_elevationや距離計算へ渡すと、"
+        "**誤った場所の正しい実測値**という最も気づきにくい誤りになります。したがって、"
+        "拠点の座標が必要な場合は、まずread_goal_reference／read_reference_file／web_searchで"
+        "その施設の番地までの住所を確認し、住所そのものをqueryに指定してください。"
+        "返却されたprecisionが\"area_centroid\"の場合、その座標を施設の位置として使わず、"
+        "位置未確認として扱ってください（\"point\"なら地点まで解決できています）。"
+        "また、拠点の名称はゴール文に書かれた表記をそのまま使い、記憶で別名・類似名に"
+        "言い換えないでください。\n"
+        "ただしgsi_calc_distance_bearing"
         "が返すのは直線距離であり道路距離ではありません——山間部の道路では実際の距離・所要時間を"
         "大きく過小評価します。道路距離・所要時間が必要な場合はcalc_road_routeを使い、直線距離を"
         "道路距離として提示しないでください。なお、これらのツールで取得できない種類のデータ"
@@ -7547,8 +8191,17 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "（他タスクの制約とまだ突き合わせが済んでいないため）。\n"
         "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
         "read_project_plan・write_agreement・escalate_premise_concern・ask_user_question・"
-        "web_search・web_fetch・read_reference_file・read_goal_reference・gsi_geocode・"
+        "web_search・web_fetch・read_reference_file・read_goal_reference・register_entity・write_entity_attribute・read_entity・gsi_geocode・"
         "gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・thinkです。\n"
+        "[BL-204: 課題に登場する事物の事実はレジストリで管理する] 固有の名前を持つ実世界の"
+        "対象（施設・場所・組織・路線・サービス等）についての事実は、read_entityで確認し"
+        "write_entity_attributeで記録してください。レジストリが真実の源であり、成果物本文は"
+        "その提示です。記憶や本文からの再構成で事実を組み立てないでください。値には必ず"
+        "citations（出典）とconfidence（confirmed/provisional の2値）を添えてください"
+        "——工学的仮定であることはcitationsのtype=\"expert_calculation\"で表します。"
+        "**事物の名称はゴール文の表記をそのまま使い**、記憶による言い換え・略称を使わないで"
+        "ください（未登録の名前は候補付きで差し戻されます）。ゴール文に無い事物を新たに"
+        "発見した場合のみ、register_entityで出典を添えて登録してください。\n"
         "[BL-198: 実測できる地理データは実測する] 地点の標高、2点間の直線距離、住所の緯度経度、"
         "道路距離・所要時間は、上記の専用ツール（gsi_geocode→gsi_get_elevation／"
         "gsi_calc_distance_bearing／calc_road_route）で実際に取得できます。これらを推測したり、"
@@ -7558,6 +8211,12 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "提示しないでください。なお、これらのツールで取得できない種類のデータ（例：道路区間単位の"
         "積雪・凍結の実測記録）まで実測値で揃えようとする必要はありません。取得できない項目は"
         "公的情報の定性的な参照と、根拠を明記した工学的仮定で扱ってください。\n"
+        "[BL-203: gsi_geocodeには必ず「番地までの住所」を渡す] gsi_geocodeは住所ジオコーダで"
+        "あり施設検索ではありません。施設名を入れても無視され、大字止まりで解決するとその区画の"
+        "代表点が返ります（施設の実位置と数km・標高で数百m離れることがあります）。その座標を"
+        "gsi_get_elevationや距離計算へ渡すと「誤った場所の正しい実測値」になります。番地までの"
+        "住所を先に確認してからqueryに指定し、返却precisionが\"area_centroid\"なら施設の位置と"
+        "して使わないでください。拠点名はゴール文の表記をそのまま使い、記憶で言い換えないこと。\n"
         "[BL-188] あなた自身の学習知識から導き出した回答や思考も、必ずしも正確であるとは限らず、"
         "最新の情勢（法令・相場・規制等）を反映しているとも限りません。ゴール文にない現実世界の"
         "事実（地理・費用相場・法規制等）が必要な場合は、記憶からの推測で済ませず、必ずweb_search"
@@ -7637,7 +8296,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     _CURRENT_TASK_ID = state.get("current_task_id", "")
     _reset_think_scratchpad()  # [BL-093]
     return query_AI(messages, client=client_expert, model=model_expert, label=f"Expert:{expert_name}",
-                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)
+                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, REGISTER_ENTITY_TOOL, WRITE_ENTITY_ATTRIBUTE_TOOL, READ_ENTITY_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)
 
 
 #def call_detector(goal: str, user_input: str, expert_output: str, decisions: list[Decision], current_phase: dict) -> dict:
@@ -7966,9 +8625,25 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"ください。ただし、これらのツールで取得できない種類のデータ（例：道路区間単位の積雪・"
         f"凍結の実測記録）が実測値で示されていないことを理由にmajorとしないでください——それらは"
         f"公的情報の定性的な参照と、根拠を明記した工学的仮定で扱われていれば妥当です。\n\n"
+        f"[BL-204: 成果物の事実をレジストリと突き合わせる] この課題に登場する事物"
+        f"（固有の名前を持つ実世界の対象）についての事実は、read_entityでレジストリの記録を"
+        f"取得できます。成果物本文に書かれた値がレジストリの記録と食い違っていないか、"
+        f"レジストリに無い事実が根拠なく本文へ現れていないかを確認してください。"
+        f"特に、**ゴール文に登場しない事物名が成果物に現れている場合**は重点確認対象です"
+        f"（記憶による言い換えで、実在するが無関係な対象の情報を引き込んでいる恐れがあります）。"
+        f"また、住所と座標の両方が記録されている事物は、verify_entity_geoで住所を引き直して"
+        f"座標の妥当性を検算できます。\n\n"
+        f"[BL-203: 拠点の名称と座標の由来を確認する] 実測値は「正しい場所を測った」場合にのみ"
+        f"正しく、誤った座標を測れば「誤った場所の正しい実測値」になります。これは推測値より"
+        f"気づきにくいため、次の2点を重点確認してください。①**拠点の名称がゴール文の表記と"
+        f"一致しているか**（記憶による別名・類似名への言い換えは、実在する別の施設の情報を"
+        f"引き込む原因になります）。②**座標がその施設の住所から得られたものか**"
+        f"（gsi_geocodeは住所ジオコーダで施設名を無視するため、「◯◯町 △△病院」で引くと"
+        f"大字の代表点が返ります。標高が周辺の市街地と不自然に食い違う拠点があれば、"
+        f"番地までの住所でgsi_geocodeを引き直して照合してください）。\n\n"
         f"【重要】あなたが使えるツールはread_verified_fact・read_deliverable_file・"
         f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・"
-        f"web_search・web_fetch・read_reference_file・read_goal_reference・gsi_geocode・"
+        f"web_search・web_fetch・read_reference_file・read_goal_reference・read_entity・verify_entity_geo・gsi_geocode・"
         f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
         f"{_get_frozen_agreements_text(get_active_conn(), state['run_id'])}"
@@ -8012,7 +8687,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
     _reset_think_scratchpad()  # [BL-093]
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
         domain_prompt, client=client_detector_domain, model=model_detector_domain, label="Detector (Domain Review)",
-        tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, THINK_TOOL],
+        tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, THINK_TOOL],
         fallback={"constraint_issue": "none", "comment": "", "target_excerpt": "", "observations": ""},
         state=state,
     )
@@ -8137,9 +8812,19 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"Agentが式へ投入した前提数値そのものが実態と合っているかを照合してください。特に、"
         f"直線距離（gsi_calc_distance_bearing）を道路距離として使っていないかは重点確認項目です"
         f"（山間部では道路距離が直線距離を大きく上回るため、所要時間・SLA判定が楽観側へ歪みます）。\n\n"
+        f"[BL-204: 検算対象の前提値をレジストリと突き合わせる] 式へ投入されている前提値が、"
+        f"事物についての事実である場合（施設の位置・規模・数量等）、read_entityでレジストリの"
+        f"記録と一致しているかを確認してください。レジストリの記録と食い違う値、あるいは"
+        f"レジストリに存在しない事物名が使われている場合は、それ自体をconstraint_issueの"
+        f"根拠にしてください。住所と座標を持つ事物はverify_entity_geoで検算できます。\n\n"
+        f"[BL-203: 座標そのものの妥当性を疑う] 実測値は「正しい場所を測った」場合にのみ正しく、"
+        f"誤った座標を測れば「誤った場所の正しい実測値」になります。gsi_geocodeは住所ジオコーダで"
+        f"あり施設名を無視するため、施設名で引くと大字の代表点（実位置と数km・標高で数百m違う）が"
+        f"返ります。拠点の標高が周辺の市街地と不自然に食い違う場合、拠点名がゴール文の表記と"
+        f"一致しているかを確認し、番地までの住所でgsi_geocodeを引き直して座標を照合してください。\n\n"
         f"【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
         f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・"
-        f"web_search・web_fetch・read_reference_file・read_goal_reference・gsi_geocode・"
+        f"web_search・web_fetch・read_reference_file・read_goal_reference・read_entity・verify_entity_geo・gsi_geocode・"
         f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
 
@@ -8192,7 +8877,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_detector_numeric, model=model_detector_numeric, label="Detector",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, THINK_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, THINK_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
         state=state,
     )
     if parse_failed:
@@ -10092,6 +10777,89 @@ def call_goal_essence_analyst(goal: str, state: dict | None = None) -> dict:
     return parsed
 
 
+def seed_entities_from_goal(goal: str, run_id: str, state: dict | None = None) -> dict:
+    """[BL-204] ゴール文に登場する事物をレジストリへ初期登録する。
+
+    **本設計の中核**は、抽出結果をそのまま信用せず、`canonical_name`が**ゴール文中に
+    文字列として実在すること**を機械的に検証する点にある。この部分一致判定は客観的で
+    LLMの主観を必要とせず、これ1つで`log/2026-08-10/0901`の「長野大学」
+    （ゴール文には`公立諏訪東京理科大学`とあるのにExpertが記憶から書いた実在の別大学）は
+    `origin='goal_text'`としては登録され得なくなる。
+
+    抽出そのものはLLMに任せる（ゴール文の書式は課題ごとに自由であり、機械的な固有表現
+    抽出は形態素解析器等の新規依存を必要とするため。AGENTS.md依存追加最小化方針）。
+    抽出が漏れても、Expertが`register_entity`で`origin='discovered'`として補える。
+    """
+    conn = get_active_conn()
+    # [BL-204] 冪等ガード。resumeや計画再構成で再入場しても再抽出しない（LLM呼び出しの
+    # 節約と二重登録の防止。task_plan_reviewer_nodeのplan_review_done等と同型の考え方）。
+    already = conn.execute(
+        "SELECT COUNT(*) AS c FROM entities WHERE run_id=? AND origin='goal_text'", (run_id,)
+    ).fetchone()
+    if already and already["c"] > 0:
+        return {"registered": [], "rejected": [], "skipped": True}
+
+    prompt = f"""
+    以下の絶対目標の本文に登場する「事物」（固有の名前を持つ実世界の対象）を洗い出してください。
+
+    ■ 絶対目標:
+    {goal}
+
+    【抽出の指針】
+    - 対象は、固有の名前を持つ実世界の対象です。施設・場所・組織・団体・路線・制度・
+      サービス・製品など、種類は問いません。
+    - 一般名詞（「高齢者」「市街地」「バス」等の総称）は対象外です。固有の名前を持つものだけを
+      挙げてください。
+    - **名称は、ゴール文に書かれている表記をそのまま、一字一句変えずに写してください。**
+      省略形・通称・あなたの記憶による言い換えを使わないでください。ゴール文の表記と
+      1文字でも異なる名称は、この後の機械的な照合で棄却されます。
+    - entity_typeは分類の目安です（place / organization / service / facility / route など、
+      適切と思う語を自由に付けてください）。
+
+    Return ONLY JSON:
+    {{"entities": [{{"canonical_name": "（ゴール文中の表記のまま）", "entity_type": "（分類）"}}]}}
+    """
+    global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    _CURRENT_CALLER_ROLE = "entity_registrar"
+    _CURRENT_TASK_ID = ""
+    _reset_think_scratchpad()
+    parsed, parse_failed = _query_and_parse_with_retry(
+        prompt, client=client_task_planner, model=model_task_planner,
+        label="Entity Registrar (BL-204)", tools=[THINK_TOOL],
+        fallback={"entities": []}, state=state,
+    )
+    if parse_failed:
+        print("🚨 [BL-204] 事物抽出のJSON取得に失敗しました。初期登録をスキップします"
+              "（Expertがregister_entityで補えるため、runは継続します）。")
+        return {"registered": [], "rejected": [], "skipped": False}
+
+    registered: list[str] = []
+    rejected: list[str] = []
+    for e in (parsed.get("entities") or []):
+        if not isinstance(e, dict):
+            continue
+        name = (e.get("canonical_name") or "").strip()
+        etype = (e.get("entity_type") or "unknown").strip() or "unknown"
+        if not name:
+            continue
+        # [BL-204][SAFETY] 正典名チェック。ゴール文に実在しない名称は登録しない。
+        if name not in goal:
+            rejected.append(name)
+            continue
+        try:
+            register_entity_in_db(conn, run_id, name, etype, origin="goal_text",
+                                  created_by="entity_registrar")
+            registered.append(name)
+        except ValueError:
+            rejected.append(name)
+
+    if registered:
+        print(f"  🗂️ [BL-204] ゴール文から事物を{len(registered)}件登録しました: {registered}")
+    if rejected:
+        print(f"  ⛔ [BL-204] ゴール文に実在しない名称のため登録を棄却しました: {rejected}")
+    return {"registered": registered, "rejected": rejected, "skipped": False}
+
+
 def goal_essence_node(state: LineageState) -> LineageState:
     """[BL-087 Stage3] グラフの新しいentry_point。task_planner_nodeより前に1回だけ発火し、
     本質フェーズの結果をgoal_essenceテーブルへ保存する。goal_essence_doneはチェックポイント
@@ -10151,6 +10919,15 @@ Sets the starting phase for subsequent execution steps within the lineage state.
         # 保存済みの本質テキストを取得できる（ユーザー指摘：注入漏れ、9消費者リストは
         # BL-086由来でtask_planner/task_plan_reviewerは含まれていなかった）。
         goal_essence_text = _get_goal_essence_text(get_active_conn(), state["run_id"])
+
+        # [BL-204] タスク分解より前に、ゴール文に登場する事物をレジストリへ初期登録する。
+        # ここに置くのは、acceptance_criteria/owns_variablesが事物を参照できるようにするため。
+        # 専用ノードを新設せずtask_planner内で行うのはユーザー判断（設計書§6決定1）——
+        # BL-201/BL-203で「resume経路だけ挙動が違う」事故を続けて経験しており、
+        # build_graphのトポロジーを触らない方が再発リスクが低いため。
+        # seed_entities_from_goal自身が冪等ガードを持つので、計画再構成で再入場しても
+        # 再抽出しない。
+        seed_entities_from_goal(state["goal"], state["run_id"], state=state)
         old_phases = state.get("phases", []) if revision_reason else []
         phases = call_task_planner(
             state["goal"], reviewer_feedback=reviewer_feedback, goal_essence_text=goal_essence_text, state=state,
@@ -12099,6 +12876,10 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
     try:
         # [BL-105] LangGraphランタイム設定は`config`（Appconfig、関数引数）と名前が衝突するため
         # 必ず`runtime_config`という別名を使う。
+        # [BL-203] 新規run・resumeを問わず、実行時設定（呼び出し回数上限・参照ディレクトリ）は
+        # 常に現在のAppConfigから供給する。チェックポイントに保存された古い値は使わない。
+        set_runtime_tool_limits(config)
+
         pending_resume_drain = False
         if resume_run_id:
             run_id = resume_run_id
@@ -12120,10 +12901,18 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
             # 達しましたを返し続けていた）。会話状態（chat_history/whiteboard等）は上書きせず、
             # この4フィールドのみ現在のconfigの値へ差し替える。カウンタ自体（web_search_call_count
             # 等）はそのrunで実際に消費済みの実績のためリセットしない。
-            state["max_web_search_calls"] = config.get("max_web_search_calls", 30)
-            state["max_web_fetch_calls"] = config.get("max_web_fetch_calls", 30)
-            state["max_road_route_calls"] = config.get("max_road_route_calls", 30)
-            state["goal_reference_dir"] = config.get("goal_reference_dir", "")
+            # [BL-203] BL-201の当初実装はここでローカルの`state`を書き換えるだけだったが、
+            # それでは**ラウンド途中で中断したrunには一切効かない**ことが
+            # log/2026-08-10/0901で判明した（web_searchが50ではなく30、calc_road_routeが
+            # 30ではなく20のまま動いていた）。原因は、snapshot.nextが非空の場合に
+            # `app.stream(None, ...)`を呼ぶ経路（pending_resume_drain、Ctrl+C中断の大半）
+            # では、このローカル`state`がLangGraphへ一切渡らず、グラフはチェックポイントに
+            # 保存された古い値で再開するため。
+            # [REJECTED] app.update_state()でチェックポイントへ書き戻す案は、中断中の
+            # pending tasksを乱してresume自体を壊すリスクがあるため採らない。実行時設定を
+            # 実際に読むのはツールハンドラの`config`引数だけ（_apply_runtime_tool_limits参照）
+            # なので、そこへ注入する方が影響範囲が閉じている。
+            state.update(_resume_config_overrides_from(config))
             db_path = state["db_path"]
             current_turn = state.get("turn_count", 1)
             if checkpoint_id:
@@ -12439,8 +13228,11 @@ if __name__ == "__main__":
 ## 1. 背景と地域データ（公的統計準拠）
 
 ### (1) 社会・交通背景
-- 人口・世帯: 総人口 56,400人（令和2年国勢調査、2020年10月1日時点）。高齢化率30.7%（65歳以上 約17,300人）。参考として、令和5年1月時点の推計人口は55,657人まで減少しており、人口減少と高齢化が同時に進行している。私立から2018年に公立化した理工系大学（公立諏訪東京理科大学）の学生 約1,368人（学部・大学院合計、2025年5月時点）。
-- 既存交通の状況: 令和4年（2022年）10月1日、市内の定時定路線バス13路線が利用者減少・採算悪化を理由に廃止された。現在、市内に定時定路線での路線バス運行は存在しない。
+- 人口・世帯: 総人口 56,400人（令和2年国勢調査、2020年10月1日時点）。高齢化率30.7%（65歳以上 約17,300人）。
+- 参考として、令和5年1月時点の推計人口は55,657人まで減少しており、人口減少と高齢化が同時に進行している。
+- 私立から2018年に公立化した理工系大学（公立諏訪東京理科大学）の学生 約1,368人（学部・大学院合計、2025年5月時点）。
+- 既存交通の状況: 令和4年（2022年）10月1日、市内の定時定路線バス13路線が利用者減少・採算悪化を理由に廃止された。
+- 現在、市内に定時定路線での路線バス運行は存在しない。
 - 移動弱者の急増: 近年、高齢ドライバーの運転免許返納件数が急増。通院や日常の買い物が困難な「移動難民」の増加が深刻な社会問題となっている。
 - デジタルリテラシー: 65歳以上のスマートフォン所有率は約65%に達するが、アプリによる配車予約操作を問題なく行える高齢者は全体の15%程度にとどまり、7割以上の高齢者が電話予約等に頼らざるを得ない。
 
@@ -12478,7 +13270,9 @@ if __name__ == "__main__":
 
 ## 2.5 実例の参照について
 
-本市には既存の代替交通サービスの実例が存在する可能性がある。web_searchでそうした実例を発見すること自体は制約されない。ただし、実例の運行本数・車両台数・運賃・人員体制等の具体的な運用数値をそのまま本計画の数値として転記してはならない。実例は「このような設計が現実的に成立し得るか」という妥当性の参考にのみ使用し、本計画の数値は必ず上記1・2で与えられた本課題固有の制約（予算・需要データ・距離・SLA）から独自に算出すること。
+本市には既存の代替交通サービスの実例が存在する可能性がある。web_searchでそうした実例を発見すること自体は制約されない。
+ただし、実例の運行本数・車両台数・運賃・人員体制等の具体的な運用数値をそのまま本計画の数値として転記してはならない。
+実例は「このような設計が現実的に成立し得るか」という妥当性の参考にのみ使用し、本計画の数値は必ず上記1・2で与えられた本課題固有の制約（予算・需要データ・距離・SLA）から独自に算出すること。
 
 ---
 
@@ -12502,9 +13296,9 @@ if __name__ == "__main__":
         # 再検索し、30回/runの上限を使い果たしていたことが判明。read_goal_reference導入後も、
         # 参照データに無い項目（施設の郵便番号住所等）は正当にweb_searchが必要になるため、
         # 上限自体も30→50へ緩和する（ユーザー承認済み、AGENTS.md §7）。
-        "max_web_search_calls": 50,
-        "max_web_fetch_calls": 30,
-        "max_road_route_calls": 30,
+        "max_web_search_calls": 100,
+        "max_web_fetch_calls": 100,
+        "max_road_route_calls": 100,
         "goal_reference_dir": "docs/refs/chino_city",
     }
 

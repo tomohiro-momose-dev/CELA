@@ -235,6 +235,7 @@
 | BL-201 | 高 | `cela_main.py`（`run_ai_vs_ai_loop`のresume分岐、`state = snapshot.values`直後の4フィールド再同期） | BL-199/200実装後もユーザーが「web_searchの呼び出し上限（30回/run）に達しました。50回に緩和しませんでしたか？」と報告。調査の結果、新しいログ`log/2026-08-09/2313`はBL-199実装前から続く`run_id=1786246233-0d2e0184`への`--resume`であり、resume分岐がチェックポイントのstateをそのまま復元するのみで現在の`config`引数（緩和後の`max_web_search_calls=50`等）を一切再同期していなかったことが真因と判明。BL-197で発見した「チェックポイント巻き戻しがcela.db側を巻き戻さない」問題の逆方向（config変更側がresume済みstateへ反映されない）に相当する。**実装完了（`done`）**：resume分岐で`state = snapshot.values`の直後に、呼び出し回数上限3種（`max_web_search_calls`/`max_web_fetch_calls`/`max_road_route_calls`）と`goal_reference_dir`を現在の`config`の値へ明示的に再同期する処理を追加（会話履歴は上書きせず、実行時設定のみ）。新規テスト1件（`tests/test_checkpoint_resume.py`、既存の`_FakeCompiledGraph`スタブパターンを再利用）。**運用上の注意**：この修正はコード側のみのため、既に起動済みのプロセスには反映されない。プロセスを再起動して改めて`--resume`する必要がある。詳細は[BL-201詳細](#bl-201---resumeしたrunのstateがresume時点のconfig変更呼び出し回数上限等を一切反映しない)を参照。 | P1 |
 | BL-202 | 高 | `cela_main.py`（`_query_AI_live`のリトライループ、`call_expert`の差し戻しブロック2箇所、`_build_task_scope_context`の編集方針、`WRITE_AGREEMENT_TOOL`/`READ_WHITEBOARD_EXCERPT_TOOL`のスキーマ、`_apply_text_edits`のエラーメッセージ） | ユーザーが`log/2026-08-09/2348`（`task_1_1`が20ラウンド以上Rejectedを繰り返した回）の膠着理由の調査を依頼。Reflection自身はBL-191に基づき正しく「正当なブロッキングでありstagnantではない」と判定しており、停滞判定の不具合ではなかった。実ログ精査により2つの独立した機械的原因が判明。**原因A**：`_query_AI_live`がAPIリトライを使い切ると`"(サーバー高負荷によるAPIエラー)"`という固定文字列を返し、これがExpertの発言としてDetectorへ渡って却下されるため、**Expertが1文字も編集していないのにラウンドと版番号だけが消費される**空転が、確認できたDetector指摘7件中4件で発生していた。**原因B**：edits失敗が58回発生し、その全てが`edits[0]`（1件目で失敗し後続は未評価）。失敗したold_textは節見出しからDetector注釈ブロックまでを含む数千字規模で、`read_whiteboard_excerpt`の窓の外側を記憶で補って再構成していた。根本原因は、BL-076が「**注釈行ごと含めて**old_textに入れよ」と指示し、BL-193が「**注釈ブロックを巻き込むな**」と指示する**相互矛盾がプロンプト内に同時に存在**していたこと（Expertは前者に忠実に従い後者に違反していた）。**実装完了（`done`）**：①リトライループを`while`化し、プレースホルダー返却の前に`loop_messages`（思考ログ全履歴）を保持したまま**ノードをやり直す**分岐を追加（`_MAX_NODE_REDO_ON_API_EXHAUSTION=2`・`_NODE_REDO_COOLDOWN_SECONDS=180`、AGENTS.md §7の新規定数としてユーザー承認待ち。BL-171の日次上限即時停止経路が手前に残ることをテストで固定）。②BL-076側の旧指示を撤回し、本文修正と注釈削除を別々のeditsへ分けるBL-193整合の指示へ置換（両プロンプト経路）。③編集方針を「推奨」から手順の明示へ強化：**必ず**read_whiteboard_excerptで現在の文字列を取得→**1箇所ずつ**修正→old_textは最短にし`（中略）`/`（以下省略）`の先は含めない。④複数箇所の矛盾を指摘された場合は、見出しではなく**問題の文言そのもの**をkeywordに`match_count`で残り箇所を確認し全箇所を直す。⑤不一致エラーメッセージへold_textの実文字数と具体的な次の手順3点を追加。新規テスト`tests/test_bl202_edit_reliability_and_node_redo.py`14件、関連既存テストと合わせ計53件で無退行を確認。詳細は[BL-202詳細](#bl-202-サーバーエラーのプレースホルダー応答によるラウンド空転とdetector注釈を巻き込んだ巨大old_textによるedits失敗の連鎖)を参照。 | P1 |
 | BL-203 | 高 | `geo_tools.py`（`_classify_geocode_precision`新設・`gsi_geocode_handler`の警告）、`cela_main.py`（`GSI_GEOCODE_TOOL`スキーマ、Expert/Detector両経路のプロンプト、`set_runtime_tool_limits`/`_tool_config`とTOOL_DISPATCH配線）、`docs/refs/gsi_api/api_notes.md` | ユーザーが`log/2026-08-10/0901`で「諏訪中央病院（標高1,239m）と長野大学（標高1,475m）」というハルシネーションを報告。実エンドポイントで再検証した結果、**`gsi_geocode`は住所ジオコーダであり施設名を完全に無視する**ことが判明（BL-198の調査漏れ）。「豊平 長野大学」「豊平 公立諏訪東京理科大学」「豊平」はいずれも同一座標＝大字の代表点を返し、番地まで指定すれば正しい地点が返る。この誤座標を標高APIへ渡すと「**誤った場所の正しい実測値**」（GSI 1m DEM レーザ測量という本物の出典付き）になり、Detectorが同じ座標で検算する限り発見できない。平地の大学（正しくは894.2m）が1,475mとされ「山間部・冬季高リスク・初期対象外」と誤判定され、設計判断が誤った前提に乗った。あわせて、ゴール文に`公立諏訪東京理科大学`と明記されているのにExpertが記憶から「長野大学」（実在するが上田市の無関係な大学）と書き、数値だけ流用していたことも判明。さらに調査中、**BL-201の修正が中断runに一切効いていなかった**ことが判明（`app.stream(None,...)`経路ではローカルstateがLangGraphへ渡らない）。**実装完了（`done`）**：①返却titleに`番地`/`丁目`/`番`/`号`が含まれるかで解決粒度を判定し`precision`として返し、`area_centroid`なら警告必須（座標自体は返し続け、機械的禁止はしない）。クエリではなくtitleを見るのは、施設名が無視される以上titleだけが客観的手掛かりだから。②Expert/Detector両経路へ「必ず番地までの住所を渡す」「`area_centroid`は施設位置として使わない」「拠点名はゴール文の表記をそのまま使う」を追加。③実行時設定を`TOOL_DISPATCH`で注入する方式へ変更（`app.update_state()`案は中断中のpending tasksを乱すリスクのため却下）。④`docs/refs/gsi_api/api_notes.md`へ`[CONSTRAINT]`節を追加。新規テスト19件、関連既存と合わせ160件で無退行を確認。詳細は[BL-203詳細](#bl-203-gsi_geocodeが施設名を無視して大字の代表点を返し誤った場所の正しい実測値が成果物へ混入するおよびbl-201の修正漏れ)を参照。 | P1 |
+| BL-204 | 高 | `cela_main.py`（`entities`/`entity_attributes`スキーマ、`seed_entities_from_goal`、ツール4本、`TOOL_DISPATCH`配線、Expert/Detectorプロンプト4箇所、`_revise_goal_tool_impl`拡張） | ユーザー提案「登場する事物をDBで構造的に管理しなければならない。webでいくらでも情報が取れる分、ハルシネーションリスクが跳ね上がった」を受けて設計。`log/2026-08-10/0901`（BL-203）で、ゴール文に`公立諏訪東京理科大学`とあるのにExpertが記憶から「長野大学」と書いた事故は、数値は`verified_facts`にあったが**名称そのものが事実として登録されていなかった**ことが根本原因と判明。**実装完了（`done`）**：`entities`/`entity_attributes`の2テーブルを新設し、`task_planner`内で（専用ノードは新設せず）ゴール文から事物を抽出し、**ゴール文中に文字列として実在するかを機械的に検証**してから`origin='goal_text'`で登録（これ1つで「長野大学」の登録を客観的に拒否できる）。未登録名への属性書き込みは`did_you_mean`付きで拒否する同一性ガードを実装。属性の出典封筒（confidence/citations/reason等）は`verified_facts`の既存語彙をそのまま踏襲。ツール4本（register_entity/write_entity_attribute/read_entity/verify_entity_geo）をExpert・Detector（Pass1/Pass2）へ配線し、プロンプト誘導はドメイン非依存で追加。独立レビュー（Cline）の指摘4件を実コードと突き合わせて検証し、`confidence`への`assumption`追加（既存の2値方針との自己矛盾）は正当化せず削除、`read_entity`は属性名指定を持たせず全属性を返す形にするなど、指摘の多くを「緩和」ではなく「原因の除去」で解消した。新規テスト31件、関連既存と合わせ191件で無退行を確認。**運用上の注意**：ゴール文からの初期登録はrunが計画未確定の時点でしか発火しないため、既にタスク分解が確定済みのrunを`--resume`しても遡って登録されない（恩恵を受けるには新規run）。詳細は[BL-204詳細](#bl-204-実世界事物レジストリentities-entity_attributesの新設)を参照。 | P1 |
 
 ---
 
@@ -6294,6 +6295,96 @@ Detectorが同じ座標で検算する限り一致してしまい発見できな
 なお実装中、`max_web_search_calls`の値をユーザーが50→100へ調整したことにより、BL-199の
 テストが特定の数値（50）を直接assertしていて失敗した。今後もドライランの実績に応じて
 調整される値のため、テストを「元の30より緩和されていること」の検証へ改めた。
+
+---
+
+### BL-204: 実世界事物レジストリ（entities / entity_attributes）の新設
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | [BL-203](#bl-203-gsi_geocodeが施設名を無視して大字の代表点を返し誤った場所の正しい実測値が成果物へ混入するおよびbl-201の修正漏れ)（本BLの発見契機。名称のすり替わりを機械的に止める側）、[BL-188](#bl-188-全ての情報にソースcitationsを明示させる)（citations封筒の再利用元）、[BL-168](#bl-168-verified_factsテーブルにゴール改定を反映するsupersede機構が一切ない)（ゴール改定時の警告付記を同じ扱いに揃えた先例）、[BL-199](#bl-199-web_searchの前に開発者事前収集の参照データdocsrefsを確認せず同じ事実の再検索で呼び出し上限を使い果たす)（「取得した事実を固定する器が無い」という同根の問題意識） |
+
+**内容:**
+
+BL-203の報告を受けた際、ユーザーが「登場する事物をDBなどで構造的に管理しなければならない。
+既に確定したものをDBに書く仕組みはあるが、構造化されていない。webでいくらでも情報が取れる分、
+ハルシネーションリスクが跳ね上がった」と提案した。
+
+`log/2026-08-10/0901`で、ゴール文に`公立諏訪東京理科大学`と明記されているのにExpertが
+記憶から「長野大学」（実在するが上田市の無関係な大学）と書き、ゴール文由来の学生数だけを
+流用する事故が起きていた。数値は`verified_facts`にあったが、**「公立諏訪東京理科大学」
+という名称そのものはどこにも事実として登録されていなかった**ため、すり替わりを検出する
+対象が存在しなかった。加えて、5拠点分の座標・標高・距離が`key_locations_matrix`という
+1本の巨大な文字列に格納されており、属性ごとの出典・確度が持てず、住所↔座標の機械的な
+整合チェックもできず、`log/2026-08-09/2348`で正しく取れていた値が`0901`で再導出され
+劣化する、という問題が重なっていた。
+
+**設計**：`docs/design/back_log/BL-204/BL204_basic_design.md`（Plan Modeで作成、
+Explore/Plan agentの原文を要約せず全文保存、AGENTS.md §7）。中核は、抽出した事物名が
+**ゴール文中に文字列として実在すること**を機械的に検証する「正典名チェック」——これ1つで
+`origin='goal_text'`としての「長野大学」の登録を客観的に拒否できる。
+
+**独立レビュー（Cline）**を実コードと突き合わせて検証し、指摘4件（`confidence`への
+`assumption`追加が設計方針との自己矛盾、列名`recorded_by`の不整合、`read_entity`の属性名
+表記ゆれ未対策、`aliases`登録経路の未定義）を全て妥当と確認。うち2件は「正当化を書き足す」
+のではなく**原因そのものを除去**する対応を選んだ：`assumption`は削除し（確定度は
+`confidence`の2値、出所は`citations[].type`という直交2軸で表現すれば`verified_facts`が
+既に担っている`expert_calculation`等で十分だったため）、`read_entity`は属性名指定を
+持たせず常に全属性を返す形にした（推測が発生する場面自体を無くす）。
+
+ユーザー決定：①初期登録は専用ノードを新設せず`task_planner`内で行う（BL-201/BL-203で
+「resume経路だけ挙動が違う」事故を続けて経験しており、`build_graph`のトポロジーを
+触らない選択）、②ツールは4本（`register_entity`を独立）、③v1から全事物型を対象とし
+（`place`に限定しない）、プロンプト誘導はBL-196の規律に従いドメイン非依存で書く。
+
+**実装完了（`done`）**：
+
+1. `entities` / `entity_attributes`の2テーブルを新設（`init_db`）。属性名（`attr_name`）は
+   完全に自由だが、出典封筒（`value`/`unit`/`confidence`/`citations`/`reason`/
+   `source_task_id`/`confirmed_by`/`confirmed_at`）は必須。`confidence`は`verified_facts`と
+   同じ`confirmed`/`provisional`の2値のみ。
+2. `task_planner_node`の先頭（既存の初回計画パス／ゴール改定パスの分岐内）で
+   `seed_entities_from_goal`を呼び、ゴール文に登場する事物を抽出→**ゴール文中に文字列として
+   実在するかを検証**→`origin='goal_text'`で登録。冪等ガード（既に`goal_text`起源の登録が
+   あればスキップ）を持ち、resumeでの再抽出・二重登録を防ぐ。抽出のJSON取得に失敗しても
+   runは止めず、Expertが`register_entity`で補える設計とした。
+3. ツール4本：`register_entity`（Expert、`origin='discovered'`固定・citations必須・
+   alias引数なし）、`write_entity_attribute`（Expert、未登録名は`did_you_mean`付きで拒否、
+   新規属性名作成時は既存属性名一覧を返す）、`read_entity`（Expert/Detector、
+   attr_name指定なしで常に全属性を返す）、`verify_entity_geo`（Detector専用、
+   `geo_tools.gsi_geocode_handler`とBL-203の`precision`を再利用し、保存住所の再解決結果と
+   保存座標の乖離をkm単位で算出）。`TOOL_DISPATCH`へ配線し、Expert（1経路）・
+   Detector（Pass1/Pass2の2箇所）のツールリストへ付与。
+4. プロンプト誘導はExpert（system_prompt・light_system_prompt）・Detector（Pass1・Pass2）の
+   計4箇所へドメイン非依存の表現で追加：「事物の事実はレジストリが真実の源、成果物本文は
+   その提示」「事物の名称はゴール文の表記のまま使う（記憶で言い換えない）」
+   「confidenceではなくcitations.type=expert_calculationで工学的仮定を表す」。
+   Detector側は「成果物の事実をレジストリと突き合わせる」「ゴール文に登場しない事物名は
+   重点確認対象」という監査観点。
+5. BL-168の先例（ゴール改定時に`verified_facts`の`reason`へ整合性未確認警告を付記する処理、
+   `_revise_goal_tool_impl`）と同じ扱いを`entity_attributes`にも適用し、新しい扱いを
+   発明しなかった（設計書§6決定4）。
+
+新規テスト`tests/test_bl204_entity_registry.py`（31件）：正典名チェック（0901の実データ
+「長野大学」で回帰）、初期登録の冪等性、抽出失敗時のフェイルセーフ、同一性ガード
+（`did_you_mean`付き拒否）、discovered登録のcitations必須、alias引数の不在、
+`confidence`が2値のみ（`assumption`拒否）・`WRITE_AGREEMENT_TOOL`のenumとの一致、
+`confirmed`のcitations必須・`provisional`は不要、列名が`confirmed_by`であること、
+全属性取得・属性名指定の不在、新規属性名作成時の既存一覧エコーバック、
+`verify_entity_geo`の不一致検出（豊平の大字代表点1,475m相当のズレを実データで回帰）・
+一致判定・住所欠如時のnot_applicable、ゴール改定時の警告付記、配線
+（Expertは書き込み系のみ・Detectorは読み取り＋監査系のみを持つことの相互排他確認）、
+プロンプトのドメイン非依存性（BL-204誘導文に「茅野」「GIS」等のゴール固有語が
+混入していないことを直接検証）。関連の既存テストと合わせて無退行を確認
+（`test_bl203_*`・`test_bl199_*`・`test_bl198_*`・`test_bl184_*`・`test_checkpoint_resume`・
+`test_bl193_*`・`test_bl195_*`の計191件）。`python -m py_compile`合格。
+
+**運用上の注意**：`seed_entities_from_goal`は`task_planner`が計画をまだ確定していない
+タイミング（新規runの初回、またはゴール改定によるplan_revision）でしか発火しない。
+**既にタスク分解が確定済みのrunを`--resume`しても、事物レジストリは遡って初期登録されない**
+（空のまま）。この保護の恩恵を受けるには新規runが必要。
 
 ---
 

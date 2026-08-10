@@ -2493,6 +2493,32 @@
 
 ---
 
+### D-177: 事物の同一性は「ゴール文中に文字列として実在するか」という機械的判定で守り、LLMの主観に委ねない
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | `log/2026-08-10/0901`で、ゴール文に`公立諏訪東京理科大学`とあるのにExpertが記憶から「長野大学」（実在するが無関係な大学）と書いた。数値は`verified_facts`にあったが、名称そのものが事実として登録されていなかったため、すり替わりを検出する対象が存在しなかった。事物を構造化して保存するだけで、この種の名称ハルシネーションを防げるか。 |
+| **決定理由** | 保存形式を構造化しただけでは、登録する名称自体が誤っていればハルシネーションはそのまま器の中に入るだけで防げない。防ぐには、登録の入口で**客観的に検証可能な条件**を課す必要がある。ゴール文に文字列として存在するかどうかは、LLMの主観判断を要さない機械的な部分一致判定であり、これ1つで「長野大学」を`origin='goal_text'`としては登録不能にできる。全面的な新規事物登録の禁止は、web_searchで正当に発見した事物まで書けなくしBL-158型のデッドロックを招くため、`origin`で区別する（禁止ではなく可視化）方針を採る。 |
+| 決定内容 | `task_planner`内の`seed_entities_from_goal`で、抽出した`canonical_name`が絶対目標の本文中に文字列として存在するかを検証し、存在しないものは`origin='goal_text'`として登録しない（`rejected`として報告するのみ）。ゴール文に無い事物は`register_entity`（`origin='discovered'`、citations必須）でのみ登録できる。 |
+| 影響 | `cela_main.py`（`seed_entities_from_goal`・`register_entity_in_db`・`_register_entity_handler`）、`tests/test_bl204_entity_registry.py`。 |
+| 関連 BL | [BL-204](back_log/issue_backlog.md#bl-204-実世界事物レジストリentities-entity_attributesの新設) |
+
+---
+
+### D-178: 事物の属性は`verified_facts`の出典封筒（confidence 2値＋citations.type）をそのまま流用し、新しい語彙（assumption等）は追加しない
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | BL-204設計の初版は、`entity_attributes.confidence`を`confirmed`/`provisional`/`assumption`の3値としていた。独立レビュー（Cline）から、これは設計方針§2.1「既存語彙に揃え新しい語彙を足さない」との自己矛盾だと指摘された。実測値・二次情報・工学的仮定を区別する必要はBL-195〜198から続く要求であり、これをどう表現するか。 |
+| **決定理由** | 検証の結果、`citations[].type`（`web`/`goal_text`/`prior_agreement`/`expert_calculation`/`user_input`/`document`）が既に「出所」を表しており、`expert_calculation`が「工学的仮定・自己導出値」を過不足なく表現できることが分かった。`confidence`（確定度：どれだけ動かないか）と`citations.type`（出所：どこから来たか）は直交する2軸であり、`assumption`は`confidence`軸への不要な語彙の追加だった。BL-076とBL-193がプロンプト内で矛盾する指示を残置し58回のedits失敗を招いた事故（BL-202/D-176）が示すように、新しい語彙・新しい状態を足すこと自体が将来の不整合の種になる。 |
+| 決定内容 | `entity_attributes.confidence`は`verified_facts`と同じ`confirmed`/`provisional`の2値のみとする。「工学的仮定である」ことは`citations[].type="expert_calculation"`で表現する。列名も`verified_facts`に揃え`confirmed_by`/`confirmed_at`とする（初版の`recorded_by`/`recorded_at`から改名）。 |
+| 影響 | `cela_main.py`（`entity_attributes`テーブル定義・`upsert_entity_attribute`・`_write_entity_attribute_handler`）、`docs/design/back_log/BL-204/BL204_basic_design.md`§2.1.1、`tests/test_bl204_entity_registry.py`。 |
+| 関連 BL | [BL-204](back_log/issue_backlog.md#bl-204-実世界事物レジストリentities-entity_attributesの新設) |
+
+---
+
 ## 未決定（pending）
 
 ---

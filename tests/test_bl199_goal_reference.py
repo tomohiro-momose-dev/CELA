@@ -134,11 +134,16 @@ def test_goal_reference_dir_wired_into_state_and_config():
     assert "goal_reference_dir" in src
 
 
-def test_max_web_search_calls_relaxed_to_50():
-    """[BL-199] ユーザー承認（AGENTS.md §7）により30→50へ緩和。log/2026-08-09/2222で
-    read_goal_reference未導入時に30回で枯渇したことへの安全弁。"""
+def test_max_web_search_calls_relaxed_beyond_original_30():
+    """[BL-199] ユーザー承認（AGENTS.md §7）により30から緩和。log/2026-08-09/2222で
+    read_goal_reference未導入時に30回で枯渇したことへの安全弁。
+    具体値はドライランの実績に応じてユーザーが調整するため（50→100等）、
+    特定の数値ではなく「元の30より緩和されている」ことだけを固定する。"""
+    import re
     src = inspect.getsource(cela_main)
-    assert '"max_web_search_calls": 50,' in src
+    m = re.search(r'"max_web_search_calls":\s*(\d+),', src.rsplit("config : Appconfig", 1)[-1])
+    assert m, "実行時configにmax_web_search_callsが見つかりません"
+    assert int(m.group(1)) > 30
 
 
 # ---------------------------------------------------------------------------
