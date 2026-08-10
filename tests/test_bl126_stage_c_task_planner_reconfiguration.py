@@ -69,6 +69,10 @@ def test_task_planner_node_does_not_fire_mid_run_without_revision_reason(db_conn
     （既存の初回計画ガードの安全な後方互換）。"""
     _, run_id = db_conn
     called = {"n": 0}
+    # [BL-204] task_planner_nodeはcall_task_plannerと同じガード内でseed_entities_from_goalも呼ぶ。
+    # 実LLM呼び出しを伴うため、call_task_plannerと同様にスタブ化する（未スタブだと日次クォータ
+    # 枯渇時に実ネットワーク呼び出しへ落ちてテストが壊れる）。
+    monkeypatch.setattr(cela_main, "seed_entities_from_goal", lambda *a, **k: {"registered": [], "rejected": [], "skipped": True})
     monkeypatch.setattr(cela_main, "call_task_planner", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
 
     state = {"run_id": run_id, "goal": "テスト目標", "turn_count": 5, "phases": EXISTING_PHASES}
@@ -89,6 +93,14 @@ def test_task_planner_node_reconfigures_mid_run_when_revision_reason_set(db_conn
         captured["existing_phases"] = existing_phases
         captured["revision_reason"] = revision_reason
         return RECONFIGURED_PHASES
+
+    # [BL-204] task_planner_nodeはcall_task_plannerと同じガード内でseed_entities_from_goalも呼ぶ。
+
+    # 実LLM呼び出しを伴うため、call_task_plannerと同様にスタブ化する（未スタブだと日次クォータ
+
+    # 枯渇時に実ネットワーク呼び出しへ落ちてテストが壊れる）。
+
+    monkeypatch.setattr(cela_main, "seed_entities_from_goal", lambda *a, **k: {"registered": [], "rejected": [], "skipped": True})
 
     monkeypatch.setattr(cela_main, "call_task_planner", _fake_call_task_planner)
 
@@ -111,6 +123,10 @@ def test_task_planner_node_supersedes_removed_tasks_not_deletes(db_conn, monkeyp
     """新しい計画に含まれなくなった既存task_id（task_1_2）が、削除ではなく
     phases_supersededへ記録され、write_agreement(SUPERSEDE)の監査証跡が残ること。"""
     conn, run_id = db_conn
+    # [BL-204] task_planner_nodeはcall_task_plannerと同じガード内でseed_entities_from_goalも呼ぶ。
+    # 実LLM呼び出しを伴うため、call_task_plannerと同様にスタブ化する（未スタブだと日次クォータ
+    # 枯渇時に実ネットワーク呼び出しへ落ちてテストが壊れる）。
+    monkeypatch.setattr(cela_main, "seed_entities_from_goal", lambda *a, **k: {"registered": [], "rejected": [], "skipped": True})
     monkeypatch.setattr(cela_main, "call_task_planner", lambda *a, **k: RECONFIGURED_PHASES)
 
     state = {
@@ -136,6 +152,10 @@ def test_task_planner_node_reopens_plan_review_after_mid_run_reconfiguration(db_
     """ラン途中再構成後は、既存のtask_plan_reviewer_node実行前ゲートを再度通す
     （plan_review_done=Falseへリセットする、design.md §11(3)：スキップしない）。"""
     _, run_id = db_conn
+    # [BL-204] task_planner_nodeはcall_task_plannerと同じガード内でseed_entities_from_goalも呼ぶ。
+    # 実LLM呼び出しを伴うため、call_task_plannerと同様にスタブ化する（未スタブだと日次クォータ
+    # 枯渇時に実ネットワーク呼び出しへ落ちてテストが壊れる）。
+    monkeypatch.setattr(cela_main, "seed_entities_from_goal", lambda *a, **k: {"registered": [], "rejected": [], "skipped": True})
     monkeypatch.setattr(cela_main, "call_task_planner", lambda *a, **k: RECONFIGURED_PHASES)
 
     state = {

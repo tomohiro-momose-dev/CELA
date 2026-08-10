@@ -198,6 +198,14 @@ def test_task_planner_node_marks_issue_planned_after_issue_driven_reconfiguratio
         "SELECT id FROM issue_log WHERE run_id=? AND topic=?", (run_id, "bl145_topic")
     ).fetchone()["id"]
 
+    # [BL-204] task_planner_nodeはcall_task_plannerと同じガード内でseed_entities_from_goalも呼ぶ。
+
+    # 実LLM呼び出しを伴うため、call_task_plannerと同様にスタブ化する（未スタブだと日次クォータ
+
+    # 枯渇時に実ネットワーク呼び出しへ落ちてテストが壊れる）。
+
+    monkeypatch.setattr(cela_main, "seed_entities_from_goal", lambda *a, **k: {"registered": [], "rejected": [], "skipped": True})
+
     monkeypatch.setattr(cela_main, "call_task_planner", lambda *a, **k: RECONFIGURED_PHASES)
 
     state = {
@@ -218,6 +226,10 @@ def test_task_planner_node_clears_plan_revision_issue_ids_even_without_issue_dri
     """既存のreviewer差し戻し・Essence Dialogue由来の再構成（plan_revision_issue_idsが空）
     では、issue_logに一切触れないこと（回帰確認）。"""
     conn, run_id = db_conn
+    # [BL-204] task_planner_nodeはcall_task_plannerと同じガード内でseed_entities_from_goalも呼ぶ。
+    # 実LLM呼び出しを伴うため、call_task_plannerと同様にスタブ化する（未スタブだと日次クォータ
+    # 枯渇時に実ネットワーク呼び出しへ落ちてテストが壊れる）。
+    monkeypatch.setattr(cela_main, "seed_entities_from_goal", lambda *a, **k: {"registered": [], "rejected": [], "skipped": True})
     monkeypatch.setattr(cela_main, "call_task_planner", lambda *a, **k: RECONFIGURED_PHASES)
 
     state = {
@@ -243,6 +255,14 @@ def test_task_planner_node_planning_is_idempotent_on_already_resolved_issue(db_c
         {"action_type": "RESOLVE", "topic": "bl145_already_resolved", "resolution_note": "既に対応済み"},
         conn, run_id, "user", "", "task_1_1",
     )
+
+    # [BL-204] task_planner_nodeはcall_task_plannerと同じガード内でseed_entities_from_goalも呼ぶ。
+
+    # 実LLM呼び出しを伴うため、call_task_plannerと同様にスタブ化する（未スタブだと日次クォータ
+
+    # 枯渇時に実ネットワーク呼び出しへ落ちてテストが壊れる）。
+
+    monkeypatch.setattr(cela_main, "seed_entities_from_goal", lambda *a, **k: {"registered": [], "rejected": [], "skipped": True})
 
     monkeypatch.setattr(cela_main, "call_task_planner", lambda *a, **k: RECONFIGURED_PHASES)
     state = {

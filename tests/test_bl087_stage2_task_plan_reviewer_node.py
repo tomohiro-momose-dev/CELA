@@ -310,6 +310,10 @@ def test_task_planner_node_seeds_plan_drafts_skeleton_for_every_task(db_conn, mo
     事前生成すること（従来は_append_deferred_note_to_plan等が呼ばれるまで存在せず、
     task_plan_reviewer_nodeが動く時点で書き込み先が無かった問題への対策）。"""
     conn, run_id = db_conn
+    # [BL-204] task_planner_nodeはcall_task_plannerと同じガード内でseed_entities_from_goalも呼ぶ。
+    # 実LLM呼び出しを伴うため、call_task_plannerと同様にスタブ化する（未スタブだと日次クォータ
+    # 枯渇時に実ネットワーク呼び出しへ落ちてテストが壊れる）。
+    monkeypatch.setattr(cela_main, "seed_entities_from_goal", lambda *a, **k: {"registered": [], "rejected": [], "skipped": True})
     monkeypatch.setattr(cela_main, "call_task_planner", lambda *a, **k: SAMPLE_PHASES)
 
     state = {"turn_count": 1, "phases": [], "run_id": run_id, "goal": "テスト目標"}

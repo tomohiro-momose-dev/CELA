@@ -134,6 +134,10 @@ def test_task_planner_node_reconciles_current_phase_on_structural_reorg(db_conn,
     """task_planner_nodeが計画全体を再編した際、current_task_id（phase_2のtask_2_1）が
     新しいphase_3へ移動していても、current_phaseが正しく追随すること（BL-190の再現テスト）。"""
     _, run_id = db_conn
+    # [BL-204] task_planner_nodeはcall_task_plannerと同じガード内でseed_entities_from_goalも呼ぶ。
+    # 実LLM呼び出しを伴うため、call_task_plannerと同様にスタブ化する（未スタブだと日次クォータ
+    # 枯渇時に実ネットワーク呼び出しへ落ちてテストが壊れる）。
+    monkeypatch.setattr(cela_main, "seed_entities_from_goal", lambda *a, **k: {"registered": [], "rejected": [], "skipped": True})
     monkeypatch.setattr(cela_main, "call_task_planner", lambda *a, **k: _RESTRUCTURED_PHASES_FOR_NODE)
 
     state = {
@@ -159,6 +163,10 @@ def test_task_planner_node_additive_reconfiguration_keeps_current_phase(db_conn,
             {"task_id": "task_7_1", "acceptance_criteria": [], "depends_on": [], "owns_variables": []},
         ]},
     ]
+    # [BL-204] task_planner_nodeはcall_task_plannerと同じガード内でseed_entities_from_goalも呼ぶ。
+    # 実LLM呼び出しを伴うため、call_task_plannerと同様にスタブ化する（未スタブだと日次クォータ
+    # 枯渇時に実ネットワーク呼び出しへ落ちてテストが壊れる）。
+    monkeypatch.setattr(cela_main, "seed_entities_from_goal", lambda *a, **k: {"registered": [], "rejected": [], "skipped": True})
     monkeypatch.setattr(cela_main, "call_task_planner", lambda *a, **k: additive_phases)
 
     state = {
