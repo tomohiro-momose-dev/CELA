@@ -237,6 +237,7 @@
 | BL-203 | 高 | `geo_tools.py`（`_classify_geocode_precision`新設・`gsi_geocode_handler`の警告）、`cela_main.py`（`GSI_GEOCODE_TOOL`スキーマ、Expert/Detector両経路のプロンプト、`set_runtime_tool_limits`/`_tool_config`とTOOL_DISPATCH配線）、`docs/refs/gsi_api/api_notes.md` | ユーザーが`log/2026-08-10/0901`で「諏訪中央病院（標高1,239m）と長野大学（標高1,475m）」というハルシネーションを報告。実エンドポイントで再検証した結果、**`gsi_geocode`は住所ジオコーダであり施設名を完全に無視する**ことが判明（BL-198の調査漏れ）。「豊平 長野大学」「豊平 公立諏訪東京理科大学」「豊平」はいずれも同一座標＝大字の代表点を返し、番地まで指定すれば正しい地点が返る。この誤座標を標高APIへ渡すと「**誤った場所の正しい実測値**」（GSI 1m DEM レーザ測量という本物の出典付き）になり、Detectorが同じ座標で検算する限り発見できない。平地の大学（正しくは894.2m）が1,475mとされ「山間部・冬季高リスク・初期対象外」と誤判定され、設計判断が誤った前提に乗った。あわせて、ゴール文に`公立諏訪東京理科大学`と明記されているのにExpertが記憶から「長野大学」（実在するが上田市の無関係な大学）と書き、数値だけ流用していたことも判明。さらに調査中、**BL-201の修正が中断runに一切効いていなかった**ことが判明（`app.stream(None,...)`経路ではローカルstateがLangGraphへ渡らない）。**実装完了（`done`）**：①返却titleに`番地`/`丁目`/`番`/`号`が含まれるかで解決粒度を判定し`precision`として返し、`area_centroid`なら警告必須（座標自体は返し続け、機械的禁止はしない）。クエリではなくtitleを見るのは、施設名が無視される以上titleだけが客観的手掛かりだから。②Expert/Detector両経路へ「必ず番地までの住所を渡す」「`area_centroid`は施設位置として使わない」「拠点名はゴール文の表記をそのまま使う」を追加。③実行時設定を`TOOL_DISPATCH`で注入する方式へ変更（`app.update_state()`案は中断中のpending tasksを乱すリスクのため却下）。④`docs/refs/gsi_api/api_notes.md`へ`[CONSTRAINT]`節を追加。新規テスト19件、関連既存と合わせ160件で無退行を確認。詳細は[BL-203詳細](#bl-203-gsi_geocodeが施設名を無視して大字の代表点を返し誤った場所の正しい実測値が成果物へ混入するおよびbl-201の修正漏れ)を参照。 | P1 |
 | BL-204 | 高 | `cela_main.py`（`entities`/`entity_attributes`スキーマ、`seed_entities_from_goal`、ツール4本、`TOOL_DISPATCH`配線、Expert/Detectorプロンプト4箇所、`_revise_goal_tool_impl`拡張） | ユーザー提案「登場する事物をDBで構造的に管理しなければならない。webでいくらでも情報が取れる分、ハルシネーションリスクが跳ね上がった」を受けて設計。`log/2026-08-10/0901`（BL-203）で、ゴール文に`公立諏訪東京理科大学`とあるのにExpertが記憶から「長野大学」と書いた事故は、数値は`verified_facts`にあったが**名称そのものが事実として登録されていなかった**ことが根本原因と判明。**実装完了（`done`）**：`entities`/`entity_attributes`の2テーブルを新設し、`task_planner`内で（専用ノードは新設せず）ゴール文から事物を抽出し、**ゴール文中に文字列として実在するかを機械的に検証**してから`origin='goal_text'`で登録（これ1つで「長野大学」の登録を客観的に拒否できる）。未登録名への属性書き込みは`did_you_mean`付きで拒否する同一性ガードを実装。属性の出典封筒（confidence/citations/reason等）は`verified_facts`の既存語彙をそのまま踏襲。ツール4本（register_entity/write_entity_attribute/read_entity/verify_entity_geo）をExpert・Detector（Pass1/Pass2）へ配線し、プロンプト誘導はドメイン非依存で追加。独立レビュー（Cline）の指摘4件を実コードと突き合わせて検証し、`confidence`への`assumption`追加（既存の2値方針との自己矛盾）は正当化せず削除、`read_entity`は属性名指定を持たせず全属性を返す形にするなど、指摘の多くを「緩和」ではなく「原因の除去」で解消した。新規テスト31件、関連既存と合わせ191件で無退行を確認。**運用上の注意**：ゴール文からの初期登録はrunが計画未確定の時点でしか発火しないため、既にタスク分解が確定済みのrunを`--resume`しても遡って登録されない（恩恵を受けるには新規run）。詳細は[BL-204詳細](#bl-204-実世界事物レジストリentities-entity_attributesの新設)を参照。 | P1 |
 | BL-205 | 中 | `cela_main.py`（`READ_ENTITY_TOOL`スキーマ、`_read_entity_handler`のヒント付与、`read_entity`を持つ全ノードのプロンプト本文） | ユーザーが`log/2026-08-10/1829`で「read_entityとread_entityで混乱が生まれています」（意図はread_verified_factとの混乱）と報告。BL-204でread_entityを全ノードへ展開した後、モデルが空クエリでread_verified_factを呼び、さらにread_entityも`entity=""`で呼んで名前一覧のみ（属性なし）を得る、という非効率な探索呼び出しを繰り返す事例が複数回観測された。User AI (Stage4)の思考ログに原因（read_entityが「真実の源」としか伝わっておらず、read_verified_factとの役割分担が説明されていなかったこと）がそのまま現れていた。正典名チェック自体は正常に機能しており（12件正しく登録、unknown_entity拒否0件）、ハルシネーション防止という主目的への影響はない。**実装完了（`done`）**：①`READ_ENTITY_TOOL`のスキーマ説明とentityパラメータへ、read_verified_factとの境界を明記。②一覧モード（entity未指定）の返り値へ、次に取るべき行動のhintを追加（登録0件時は付けない）。③ユーザー指摘「プロンプト説明にも書かないと見落とされます」を受け、read_entityを付与した全ノード（call_expert・call_detector Pass1/Pass2・call_task_planner・call_task_plan_reviewer・call_reviewer・call_reflection・call_facilitator・generate_user_utterance4段階）それぞれのプロンプト本文へ境界説明を追記（read_verified_fact非搭載ノードにはその旨も明記）。新規テスト15件、関連既存と合わせ計1032件で無退行を確認。詳細は[BL-205詳細](#bl-205-read_entityとread_verified_factの役割分担が伝わらず無駄な探索呼び出しが繰り返される)を参照。 | P2 |
+| BL-206 | 中 | `cela_main.py`（`_commit_agreement_from_tool`のUPDATE/edits分岐、`_find_active_deliverable_agreement`、`_apply_text_edits`） | `log/2026-08-10/1905`・`log/2026-08-10/2100`のドライラン精査で、`write_agreement`のUPDATE（edits指定）が同一タスクに対し連続6〜16回失敗する事例をそれぞれ1件ずつ発見。表面上はBL-193（記憶で継ぎ足したold_textが窓の外へドリフトする）の再発に見えたが、実DB（`cela.db`のwhiteboard_drafts）に残る当該run・当該versionの実データと突き合わせたところ、失敗したold_text（144文字・14文字等）は**version=1の保存内容へ一字一句正確に、しかも直前の`read_whiteboard_excerpt`が`match_type: exact`で発見できている文言だった**。にもかかわらず`_apply_text_edits`は「緩い一致も0件」で失敗し、エラーメッセージに添えるはずの近傍スニペット（`_nearest_content_snippet`、cela_main.py:6108）が**完全に空文字**だった。同関数の実装上、空スニペットは比較対象の`content`自体が空文字のときにしか発生しない。つまり実際の不具合は「old_textの引用ミス」ではなく、**edit照合に渡された「現在のホワイトボード内容」がその時点で空文字だった**ことを示している。2件とも最終的にはBL-080のSUPERSEDE（全文置換）へExpertが自律的に切り替えて成功しており、BL-076/193のような回答不能までの完全な膠着には至っていないが、2100ログでは12回の無駄な`write_agreement`呼び出し（約15分、tool_iter予算の相当部分）を空費した。`_commit_agreement_from_tool`のUPDATE分岐（cela_main.py:3062以降）を読むと、`_find_active_deliverable_agreement`が対象のDeliverable agreementを見つけられなかった場合に`old_content`が空文字のまま初期化された値を使い続け、`is_whiteboard = old_content.startswith("WHITEBOARD:")`がFalseとなって`base_content = old_content`（空文字）を編集対象にしてしまう経路が疑わしいが、当該run・当該時点のDB上は`_find_active_deliverable_agreement`が対象を発見できるはずの条件（status≠Superseded、phase_id/task_id一致）を満たしており、なぜこの経路に入ったのかはログ調査だけでは特定できていない。`open`のまま、再現条件を絞る追加調査が必要。詳細は[BL-206詳細](#bl-206-write_agreementのedits照合が実際には空のホワイトボード内容に対して行われ本来一致するはずのold_textが繰り返し不一致になる)を参照。 | P2 |
 
 ---
 
@@ -6454,6 +6455,70 @@ Stage4修正指示・非Stage4の初回ターン等、計6箇所）。特にStag
 `read_entity`を持つ全ノード（7ノード・Expert/Detector両経路・User AI4段階）のプロンプト
 本文に境界説明があることの直接検証、1829ログの実際の呼び出しパターンの回帰確認。
 関連の既存テストと合わせて計1032件、無退行を確認。`python -m py_compile`合格。
+
+---
+
+### BL-206: write_agreementのedits照合が実際には空のホワイトボード内容に対して行われ、本来一致するはずのold_textが繰り返し不一致になる
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（原因未特定、追加調査が必要） |
+| 優先度 | P2 |
+| 関連 | [BL-202](#bl-202-サーバーエラーのプレースホルダー応答によるラウンド空転とdetector注釈を巻き込んだ巨大old_textによるedits失敗の連鎖)（同じ`edits失敗`ログを対象にした先行調査。原因が異なることを本BLで確認）、[BL-193/BL-151](#bl-202-サーバーエラーのプレースホルダー応答によるラウンド空転とdetector注釈を巻き込んだ巨大old_textによるedits失敗の連鎖)（`_nearest_content_snippet`の元設計） |
+
+**内容:**
+
+`log/2026-08-10/1905`・`log/2026-08-10/2100`のドライラン精査で「ホワイトボードedit失敗
+はどうか」というユーザー確認に対応する過程で発見。両ログとも、1つのUPDATE要求に対し
+Expertがold_textを少しずつ変えながら連続失敗するクラスタが1件ずつ観測された。
+
+| ログ | 失敗回数 | 対象 | 失敗のiter範囲 |
+|---|---|---|---|
+| 1905 | 7回 | task_1_4（需要推計式の修正） | iter 2→12 |
+| 2100 | 16回 | task_2_2（SLA運用定義の追記） | iter 5→33（実時間で約15分） |
+
+いずれも最終的にはBL-080のSUPERSEDE（全文置換）へExpert自身が自律的に切り替えて成功
+しており、BL-076/193のような回答不能までの完全な膠着には至っていない。
+
+**BL-193の再発ではないことを実データで確認：**
+
+2100ログのiter=7で失敗したold_text（144文字）について、当該run・当該version（V1）の
+実際のDB保存内容（`cela.db`のwhiteboard_drafts、`content.count(old_text)`）を直接検証
+したところ、**一字一句正確に1回だけ存在**していた。しかも同じiter=6の直前で
+`read_whiteboard_excerpt`が同一文言を`match_type: exact`で正しく発見している。BL-193が
+想定する「窓の外を記憶で継ぎ足して不一致になる」パターンなら、そもそも一致するold_text
+が実在しないはずであり、今回は実在するのに不一致になっている点が異なる。
+
+**根本原因の手がかり：near-content-snippetが完全に空**
+
+`_apply_text_edits`のエラーメッセージは、不一致時に`_nearest_content_snippet`
+（`cela_main.py:6108`）で現在の内容から最も近い箇所を抜粋して見せる設計（BL-151/193）
+だが、1905・2100両ログの失敗メッセージは例外なく「【参考：…】」の直後が**完全な空文字**
+だった。同関数の実装上、これが起きるのは比較対象の`content`自体が空文字（または`match.size
+< 20`かつ`content`が空）のときのみ。つまり実際に起きていたのは「old_textの引用ミス」では
+なく、**edit照合に渡された「現在のホワイトボード内容」がその時点で空文字だった**という
+ことになる。
+
+`_commit_agreement_from_tool`のUPDATE分岐（`cela_main.py:3062`以降）を読むと、
+`_find_active_deliverable_agreement`（`cela_main.py:2958`）が対象のDeliverable
+agreementを見つけられなかった場合、`old_content`は空文字のまま初期化された値を使い続け、
+`is_whiteboard = old_content.startswith("WHITEBOARD:")`がFalseとなり、
+`base_content = old_content`（空文字）を編集対象にしてしまう経路がある。この経路なら
+「空文字に対する照合が常に0件で失敗し、スニペットも空になる」という観測と整合する。
+
+ただし、2100ログの該当run・該当時点のDBを直接確認すると、`_find_active_deliverable_agreement`
+が対象を発見できるはずの条件（当該agreement`AG-1786367888867`のstatusはこの時点でまだ
+`Superseded`になっていない、phase_id='phase_2'・task_id='task_2_2'は一致）を満たして
+おり、なぜこの経路に入ったのかはログ調査だけでは特定できなかった。SQLite接続の分離や
+LangGraphのcheckpoint resumeとの相互作用など他の要因も考えられるが、いずれも確証は
+得られていない。
+
+**現状（`open`）：**
+
+再現条件（特に「なぜ`base_content`が空になったか」）を絞り込む追加調査が必要。実害と
+しては、両ログとも最終的にBL-080のSUPERSEDE経路で自己解決しているため緊急性は高くない
+が、2100ログでは12回・約15分のtool_iter予算を空費しており、tool_iter上限に余裕のない
+ケースではBL-076/193型の完全な膠着に発展するリスクがある。
 
 ---
 
