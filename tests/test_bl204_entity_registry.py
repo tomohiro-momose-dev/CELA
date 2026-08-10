@@ -389,3 +389,64 @@ def test_seed_entities_called_from_task_planner_node():
     （build_graphのトポロジーを変更しない）。"""
     src = inspect.getsource(cela_main.task_planner_node)
     assert "seed_entities_from_goal" in src
+
+
+# ---------------------------------------------------------------------------
+# 8. read_entityの全ノードへの展開（事実確認に関わるノードのみ、書き込み系は拡大しない）
+#
+# ユーザー提案「少なくともread_entityは全ノードが使えたほうが良いのでは？」を受け、
+# 読み取り専用・呼び出し予算を消費しないread_entityのみを、成果物・主張の事実確認に
+# 関わるノードへ展開した。register_entity/write_entity_attribute（書き込み系）は
+# Expertのみに限定したまま（誰が事物を登録・確定してよいかという権限の問題であり、
+# read_entityの「見るだけ」とはリスクの性質が異なるため）。
+# 対象外（call_orchestrator/call_resource_arbiter/call_integrator）は、事実確認より
+# フェーズ選択・予算調整・成果物マージが主目的のノードとして意図的に除外している。
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("node_name", [
+    "call_task_planner", "call_task_plan_reviewer", "call_reviewer",
+    "call_reflection", "call_facilitator",
+])
+def test_fact_checking_nodes_gain_read_entity(node_name):
+    src = inspect.getsource(getattr(cela_main, node_name))
+    assert "READ_ENTITY_TOOL" in src, f"{node_name}にREAD_ENTITY_TOOLが付与されていません"
+    assert "read_entity" in src, f"{node_name}のプロンプト文にread_entityの言及がありません"
+
+
+def test_write_tools_not_extended_to_fact_checking_nodes():
+    """[BL-204] read_entityだけを広げ、register_entity/write_entity_attributeは
+    Expert専用のまま維持する（書き込み権限は拡大しない）。"""
+    for node_name in ["call_task_planner", "call_task_plan_reviewer", "call_reviewer",
+                      "call_reflection", "call_facilitator"]:
+        src = inspect.getsource(getattr(cela_main, node_name))
+        assert "REGISTER_ENTITY_TOOL" not in src, f"{node_name}にREGISTER_ENTITY_TOOLが混入"
+        assert "WRITE_ENTITY_ATTRIBUTE_TOOL" not in src, f"{node_name}にWRITE_ENTITY_ATTRIBUTE_TOOLが混入"
+
+
+def test_user_ai_all_four_stages_gain_read_entity():
+    """[BL-204] generate_user_utterance内の4経路（Stage1レビュー・Stage3承認判断・
+    Stage4修正指示・非Stage4の初回ターン等）全てにread_entityを付与する。特にStage3/4は
+    BL-197（過剰な実測要求）の発生源そのものであり、要求前にレジストリを確認できることが
+    直接的な再発防止になる。"""
+    src = inspect.getsource(cela_main.generate_user_utterance)
+    # Stage1 + Stage3 + Stage4(リトライ含め2箇所) + 非Stage4(リトライ含め2箇所) = 6箇所
+    assert src.count("READ_ENTITY_TOOL") == 6
+
+
+def test_excluded_nodes_do_not_gain_read_entity():
+    """[BL-204] フェーズ選択・予算調整・成果物マージが主目的のノードは対象外のまま。"""
+    for node_name in ["call_orchestrator", "call_resource_arbiter", "call_integrator",
+                      "call_decision_extractor", "call_goal_essence_analyst"]:
+        src = inspect.getsource(getattr(cela_main, node_name))
+        assert "READ_ENTITY_TOOL" not in src, f"{node_name}は対象外のはずですがREAD_ENTITY_TOOLが混入"
+
+
+def test_read_entity_call_via_dispatch_from_non_expert_role(db_conn):
+    """[BL-204] read_entityハンドラ自体はcaller_roleに依存せず動作する（read_verified_fact等の
+    既存の読み取り専用ツールと同じく、呼び出し元ロールを問わない設計であることの確認）。"""
+    conn, run_id = db_conn
+    _seed_goal_entities(conn, run_id)
+    cela_main._CURRENT_CALLER_ROLE = "reflection"
+    result = cela_main.TOOL_DISPATCH["read_entity"]({"entity": "茅野駅"}, {})
+    assert result["canonical_name"] == "茅野駅"
+    cela_main._CURRENT_CALLER_ROLE = "expert"

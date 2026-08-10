@@ -311,43 +311,43 @@ model_user = gpt_5_6_luna
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = laguna_S_2_1
+model_orchestrator = gpt_5_6_luna #laguna_S_2_1
 
 client_expert = client_openrouter
-model_expert = nemotron_3_ultra
+model_expert = gpt_5_6_luna #nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = nemotron_3_ultra
+model_task_planner = gpt_5_6_luna #nemotron_3_ultra
 
 client_task_plan_reviewer = client_openrouter
-model_task_plan_reviewer = nemotron_3_ultra
+model_task_plan_reviewer = gpt_5_6_luna #nemotron_3_ultra
 
 client_detector_domain = client_openrouter
-model_detector_domain = nemotron_3_ultra
+model_detector_domain = gpt_5_6_luna # nemotron_3_ultra
 
 client_detector_numeric = client_openrouter
 model_detector_numeric = gpt_5_6_luna
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = laguna_S_2_1
+model_decision_extractor = gpt_5_6_luna #laguna_S_2_1
 
 client_resource_arbiter = client_openrouter
-model_resource_arbiter = nemotron_3_ultra
+model_resource_arbiter = gpt_5_6_luna #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = nemotron_3_ultra
+model_reflection = gpt_5_6_luna #nemotron_3_ultra
 
 client_facilitator = client_openrouter
-model_facilitator = nemotron_3_ultra
+model_facilitator = gpt_5_6_luna #nemotron_3_ultra
 
 client_integrator = client_openrouter
-model_integrator = nemotron_3_ultra
+model_integrator = gpt_5_6_luna #nemotron_3_ultra
 
 client_reviewer_qa = client_openrouter
-model_reviewer_qa = nemotron_3_ultra
+model_reviewer_qa = gpt_5_6_luna #nemotron_3_ultra
 
 client_goal_essence = client_openrouter
-model_goal_essence = nemotron_3_ultra
+model_goal_essence = gpt_5_6_luna #nemotron_3_ultra
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -7532,8 +7532,11 @@ It serves as the initial planning layer for breaking down complex objectives acr
        鵜呑みにせず、一次ソース（公的統計・公式文書等）を優先し、二次的な要約より信頼性の高い
        情報を採用してください。この分解で採用した数値・前提のうち外部情報に基づくものは、
        write_agreementのcitations（type="web"等）で追跡可能な出典として明示してください。
+       [BL-204] read_entityで、この課題に登場する事物について既に登録済みの事実を確認できます
+       （何が既知で何が未確認かを踏まえてタスクを分解する際に役立ちます）。
        【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
-       read_plan_draft・write_agreement・web_search・web_fetch・read_reference_file・think
+       read_plan_draft・write_agreement・web_search・web_fetch・read_reference_file・
+       read_entity・think
        です。{_THINK_TRAILER_SENTENCE}
     13. [BL-196: 実行環境に無い専用処理能力の行使をacceptance_criteriaに要求しない] acceptance_criteria/
        descriptionに「実測データの収集・抽出・生成」を書く際は、Expertが実際に使えるツール
@@ -7621,7 +7624,7 @@ It serves as the initial planning layer for breaking down complex objectives acr
     _reset_think_scratchpad()  # [BL-093]
     phases, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_task_planner, model=model_task_planner, label="Task Planner",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_PLAN_DRAFT_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, THINK_TOOL], fallback=fallback_phase,
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_PLAN_DRAFT_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, THINK_TOOL], fallback=fallback_phase,
         state=state,
     )
     if parse_failed:
@@ -9410,7 +9413,9 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
        [BL-188] 上記の矛盾・懸念がweb由来のcitations（引用元URL）に基づく主張に関わる場合、
        read_reference_fileでそのキャッシュ本文を確認し、実際に主張と一致しているかを検証できます
        （新規のweb検索・取得はこのパスでは行いません）。
-       【重要】あなたが使えるツールはread_reference_fileのみです。
+       [BL-204] この課題に登場する事物についての事実はread_entityで確認できます。停滞・矛盾の
+       判断が特定の事物の主張に関わる場合、レジストリの記録と食い違っていないか確認してください。
+       【重要】あなたが使えるツールはread_reference_file・read_entityです。
 
         Return ONLY JSON in the exact format below:
         {{
@@ -9434,7 +9439,9 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
         # [BL-184] BL-109でtools=None（単発判定、think無し）にした方針は維持しつつ、
         # ユーザー指示により滞留issueの根拠（citations由来URL）をReflectorが自ら検証できるよう
         # read_reference_fileのみ追加する（新規の外部通信は発生させない、既存キャッシュの参照専用）。
-        tools=[READ_REFERENCE_FILE_TOOL],
+        # [BL-204] read_entityも同じ理由（読み取り専用・外部通信なし・呼び出し予算を消費しない）
+        # で追加する。
+        tools=[READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL],
         fallback={"still_aligned": False, "discussion_status": "stagnant", "note": "Parse error."},
         state=state,
     )
@@ -9481,7 +9488,7 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
        ください（この提案はUser AIが承認するまで正式な合意にはなりません）。
 
     【重要】あなたが使えるツールはthink・escalate_premise_concern・write_agreement・
-    read_reference_fileです。
+    read_reference_file・read_entityです。
 
     ■ プロジェクトの目標(Goal): {goal}
     {goal_essence_text}
@@ -9569,7 +9576,7 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     主張に関わる場合、read_reference_fileでそのキャッシュ本文を確認できます（新規のweb検索・
     取得はこのノードでは行いません）。
     【重要】あなたが使えるツールはthink・escalate_premise_concern・write_agreement・
-    read_reference_fileです。
+    read_reference_file・read_entityです。
 
     ■ プロジェクトの目標(Goal): {goal}
     {goal_essence_text}
@@ -9593,7 +9600,7 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     _reset_think_scratchpad()  # [BL-093]
     return query_AI(
         [{"role": "user", "content": prompt}], client=client_facilitator, model=model_facilitator, label="Facilitator",
-        tools=[THINK_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, WRITE_AGREEMENT_TOOL, READ_REFERENCE_FILE_TOOL], state=state,
+        tools=[THINK_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, WRITE_AGREEMENT_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL], state=state,
     )
 
 def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "", state: dict | None = None) -> dict:
@@ -9720,8 +9727,10 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
     いたか（仮定として書かれていたか、無条件の確定事項として書かれていたか）を確認できます。
     【最低限、iter=1で一度は、成果物中の主要な数値についてread_verified_factで確認してから
     判定を進めてください】。\n
+    [BL-204] 成果物が特定の事物についての主張を含む場合、read_entityでレジストリの記録と
+    突き合わせて確認できます。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
-    write_agreement・thinkです。{_THINK_TRAILER_SENTENCE}
+    write_agreement・read_entity・thinkです。{_THINK_TRAILER_SENTENCE}
 
     ■ 達成すべき【絶対目標(Goal)】:
     {goal}
@@ -9743,7 +9752,7 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_reviewer_qa, model=model_reviewer_qa, label="Reviewer QA",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL], fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"},
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, READ_ENTITY_TOOL, THINK_TOOL], fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"},
         state=state,
     )
     if parse_failed:
@@ -9863,16 +9872,18 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"[BL-094: read_verified_fact/read_deliverable_fileで既存の決定と同期する] 数値の出所が"
             f"ゴール文の直接記載か、Agent自身の派生仮定かを見分けるため、必要に応じてこれらのツールで"
             f"確認してください。\n\n"
+            f"[BL-204] Agentの主張が特定の事物についてのものである場合、read_entityでレジストリの"
+            f"記録と突き合わせて確認できます。\n\n"
             f"【今回レビューする直近のやり取り】\n{stage_history_text}\n\n"
             f"【重要】あなたが使えるツールはread_verified_fact・read_deliverable_file・python_repl・"
-            f"thinkです。{_THINK_TRAILER_SENTENCE}\n"
+            f"read_entity・thinkです。{_THINK_TRAILER_SENTENCE}\n"
             f'Return ONLY JSON: {{"domain_concerns": "ドメイン妥当性上の懸念（無ければ空文字）", '
             f'"scope_compliant": true/false, "review_comment": "レビューの要点（次段へ引き継ぐ短い要約）"}}'
         )
         _reset_think_scratchpad()
         review_parsed, review_parse_failed = _query_and_parse_with_retry(
             review_prompt, client=client_user, model=model_user, label="User AI (Stage1: レビュー)",
-            tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, PYTHON_REPL_TOOL, THINK_TOOL],
+            tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, PYTHON_REPL_TOOL, READ_ENTITY_TOOL, THINK_TOOL],
             fallback={"domain_concerns": "", "scope_compliant": True, "review_comment": ""},
             state=state,
         )
@@ -9979,8 +9990,10 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             + f"承認しない場合は"
             f"write_agreementを呼ばず、approval_status=\"Rejected\"としてください。まだ判断材料が"
             f"不足している場合はapproval_status=\"Pending\"としてください。\n\n"
+            f"[BL-204] 承認を保留・却下する前に、read_entityでこの課題の事物について既に登録済みの"
+            f"事実を確認してください。既に確認できる事実をAgentへ再要求するのは避けてください。\n\n"
             f"【今回レビューする直近のやり取り】\n{stage_history_text}\n\n"
-            f"【重要】あなたが使えるツールはwrite_agreement・thinkです。{_THINK_TRAILER_SENTENCE}\n"
+            f"【重要】あなたが使えるツールはwrite_agreement・read_entity・thinkです。{_THINK_TRAILER_SENTENCE}\n"
             f'Return ONLY JSON: {{"approval_status": "Approved/Approved_with_Conditions/Rejected/Pending", '
             f'"approval_reason": "承認・却下・保留の理由"}}'
         )
@@ -9996,7 +10009,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             _reset_think_scratchpad()
             approval_parsed, approval_parse_failed = _query_and_parse_with_retry(
                 approval_prompt_base + _approval_mismatch_notice, client=client_user, model=model_user,
-                label="User AI (Stage3: 統合承認判断)", tools=[WRITE_AGREEMENT_TOOL, THINK_TOOL],
+                label="User AI (Stage3: 統合承認判断)", tools=[WRITE_AGREEMENT_TOOL, READ_ENTITY_TOOL, THINK_TOOL],
                 fallback={"approval_status": "Pending", "approval_reason": ""}, state=state,
             )
             _absorb_stage_trackers()
@@ -10101,10 +10114,12 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
                 f"取得日時・ハッシュ値等の記録項目を追加で要求したりしないでください。Agent AIが"
                 f"選んだ実現手段が要求項目を満たしているかどうかで判断し、手段そのものを指定しない"
                 f"でください。\n"
+                f"[BL-204] 修正指示を出す前に、read_entityでこの課題の事物について既に登録済みの"
+                f"事実を確認してください。既に確認できる事実の再取得を修正指示に含めないでください。\n"
             )
         stage4_system_prompt += (
-            f"\n【重要】あなたが使えるツールはthinkとschedule_task_focus（[BL-191]過去タスクの"
-            f"手戻りが必要な場合のみ）です。{_THINK_TRAILER_SENTENCE}\n"
+            f"\n【重要】あなたが使えるツールはthink・schedule_task_focus（[BL-191]過去タスクの"
+            f"手戻りが必要な場合のみ）・read_entityです。{_THINK_TRAILER_SENTENCE}\n"
         )
         _reset_think_scratchpad()
         stage4_messages = [{"role": "system", "content": stage4_system_prompt}]
@@ -10117,14 +10132,14 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             stage4_messages.append({"role": _role, "content": msg["content"]})
 
         content = query_AI(stage4_messages, client=client_user, model=model_user, label="User AI (Stage4)",
-                            tools=[THINK_TOOL, SCHEDULE_TASK_FOCUS_TOOL], state=state)
+                            tools=[THINK_TOOL, SCHEDULE_TASK_FOCUS_TOOL, READ_ENTITY_TOOL], state=state)
         _absorb_stage_trackers()
         if content is None or content.strip() == "" or content == "(APIから空の応答が返されました)":
             for _retry in range(3):
                 print(f"⚠️ [User AI Stage4] 空応答を検知。リトライ {_retry + 1}/3...")
                 _reset_think_scratchpad()
                 content = query_AI(stage4_messages, client=client_user, model=model_user, label="User AI (Stage4)",
-                                    tools=[THINK_TOOL, SCHEDULE_TASK_FOCUS_TOOL], state=state)
+                                    tools=[THINK_TOOL, SCHEDULE_TASK_FOCUS_TOOL, READ_ENTITY_TOOL], state=state)
                 _absorb_stage_trackers()
                 if content and content.strip() and content != "(APIから空の応答が返されました)":
                     break
@@ -10405,9 +10420,11 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         "[BL-140] 直前のthinkツールのscratch_concernsは、このツール呼び出しループの中だけで"
         "消える一時メモであり、後続タスクへは一切引き継がれません。持ち越したい懸念を"
         "scratch_concernsに書くだけで満足せず、必ずwrite_issueで記録してください。\n"
+        "[BL-204] 判断が特定の事物についての主張に関わる場合、read_entityでレジストリの記録と"
+        "突き合わせて確認できます。\n"
         "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
         "write_agreement・escalate_premise_concern・resolve_premise_concern・revise_goal・"
-        "freeze_agreement・write_issue・read_issues・thinkです。"
+        "freeze_agreement・write_issue・read_issues・read_entity・thinkです。"
         + _THINK_TRAILER_SENTENCE + "\n"
     )
 
@@ -10517,7 +10534,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")  # [BL-096] write_issueのphase_id用
     _CURRENT_GOAL_TEXT = user_goal  # [BL-086] revise_goalの編集対象
     _reset_think_scratchpad()  # [BL-093]
-    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, THINK_TOOL], state=state)
+    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, THINK_TOOL], state=state)
 
     if content is None or content.strip() == "" or content == "(APIから空の応答が返されました)":
         for retry in range(3):
@@ -10528,7 +10545,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")
             _CURRENT_GOAL_TEXT = user_goal
             _reset_think_scratchpad()  # [BL-093]
-            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, THINK_TOOL], state=state)
+            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, THINK_TOOL], state=state)
             if content and content.strip() and content != "(APIから空の応答が返されました)":
                 break
         else:
@@ -11117,9 +11134,11 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     消費しない）で先に確認してください。web検索結果は鵜呑みにせず一次ソースを優先してください。
     計画中の主張がcitations（引用元）付きでweb由来の情報を根拠にしている場合は、
     read_reference_fileでそのキャッシュ本文を確認し、実際に主張と一致しているか検証できます。
+    [BL-204] 計画中の主張が特定の事物についてのものである場合、read_entityでレジストリの
+    記録と突き合わせて確認できます。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
     diff_plan_draft_versions・write_agreement・web_search・web_fetch・read_reference_file・
-    thinkです。{_THINK_TRAILER_SENTENCE}
+    read_entity・thinkです。{_THINK_TRAILER_SENTENCE}
 
     ■ 絶対目標: {goal}
     {goal_essence_text}
@@ -11143,7 +11162,7 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_task_plan_reviewer, model=model_task_plan_reviewer, label="Task Plan Reviewer",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, THINK_TOOL],
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, THINK_TOOL],
         fallback={"risk": "low", "constraint_issue": "none", "comment": "(JSONパース失敗のためnone扱い)",
                   "observations": "", "per_task_comments": []},
         state=state,
