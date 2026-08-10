@@ -6465,9 +6465,9 @@ Stage4修正指示・非Stage4の初回ターン等、計6箇所）。特にStag
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（原因未特定、追加調査が必要） |
+| 状態 | `done` |
 | 優先度 | P2 |
-| 関連 | [BL-202](#bl-202-サーバーエラーのプレースホルダー応答によるラウンド空転とdetector注釈を巻き込んだ巨大old_textによるedits失敗の連鎖)（同じ`edits失敗`ログを対象にした先行調査。原因が異なることを本BLで確認）、[BL-193/BL-151](#bl-202-サーバーエラーのプレースホルダー応答によるラウンド空転とdetector注釈を巻き込んだ巨大old_textによるedits失敗の連鎖)（`_nearest_content_snippet`の元設計） |
+| 関連 | [BL-202](#bl-202-サーバーエラーのプレースホルダー応答によるラウンド空転とdetector注釈を巻き込んだ巨大old_textによるedits失敗の連鎖)（同じ`edits失敗`ログを対象にした先行調査。原因が異なることを本BLで確認）、[BL-193/BL-151](#bl-202-サーバーエラーのプレースホルダー応答によるラウンド空転とdetector注釈を巻き込んだ巨大old_textによるedits失敗の連鎖)（`_nearest_content_snippet`の元設計）、[BL-161](#bl-161-write_agreementのphase_idにフォールバックが一切なくexpertが省略するとeditsホワイトボード差分更新が必ず0件一致で失敗し続ける)（write_agreement経路で先に修正済みの同型のphase_idバグ）、[BL-131](#bl-131-task_plannerの正式なフェーズタスク計画に存在しないtask_idtask_1_1_review等でwrite_agreementwhiteboardが作成されてしまう構造的リスク)（`get_latest_whiteboard`のtask_id単独検索という先例） |
 
 **内容:**
 
@@ -6600,18 +6600,41 @@ task_id = item.get("task_id") or state.get("current_task_id", "")          # ←
 | task_2_2 | 22:25:17 | 22:33:31 | 8分14秒 | 2100ログ 12回 |
 | task_2_3 | 00:20:02 / 00:29:27 / 00:39:05 | 00:24:15 / 00:33:09 / 00:46:42 | 計3窓 | 0016ログ 25回（8+8+5+4） |
 
-**提案する修正方針（未実装、ユーザー承認待ち）：**
+**実装完了（`done`）**：
 
-1. **`decision_extractor_node`のsupersedeループに`entry_type`一致条件を追加**する。
-   entry_typeの異なるエントリがDeliverableを乗っ取れないようにする（最小・確実）。
-2. **`phase_id`のフォールバックを`or`へ修正**（`cela_main.py:11989`）。BL-161と同型の
-   修正をdecision_extractor経路にも適用する。
-3. **防御的措置として`_find_active_deliverable_agreement`をBL-131の先例に揃える**：
+1. **`decision_extractor_node`のsupersedeループへ`entry_type`一致条件を追加**
+   （`cela_main.py:12038`付近）。topic一致だけでなく`a.get("entry_type") == entry_type`
+   も要求し、entry_typeの異なるエントリ（例: 却下発言が`Decision`として抽出された場合）が
+   同一topicのDeliverable行を乗っ取れないようにした。
+2. **`phase_id`のフォールバックを`or`へ修正**（`cela_main.py:11989`）。
+   `item.get("phase_id", default)`はキーが欠落した時しかdefaultを使わず、LLMが
+   `"phase_id": ""`を明示的に返すと空文字がそのまま採用されていた。1行下の`task_id`と
+   同じ`item.get("phase_id") or default`パターンへ揃えた（BL-161が`write_agreement`経路で
+   修正した同型のバグを、decision_extractor経路にも適用）。
+3. **防御として`_find_active_deliverable_agreement`をBL-131の先例に揃えた**：
    `get_latest_whiteboard`は既に「task_idはrun_id内で一意」という規約に基づき
    `phase_id`をWHERE句に含めず、不一致時は警告のみ出す設計になっている
    （「呼び出し元が誤ったphase_idを渡しても『該当なし』と誤判定する事故」を防ぐため、
-   まさに同じクラスの問題への対処）。同じ方針へ揃えれば、phase_idドリフトが
-   再発しても孤児化しない。
+   まさに同じクラスの問題への対処）。同じ方針へ揃え、`phase_id`引数はtask_id一致時の
+   整合性チェック（不一致なら`print`で警告）にのみ使う形へ変更した。これにより1・2の
+   修正後もなお発生しうる未知のphase_idドリフトに対しても、孤児化ではなくフェイルセーフ
+   （見つかる・警告のみ）で動作する。
+
+新規テスト`tests/test_bl206_deliverable_orphaning.py`（6件）：entry_typeドリフトで
+Deliverableが孤児化しないこと、Decision同士の正当なsupersedeは引き続き機能すること
+（非退行）、空文字phase_idが正しくフォールバックすること、
+`_find_active_deliverable_agreement`がphase_id不一致でも発見しつつ警告を出すこと、
+未知のtask_idや全件Supersededの場合は引き続き`None`を返すこと（非退行）を検証。
+
+既存テスト`tests/test_bl161_write_agreement_phase_id_fallback.py`の1件
+（`test_update_edits_without_fallback_target_reports_not_found_regression`）は、
+「phase_idの手掛かりが一切無いと更新が失敗する」という旧設計（BL-161時点）の期待値を
+検証していたが、本修正（task_id単独検索への変更）により意図的にこの制約を撤廃したため、
+`test_update_edits_without_fallback_target_still_succeeds_via_task_id`へ改名し期待値を
+反転（成功することを検証）した。
+
+オフライン全テストスイート1136件通過（既知flaky1件・live API 4件を除く）、
+`python -m py_compile`合格、`check_docs_consistency.py`合格。
 
 ---
 
