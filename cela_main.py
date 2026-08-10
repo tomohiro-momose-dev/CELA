@@ -1065,16 +1065,26 @@ READ_ENTITY_TOOL = {
         "name": "read_entity",
         "description": (
             "Read a registered thing together with ALL of its recorded attributes (each with its "
-            "own source and confidence). Call with no 'entity' to list every thing registered in "
-            "this project. [BL-204] Use this INSTEAD of reconstructing facts from memory or from "
-            "the deliverable text -- the registry is the source of truth and the deliverable is "
-            "the presentation of it. There is deliberately no attribute-name filter: you always "
-            "get everything, so you never have to guess an attribute's exact spelling."
+            "own source and confidence). [BL-204] Use this INSTEAD of reconstructing facts from "
+            "memory or from the deliverable text -- the registry is the source of truth and the "
+            "deliverable is the presentation of it. There is deliberately no attribute-name "
+            "filter: you always get everything, so you never have to guess an attribute's exact "
+            "spelling. "
+            "[BL-205] This tool is for facts ABOUT A NAMED THING (a place, organization, "
+            "facility, law, etc. -- something you could point at and give a proper name). It is "
+            "NOT the same store as read_verified_fact, which holds standalone derived/global "
+            "values that are not tied to any one named thing (a budget cap, a computed ratio, a "
+            "vehicle count). If what you need is a specific value with no owning entity, use "
+            "read_verified_fact instead -- calling this with entity='' to 'see everything' is "
+            "rarely useful, since it returns names only, with no attributes attached (see "
+            "'entity' param below). Look up an entity by its EXACT name first (you can list "
+            "registered things by omitting 'entity', but that only gives names -- call again with "
+            "a specific 'entity' to see its attributes)."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "entity": {"type": "string", "description": "The thing's registered name. Omit to list all registered things."},
+                "entity": {"type": "string", "description": "The thing's registered name. Omit to list all registered things (names only, no attributes -- call again with a name to see its attributes)."},
                 "entity_type": {"type": "string", "description": "When listing, optionally filter by category."},
             },
         },
@@ -1802,12 +1812,27 @@ def _read_entity_handler(args: dict, state: dict | None = None) -> dict:
     """[BL-204] `read_entity`ハンドラ。事物と**全属性**を返す。
     [CONSTRAINT] attr_name指定の絞り込みは提供しない。属性名が完全に自由である以上、
     読み取り側で名前を推測させると表記ゆれで空振りするため、推測が発生しない形にする
-    （設計書§2.4、Clineレビュー指摘・軽3）。"""
+    （設計書§2.4、Clineレビュー指摘・軽3）。
+    [BL-205] log/2026-08-10/1829で、read_entityとread_verified_factの役割分担が伝わらず、
+    モデルが「何か確認したい」→空引数で一覧取得→属性が無く空振り、という探索的だが
+    非効率な呼び出しを繰り返す事例が複数回観測された（User AI Stage4の思考ログ
+    「The developer mentioned that the source of truth requires using the read_entity
+    function. So it seems like I should call the function to list all entities.」）。
+    一覧モード（entity未指定）の返り値へ、次に取るべき行動のヒントを添えて誘導する。"""
     conn = get_active_conn()
     run_id = _CURRENT_RUN_ID
     name = (args.get("entity") or "").strip()
     if not name:
-        return {"entities": list_entities_from_db(conn, run_id, (args.get("entity_type") or "").strip())}
+        entities = list_entities_from_db(conn, run_id, (args.get("entity_type") or "").strip())
+        result = {"entities": entities}
+        if entities:
+            result["hint"] = (
+                "これは名前の一覧のみです（属性は含まれません）。特定の事物について値が"
+                "必要な場合は、read_entity(entity=\"<上記のcanonical_nameのいずれか>\")で"
+                "再度呼んでください。対象がどの事物にも属さない単独の値（予算上限・比率等）の"
+                "場合は、read_entityではなくread_verified_factを使ってください。"
+            )
+        return result
     ent = resolve_entity(conn, run_id, name)
     if not ent:
         return {"status": "not_found",
@@ -7534,6 +7559,9 @@ It serves as the initial planning layer for breaking down complex objectives acr
        write_agreementのcitations（type="web"等）で追跡可能な出典として明示してください。
        [BL-204] read_entityで、この課題に登場する事物について既に登録済みの事実を確認できます
        （何が既知で何が未確認かを踏まえてタスクを分解する際に役立ちます）。
+       [BL-205] read_entityは名前を持つ事物専用です。対象を持たない単独の値（予算上限等）は
+       read_verified_factを使い、read_entityをentity未指定の「とりあえず一覧」目的で
+       多用しないでください。
        【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
        read_plan_draft・write_agreement・web_search・web_fetch・read_reference_file・
        read_entity・think
@@ -7889,6 +7917,11 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "confidenceは\"confirmed\"（他タスクと突き合わせても動かない）と\"provisional\"の2値です。"
         "「自分で導出した工学的仮定である」ことは、confidenceではなく"
         "citationsのtype=\"expert_calculation\"で表してください（確定度と出所は別の軸です）。\n"
+        "[BL-205: read_entityとread_verified_factの使い分け] read_entityは**名前を持つ事物**"
+        "（施設・場所・組織等）の属性専用です。予算上限や比率のような、どの事物にも属さない"
+        "単独の値はread_verified_factを使ってください。read_entityをentity未指定で呼んでも"
+        "名前の一覧しか返らず属性は含まれません——「とりあえず全部見る」目的では使わず、"
+        "確認したい事物の名前が分かっている場合にentity指定で呼んでください。\n"
         "3. **事物の名称は、ゴール文に書かれた表記をそのまま使ってください。**"
         "記憶による言い換え・略称・類似名を使わないでください。ゴール文に登場する事物は"
         "run開始時に登録済みであり、未登録の名前を渡すと候補付きで差し戻されます。"
@@ -8205,6 +8238,9 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "**事物の名称はゴール文の表記をそのまま使い**、記憶による言い換え・略称を使わないで"
         "ください（未登録の名前は候補付きで差し戻されます）。ゴール文に無い事物を新たに"
         "発見した場合のみ、register_entityで出典を添えて登録してください。\n"
+        "[BL-205] read_entityは名前を持つ事物専用です。対象を持たない単独の値は"
+        "read_verified_factを使い、read_entityをentity未指定の「一覧確認」目的で"
+        "多用しないでください（一覧は名前のみで属性を含みません）。\n"
         "[BL-198: 実測できる地理データは実測する] 地点の標高、2点間の直線距離、住所の緯度経度、"
         "道路距離・所要時間は、上記の専用ツール（gsi_geocode→gsi_get_elevation／"
         "gsi_calc_distance_bearing／calc_road_route）で実際に取得できます。これらを推測したり、"
@@ -8635,7 +8671,9 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"特に、**ゴール文に登場しない事物名が成果物に現れている場合**は重点確認対象です"
         f"（記憶による言い換えで、実在するが無関係な対象の情報を引き込んでいる恐れがあります）。"
         f"また、住所と座標の両方が記録されている事物は、verify_entity_geoで住所を引き直して"
-        f"座標の妥当性を検算できます。\n\n"
+        f"座標の妥当性を検算できます。\n"
+        f"[BL-205] read_entityは名前を持つ事物専用です。対象を持たない単独の値の検算は"
+        f"read_verified_factを使ってください。\n\n"
         f"[BL-203: 拠点の名称と座標の由来を確認する] 実測値は「正しい場所を測った」場合にのみ"
         f"正しく、誤った座標を測れば「誤った場所の正しい実測値」になります。これは推測値より"
         f"気づきにくいため、次の2点を重点確認してください。①**拠点の名称がゴール文の表記と"
@@ -8819,7 +8857,9 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"事物についての事実である場合（施設の位置・規模・数量等）、read_entityでレジストリの"
         f"記録と一致しているかを確認してください。レジストリの記録と食い違う値、あるいは"
         f"レジストリに存在しない事物名が使われている場合は、それ自体をconstraint_issueの"
-        f"根拠にしてください。住所と座標を持つ事物はverify_entity_geoで検算できます。\n\n"
+        f"根拠にしてください。住所と座標を持つ事物はverify_entity_geoで検算できます。\n"
+        f"[BL-205] read_entityは名前を持つ事物専用です。対象を持たない単独の値の検算は"
+        f"read_verified_factを使ってください。\n\n"
         f"[BL-203: 座標そのものの妥当性を疑う] 実測値は「正しい場所を測った」場合にのみ正しく、"
         f"誤った座標を測れば「誤った場所の正しい実測値」になります。gsi_geocodeは住所ジオコーダで"
         f"あり施設名を無視するため、施設名で引くと大字の代表点（実位置と数km・標高で数百m違う）が"
@@ -9415,6 +9455,8 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
        （新規のweb検索・取得はこのパスでは行いません）。
        [BL-204] この課題に登場する事物についての事実はread_entityで確認できます。停滞・矛盾の
        判断が特定の事物の主張に関わる場合、レジストリの記録と食い違っていないか確認してください。
+       [BL-205] read_entityは名前を持つ事物専用です。対象を持たない単独の値はここでは
+       扱いません（このパスにread_verified_factはありません）。
        【重要】あなたが使えるツールはread_reference_file・read_entityです。
 
         Return ONLY JSON in the exact format below:
@@ -9486,6 +9528,10 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
        topic="essence_dialogue_<簡潔な識別子>", decision_what="<結論の要約>",
        reason_why="<なぜこの結論に至ったか>")を呼び、本質対話の結論を確定提案として記録して
        ください（この提案はUser AIが承認するまで正式な合意にはなりません）。
+
+    [BL-204] この課題に登場する事物についての事実はread_entityで確認できます。
+    [BL-205] read_entityは名前を持つ事物専用です。対象を持たない単独の値はここでは
+    扱いません（このパスにread_verified_factはありません）。
 
     【重要】あなたが使えるツールはthink・escalate_premise_concern・write_agreement・
     read_reference_file・read_entityです。
@@ -9575,6 +9621,9 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     [BL-188] 上記のescalated_issuesや直近の会話がweb由来のcitations（引用元URL）に基づく
     主張に関わる場合、read_reference_fileでそのキャッシュ本文を確認できます（新規のweb検索・
     取得はこのノードでは行いません）。
+    [BL-204] この課題に登場する事物についての事実はread_entityで確認できます。
+    [BL-205] read_entityは名前を持つ事物専用です。対象を持たない単独の値はここでは
+    扱いません（このパスにread_verified_factはありません）。
     【重要】あなたが使えるツールはthink・escalate_premise_concern・write_agreement・
     read_reference_file・read_entityです。
 
@@ -9728,7 +9777,8 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
     【最低限、iter=1で一度は、成果物中の主要な数値についてread_verified_factで確認してから
     判定を進めてください】。\n
     [BL-204] 成果物が特定の事物についての主張を含む場合、read_entityでレジストリの記録と
-    突き合わせて確認できます。
+    突き合わせて確認できます。[BL-205] read_entityは名前を持つ事物専用です。対象を持たない
+    単独の値（予算上限等）はread_verified_factを使ってください。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
     write_agreement・read_entity・thinkです。{_THINK_TRAILER_SENTENCE}
 
@@ -9873,7 +9923,8 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"ゴール文の直接記載か、Agent自身の派生仮定かを見分けるため、必要に応じてこれらのツールで"
             f"確認してください。\n\n"
             f"[BL-204] Agentの主張が特定の事物についてのものである場合、read_entityでレジストリの"
-            f"記録と突き合わせて確認できます。\n\n"
+            f"記録と突き合わせて確認できます。[BL-205] read_entityは名前を持つ事物専用です。"
+            f"対象を持たない単独の値はread_verified_factを使ってください。\n\n"
             f"【今回レビューする直近のやり取り】\n{stage_history_text}\n\n"
             f"【重要】あなたが使えるツールはread_verified_fact・read_deliverable_file・python_repl・"
             f"read_entity・thinkです。{_THINK_TRAILER_SENTENCE}\n"
@@ -9991,7 +10042,9 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"write_agreementを呼ばず、approval_status=\"Rejected\"としてください。まだ判断材料が"
             f"不足している場合はapproval_status=\"Pending\"としてください。\n\n"
             f"[BL-204] 承認を保留・却下する前に、read_entityでこの課題の事物について既に登録済みの"
-            f"事実を確認してください。既に確認できる事実をAgentへ再要求するのは避けてください。\n\n"
+            f"事実を確認してください。既に確認できる事実をAgentへ再要求するのは避けてください。"
+            f"[BL-205] read_entityは名前を持つ事物専用です。entity未指定で「とりあえず一覧」を"
+            f"見る目的では使わないでください（一覧は名前のみで属性を含みません）。\n\n"
             f"【今回レビューする直近のやり取り】\n{stage_history_text}\n\n"
             f"【重要】あなたが使えるツールはwrite_agreement・read_entity・thinkです。{_THINK_TRAILER_SENTENCE}\n"
             f'Return ONLY JSON: {{"approval_status": "Approved/Approved_with_Conditions/Rejected/Pending", '
@@ -10116,6 +10169,10 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
                 f"でください。\n"
                 f"[BL-204] 修正指示を出す前に、read_entityでこの課題の事物について既に登録済みの"
                 f"事実を確認してください。既に確認できる事実の再取得を修正指示に含めないでください。\n"
+                f"[BL-205] read_entityは名前を持つ事物専用のツールです。entity=\"\"で「とりあえず"
+                f"全部見る」ために呼ばないでください——それでは名前の一覧しか返らず、属性は"
+                f"含まれません。確認したい事物の名前が分かっている場合にのみ、entity指定で"
+                f"呼んでください。\n"
             )
         stage4_system_prompt += (
             f"\n【重要】あなたが使えるツールはthink・schedule_task_focus（[BL-191]過去タスクの"
@@ -10421,7 +10478,9 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         "消える一時メモであり、後続タスクへは一切引き継がれません。持ち越したい懸念を"
         "scratch_concernsに書くだけで満足せず、必ずwrite_issueで記録してください。\n"
         "[BL-204] 判断が特定の事物についての主張に関わる場合、read_entityでレジストリの記録と"
-        "突き合わせて確認できます。\n"
+        "突き合わせて確認できます。[BL-205] read_entityは名前を持つ事物専用です。対象を持たない"
+        "単独の値（予算上限等）はread_verified_factを使い、read_entityをentity未指定の"
+        "「一覧確認」目的で多用しないでください。\n"
         "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
         "write_agreement・escalate_premise_concern・resolve_premise_concern・revise_goal・"
         "freeze_agreement・write_issue・read_issues・read_entity・thinkです。"
@@ -11135,7 +11194,8 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     計画中の主張がcitations（引用元）付きでweb由来の情報を根拠にしている場合は、
     read_reference_fileでそのキャッシュ本文を確認し、実際に主張と一致しているか検証できます。
     [BL-204] 計画中の主張が特定の事物についてのものである場合、read_entityでレジストリの
-    記録と突き合わせて確認できます。
+    記録と突き合わせて確認できます。[BL-205] read_entityは名前を持つ事物専用です。
+    対象を持たない単独の値はread_verified_factを使ってください。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
     diff_plan_draft_versions・write_agreement・web_search・web_fetch・read_reference_file・
     read_entity・thinkです。{_THINK_TRAILER_SENTENCE}
