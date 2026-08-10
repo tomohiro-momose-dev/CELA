@@ -2532,6 +2532,19 @@
 
 ---
 
+### D-180: issueの「先送り済みか」の判定は、いつ記録されたかに関わらずdefer_to_task_idの有無だけで行う
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | `log/2026-08-10/2100`（ライブ中のドライラン）で、task_2_3→task_3_1への移行がラウンド31から36以上にわたり繰り返し差し戻されていた。DBを確認すると該当issue（`winter_vehicle_capex_conflict`）は`defer_to_task_id=task_3_1`が既に設定済みだったが、Detectorは`status='escalated'`のみを根拠に`major`判定を繰り返していた。BL-125/158の機械的ゲート（`_get_blocking_issues_for_transition`）は`defer_to_task_id`の有無で正しく判定しているのに、なぜDetector自身のLLM判定は繰り返し差し戻すのか。 |
+| **決定理由** | `write_issue(DEFER)`はBL-136の設計により意図的に`status`を`escalated`のまま変更せず、`defer_to_task_id`だけを記録する（先送り後もこのissueは「重大な懸念として記録され続ける」ことに意味があるため）。ところがBL-181のDetectorプロンプト指示（`role_specific_instruction`のuser分岐3節）は`status='escalated'`の残存だけを見て、かつ「**今回の発言内で**」RESOLVE/DEFERが実行されたことを要求していた。DEFERは一度実行すれば恒久的に`defer_to_task_id`が残るにもかかわらず、承認を試みるたびに**同じラウンド内での再実行**を求める基準になっており、機械的ゲート（正しい）とDetectorの自然文判定（過剰に厳しい）が矛盾していた。これはBL-076/BL-193（プロンプト内の相互矛盾が58回のedits失敗を招いた事故、BL-202/D-176）と同型の「複数箇所に同じ規則を書いた結果、一方だけ更新漏れが起きる」パターンである。 |
+| 決定内容 | BL-181のプロンプト指示を、`defer_to_task_id`が（いつ設定されたかに関わらず）既に設定済みであれば正式に先送り済みとみなし`major`としないよう修正する。`defer_to_task_id`が未設定のまま残っているissueがある場合のみ、従来通り`major`で差し戻す。 |
+| 影響 | `cela_main.py`（`call_detector`のuser向け`role_specific_instruction`BL-181節）、`tests/test_bl207_defer_gate_ignores_prior_round.py`。 |
+| 関連 BL | [BL-207](back_log/issue_backlog.md#bl-207-bl-181のdetectorプロンプトがdefer_to_task_id設定済みのissueにも毎ラウンド再deferを要求し無限に差し戻し続ける) |
+
+---
+
 ## 未決定（pending）
 
 ---

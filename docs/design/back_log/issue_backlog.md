@@ -238,6 +238,7 @@
 | BL-204 | 高 | `cela_main.py`（`entities`/`entity_attributes`スキーマ、`seed_entities_from_goal`、ツール4本、`TOOL_DISPATCH`配線、Expert/Detectorプロンプト4箇所、`_revise_goal_tool_impl`拡張） | ユーザー提案「登場する事物をDBで構造的に管理しなければならない。webでいくらでも情報が取れる分、ハルシネーションリスクが跳ね上がった」を受けて設計。`log/2026-08-10/0901`（BL-203）で、ゴール文に`公立諏訪東京理科大学`とあるのにExpertが記憶から「長野大学」と書いた事故は、数値は`verified_facts`にあったが**名称そのものが事実として登録されていなかった**ことが根本原因と判明。**実装完了（`done`）**：`entities`/`entity_attributes`の2テーブルを新設し、`task_planner`内で（専用ノードは新設せず）ゴール文から事物を抽出し、**ゴール文中に文字列として実在するかを機械的に検証**してから`origin='goal_text'`で登録（これ1つで「長野大学」の登録を客観的に拒否できる）。未登録名への属性書き込みは`did_you_mean`付きで拒否する同一性ガードを実装。属性の出典封筒（confidence/citations/reason等）は`verified_facts`の既存語彙をそのまま踏襲。ツール4本（register_entity/write_entity_attribute/read_entity/verify_entity_geo）をExpert・Detector（Pass1/Pass2）へ配線し、プロンプト誘導はドメイン非依存で追加。独立レビュー（Cline）の指摘4件を実コードと突き合わせて検証し、`confidence`への`assumption`追加（既存の2値方針との自己矛盾）は正当化せず削除、`read_entity`は属性名指定を持たせず全属性を返す形にするなど、指摘の多くを「緩和」ではなく「原因の除去」で解消した。新規テスト31件、関連既存と合わせ191件で無退行を確認。**運用上の注意**：ゴール文からの初期登録はrunが計画未確定の時点でしか発火しないため、既にタスク分解が確定済みのrunを`--resume`しても遡って登録されない（恩恵を受けるには新規run）。詳細は[BL-204詳細](#bl-204-実世界事物レジストリentities-entity_attributesの新設)を参照。 | P1 |
 | BL-205 | 中 | `cela_main.py`（`READ_ENTITY_TOOL`スキーマ、`_read_entity_handler`のヒント付与、`read_entity`を持つ全ノードのプロンプト本文） | ユーザーが`log/2026-08-10/1829`で「read_entityとread_entityで混乱が生まれています」（意図はread_verified_factとの混乱）と報告。BL-204でread_entityを全ノードへ展開した後、モデルが空クエリでread_verified_factを呼び、さらにread_entityも`entity=""`で呼んで名前一覧のみ（属性なし）を得る、という非効率な探索呼び出しを繰り返す事例が複数回観測された。User AI (Stage4)の思考ログに原因（read_entityが「真実の源」としか伝わっておらず、read_verified_factとの役割分担が説明されていなかったこと）がそのまま現れていた。正典名チェック自体は正常に機能しており（12件正しく登録、unknown_entity拒否0件）、ハルシネーション防止という主目的への影響はない。**実装完了（`done`）**：①`READ_ENTITY_TOOL`のスキーマ説明とentityパラメータへ、read_verified_factとの境界を明記。②一覧モード（entity未指定）の返り値へ、次に取るべき行動のhintを追加（登録0件時は付けない）。③ユーザー指摘「プロンプト説明にも書かないと見落とされます」を受け、read_entityを付与した全ノード（call_expert・call_detector Pass1/Pass2・call_task_planner・call_task_plan_reviewer・call_reviewer・call_reflection・call_facilitator・generate_user_utterance4段階）それぞれのプロンプト本文へ境界説明を追記（read_verified_fact非搭載ノードにはその旨も明記）。新規テスト15件、関連既存と合わせ計1032件で無退行を確認。詳細は[BL-205詳細](#bl-205-read_entityとread_verified_factの役割分担が伝わらず無駄な探索呼び出しが繰り返される)を参照。 | P2 |
 | BL-206 | 中 | `cela_main.py`（`_commit_agreement_from_tool`のUPDATE/edits分岐、`_find_active_deliverable_agreement`、`_apply_text_edits`） | `log/2026-08-10/1905`・`log/2026-08-10/2100`のドライラン精査で、`write_agreement`のUPDATE（edits指定）が同一タスクに対し連続6〜16回失敗する事例をそれぞれ1件ずつ発見。表面上はBL-193（記憶で継ぎ足したold_textが窓の外へドリフトする）の再発に見えたが、実DB（`cela.db`のwhiteboard_drafts）に残る当該run・当該versionの実データと突き合わせたところ、失敗したold_text（144文字・14文字等）は**version=1の保存内容へ一字一句正確に、しかも直前の`read_whiteboard_excerpt`が`match_type: exact`で発見できている文言だった**。にもかかわらず`_apply_text_edits`は「緩い一致も0件」で失敗し、エラーメッセージに添えるはずの近傍スニペット（`_nearest_content_snippet`、cela_main.py:6108）が**完全に空文字**だった。同関数の実装上、空スニペットは比較対象の`content`自体が空文字のときにしか発生しない。つまり実際の不具合は「old_textの引用ミス」ではなく、**edit照合に渡された「現在のホワイトボード内容」がその時点で空文字だった**ことを示している。2件とも最終的にはBL-080のSUPERSEDE（全文置換）へExpertが自律的に切り替えて成功しており、BL-076/193のような回答不能までの完全な膠着には至っていないが、2100ログでは12回の無駄な`write_agreement`呼び出し（約15分、tool_iter予算の相当部分）を空費した。`_commit_agreement_from_tool`のUPDATE分岐（cela_main.py:3062以降）を読むと、`_find_active_deliverable_agreement`が対象のDeliverable agreementを見つけられなかった場合に`old_content`が空文字のまま初期化された値を使い続け、`is_whiteboard = old_content.startswith("WHITEBOARD:")`がFalseとなって`base_content = old_content`（空文字）を編集対象にしてしまう経路が疑わしいが、当該run・当該時点のDB上は`_find_active_deliverable_agreement`が対象を発見できるはずの条件（status≠Superseded、phase_id/task_id一致）を満たしており、なぜこの経路に入ったのかはログ調査だけでは特定できていない。`open`のまま、再現条件を絞る追加調査が必要。詳細は[BL-206詳細](#bl-206-write_agreementのedits照合が実際には空のホワイトボード内容に対して行われ本来一致するはずのold_textが繰り返し不一致になる)を参照。 | P2 |
+| BL-207 | 高 | `cela_main.py`（`call_detector`のuser向け`role_specific_instruction`、BL-181節） | ユーザーの依頼で`log/2026-08-10/2100`（ライブ中のドライラン）のtask_2_3→task_3_1移行の膠着を調査。DBを確認すると該当issue（`winter_vehicle_capex_conflict`）は`defer_to_task_id=task_3_1`が既に設定済みだったにもかかわらず、Userが承認・移行を試みるたびにDetectorが`constraint_issue=major`（BL-181名指し）で差し戻しを繰り返し、ラウンド31から36以上にわたり同じサイクル（承認→差し戻し→撤回→Expertがほぼ同内容を再提出→minor判定→再度承認→また差し戻し）が続いていたことを発見。原因は、`write_issue(DEFER)`が仕様上`status`を`'escalated'`のまま変更せず`defer_to_task_id`のみを記録する設計（BL-136）に対し、実際の遷移をブロックする機械的ゲート（`_get_blocking_issues_for_transition`、BL-125/158）は`defer_to_task_id`の有無を正しく見て先送り済みissueを除外しているのに、**Detector自身のLLM判定に渡すBL-181のプロンプト指示だけが`defer_to_task_id`を一切見ず、`status='escalated'`の残存だけを根拠にし、しかも「今回の発言内で」RESOLVE/DEFERが実行されたことを要求していた**こと。DEFERは一度実行すれば恒久的に記録が残るのに、承認を試みるたびに同じラウンド内での再実行を求める基準になっており、機械的ゲート（正しい）とDetectorの自然文判定（過剰に厳しい）が矛盾し、無限ループを生んでいた。BL-076/BL-193（BL-202/D-176）と同型の「同じ規則を複数箇所に書いた結果、一方だけ更新漏れが起きる」パターン。**実装完了（`done`）**：BL-181の指示文を、`defer_to_task_id`が（いつ設定されたかに関わらず）既に設定済みであれば正式に先送り済みとみなし`major`としないよう修正。`defer_to_task_id`が未設定のまま残るissueがある場合のみ、従来通り`major`で差し戻す。新規テスト`tests/test_bl207_defer_gate_ignores_prior_round.py`5件、既存の`test_bl181_task_transition_block_stops_orchestrator.py`・`test_bl183_task_transition_block_severe_issue_flag.py`を含め無退行、オフライン全テストスイート1037件通過。詳細は[BL-207詳細](#bl-207-bl-181のdetectorプロンプトがdefer_to_task_id設定済みのissueにも毎ラウンド再deferを要求し無限に差し戻し続ける)を参照。 | P1 |
 
 ---
 
@@ -6522,6 +6523,80 @@ LangGraphのcheckpoint resumeとの相互作用など他の要因も考えられ
 
 ---
 
+### BL-207: BL-181のDetectorプロンプトがdefer_to_task_id設定済みのissueにも毎ラウンド再DEFERを要求し、無限に差し戻し続ける
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | [D-180](../decision_log.md#d-180-issueの先送り済みかの判定はいつ記録されたかに関わらずdefer_to_task_idの有無だけで行う)、[BL-181](#bl-181-bl-125のタスク遷移ブロックをorchestratorexpertが素通りしtask_idの誤登録データ破損を招く)、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)、[BL-136](#bl-136-issue_logが起票されるが解決されない状態だった可視性強制力の非対称性)、[BL-202](#bl-202-サーバーエラーのプレースホルダー応答によるラウンド空転とdetector注釈を巻き込んだ巨大old_textによるedits失敗の連鎖)（同型の「プロンプト内の相互矛盾」パターン） |
+
+**内容:**
+
+ユーザーの依頼で`log/2026-08-10/2100`（調査時点でライブ中のドライラン）を調査。
+task_2_3→task_3_1の移行がラウンド31から36以上にわたり、以下のサイクルを繰り返し
+続けていた。
+
+1. User「task_2_3を承認し、task_3_1へ進める」
+2. Detector「`winter_vehicle_capex_conflict`（severity=major）が未解決のまま移行しよう
+   としている」（BL-181を名指し）として`constraint_issue=major`で差し戻す
+3. User「移行を保留する」と撤回
+4. Expertがtask_2_3をほぼ同内容で再提出 → Detectorは`minor`判定（内容自体は問題なし）
+5. Userが再度承認・移行を試みる → 2に戻る
+
+DBを直接確認すると、該当issueは`status='escalated'`のまま、`defer_to_task_id='task_3_1'`
+は既に設定済みだった（つまり手続き上の先送りは既に行われている）。
+
+**根本原因：**
+
+`write_issue(DEFER)`はBL-136の設計により**意図的に`status`を変更せず**、
+`defer_to_task_id`だけを記録する（`cela_main.py:3471-3473`）。実際の遷移をブロックする
+機械的ゲート（`_get_blocking_issues_for_transition`、BL-125/158、`cela_main.py:11608`）
+は`defer_to_task_id`が設定済みのissueを正しく除外しており、こちらは設計通り機能して
+いた。
+
+問題はDetector自身のプロンプト指示（BL-181、`call_detector`のuser向け
+`role_specific_instruction`）にあった。この指示は`status='escalated'`の残存だけを根拠に
+し、`defer_to_task_id`の有無を一切見ておらず、しかも「**今回の発言内で**」RESOLVE/
+DEFERが実行されたことを要求していた。DEFERは一度実行すれば恒久的に記録が残るのに、
+承認を試みるたびに**同じラウンド内での再DEFER**を求める基準になっており、機械的ゲート
+（正しい）とDetectorの自然文判定（過剰に厳しい）が矛盾し、無限ループを生んでいた。
+
+これはBL-076/BL-193（BL-202/D-176、プロンプト内の相互矛盾が58回のedits失敗を招いた
+事故）と同型の「同じ規則を複数箇所（コードの機械的ゲートとLLMへのプロンプト指示）に
+書いた結果、一方だけ更新漏れが起きる」パターンである。
+
+なお、調査時点のライブなログでは、User AI自身が「defer_to_task_idは設定済みだが、
+`escalated`のままなので改めてDEFERを呼ぶ必要がありそうだ」と気づき、承認と同じターン内
+でDEFERを再実行し始める挙動が観測された。これは修正前でも偶然ループを抜けられる可能性の
+あるモデルの適応的な回避策だが、再現性は保証されず、根本修正が必要と判断した。
+
+**実装完了（`done`）**：
+
+BL-181のプロンプト指示を、`defer_to_task_id`が（いつ設定されたかに関わらず）既に
+設定済みであれば正式に先送り済みとみなし`major`としないよう修正した。
+`defer_to_task_id`が未設定のまま残っているissueがある場合のみ、従来通り
+`major`で差し戻す。`write_issue(DEFER)`が`status`を変更しない仕様であることも
+指示文中に明記し、なぜ`status='escalated'`の残存だけでは未対応と判定してはいけないかの
+理由を示した。
+
+新規テスト`tests/test_bl207_defer_gate_ignores_prior_round.py`（5件）：BL-181節に
+`BL-207`・`defer_to_task_id`が含まれること、`status='escalated'`が変わらない理由の
+説明があること、旧来の「今回の発言内で」を要求する趣旨の文言が「未設定のまま残っている
+場合のみ」という条件付きに置き換わっていること、本来の趣旨（真に未対応の場合はmajorで
+差し戻す）が維持されていること、既存の`test_bl181_task_transition_block_stops_orchestrator.py`
+の骨格アサーションが壊れていないことを検証。関連の既存テスト（BL-181/183系）と合わせて
+無退行、オフライン全テストスイート1037件通過（92件の既知flaky/live除外）。
+`python -m py_compile`合格、`check_docs_consistency.py`合格。
+
+**運用上の注意**：この修正はプロンプト文言のみのコード変更であり、既に起動済みの
+プロセスには次のDetector呼び出しから反映される（`--resume`不要、モジュール再インポート
+時点で新しい文言が使われる）。ただし調査時点でライブだった`log/2026-08-10/2100`の
+プロセス自体は既に起動済みのため、修正の効果はそのプロセスの次回Detector呼び出しで
+確認する必要がある。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -6695,4 +6770,5 @@ LangGraphのcheckpoint resumeとの相互作用など他の要因も考えられ
 | 2026-08-08 | ユーザーが`log/2026-08-08/1514`のレビュー中、「ホワイトボードの書き換えが失敗しまくっています。どうにかなりませんか？」と報告（BL-193）。調査の結果、task_2_1のホワイトボードが50KB超に育った状態で、Expertがwrite_agreement(edits=...)のold_textとしてDetector注釈ブロックごと巻き込んだ巨大な引用を組み立て、実際の格納内容と一致せず同一失敗を8回連続で繰り返していたことを特定。根本原因はBL-151の不一致時スニペットが文書サイズに関わらず常に先頭400文字固定だったため、編集対象が先頭から遠い大規模文書では自己修復が機能していなかったこと。ユーザーとの議論でClaude Code等の実エージェントのdiff編集規律（編集直前に現物を読み直す・old_stringは最小限に保つ）を参照し、「ファイル化してgrepさせる」案はR4設計の「DBが正」原則と衝突するため却下、DB直参照のままBL-079（`verify_whiteboard_excerpt`）と同じ判定ロジックを流用する方針で合意。実装完了：①`_nearest_content_snippet`（不一致時スニペットをold_textとの最長共通部分の周辺へ差し替え）、②`read_whiteboard_excerpt`ツール（Expert専用、old_text組み立て前に対象箇所の現在の実際の文字列をピンポイント取得）、③R4編集方針プロンプトへold_text最小化指示と新ツールの使用推奨を追記。新規テスト`tests/test_bl193_whiteboard_edit_reliability.py`16件、既存BL-151テスト1件をスニペット文言変更に合わせて更新、オフライン全テストスイート841件通過、`python -m py_compile`合格、`check_docs_consistency.py`合格。 |
 | 2026-08-08 | ユーザーが`log/2026-08-08/1514`のhaltについて「なぜtask_2_1はここまで伸びたのか、なぜエキスパートは修正しきれなかったのか」を調査依頼（BL-194）。halt判定に使われた滞留escalated issue20件が全件`write_issue(DEFER)`によりtriage済みだったにもかかわらず、督促経路（BL-103 pin・BL-096/144停滞判定）だけが`defer_to_task_id`を見ずに全件を「未対応」と扱い続けていたこと、うち6件がtask_2_1自身への自己先送りでDEFERの実効性が全て打ち消されていたことを実ログ・実コードで確認。ユーザーの3つの追加質問（ゴール改定は効いていないか／User AIの気づきがなぜ定着しなかったか／なぜReflector・Facilitatorが整理できなかったか）に、`_build_task_scope_context`をReflection/Facilitatorが一度も呼んでおらずスコープ判定材料が構造的に無いこと等で回答。Planエージェントによる設計中に私（Claude）の当初診断への3点の補正（BL-158ゲートは既にDEFER済みを除外する側だった等）を実コードで再検証・確定。さらにPlanエージェント自身の§7段階リリース推奨（S1〜S6先行）について、ユーザーの問いを受けて再検証した結果、自己先送り6件がS1〜S6だけではactionableのまま残りhalt経路が再発し得ることが判明し、推奨を訂正（S1〜S8は一括実装が前提）。設計書を`docs/design/back_log/BL-194/BL194_basic_design.md`として（Planエージェント原文＋Claudeの事実検証・補正を含め）逐語保存し、issue_backlog.mdへBL-194を起票。`_BL194_ACK_TTL_ROUNDS=3`/`_BL194_ACK_MAX_GRANTS=2`をユーザー承認済み（AGENTS.md §7）。今回は設計書の保存までとし、コード実装（S1〜S8）は別途進める。 |
 | 2026-08-10 | ユーザーの「ホワイトボードのedit失敗はどうか？」という依頼を受け`log/2026-08-10/1905`・`log/2026-08-10/2100`を精査し、BL-206を新規起票（`open`）。1タスクのUPDATEに対しExpertが連続6〜16回`edits失敗`する事例を発見。当初はBL-193の再発に見えたが、実DB（`cela.db`のwhiteboard_drafts）に残る当該run・当該versionの実データと突き合わせたところ、失敗したold_textは実際にはversion=1の保存内容へ一字一句正確に存在しており（直前の`read_whiteboard_excerpt`も`match_type: exact`で同一文言を発見済み）、BL-193が想定する「記憶による継ぎ足しで不一致になる」パターンとは異なることを確認。エラーメッセージに添えられるはずの近傍スニペット（`_nearest_content_snippet`）が全失敗で完全に空文字だったことから、edit照合に渡された「現在のホワイトボード内容」自体がその時点で空文字だったことを特定。`_commit_agreement_from_tool`のUPDATE分岐で`_find_active_deliverable_agreement`が対象を発見できない場合に空文字の`old_content`を編集対象にしてしまう経路が疑わしいが、当該run・当該時点のDBは`_find_active_deliverable_agreement`が対象を発見できるはずの条件を満たしており、なぜこの経路に入ったのかはログ調査だけでは特定できず`open`のまま。両ログとも最終的にはBL-080のSUPERSEDE（全文置換）へExpertが自律的に切り替えて成功しているため、BL-076/193型の完全な膠着には至っていない。 |
+| 2026-08-10 | ユーザーの「task_2_3から3_1への遷移で膠着しています。状況と原因を」という依頼を受け、`log/2026-08-10/2100`（調査時点でライブ中のドライラン）でtask_2_3→task_3_1移行がラウンド31〜36以上にわたり繰り返し差し戻されている状況を確認しBL-207を新規起票・`done`化。DBでは該当issue（`winter_vehicle_capex_conflict`）の`defer_to_task_id='task_3_1'`が既に設定済みだったにもかかわらず、Detectorが`status='escalated'`の残存のみを根拠に`major`で差し戻し続けていた。原因は`write_issue(DEFER)`が仕様上`status`を変更しない設計（BL-136）に対し、機械的ゲート（`_get_blocking_issues_for_transition`、BL-125/158）は`defer_to_task_id`を正しく見て先送り済みissueを除外しているのに、Detector自身のプロンプト指示（BL-181）だけが`defer_to_task_id`を見ず「今回の発言内で」の再DEFERを要求しており、機械的ゲートとプロンプト指示が矛盾していたこと（BL-076/193/BL-202/D-176と同型のパターン）。ユーザーの「修正してください」を受け、BL-181の指示文を`defer_to_task_id`の設定済みを尊重するよう修正し、D-180として決定理由を記録。新規テスト`tests/test_bl207_defer_gate_ignores_prior_round.py`5件、関連既存（BL-181/183系）を含め無退行、オフライン全テストスイート1037件通過、`python -m py_compile`合格、`check_docs_consistency.py`合格。 |
 | 2026-08-09 | ユーザーが「実装に移ってください」と指示。BL-194のS1〜S8を因果的に結合したまま一括実装した（設計書§7の「S1〜S6を先行リリース」という段階リリース推奨は、実装前に私が再検証で誤りと訂正済みだったため不採用）。①述語の単一化（`_is_issue_effectively_deferred`/`_get_actionable_escalated_issues`新設）で、Camp A（BL-136強制解決文・BL-145計画化）とCamp B（BL-096/144停滞判定・facilitator名指し）の重複フィルタ4箇所を一元化（BL-125遷移ゲートのみ安全装置として明示的に例外で据え置き）。②自己先送り（defer_to_task_id==実行中タスク自身）をtool boundaryで拒否（`_write_issue_impl`のDEFER分岐）。③Reflection/Facilitatorへ軽量スコープ要約`_build_current_task_scope_brief`を新設・注入（`_build_task_scope_context`は無関係な50KB超のホワイトボード全文を含むため再利用せず却下）。④第3のissue状態`ACKNOWLEDGE`をstatus語彙拡張ではなくTTL付き補助列（`acknowledged_until_round`等3列）で実装しD-079/D-080の不変条件を保護、定数はユーザー承認済み値（TTL=3ラウンド・累計上限2回）で実装。⑤DEFER成功時に受け皿タスクのスコープをエコーバック（機械的ゲートは追加せずプロンプト誘導のみ）。⑥BL-103 pinを「要対応」「対応予定確定済み」「対応中」の3見出しへ分離（和集合で従来の可視性を保存）。実装中に既存テスト2件（`test_bl145_issue_driven_plan_formalization.py`/`test_bl167_defer_to_task_id_completed_target.py`）のフィクスチャが偶然「自己先送り」または「BL-194が意図的に変更する挙動（正当にDEFER済みの懸念はもはやstagnantの根拠にならない）」を検証していたことが判明し、コメント付きで修正した（テスト側の期待値を弱めるのではなく、フィクスチャの実態を読み替える形）。新規テスト`tests/test_bl194_deferred_issue_consistency.py`26件、`tests/test_bl194_issue_acknowledge.py`18件を追加。既存の関連テスト134件（BL-096/103/123/136/144/145/154/157/158/167系）およびBL-186/190/191/192/193系69件と合わせて無退行を確認、オフライン全テストスイート885件通過、`python -m py_compile`合格、`check_docs_consistency.py`合格。 |
