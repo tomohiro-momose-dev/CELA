@@ -8527,7 +8527,13 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
                 「発注者としてのレビュー不足（妥協）」とみなし、**容赦なく major を出力し、Userに対して『承認を取り消し、Agentに厳しく修正を要求せよ』と差し戻してください。**\n\n
             3. 【BL-181: 次タスクへの移行時の宿題残し】: Userが次のタスクへの移行を指示している場合、read_issuesで現在のタスク（{_current_task_id}）に紐づく\n
                 severity='major'またはstatus='escalated'のissueが残っていないか確認してください。\n
-                残っている場合、今回の発言内でそのissueがwrite_issueのRESOLVEまたはDEFERにより明示的に対応されていなければ、\n
+                残っている場合、read_issuesが返す各issueのdefer_to_task_id列を確認してください。**defer_to_task_idが既に\n
+                何らかのtask_idへ設定済みであれば、それが今回の発言より前のラウンドで記録されたものであっても、\n
+                正式に先送り済みとみなし、このissueを理由にmajorとしないでください**（write_issue(DEFER)は仕様上statusを\n
+                'escalated'のまま変更しないため、defer_to_task_idの有無だけが「先送り済みか」の判断材料です。[BL-207]\n
+                「今回の発言内で対応されていなければ」という基準は、既に先送り済みのissueにも毎回のラウンドで再度DEFERの\n
+                実行を要求してしまい、正しく先送りされているのに無限に差し戻し続ける不具合の原因でした）。\n
+                defer_to_task_idが未設定のまま残っているissueがある場合のみ、\n
                 「現タスクの重大な懸念を未解決のまま次タスクへ進めようとしている」とみなし、**major を出力し、\n
                 『次タスクへ進む前に、残存issueをRESOLVEまたはDEFERせよ』と差し戻してください。**\n
         """)
