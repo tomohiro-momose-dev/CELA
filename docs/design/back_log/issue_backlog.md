@@ -6386,6 +6386,21 @@ Explore/Plan agentの原文を要約せず全文保存、AGENTS.md §7）。中�
 **既にタスク分解が確定済みのrunを`--resume`しても、事物レジストリは遡って初期登録されない**
 （空のまま）。この保護の恩恵を受けるには新規runが必要。
 
+**追記（同日）：`read_entity`の全ノードへの展開**：ユーザーから「少なくともread_entityは
+全ノードが使えたほうが良いのでは？」と提案を受けた。`write_entity_attribute`/
+`register_entity`（書き込み系、誰が事物を確定してよいかという権限の問題）とは異なり、
+`read_entity`は読み取り専用でrun単位の呼び出し予算も消費しないため、制限する理由がない。
+成果物・主張の**事実確認に関わるノード**へ展開した：`call_task_planner`、
+`call_task_plan_reviewer`、`call_reviewer`、`call_reflection`、`call_facilitator`、
+および`generate_user_utterance`（User AI）の4経路（Stage1レビュー・Stage3承認判断・
+Stage4修正指示・非Stage4の初回ターン等、計6箇所）。特にStage3/4はBL-197（過剰な実測要求）
+の発生源そのものであり、要求前にレジストリで既知の事実を確認できることが直接的な再発防止
+になる。`call_orchestrator`（フェーズ選択）・`call_resource_arbiter`（予算調整）・
+`call_integrator`（成果物マージ）は、事実確認より別の判断が主目的のノードとして意図的に
+対象外とした。書き込み系ツールはExpert専用のまま拡大していない。
+新規テスト9件（`test_bl204_entity_registry.py`へ追加、計40件）。関連の既存テストと
+合わせて計1017件、無退行を確認。
+
 ---
 
 | 日付 | 内容 |
