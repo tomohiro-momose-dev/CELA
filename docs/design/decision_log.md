@@ -2571,6 +2571,19 @@
 
 ---
 
+### D-183: Deliverableの識別（supersede対象の特定）は、entry_typeで絞り込みphase_idはフェイルセーフ照合に留める
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | BL-206の再調査で、`decision_extractor_node`のUPDATE分岐が「topic文字列一致」だけでsupersede対象を探しており、entry_typeの異なるエントリ（Userの却下が`entry_type='Decision'`として抽出された場合）が同一topicのDeliverable行まで乗っ取ってしまうことが判明した。加えて、`phase_id`のフォールバックが`item.get(key, default)`の欠落判定に依存しており、LLMが`"phase_id": ""`を明示的に返すケースを捕捉できていなかった。識別ロジックをどう堅牢化するか。 |
+| **決定理由** | supersedeループへの`entry_type`条件追加とphase_idの`or`フォールバック化は最小修正として妥当だが、それだけでは「LLMが返す識別子は将来も何らかの形でドリフトしうる」という前提に対して脆弱なままである。BL-131は既に`get_latest_whiteboard`で「task_idはrun_id内で一意」という規約に基づき、phase_idを完全一致条件からフェイルセーフな整合性チェック（不一致は警告のみ、発見は妨げない）へ格下げする設計を確立していた。`_find_active_deliverable_agreement`だけがこの規約に従わず完全一致のままだったことが、今回の孤児化を成立させる最後の1ピースだった。同じ規約を持つ2つの関数の扱いが食い違っていること自体が将来の再発源になるため、揃えることを決定として明示する。 |
+| 決定内容 | `_find_active_deliverable_agreement`を、task_id単独で検索しphase_id不一致は警告のみとする設計（`get_latest_whiteboard`と同型）へ変更する。加えて、decision_extractor_nodeのsupersede対象探索は`entry_type`一致を必須条件とする。今後、Deliverableやそれに準ずる版管理対象を識別子で探す新規コードを書く場合も、「一意性の根拠となる列（この場合task_id）で検索し、それ以外の列は完全一致条件ではなくフェイルセーフな整合性チェックに留める」という設計を既定とする。 |
+| 影響 | `cela_main.py`（`_find_active_deliverable_agreement`、`decision_extractor_node`のUPDATE分岐、`item.get("phase_id")`のフォールバック）、`tests/test_bl206_deliverable_orphaning.py`、`tests/test_bl161_write_agreement_phase_id_fallback.py`（既存1件の期待値を仕様変更に合わせ反転）。 |
+| 関連 BL | [BL-206](back_log/issue_backlog.md#bl-206-write_agreementのedits照合が実際には空のホワイトボード内容に対して行われ本来一致するはずのold_textが繰り返し不一致になる)、BL-131 |
+
+---
+
 ## 未決定（pending）
 
 ---
