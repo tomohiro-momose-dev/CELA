@@ -63,6 +63,35 @@ Expertは記憶から「長野大学」（実在するが上田市の無関係�
 最小化できるため（BL-076とBL-193が矛盾した事故のように、新しい語彙を足すこと自体が
 将来の不整合の種になる）。
 
+### 2.1.1 `confidence`と`citations.type`は直交する2軸である（Clineレビュー指摘・中1への対応）
+
+初版では`confidence`を`confirmed | provisional | assumption`の3値とし、BL-195〜198の
+「実測値／二次情報／工学的仮定を分離する」要求に応えようとしていた。しかしこれは
+**上記2.1の方針に対する自己矛盾**であるとレビューで指摘された。実コードを確認した結果、
+既存の`confidence` enumは`["confirmed", "provisional"]`の2値であり（`cela_main.py:1905`）、
+`assumption`は確かに新語彙の追加だった。
+
+さらに調査したところ、**「実測値／二次情報／工学的仮定」の区別は既に`citations.type`が
+担っている**ことが分かった（`cela_main.py:1851`）：
+
+```
+citations.type ∈ {"web", "goal_text", "prior_agreement", "expert_calculation", "user_input", "document"}
+```
+
+`expert_calculation`が工学的仮定・導出値を、`web`/`document`が二次情報を、`goal_text`が
+与件を表す。したがって`assumption`は**冗長**であり、正当化するのではなく**削除**する。
+
+本設計では以下の直交2軸として整理する。新しい語彙は一切追加しない。
+
+| 軸 | フィールド | 値 | 意味 |
+|---|---|---|---|
+| **確定度** | `confidence` | `confirmed` / `provisional` | その値がどれだけ動かないか |
+| **出所** | `citations[].type` | `web` / `goal_text` / `expert_calculation` 等 | その値がどこから来たか |
+
+例：`confidence="provisional"` かつ `citations=[{"type":"expert_calculation"}]` が
+「まだ他タスクと突き合わせていない工学的仮定」を表し、初版の`assumption`が意図していた
+状態を過不足なく表現できる。
+
 ### 2.2 スキーマ
 
 ```sql
