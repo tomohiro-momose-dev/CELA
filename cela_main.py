@@ -41,6 +41,7 @@ from openai import APIError, APIConnectionError, RateLimitError, APITimeoutError
 # [BL-184] cela_main.pyの肥大化を避けるため、web_search/web_fetch/read_reference_fileの
 # Provider抽象化・SSRF検証・HTML抽出・キャッシュ管理・ハンドラ本体は独立モジュールへ切り出す
 # （web_tools.py側はcela_main.pyを一切importしない、循環import回避）。
+import geo_tools
 import web_tools
 
 
@@ -312,7 +313,7 @@ client_orchestrator = client_openrouter
 model_orchestrator = laguna_S_2_1
 
 client_expert = client_openrouter
-model_expert = gpt_5_6_luna
+model_expert = nemotron_3_ultra
 
 client_task_planner = client_openrouter
 model_task_planner = nemotron_3_ultra
@@ -913,8 +914,10 @@ WEB_FETCH_TOOL = {
             "Fetch a URL (http/https only) and return its body converted to Markdown (headings, "
             "tables, and links preserved in place -- both HTML pages and PDF documents are "
             "supported, including tables in government/municipal PDF primary sources; truncated "
-            "if very long). The result is automatically cached under "
-            "web_cache/<run_id>/ for later re-reading via read_reference_file, so you can cite it. "
+            "if very long). The result is automatically cached (keyed by URL, shared across ALL "
+            "runs -- not just this one) for later re-reading via read_reference_file, so you can "
+            "cite it. [BL-200] If a URL was already fetched in a previous run, this call returns "
+            "the cached content immediately without consuming your call limit. "
             "[BL-188] Links appear inline as normal Markdown links [text](url) wherever they occur in "
             "the page -- use these to navigate from an index/landing page (e.g. a case-list or topic "
             "page) to the specific sub-page you actually need, instead of only relying on web_search. "
@@ -945,14 +948,16 @@ READ_REFERENCE_FILE_TOOL = {
     "function": {
         "name": "read_reference_file",
         "description": (
-            "Read back a previously web_fetch-cached page from web_cache/<run_id>/, either by exact "
-            "path (as returned/implied by web_fetch) or by keyword search over cached pages' source "
-            "URLs (useful to re-locate the source behind a citation URL you saw earlier). "
+            "Read back a previously web_fetch-cached page, either by exact path (as returned/"
+            "implied by web_fetch) or by keyword search over cached pages' source URLs (useful to "
+            "re-locate the source behind a citation URL you saw earlier). [BL-200] The cache is "
+            "keyed by URL and shared across ALL runs, not just this one -- a page fetched in a "
+            "past run is readable here too. "
             "[BL-188] Does not consume the web_search/web_fetch run-scoped call limits -- prefer "
             "trying a keyword search here FIRST before calling web_search/web_fetch again for a "
-            "topic that may already have been researched earlier in this run (by you or another "
-            "role), to avoid redundant external calls. "
-            "Read-only; cannot access anything outside web_cache/<run_id>/. "
+            "topic that may already have been researched (by you or another role, in this run or "
+            "a past one), to avoid redundant external calls. "
+            "Read-only; cannot access anything outside the cache directory. "
             "[BL-110] Optionally call `think` (with a `summary`) alongside this or any other tool call "
             "to record your reasoning -- it is no longer required, and other tool calls are no "
             "longer rejected for omitting it."
@@ -963,6 +968,141 @@ READ_REFERENCE_FILE_TOOL = {
                 "path": {"type": "string", "description": "Exact cache filename if already known."},
                 "keyword": {"type": "string", "description": "Keyword to search for in cached pages' source URLs."},
             },
+        },
+    },
+}
+
+
+# [BL-199] 開発者がAGENTS.md §9に従い事前収集した、ゴール固有の参照データ（docs/refs/<goal>/）
+# をrun単位の呼び出し回数制限を消費せずに読む。web_searchより先に確認することで、既に
+# キャッシュ済みの事実（施設住所・座標等）の再検索によるweb_search予算の浪費を防ぐ。
+# 設計: docs/design/back_log/issue_backlog.md BL-199。
+READ_GOAL_REFERENCE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_goal_reference",
+        "description": (
+            "Read pre-collected reference data that a developer curated specifically for this "
+            "goal (facts, addresses, figures gathered ahead of time and cached to disk). Does "
+            "not consume the web_search/web_fetch run-scoped call limits. "
+            "[BL-199/BL-200] This is step 1 of the lookup order for any fact about the goal's "
+            "subject (addresses, coordinates, demographics, named facilities, etc.): "
+            "1) read_goal_reference (this tool, developer-curated) -> 2) read_reference_file "
+            "(the shared web_fetch cache, which now persists across runs too) -> 3) web_search "
+            "(last resort, only if both return not_found/not_configured). This tool is separate "
+            "from read_reference_file: this one holds developer-curated reference data, "
+            "read_reference_file holds pages this or a past run actually fetched."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Exact relative path if already known (from a previous multiple_matches response)."},
+                "keyword": {"type": "string", "description": "Keyword to search for in the reference data's content."},
+            },
+        },
+    },
+}
+
+
+# [BL-198] 実在の公式・準公式APIで、標高・2点間の直線距離・住所ジオコーディング・道路距離を
+# 実測値として取得する4ツール。BL-195〜197のプロンプト誘導（実測手段を義務付けない）を
+# 補完し、「実測できるものは実測する」余地を広げる。設計: docs/design/back_log/issue_backlog.md BL-198。
+GSI_GEOCODE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "gsi_geocode",
+        "description": (
+            "Look up latitude/longitude candidates for a Japanese address string, using the "
+            "official Geospatial Information Authority of Japan (GSI) address search API "
+            "(no API key required). Returns up to 5 {title, lat, lon} candidates. Use this "
+            "instead of guessing coordinates from memory or from a web_search snippet."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Japanese address string to geocode."},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+GSI_GET_ELEVATION_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "gsi_get_elevation",
+        "description": (
+            "Get the real measured elevation (meters) at a latitude/longitude point, using the "
+            "official GSI elevation (DEM) API (no API key required). Returns {elevation_m, "
+            "data_source}. Use this instead of estimating/guessing elevation, or citing an "
+            "indirect web_search mention of elevation, when you already have coordinates "
+            "(e.g. from gsi_geocode)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "lat": {"type": "number", "description": "Latitude (decimal degrees)."},
+                "lon": {"type": "number", "description": "Longitude (decimal degrees)."},
+            },
+            "required": ["lat", "lon"],
+        },
+    },
+}
+
+GSI_CALC_DISTANCE_BEARING_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "gsi_calc_distance_bearing",
+        "description": (
+            "Compute the geodesic (straight-line, as-the-crow-flies) distance and bearing "
+            "between two latitude/longitude points, using the official GSI survey calculation "
+            "API (no API key required). "
+            "[IMPORTANT] This is a STRAIGHT-LINE distance, NOT a road distance -- it will "
+            "understate actual travel distance, especially on winding mountain roads. Do not "
+            "present this as road distance or travel time. If you need road distance/duration, "
+            "use calc_road_route instead. This tool is appropriate for a defensible order-of-"
+            "magnitude reference or when only straight-line distance is actually needed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "lat1": {"type": "number", "description": "Latitude of point 1."},
+                "lon1": {"type": "number", "description": "Longitude of point 1."},
+                "lat2": {"type": "number", "description": "Latitude of point 2."},
+                "lon2": {"type": "number", "description": "Longitude of point 2."},
+            },
+            "required": ["lat1", "lon1", "lat2", "lon2"],
+        },
+    },
+}
+
+CALC_ROAD_ROUTE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "calc_road_route",
+        "description": (
+            "Compute the real road-network driving distance and travel time between two "
+            "latitude/longitude points, using the OpenRouteService Directions API. Requires the "
+            "CELA_ORS_API_KEY environment variable to be set (free registration at "
+            "https://openrouteservice.org/dev/#/signup) -- if unset, this tool returns a "
+            "configuration error explaining how to obtain a key; fall back to "
+            "gsi_calc_distance_bearing (clearly labeled as straight-line) in that case. "
+            "Run-scoped call limit applies (see error message if exceeded). Returns "
+            "{road_distance_m, duration_s, profile}."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "lat1": {"type": "number", "description": "Latitude of the start point."},
+                "lon1": {"type": "number", "description": "Longitude of the start point."},
+                "lat2": {"type": "number", "description": "Latitude of the end point."},
+                "lon2": {"type": "number", "description": "Longitude of the end point."},
+                "profile": {
+                    "type": "string",
+                    "description": "Routing profile, e.g. 'driving-car' (default), 'foot-walking'.",
+                },
+            },
+            "required": ["lat1", "lon1", "lat2", "lon2"],
         },
     },
 }
@@ -1021,7 +1161,14 @@ READ_WHITEBOARD_EXCERPT_TOOL = {
             "annotation was inserted). Your old_text MUST match the string this tool returns "
             "verbatim, not your recollection of the original prompt. If the keyword matches more "
             "than once, this returns the match count so you can pick a more specific keyword instead "
-            "of guessing which occurrence you meant."
+            "of guessing which occurrence you meant. "
+            "[BL-202] The returned excerpt is a WINDOW around the match: a leading '…（中略）' or "
+            "trailing '…（以下省略）' means text was cut off there and you cannot see it -- never "
+            "extend your old_text into those cut-off regions from memory. "
+            "[BL-202] Also use this to COUNT occurrences when you are told the same claim "
+            "contradicts itself across several sections: search for the offending phrase itself "
+            "(e.g. '通年運行可能'), not the section heading, and the match_count tells you how many "
+            "places you still have to fix."
         ),
         "parameters": {
             "type": "object",
@@ -1763,10 +1910,18 @@ WRITE_AGREEMENT_TOOL = {
                     "description": (
                         "[R4] For entry_type='Deliverable', action_type='UPDATE' only. Instead of restating "
                         "the full document in decision_what, provide targeted text replacements against the "
-                        "CURRENT whiteboard version shown in your system prompt. Each old_text must match "
+                        "CURRENT whiteboard version. Each old_text must match "
                         "exactly (and uniquely, unless replace_all=true) in the current content, or this call "
                         "fails with an error you can fix and retry in the same turn. Do not use this for the "
-                        "very first version of a deliverable (use decision_what with action_type='CREATE')."
+                        "very first version of a deliverable (use decision_what with action_type='CREATE'). "
+                        "[BL-202] Call read_whiteboard_excerpt FIRST to get the exact current text -- never "
+                        "reconstruct old_text from memory or from the snapshot in your system prompt, which "
+                        "may be stale. Keep each old_text as SHORT as possible (just the line(s) you are "
+                        "actually changing, not a whole section), and fix ONE place per call rather than "
+                        "batching many replacements: if any single old_text mismatches, the entire edits "
+                        "array is rejected and no change is applied. Never include a "
+                        "'> [Detector指摘 #...]' annotation block inside an old_text that also covers body "
+                        "text -- remove such annotations as their own separate, small edits entry."
                     ),
                     "items": {
                         "type": "object",
@@ -3655,6 +3810,12 @@ TOOL_DISPATCH = {
     "web_search": lambda args, state=None: web_tools.web_search_handler(args, state or {}, state or {}),
     "web_fetch": lambda args, state=None: web_tools.web_fetch_handler(args, state or {}, state or {}),
     "read_reference_file": lambda args, state=None: web_tools.read_reference_file_handler(args, state or {}),
+    "read_goal_reference": lambda args, state=None: web_tools.read_goal_reference_handler(args, state or {}),
+    # [BL-198] 地理データ実測ツール。web_search/web_fetchと同型に、stateをstate/config兼用で渡す。
+    "gsi_geocode": lambda args, state=None: geo_tools.gsi_geocode_handler(args, state or {}, state or {}),
+    "gsi_get_elevation": lambda args, state=None: geo_tools.gsi_get_elevation_handler(args, state or {}, state or {}),
+    "gsi_calc_distance_bearing": lambda args, state=None: geo_tools.gsi_calc_distance_bearing_handler(args, state or {}, state or {}),
+    "calc_road_route": lambda args, state=None: geo_tools.calc_road_route_handler(args, state or {}, state or {}),
 }
 
 # BL-033: 直前のquery_AI呼び出しでLLMが実際に実行したpython_replの(code, result)記録。
@@ -3942,6 +4103,17 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
         use_json_mode = False
 
     delays = [8, 16, 32, 64, 128]
+    # [BL-202] delaysを全て使い切った後、"(サーバー高負荷によるAPIエラー)"というプレース
+    # ホルダーを「そのノードの回答」として下流へ流す前に、ノード自体をやり直す回数。
+    # log/2026-08-09/2348では、この文字列がExpertの発言としてDetectorへ渡り、Detectorが
+    # 「Agentの応答が『(サーバー高負荷によるAPIエラー)』のみで指示に一切応えていない」として
+    # 却下する、というラウンドの空転が20ラウンド中4回以上発生した（Expertは1文字も編集して
+    # いないのに版番号とラウンドだけが消費される）。やり直しはloop_messages（それまでの
+    # reasoning・ツール結果の全履歴）を保持したまま行うため、思考ログは失われない。
+    _MAX_NODE_REDO_ON_API_EXHAUSTION = 2
+    # [BL-202] ノードやり直し前の追加クールダウン。delaysの最終値（128秒）を待ってなお
+    # 全滅している状況のため、即座に再突入せず一段長く待つ。
+    _NODE_REDO_COOLDOWN_SECONDS = 180
 
     provider_preferences = {
         "provider": {
@@ -3970,7 +4142,14 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
     reasoning_parts_all: list[str] = []  # [R5 F-2.1] 全iterationのreasoningを蓄積
     iteration_start = 1  # [BL-122] APIエラーで再試行する際、同じiteration番号から再開する
 
-    for attempt in range(len(delays) + 1):
+    # [BL-202] 従来は`for attempt in range(len(delays) + 1)`だったが、delays消尽後の
+    # 「ノードやり直し」（loop_messagesを保持したままattemptカウンタだけ巻き戻す）を
+    # 表現するためwhileへ変更した。成功時は本体内のreturnで関数を抜けるため、この
+    # ループを正常に抜ける経路は存在しない（例外処理側でのみreturn/継続を決める）。
+    # ループ本体は一切変更していない（attemptは例外処理ブロック内でしか参照されない）。
+    attempt = 0
+    node_redo_count = 0
+    while True:
         try:
             time.sleep(5)
             create_kwargs = dict(
@@ -4423,6 +4602,22 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                     f"API呼び出しをやり直します（attempt {attempt + 1}/{len(delays) + 1}）: {e}"
                 )
                 time.sleep(delays[attempt])
+                attempt += 1
+            elif node_redo_count < _MAX_NODE_REDO_ON_API_EXHAUSTION:
+                # [BL-202] delaysを使い切ってもなお失敗。ここでプレースホルダー文字列を返すと、
+                # それが「このノードの回答」として下流（Detector等）へ流れ、実質的に何も
+                # 作業していないラウンドが1回消費される。loop_messages（それまでのreasoning・
+                # ツール結果）は関数冒頭で初期化されattemptをまたいで保持されているため、
+                # attemptカウンタだけ巻き戻せば「思考ログを重ねたままノードをやり直す」形になる。
+                node_redo_count += 1
+                print(
+                    f"\n♻️ [{label}] APIリトライを全て使い切りました。これまでの思考ログ"
+                    f"（{len(loop_messages)}メッセージ・iteration {iteration_start}まで）を保持したまま、"
+                    f"{_NODE_REDO_COOLDOWN_SECONDS}秒後にノードをやり直します"
+                    f"（node redo {node_redo_count}/{_MAX_NODE_REDO_ON_API_EXHAUSTION}）: {e}"
+                )
+                time.sleep(_NODE_REDO_COOLDOWN_SECONDS)
+                attempt = 0
             else:
                 print(f"\n[API Error] サーバーが高負荷のため応答できませんでした。: {e}")
                 return "(サーバー高負荷によるAPIエラー)"
@@ -5525,6 +5720,21 @@ def _apply_text_edits(
             return None, (
                 f"edits[{i}]: old_textが{content_label}に見つかりませんでした"
                 f"（正規化後の緩い一致も{len(loose_spans)}件でした）。一字一句正確な引用か確認してください。\n"
+                # [BL-202] log/2026-08-09/2348で、同一ターン内に20回連続で同じ不一致を
+                # 繰り返す事例が観測された。原因は、節全体＋Detector注釈を含む数千字規模の
+                # old_textを、read_whiteboard_excerptの窓（…（中略）/…（以下省略）で
+                # 切られている）の外まで記憶で補って再構成していたこと。「正確に引用しろ」と
+                # 繰り返すだけでは同じ失敗を繰り返すため、次に取るべき具体的な行動を示す。
+                f"【次に取るべき手順】(1) このold_textは{len(old_text)}文字あります。"
+                f"節全体やDetector注釈ブロックを巻き込んでいる場合、実際に書き換える行だけに"
+                f"絞ってください（短いほど成功します）。(2) read_whiteboard_excerptで対象箇所の"
+                f"現在の文字列を取得し、その戻り値からコピーしてold_textを作ってください。"
+                # [BL-202] ここで抜粋の省略マーカーを完全な形（先頭の三点リーダ付き）で書くと、
+                # 「スニペット自体が切り詰められていないこと」を検証するBL-151のテストと
+                # 文字列が衝突するため、マーカーの括弧部分のみを引用する。
+                f"戻り値の先頭が「（中略）」、末尾が「（以下省略）」となっている場合、"
+                f"その先は見えていないのでold_textに含めないでください。"
+                f"(3) 複数箇所を一度に直そうとせず、1箇所ずつwrite_agreementを呼んでください。\n"
                 f"【参考：{content_label}のうち、あなたのold_textに最も近い実際の内容】\n{snippet}"
             )
         print(f"  ⚠️ [edits失敗] edits[{i}]: old_textが{content_label}内で{exact_count}箇所に一致し一意に特定できません（緩い一致{len(loose_spans)}件）。")
@@ -5977,6 +6187,14 @@ class LineageState(TypedDict):
     # 上限値をstate自身に持たせることで、config専用の新しい配線を増やさずに済ませる。
     max_web_search_calls: int
     max_web_fetch_calls: int
+    # [BL-198] calc_road_route（OpenRouteService、無料枠API）のrun単位の累積呼び出し回数と
+    # 上限。web_search/web_fetchと同型（GSI系3ツールはAPIキー不要かつ軽量なため専用の上限は
+    # 設けず、MAX_TOOL_ITERによるツールループ全体の上限に委ねる）。
+    road_route_call_count: int
+    max_road_route_calls: int
+    # [BL-199] read_goal_referenceのベースディレクトリ（AppConfigからrun開始時にコピー）。
+    # 未設定（空文字列）の場合、read_goal_referenceはnot_configuredを返しweb_searchへ委ねる。
+    goal_reference_dir: str
     # [BL-158] 今回のUser AIターンでwrite_issue(RESOLVE/DEFER)が成功したか。detector_nodeが
     # 未解決の重大issueを残したままの前進を機械的に差し戻すかどうかの判定に使う。
     user_wrote_issue_resolution: bool
@@ -6051,6 +6269,11 @@ class Appconfig(TypedDict):
     # [BL-184] web_search/web_fetchのrun単位の呼び出し回数上限（ユーザー確定値: 各30回/run）。
     max_web_search_calls: int
     max_web_fetch_calls: int
+    # [BL-198] calc_road_route（OpenRouteService無料枠）のrun単位の呼び出し回数上限。
+    max_road_route_calls: int
+    # [BL-199] read_goal_referenceが読む、開発者事前収集の参照データディレクトリ
+    # （例: "docs/refs/chino_city"）。未指定なら空文字列扱いでツールは無効化される。
+    goal_reference_dir: str
 
 
   
@@ -6408,11 +6631,29 @@ def _build_task_scope_context(state: LineageState, conn: sqlite3.Connection) -> 
             "巻き込んで1つの巨大なold_textにしないでください。注釈の削除が必要な場合は、"
             "本文修正とは別のeditsの要素として、注釈のブロックだけを対象にした短いold_textで"
             "個別に削除してください。1つのeditsが大きいほど、一字一句の不一致で全体が失敗する"
-            "リスクが上がります。また、このプロンプトに表示された本文は生成時点のスナップショット"
-            "であり、その後に変わっている可能性があります。old_textを組み立てる前に、"
-            "read_whiteboard_excerptツールで対象箇所の「現在の」実際の文字列を確認することを推奨します"
-            "（特に、上記本文が長く編集対象が後半にある場合や、前ターンでold_textが一度でも"
-            "不一致になった場合は必ず使ってください）。"
+            "リスクが上がります。\n"
+            "【BL-202: 編集は「読む→1箇所だけ直す」を繰り返す（厳守）】このプロンプトに表示された"
+            "本文は生成時点のスナップショットであり、Detector注釈の挿入等で既に変わっている"
+            "可能性があります。したがって、次の手順を必ず守ってください。\n"
+            "  (1) old_textを組み立てる前に、**必ず**read_whiteboard_excerptツールで対象箇所の"
+            "「現在の」実際の文字列を確認する（記憶や上記スナップショットからold_textを"
+            "再構成しない）。\n"
+            "  (2) 1回のwrite_agreementで文書中の何箇所も一度に書き換えようとせず、"
+            "**1箇所ずつ**修正する。修正箇所が複数ある場合は、(1)→(2)を修正箇所の数だけ"
+            "繰り返してください（ツール呼び出しの往復は十分に確保されています）。一度に"
+            "詰め込むほど、1つの不一致でedits全体が巻き戻り、結局やり直しになります。\n"
+            "  (3) old_textは、その箇所を一意に特定できる**最短の文字列**にする。"
+            "見出しから節の末尾までを丸ごと引用するのではなく、実際に書き換える行だけを"
+            "引用してください。read_whiteboard_excerptの結果に「…（中略）」「…（以下省略）」が"
+            "含まれている場合、その部分は**あなたに見えていない**ので、絶対にold_textへ"
+            "含めないでください（見えていない範囲を記憶で補うことが不一致の最大の原因です）。\n"
+            "【BL-202: 同じ記述が複数箇所にある場合】Detectorやユーザーから「複数のセクションで"
+            "矛盾している」と指摘された場合（例：4B-1・5A-1・6Aで同じ断定が繰り返されている）、"
+            "セクション見出しではなく**問題の文言そのもの**（例：「通年運行可能」）を"
+            "keywordにしてread_whiteboard_excerptを呼び、一致件数を確認してください。"
+            "複数箇所に存在することが分かったら、1箇所だけ直して終わりにせず、"
+            "全ての箇所を（1箇所ずつ、または同一文言ならreplace_all=trueで）修正してください。"
+            "1箇所だけ直すと、残った箇所が次のラウンドで再び矛盾として差し戻されます。"
         )
     else:
         whiteboard_text = "(このタスクの成果物はまだホワイトボードに存在しません。初版はwrite_agreementのdecision_whatに全文を渡してください)"
@@ -6684,6 +6925,18 @@ It serves as the initial planning layer for breaking down complex objectives acr
        【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
        read_plan_draft・write_agreement・web_search・web_fetch・read_reference_file・think
        です。{_THINK_TRAILER_SENTENCE}
+    13. [BL-196: 実行環境に無い専用処理能力の行使をacceptance_criteriaに要求しない] acceptance_criteria/
+       descriptionに「実測データの収集・抽出・生成」を書く際は、Expertが実際に使えるツール
+       （python_repl・web_search・web_fetch・read_reference_file等）で到達可能な水準に
+       留めてください。python_replはmath/statistics等の許可リストのみのサンドボックスで
+       許可外モジュールのimport・ファイル読み込みは一切できず、web_fetchもtext/*と
+       application/pdfのみ対応です。専用の解析・変換ツール、特殊形式のデータ処理、実測機器
+       による現地計測などが無ければ原理的に満たせない要求は、たとえそのドメインにおいて
+       理想的な精度であっても課さないでください。acceptance_criteriaは、ゴール文で与えられた
+       背景データ・web_searchで確認できる公的な二次情報・そこから導出した合理的な仮定
+       （仮定である旨を明記）の組み合わせで満たせる水準にしてください。ゴール文に既にある
+       数値データ（人口統計等）で確立されている「実測値と計画仮定を分離して明記する」という
+       扱いを、他の種類のデータにも同じ基準で適用してください。
 
     ■ 目標: {goal}
     {goal_essence_text}
@@ -6982,9 +7235,11 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "最新の情勢（法令・相場・規制等）を反映しているとも限りません。ゴール文に直接記載の"
         "ない数値・相場・法令・規制等（例：人件費単価、法令の条文番号、業界標準）を提示する際は、"
         "記憶だけで断定せず、web_searchで信頼できる一次情報（公的統計・公式文書等）を確認・"
-        "裏取りしてください。新規に呼ぶ前に、このrun内で既に調べた可能性がある話題は"
-        "read_reference_fileで先に確認してください（呼び出し回数上限を消費しません）。"
-        "確認した内容は、write_agreementのcitations（type=\"web\", detail=<URL>等）で"
+        "裏取りしてください。ただしweb_searchはいきなり呼ばず、[BL-199/BL-200] "
+        "①read_goal_reference（開発者がこのゴール用に事前収集した参照データ）"
+        "→②read_reference_file（web_fetchキャッシュ。URLキーで全run共有され、過去のrunで"
+        "取得済みのページも読めます）→③web_search、の順に確認してください。①②はいずれも"
+        "呼び出し回数上限を消費しません。確認した内容は、write_agreementのcitations（type=\"web\", detail=<URL>等）で"
         "追跡可能な出典として明示してください。"
         "【最低限】今回の成果物がゴール文にない数値（単価・相場・法定基準値等）を新たに"
         "前提として置く場合、confirmed_variablesのcitationsを`expert_calculation`のみで済ませず、"
@@ -7005,6 +7260,21 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "導出したか（計算式・入力値）を必ず明記してください。実例の数値と独自算出の結果が"
         "たまたま近い値になること自体は問題ではありませんが、算出過程を示さず実例の値を"
         "そのまま使うことは認められません。\n"
+    )
+
+    system_prompt += (
+        "\n【BL-198: 実測できる地理データは実測する】\n"
+        "地点の標高、2点間の直線距離、住所の緯度経度、道路距離・所要時間は、専用ツール"
+        "（gsi_geocode→gsi_get_elevation／gsi_calc_distance_bearing／calc_road_route）で"
+        "実際に取得できます。これらを記憶からの推測やweb_searchスニペットの間接的な言及で"
+        "代用せず、専用ツールの実測値を使ってください（住所しか分からない場合は、まず"
+        "gsi_geocodeで緯度経度を得てから他のツールへ渡します）。ただしgsi_calc_distance_bearing"
+        "が返すのは直線距離であり道路距離ではありません——山間部の道路では実際の距離・所要時間を"
+        "大きく過小評価します。道路距離・所要時間が必要な場合はcalc_road_routeを使い、直線距離を"
+        "道路距離として提示しないでください。なお、これらのツールで取得できない種類のデータ"
+        "（例：道路区間単位の積雪・凍結の実測記録）まで実測値で揃えようとする必要はありません。"
+        "取得できない項目は、公的情報の定性的な参照と、根拠を明記した工学的仮定（仮定である旨を"
+        "明記）で扱ってください。\n"
     )
 
     system_prompt += (
@@ -7240,8 +7510,12 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
             上記📋セクションに示されている現在のホワイトボードは、あなたの前回の提案の内容のままです（ロールバックされていません）。\n
             [BL-076] 該当箇所には「> 🔴 **[Detector指摘 #...]**: ...」という注釈が本文中に直接埋め込まれている場合があります。\n
             まずこの注釈を探し、指摘箇所を特定してください（見つからない場合は上記の指摘事項テキストから該当箇所を判断してください）。\n
-            write_agreementのedits（old_text/new_text）で、注釈行ごと含めて該当箇所のみを部分修正してください\n
-            （old_textに注釈を含めることで、修正と同時に注釈も自然に消えます）。修正の影響が他の箇所（関連する数値・前提）にも\n
+            [BL-202] write_agreementのedits（old_text/new_text）で該当箇所のみを部分修正してください。\n
+            このとき、**本文の修正と注釈の削除は必ず別々のeditsの要素に分けてください**。1つのold_textに\n
+            「本文＋注釈ブロック全体」をまとめて入れると、old_textが数千字規模になり一字一句の再現に失敗して\n
+            edits全体が却下されます（log/2026-08-09/2348で同一ターン内20回連続の不一致を実測）。\n
+            注釈の削除は、「> 🔴 **[Detector指摘 #<ID>]**:」で始まるそのブロックだけを対象にした\n
+            独立したeditsの要素として行ってください。修正の影響が他の箇所（関連する数値・前提）にも\n
             及ぶ場合は、その範囲も併せて見直し、必要であればdecision_whatによる全文更新（SUPERSEDE）を使ってください。\n
             既に正しく確定していた他の記述内容（例：以前のDetector指摘で修正済みの箇所）を、今回とは無関係な\n
             理由で元に戻さないよう特に注意してください。\n
@@ -7273,13 +7547,25 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "（他タスクの制約とまだ突き合わせが済んでいないため）。\n"
         "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
         "read_project_plan・write_agreement・escalate_premise_concern・ask_user_question・"
-        "web_search・web_fetch・read_reference_file・thinkです。\n"
+        "web_search・web_fetch・read_reference_file・read_goal_reference・gsi_geocode・"
+        "gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・thinkです。\n"
+        "[BL-198: 実測できる地理データは実測する] 地点の標高、2点間の直線距離、住所の緯度経度、"
+        "道路距離・所要時間は、上記の専用ツール（gsi_geocode→gsi_get_elevation／"
+        "gsi_calc_distance_bearing／calc_road_route）で実際に取得できます。これらを推測したり、"
+        "web_searchのスニペットからの間接的な言及で代用したりせず、専用ツールの実測値を使って"
+        "ください。ただしgsi_calc_distance_bearingが返すのは直線距離であり道路距離ではありません"
+        "——道路距離・所要時間が必要な場合はcalc_road_routeを使い、直線距離を道路距離として"
+        "提示しないでください。なお、これらのツールで取得できない種類のデータ（例：道路区間単位の"
+        "積雪・凍結の実測記録）まで実測値で揃えようとする必要はありません。取得できない項目は"
+        "公的情報の定性的な参照と、根拠を明記した工学的仮定で扱ってください。\n"
         "[BL-188] あなた自身の学習知識から導き出した回答や思考も、必ずしも正確であるとは限らず、"
         "最新の情勢（法令・相場・規制等）を反映しているとも限りません。ゴール文にない現実世界の"
         "事実（地理・費用相場・法規制等）が必要な場合は、記憶からの推測で済ませず、必ずweb_search"
-        "で信頼できる一次情報を確認・裏取りしてください。既にこのrun内で調べた可能性がある話題は、"
-        "新規にweb_search/web_fetchを呼ぶ前にread_reference_file（keyword検索、呼び出し回数上限を"
-        "消費しない）で先に確認してください。web検索結果は鵜呑みにせず一次ソース（公的統計・"
+        "で信頼できる一次情報を確認・裏取りしてください。ただしweb_searchはいきなり呼ばず、"
+        "[BL-199/BL-200] ①read_goal_reference（開発者がこのゴール用に事前収集した参照データ）"
+        "→②read_reference_file（web_fetchキャッシュ。URLキーで全run共有され、過去のrunで"
+        "取得済みのページも読めます。keyword検索可）→③web_search、の順に確認してください。"
+        "①②はいずれも呼び出し回数上限を消費しません。web検索結果は鵜呑みにせず一次ソース（公的統計・"
         "公式文書等）を優先し、確定値・暫定値としてconfirmed_variablesに書く際はcitations"
         "（type=\"web\", detail=<URL>等）で追跡可能な出典を明示してください。"
         "【最低限】ゴール文にない数値（単価・相場・法定基準値等）を新たに前提として置く場合、"
@@ -7338,7 +7624,12 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
             f"[Detectorからの指摘事項（要修正箇所）]\n{state.get('constraint_issue_log', [])[-1:]}\n"
             "上記のホワイトボード本文には「> 🔴 **[Detector指摘 #...]**」という注釈が埋め込まれて"
             "いる場合があります。まずこの注釈を探し、write_agreementのedits（old_text/new_text）で"
-            "注釈行ごと該当箇所のみを部分修正してください。\n"
+            "該当箇所のみを部分修正してください。\n"
+            "[BL-202] このとき、本文の修正と注釈の削除は必ず別々のeditsの要素に分けてください。"
+            "1つのold_textに「本文＋注釈ブロック全体」をまとめて入れると、old_textが数千字規模になり"
+            "一字一句の再現に失敗してedits全体が却下されます。注釈の削除は、"
+            "「> 🔴 **[Detector指摘 #<ID>]**:」で始まるそのブロックだけを対象にした独立した"
+            "editsの要素として行ってください。\n"
         )
 
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
@@ -7346,7 +7637,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     _CURRENT_TASK_ID = state.get("current_task_id", "")
     _reset_think_scratchpad()  # [BL-093]
     return query_AI(messages, client=client_expert, model=model_expert, label=f"Expert:{expert_name}",
-                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)
+                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)
 
 
 #def call_detector(goal: str, user_input: str, expert_output: str, decisions: list[Decision], current_phase: dict) -> dict:
@@ -7654,9 +7945,11 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"citationsが`expert_calculation`や`prior_agreement`のみで、外部の一次情報（`type=\"web\"`）"
         f"による裏付けが一切ない主張のうち、あなた自身の知識でも真偽の確信が持てないもの"
         f"（例：人件費相場、法定基準値、業界標準）があれば、web_searchで実際に調べて検証して"
-        f"ください（Expertと同じくweb_fetchで一次資料を直接確認できます。既にこのrun内で"
-        f"調べた可能性がある話題はread_reference_fileで先に確認し、無駄な重複呼び出しを避けて"
-        f"ください）。検証の結果、前提数値が実態と乖離していると判明した場合は、それ自体を"
+        f"ください（Expertと同じくweb_fetchで一次資料を直接確認できます）。ただしweb_searchは"
+        f"いきなり呼ばず、[BL-199/BL-200] ①read_goal_reference（開発者事前収集の参照データ）"
+        f"→②read_reference_file（web_fetchキャッシュ。URLキーで全run共有、過去のrunで取得済みの"
+        f"ページも読めます）→③web_search、の順に確認し、無駄な重複呼び出しを避けてください"
+        f"（①②は呼び出し回数上限を消費しません）。検証の結果、前提数値が実態と乖離していると判明した場合は、それ自体を"
         f"constraint_issueの根拠にしてください（自己参照のみの前提を鵜呑みにしないこと）。\n\n"
         f"[BL-195: 実例からの無derivation転記チェック] Agentの主張がcitations type=\"web\"で"
         f"実在の類似事例（デマンド交通・自動運転バス等の運行サービス）を出典としている場合、"
@@ -7665,9 +7958,18 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"示さず実例の数値をそのまま転記しているだけの場合は、それ自体をminor以上の指摘対象に"
         f"してください（「実例のcitationsはあるが、本課題の制約からの再計算過程が示されていない」"
         f"のように具体的に指摘すること）。\n\n"
+        f"[BL-198: 地理データの主張は専用ツールで検算できる] Agentが提示した標高・2点間の距離・"
+        f"緯度経度・道路距離は、gsi_geocode／gsi_get_elevation／gsi_calc_distance_bearing／"
+        f"calc_road_routeで実際に取得して照合できます。値が大きく食い違う場合や、実測できるはず"
+        f"の値が推測値・web検索スニペットからの間接的な引用に留まっている場合は指摘対象です。"
+        f"特に、直線距離（gsi_calc_distance_bearing）を道路距離として提示していないかを確認して"
+        f"ください。ただし、これらのツールで取得できない種類のデータ（例：道路区間単位の積雪・"
+        f"凍結の実測記録）が実測値で示されていないことを理由にmajorとしないでください——それらは"
+        f"公的情報の定性的な参照と、根拠を明記した工学的仮定で扱われていれば妥当です。\n\n"
         f"【重要】あなたが使えるツールはread_verified_fact・read_deliverable_file・"
         f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・"
-        f"web_search・web_fetch・read_reference_file・thinkです。"
+        f"web_search・web_fetch・read_reference_file・read_goal_reference・gsi_geocode・"
+        f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
         f"{_get_frozen_agreements_text(get_active_conn(), state['run_id'])}"
         f"【BL-086: 🔒Freeze済み項目の扱い】上記に🔒が付いている項目があれば、それは人間の発注者が"
@@ -7710,7 +8012,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
     _reset_think_scratchpad()  # [BL-093]
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
         domain_prompt, client=client_detector_domain, model=model_detector_domain, label="Detector (Domain Review)",
-        tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, THINK_TOOL],
+        tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, THINK_TOOL],
         fallback={"constraint_issue": "none", "comment": "", "target_excerpt": "", "observations": ""},
         state=state,
     )
@@ -7819,17 +8121,26 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"しか保証しません。式に投入されている前提数値（単価・相場・法定基準値等）自体が"
         f"citations=`expert_calculation`のみ（外部の一次情報`type=\"web\"`による裏付けなし）で、"
         f"かつあなた自身の知識でも真偽の確信が持てない場合は、web_searchで実際に調べて検証して"
-        f"ください（web_fetchで一次資料を直接確認できます。既にこのrun内で調べた可能性がある"
-        f"話題はread_reference_fileで先に確認してください）。検算が内部整合的でも、前提数値が"
-        f"実態と乖離していれば、それ自体をconstraint_issueの根拠にしてください。\n\n"
+        f"ください（web_fetchで一次資料を直接確認できます）。ただしweb_searchはいきなり呼ばず、"
+        f"[BL-199/BL-200] ①read_goal_reference（開発者事前収集の参照データ）→②read_reference_file"
+        f"（web_fetchキャッシュ。URLキーで全run共有、過去のrunで取得済みのページも読めます）"
+        f"→③web_search、の順に確認してください（①②は呼び出し回数上限を消費しません）。"
+        f"検算が内部整合的でも、前提数値が実態と乖離していれば、それ自体をconstraint_issueの根拠にしてください。\n\n"
         f"[BL-195: 実例からの無derivation転記チェック] 検算対象の数値がcitations type=\"web\"で"
         f"実在の類似事例を出典としている場合、python_replでの検算が「実例の数値を式に代入して"
         f"一致を確認しているだけ」なのか、「本課題固有の入力値（予算・需要データ・距離等）から"
         f"独立にその数値を導出しているか」を区別してください。前者（実例の値のコピーの検算に"
         f"すぎない）の場合は、独自導出がなされていない旨をconstraint_issueの根拠にしてください。\n\n"
+        f"[BL-198: 地理データの数値は専用ツールで実測照合する] 検算対象に標高・2点間の距離・"
+        f"緯度経度・道路距離が含まれる場合、python_replでの式の検算だけでなく、gsi_geocode／"
+        f"gsi_get_elevation／gsi_calc_distance_bearing／calc_road_routeで実測値を取得し、"
+        f"Agentが式へ投入した前提数値そのものが実態と合っているかを照合してください。特に、"
+        f"直線距離（gsi_calc_distance_bearing）を道路距離として使っていないかは重点確認項目です"
+        f"（山間部では道路距離が直線距離を大きく上回るため、所要時間・SLA判定が楽観側へ歪みます）。\n\n"
         f"【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
         f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・"
-        f"web_search・web_fetch・read_reference_file・thinkです。"
+        f"web_search・web_fetch・read_reference_file・read_goal_reference・gsi_geocode・"
+        f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
 
         f"System Goal: {goal}\n"
@@ -7881,7 +8192,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_detector_numeric, model=model_detector_numeric, label="Detector",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, THINK_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, THINK_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
         state=state,
     )
     if parse_failed:
@@ -8954,6 +9265,13 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"相手が「制約が厳しい」「要件を満たせない」と泣き言を言ってきても、絶対に【絶対目標】の"
             f"ハードルを下げないでください。ただし、緩和を求めているのが「動かせない真の制約」なのか"
             f"「議論の前提として例示的に与えられているだけの見直し可能な条件」なのかは見極めてください。\n\n"
+            f"[BL-197: 承認基準はacceptance_criteriaを超えない] 上記の妥協なきスタンスは、絶対目標の"
+            f"ハードな数値制約（予算・SLA等）を安易に緩めないという意味であり、そのタスク自身の"
+            f"【現在のタスクで未充足の要求項目】（acceptance_criteria）を超える独自の検証水準や、"
+            f"特定のデータ取得手段・ソフトウェア・ファイル形式を新たに義務付けてよいという意味では"
+            f"ありません。未充足の要求項目が既に満たされていれば承認してください。第2段でAgent AIが"
+            f"正当にDEFERした懸念（別タスクの責務として先送りされたもの）を、このタスクの未解決懸念"
+            f"として承認却下の理由にしないでください。\n\n"
             f"【絶対目標】{user_goal}\n"
             f"{goal_essence_text}\n"
             f"【現在のタスクで未充足の要求項目】\n{remaining_criteria_text}\n"
@@ -9092,6 +9410,12 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
                 f"【第2段（issue確認）で残った懸念】{remaining_concerns or '(なし)'}\n\n"
                 f"矛盾の内容とその理由を明示し、Agent AIが成果物のどこをどう直すべきか具体的に"
                 f"示した修正指示を出してください。次タスクへの移行はまだ指示しないでください。\n"
+                f"[BL-197: 過剰な手段の指定を避ける] 修正指示は、そのタスクのacceptance_criteriaを"
+                f"満たすために必要な内容に留めてください。特定のデータ取得元・ファイル形式・解析"
+                f"ソフトウェア（例：特定の地図データ配布元、特定のGISツール等）を新たに義務付けたり、"
+                f"取得日時・ハッシュ値等の記録項目を追加で要求したりしないでください。Agent AIが"
+                f"選んだ実現手段が要求項目を満たしているかどうかで判断し、手段そのものを指定しない"
+                f"でください。\n"
             )
         stage4_system_prompt += (
             f"\n【重要】あなたが使えるツールはthinkとschedule_task_focus（[BL-191]過去タスクの"
@@ -9340,6 +9664,11 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         1回の指示で要求してよい内容は、以下の「現在のタスク」の acceptance_criteria の範囲に厳密に限定してください。\n
         範囲外の追加要求（他タスクの依存項目の前倒し要求、まだ指示していない後続タスクの内容の混入など）は、\n
         たとえ関連性が高く見えても行わないでください。それは次のタスクの役目です。\n
+        [BL-197: 手段の過剰な指定を避ける] 同様に、acceptance_criteriaの文言（「マトリクス化し確定する」\n
+        「地図上に明示する」等）を、特定のデータ取得元・専用ソフトウェア・ファイル形式・検証ログの\n
+        提出まで義務付けてよいという意味に拡大解釈しないでください。要求項目が満たされているかどうかは\n
+        提示された結論の妥当性で判断し、Agent AIが選んだ実現手段（一次資料の参照・web_searchでの\n
+        確認・工学的仮定の明記等）を、より厳格な手段への置き換えを理由に不足として扱わないでください。\n
 
         【現在のタスク】\n
         {current_task_json}\n
@@ -11782,6 +12111,19 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
                 print(f"🚨 [Resume] run_id={run_id}（{target_desc}）が見つかりませんでした（{CELA_CHECKPOINT_DB_PATH}）。--list-checkpoints {run_id} で一覧を確認してください。")
                 return
             state = snapshot.values
+            # [BL-201] チェックポイントから復元したstateは、resume時点のconfig引数を一切
+            # 反映しない（run開始時にconfigからコピーした値がそのまま固定される）。呼び出し
+            # 回数の上限・参照ディレクトリのような「会話の履歴ではなく実行時設定」の値は、
+            # resumeのたびに現在のconfigから再同期しないと、コード側でmax_web_search_calls等を
+            # 変更してもresume済みのrunには一切反映されない（log/2026-08-09/2313で実機確認：
+            # BL-199で30→50へ緩和した後もresumeしたrunがweb_searchの呼び出し上限（30回/run）に
+            # 達しましたを返し続けていた）。会話状態（chat_history/whiteboard等）は上書きせず、
+            # この4フィールドのみ現在のconfigの値へ差し替える。カウンタ自体（web_search_call_count
+            # 等）はそのrunで実際に消費済みの実績のためリセットしない。
+            state["max_web_search_calls"] = config.get("max_web_search_calls", 30)
+            state["max_web_fetch_calls"] = config.get("max_web_fetch_calls", 30)
+            state["max_road_route_calls"] = config.get("max_road_route_calls", 30)
+            state["goal_reference_dir"] = config.get("goal_reference_dir", "")
             db_path = state["db_path"]
             current_turn = state.get("turn_count", 1)
             if checkpoint_id:
@@ -11842,6 +12184,9 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
                 "web_fetch_call_count": 0,
                 "max_web_search_calls": config.get("max_web_search_calls", 30),
                 "max_web_fetch_calls": config.get("max_web_fetch_calls", 30),
+                "road_route_call_count": 0,
+                "max_road_route_calls": config.get("max_road_route_calls", 30),
+                "goal_reference_dir": config.get("goal_reference_dir", ""),
                 "global_constraints": [],
                 "phases": [],
                 "current_phase": {
@@ -12085,7 +12430,7 @@ if __name__ == "__main__":
     sys.stdout = MultiLogger()
 
     TARGET_GOAL = (f"""
-                   # 課題：長野県茅野市における自動運転バス導入計画の策定
+# 課題：長野県茅野市における自動運転バス導入計画の策定
 
 以下の背景・地理データ・制約条件に基づき、長野県茅野市における「自動運転バス導入計画書」を作成してください。
 
@@ -12152,8 +12497,15 @@ if __name__ == "__main__":
         "agent_has_guardrail" : True,
         "chat_history_window": 4,
         "expert_history_window": 6,
-        "max_web_search_calls": 30,
+        # [BL-199] log/2026-08-09/2222で、read_goal_reference未導入だった当時のExpertが
+        # docs/refs/chino_city/chino_city_data.mdに既にある施設住所・座標を知らずweb_searchで
+        # 再検索し、30回/runの上限を使い果たしていたことが判明。read_goal_reference導入後も、
+        # 参照データに無い項目（施設の郵便番号住所等）は正当にweb_searchが必要になるため、
+        # 上限自体も30→50へ緩和する（ユーザー承認済み、AGENTS.md §7）。
+        "max_web_search_calls": 50,
         "max_web_fetch_calls": 30,
+        "max_road_route_calls": 30,
+        "goal_reference_dir": "docs/refs/chino_city",
     }
 
     run_ai_vs_ai_loop(

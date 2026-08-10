@@ -416,7 +416,7 @@ def test_fetch_and_extract_truncates_long_output(monkeypatch):
 
 def test_cache_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))
-    path = web_tools.cache_file_path("run-1", "https://example.com/")
+    path = web_tools.cache_file_path("https://example.com/")
     assert not path.exists()
     web_tools.write_cache(path, "https://example.com/", "本文テキスト")
     assert path.exists()
@@ -426,11 +426,29 @@ def test_cache_roundtrip(tmp_path, monkeypatch):
 
 
 def test_cache_file_path_is_deterministic():
-    p1 = web_tools.cache_file_path("run-1", "https://example.com/")
-    p2 = web_tools.cache_file_path("run-1", "https://example.com/")
-    p3 = web_tools.cache_file_path("run-1", "https://example.com/other")
+    p1 = web_tools.cache_file_path("https://example.com/")
+    p2 = web_tools.cache_file_path("https://example.com/")
+    p3 = web_tools.cache_file_path("https://example.com/other")
     assert p1 == p2
     assert p1 != p3
+
+
+def test_cache_file_path_is_shared_across_runs(monkeypatch, tmp_path):
+    """[BL-200] web_cacheはURLキーのグローバル共有であり、run_idを問わず同じパスに
+    解決される。過去のrunでweb_fetch済みのURLは、別のrun_idからでも呼び出し回数を
+    消費せず再利用できる（log/2026-08-09/2222でrun単位分離のコストが指摘された）。"""
+    monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))
+    cache_path = web_tools.cache_file_path("https://example.com/")
+    web_tools.write_cache(cache_path, "https://example.com/", "run-1が取得した本文")
+
+    def _should_not_be_called(url):
+        raise AssertionError("fetch_and_extract should not be called on cache hit from a different run")
+    monkeypatch.setattr(web_tools, "fetch_and_extract", _should_not_be_called)
+
+    state = {"run_id": "run-2", "web_fetch_call_count": 0}
+    result = web_tools.web_fetch_handler({"url": "https://example.com/"}, state, {})
+    assert result == "run-1が取得した本文"
+    assert state["web_fetch_call_count"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +500,7 @@ def test_web_fetch_handler_requires_url():
 def test_web_fetch_handler_cache_hit_skips_provider_and_count(monkeypatch, tmp_path):
     monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))
     state = {"run_id": "run-1", "web_fetch_call_count": 0}
-    cache_path = web_tools.cache_file_path("run-1", "https://example.com/")
+    cache_path = web_tools.cache_file_path("https://example.com/")
     web_tools.write_cache(cache_path, "https://example.com/", "キャッシュ済み本文")
 
     def _should_not_be_called(url):
@@ -510,7 +528,7 @@ def test_web_fetch_handler_success_writes_cache_and_increments_count(monkeypatch
     result = web_tools.web_fetch_handler({"url": "https://example.com/"}, state, {})
     assert result == "取得した本文"
     assert state["web_fetch_call_count"] == 1
-    cache_path = web_tools.cache_file_path("run-1", "https://example.com/")
+    cache_path = web_tools.cache_file_path("https://example.com/")
     assert cache_path.exists()
 
 
@@ -531,7 +549,7 @@ def test_web_fetch_handler_ssrf_blocked_returns_error(monkeypatch, tmp_path):
 
 def test_read_reference_file_by_path_success(monkeypatch, tmp_path):
     monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))
-    cache_path = web_tools.cache_file_path("run-1", "https://example.com/")
+    cache_path = web_tools.cache_file_path("https://example.com/")
     web_tools.write_cache(cache_path, "https://example.com/", "本文")
     state = {"run_id": "run-1"}
     result = web_tools.read_reference_file_handler({"path": cache_path.name}, state)
@@ -547,7 +565,7 @@ def test_read_reference_file_path_traversal_rejected(monkeypatch, tmp_path):
 
 def test_read_reference_file_by_keyword_single_match(monkeypatch, tmp_path):
     monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))
-    cache_path = web_tools.cache_file_path("run-1", "https://example.com/target")
+    cache_path = web_tools.cache_file_path("https://example.com/target")
     web_tools.write_cache(cache_path, "https://example.com/target", "対象の本文")
     state = {"run_id": "run-1"}
     result = web_tools.read_reference_file_handler({"keyword": "example.com/target"}, state)
@@ -556,14 +574,25 @@ def test_read_reference_file_by_keyword_single_match(monkeypatch, tmp_path):
 
 def test_read_reference_file_by_keyword_multiple_matches(monkeypatch, tmp_path):
     monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))
-    p1 = web_tools.cache_file_path("run-1", "https://example.com/a")
-    p2 = web_tools.cache_file_path("run-1", "https://example.com/b")
+    p1 = web_tools.cache_file_path("https://example.com/a")
+    p2 = web_tools.cache_file_path("https://example.com/b")
     web_tools.write_cache(p1, "https://example.com/a", "A")
     web_tools.write_cache(p2, "https://example.com/b", "B")
     state = {"run_id": "run-1"}
     result = web_tools.read_reference_file_handler({"keyword": "example.com"}, state)
     assert result["status"] == "multiple_matches"
     assert len(result["candidates"]) == 2
+
+
+def test_read_reference_file_reads_cache_written_by_a_different_run(monkeypatch, tmp_path):
+    """[BL-200] read_reference_fileはstate["run_id"]でベースディレクトリを絞らなくなった
+    ため、別runが書いたキャッシュも読める。"""
+    monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))
+    cache_path = web_tools.cache_file_path("https://example.com/target")
+    web_tools.write_cache(cache_path, "https://example.com/target", "run-1が書いた本文")
+    state = {"run_id": "run-2"}
+    result = web_tools.read_reference_file_handler({"keyword": "example.com/target"}, state)
+    assert "run-1が書いた本文" in result
 
 
 def test_read_reference_file_no_args_returns_error(monkeypatch, tmp_path):

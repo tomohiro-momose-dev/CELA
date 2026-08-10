@@ -360,10 +360,15 @@ def fetch_and_extract(url: str) -> str:
 # キャッシュ（web_fetch結果 / read_reference_fileの読み取り対象）
 # ---------------------------------------------------------------------------
 
-def cache_file_path(run_id: str, url: str) -> Path:
-    """[BL-184] `web_cache/<run_id>/<sha256(url)[:16]>.md`のパスを返す。"""
+def cache_file_path(url: str) -> Path:
+    """[BL-184→BL-200] `web_cache/<sha256(url)[:16]>.md`のパスを返す。当初は
+    `web_cache/<run_id>/`とrun単位で分離していたが、同一URLの再取得コスト（web_fetchの
+    呼び出し回数消費・応答待ち）はrunをまたいでも同じであり、run単位の分離はそのコストを
+    毎回リセットして無駄にするだけだった（log/2026-08-09/2222を機にユーザーが指摘）。
+    URLをキーとしたグローバル共有キャッシュへ変更し、以前のrunで取得済みのページは以後の
+    全runで無料・即時に再利用できるようにする。"""
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
-    return Path(WEB_CACHE_DIR) / run_id / f"{digest}.md"
+    return Path(WEB_CACHE_DIR) / f"{digest}.md"
 
 
 def write_cache(path: Path, url: str, text: str) -> None:
@@ -422,13 +427,14 @@ def web_search_handler(args: dict, state: dict, config: dict) -> dict:
 
 def web_fetch_handler(args: dict, state: dict, config: dict) -> dict | str:
     """[BL-184] `web_fetch`ツールのハンドラ。キャッシュヒット時はrun単位の呼び出し回数
-    カウントを消費しない（BL184_basic_design.md）。"""
+    カウントを消費しない（BL184_basic_design.md）。[BL-200] キャッシュはURLキーの
+    グローバル共有（`web_cache/`直下）のため、過去の別runで既に取得済みのURLは
+    このrunでも呼び出し回数を消費せず即座に返る。"""
     url = (args.get("url") or "").strip()
     if not url:
         return {"status": "error", "message": "urlは必須です。"}
-    run_id = state.get("run_id", "")
 
-    cache_path = cache_file_path(run_id, url)
+    cache_path = cache_file_path(url)
     if cache_path.exists():
         return strip_cache_header(cache_path.read_text(encoding="utf-8"))[:_MAX_OUTPUT_CHARS]
 
@@ -454,13 +460,15 @@ def web_fetch_handler(args: dict, state: dict, config: dict) -> dict | str:
 
 def read_reference_file_handler(args: dict, state: dict) -> dict | str:
     """[BL-184] `read_reference_file`ツールのハンドラ。ベースディレクトリは
-    `web_cache/<run_id>/`一本に限定する（BL184_basic_design.md）。`read_deliverable_file`
-    と同じ`Path(...).resolve()` → `relative_to(base_dir)`のresolve-and-containパターンで
+    `web_cache/`一本に限定する。`read_deliverable_file`と同じ
+    `Path(...).resolve()` → `relative_to(base_dir)`のresolve-and-containパターンで
     パス脱出を防ぐ。`keyword`指定時は各キャッシュファイル先頭の`# Source: {url}`行への
     部分一致検索を行う（Detectorが`citations`のURLから逆引きする経路、必須要件）。
+    [BL-200] キャッシュはURLキーのグローバル共有のため、このrun自身がweb_fetchした
+    ページだけでなく、過去の別runで既に取得済みのページも読める（`state`引数は
+    TOOL_DISPATCHの統一シグネチャに合わせて受け取るのみで、現在は未使用）。
     """
-    run_id = state.get("run_id", "")
-    base_dir = (Path(WEB_CACHE_DIR) / run_id).resolve()
+    base_dir = Path(WEB_CACHE_DIR).resolve()
     path = args.get("path") or ""
     keyword = args.get("keyword") or ""
 
@@ -476,7 +484,7 @@ def read_reference_file_handler(args: dict, state: dict) -> dict | str:
 
     if keyword:
         if not base_dir.exists():
-            return {"status": "not_found", "message": "このrunにはまだキャッシュファイルがありません。"}
+            return {"status": "not_found", "message": "web_cacheにまだキャッシュファイルがありません。"}
         matches: list[str] = []
         for f in sorted(base_dir.glob("*.md")):
             head = f.read_text(encoding="utf-8", errors="ignore")[:500]
@@ -488,6 +496,59 @@ def read_reference_file_handler(args: dict, state: dict) -> dict | str:
             return {
                 "status": "multiple_matches",
                 "message": "複数のキャッシュファイルが該当しました。pathを指定して再取得してください。",
+                "candidates": matches,
+            }
+        return (base_dir / matches[0]).read_text(encoding="utf-8")[:_MAX_READ_REFERENCE_CHARS]
+
+    return {"status": "error", "message": "pathまたはkeywordのいずれかを指定してください。"}
+
+
+# [BL-199] 実行中のweb_search/web_fetchとは別に、開発者がAGENTS.md §9に従って事前収集した
+# ゴール固有の参照データ（`docs/refs/<goal>/`、run開始前に人間が用意する）を、run単位の
+# 呼び出し回数制限を消費せずに読めるようにする。log/2026-08-09/2222で、Expertが既に
+# `docs/refs/chino_city/chino_city_data.md`にキャッシュ済みの施設住所・座標を知らずに
+# web_searchで同じ情報を再検索し、run単位の呼び出し上限（30回）を使い果たしていたことが
+# 判明した（read_reference_fileはweb_cache/<run_id>/専用でdocs/refs/を読めないため、
+# 既存ツールでは代替できなかった）。
+def read_goal_reference_handler(args: dict, state: dict) -> dict | str:
+    """[BL-199] `read_goal_reference`ツールのハンドラ。ベースディレクトリは
+    `state["goal_reference_dir"]`（run開始時にAppConfigからコピー、未設定なら無効）
+    一本に限定する。`read_reference_file`と同じresolve-and-containパターンでパス脱出を
+    防ぐが、対象はweb_cacheの実行時キャッシュではなく開発者が事前キュレーションした
+    静的参照データである点が異なる（AGENTS.md §9のdocs/refs/運用そのもの）。
+    """
+    goal_reference_dir = state.get("goal_reference_dir") or ""
+    if not goal_reference_dir:
+        return {"status": "not_configured", "message": "このrunにはgoal_reference_dirが設定されていません。"}
+    base_dir = Path(goal_reference_dir).resolve()
+    path = args.get("path") or ""
+    keyword = args.get("keyword") or ""
+
+    if not base_dir.exists() or not base_dir.is_dir():
+        return {"status": "not_found", "message": "参照データディレクトリが見つかりません。"}
+
+    if path:
+        try:
+            resolved = (base_dir / path).resolve()
+            resolved.relative_to(base_dir)
+        except ValueError:
+            return {"status": "error", "message": "参照データディレクトリ外へのアクセスは禁止されています。"}
+        if not resolved.exists() or not resolved.is_file():
+            return {"status": "not_found", "message": f"ファイルが見つかりません: {path}"}
+        return resolved.read_text(encoding="utf-8")[:_MAX_READ_REFERENCE_CHARS]
+
+    if keyword:
+        matches: list[str] = []
+        for f in sorted(base_dir.rglob("*.md")):
+            body = f.read_text(encoding="utf-8", errors="ignore")
+            if keyword in body:
+                matches.append(str(f.relative_to(base_dir)))
+        if not matches:
+            return {"status": "not_found", "message": f"'{keyword}'に該当する参照データが見つかりませんでした。web_searchを使ってください。"}
+        if len(matches) > 1:
+            return {
+                "status": "multiple_matches",
+                "message": "複数の参照データファイルが該当しました。pathを指定して再取得してください。",
                 "candidates": matches,
             }
         return (base_dir / matches[0]).read_text(encoding="utf-8")[:_MAX_READ_REFERENCE_CHARS]
