@@ -6,5 +6,29 @@ log/
 .claude/
 .pytest_cache/
 .vscode/
+.venv/
+venv/
+
+# --- ランタイム状態（コードではなく実行の副産物。差分が読めず容量も大きいため追跡しない） ---
+# LangGraphのチェックポイントDB（会話状態のスナップショット）
 cela_checkpoints.db*
+# 合意・ホワイトボード・issue_log等を保持する実行時DB。1ファイル30MB超のバイナリで、
+# コミットのたびに履歴が肥大する（BL-197時点で.git が188MBへ膨張していた）。
+# 巻き戻しにはcela.db.bak_*の手動コピーを使う運用のため、gitで版管理する必要はない。
+cela.db
+# SQLiteのWAL/共有メモリ。DBを開いている間だけ存在する一時ファイル。
+cela.db-shm
+cela.db-wal
+# DB操作前に取る手動バックアップ（例: cela.db.bak_bl197_20260809_172725）
+cela.db.bak_*
+*.db-shm
+*.db-wal
+
+# web_fetchのキャッシュ。[BL-200]でrun単位からURLキーの全run共有へ変更したが、
+# 再取得可能な外部コンテンツであることに変わりはないため引き続き追跡しない。
 web_cache/
+
+# --- 一時ファイル・スクラッチ ---
+# ログ走査等のアドホックな出力（artifacts/phase1_dryrun/のリプレイfixtureは追跡対象のため除外しない）
+artifacts/log_scan_*.json
+wa_lines.txt
