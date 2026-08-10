@@ -6537,7 +6537,81 @@ LangGraphのcheckpoint resumeとの相互作用など他の要因も考えられ
 DB側も該当`phase_id`/`task_id`で`status≠Superseded`の行が実在することを確認済み。
 したがってCline提案の修正（`call_expert`への`_CURRENT_PHASE_ID`設定追加）は今回の
 症状には効果がなく、実装しない。「症状の特定（空文字への照合）」は妥当だったが、
-「原因の特定」は誤りだった、として記録する。根本原因は引き続き未特定、`open`のまま。
+「原因の特定」は誤りだった、として記録する。
+
+**根本原因を特定（2026-08-11、`log/2026-08-11/0016`の再発調査）：**
+
+ユーザーが「やはりedit失敗が連発しています」と再報告し、`log/2026-08-11/0016`（25回の
+`edits失敗`）を調査した結果、**根本原因を確定できた**。
+
+原因は`decision_extractor_node`のUPDATE分岐（`cela_main.py:12026`付近）にある、
+**topic文字列だけで supersede 対象を探すループ**である。
+
+```python
+for a in reversed(get_agreements_from_db(_conn, _run_id)):
+    if a["topic"] == target_topic and a.get("status") != "Superseded":
+        old_content = a["decision_what"]
+        db_supersede_agreement(a["id"], _conn, _run_id)   # ← Deliverableを Superseded 化
+        break
+...
+agreement = {..., "entry_type": entry_type, "phase_id": phase_id, ...}  # ← 別の識別子で新規作成
+```
+
+このループには`entry_type`も`phase_id`も条件に無いため、**アクティブなDeliverableを
+Supersededにした上で、`_find_active_deliverable_agreement`（`entry_type='Deliverable'`
+かつ`phase_id`完全一致かつ`status != 'Superseded'`を要求）が二度と見つけられない識別子で
+置き換えてしまう**。結果、当該タスクのアクティブなDeliverableが「孤児化」する。
+
+- `target is None` → `old_content = ""` → `is_whiteboard = False`
+- → `base_content = ""` → `_apply_text_edits("", edits)` が呼ばれる
+- → 全edits が「緩い一致0件」で失敗し、`_nearest_content_snippet`も空文字を返す
+  （＝これまで観測していた「空スニペット」の正体）
+
+**孤児化の2つの変種を実データで確認：**
+
+| 変種 | 実例 | 影響 |
+|---|---|---|
+| **entry_type ドリフト**（Deliverable→Decision） | `log/2026-08-11/0016`のtask_2_3。User AIの却下が`entry_type='Decision'`として抽出され、同一topicのDeliverableをSuperseded化した。00:20:02 / 00:29:27 / 00:39:05 の**3回** | `entry_type=='Deliverable'`の条件に外れ`None` |
+| **phase_id ドリフト**（`'phase_2'`→`''`） | `log/2026-08-10/1905`のtask_1_4（19:14:00）、`log/2026-08-10/2100`のtask_2_2（22:25:17） | `phase_id`完全一致の条件に外れ`None` |
+
+phase_idドリフトの直接原因は`cela_main.py:11989`：
+
+```python
+phase_id = item.get("phase_id", current_phase.get("phase_id", "unknown"))  # ← キーが「空文字」だとフォールバックしない
+task_id = item.get("task_id") or state.get("current_task_id", "")          # ← task_idは `or` で正しく処理
+```
+
+`dict.get(key, default)`はキーが**欠落**した時しかdefaultを使わないため、LLMが
+`"phase_id": ""` を返すと空文字がそのまま採用される。すぐ下の`task_id`は`or`を使って
+おり正しい。これは`_commit_agreement_from_tool`側で**BL-161が既に修正した同型のバグ**
+（`phase_id = args.get("phase_id") or phase_id`）が、decision_extractor経路にだけ
+残っていたものである（Clineが「phase_idが空になる」と指摘したのは、経路を取り違えて
+いたものの、着眼点としては正しかったことになる）。
+
+**タイムライン照合（実DBで検証済み）：**
+
+3タスクすべてで、「孤児化した瞬間」から「ExpertがBL-080のSUPERSEDE（全文置換、正しい
+識別子で新規行を作る）へ切り替えて自己修復した瞬間」までの窓が、edits失敗クラスタと
+完全に一致した。
+
+| タスク | 孤児化 | 自己修復 | 窓 | ログ上の連続失敗 |
+|---|---|---|---|---|
+| task_1_4 | 19:14:00 | 19:15:40 | 1分40秒 | 1905ログ 7回 |
+| task_2_2 | 22:25:17 | 22:33:31 | 8分14秒 | 2100ログ 12回 |
+| task_2_3 | 00:20:02 / 00:29:27 / 00:39:05 | 00:24:15 / 00:33:09 / 00:46:42 | 計3窓 | 0016ログ 25回（8+8+5+4） |
+
+**提案する修正方針（未実装、ユーザー承認待ち）：**
+
+1. **`decision_extractor_node`のsupersedeループに`entry_type`一致条件を追加**する。
+   entry_typeの異なるエントリがDeliverableを乗っ取れないようにする（最小・確実）。
+2. **`phase_id`のフォールバックを`or`へ修正**（`cela_main.py:11989`）。BL-161と同型の
+   修正をdecision_extractor経路にも適用する。
+3. **防御的措置として`_find_active_deliverable_agreement`をBL-131の先例に揃える**：
+   `get_latest_whiteboard`は既に「task_idはrun_id内で一意」という規約に基づき
+   `phase_id`をWHERE句に含めず、不一致時は警告のみ出す設計になっている
+   （「呼び出し元が誤ったphase_idを渡しても『該当なし』と誤判定する事故」を防ぐため、
+   まさに同じクラスの問題への対処）。同じ方針へ揃えれば、phase_idドリフトが
+   再発しても孤児化しない。
 
 ---
 
