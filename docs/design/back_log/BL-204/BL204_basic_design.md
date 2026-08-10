@@ -268,15 +268,18 @@ BL-203で導入した`precision`フィールドと組み合わせ、以下を機
 
 | ツール | 権限 | 用途 |
 |---|---|---|
-| `register_entity` | Expert | 新規事物の登録（`origin='discovered'`、citations必須） |
-| `write_entity_attribute` | Expert | 属性の記録・更新。未登録名は`did_you_mean`付きで拒否 |
-| `read_entity` | Expert / Detector | 事物と全属性の取得。`entity_type`での一覧も可 |
+| `register_entity` | Expert | 新規事物の登録（`origin='discovered'`固定、citations必須、**alias引数を持たない**） |
+| `write_entity_attribute` | Expert | 属性の記録・更新。未登録名は`did_you_mean`付きで拒否。新規`attr_name`作成時は既存属性名一覧を返す |
+| `read_entity` | Expert / Detector | 事物と**全属性**の取得（`attr_name`引数なし）。`entity_type`での一覧も可 |
 | `verify_entity_geo` | Detector | 住所↔座標の整合を再ジオコーディングで検算（2.5） |
 
-**懸念**：Expertの現在のツール数は17本で、3〜4本追加すると20本を超える。
-プロンプトのツール一覧文も4箇所（Expert2経路・Detector2パス）で更新が必要になる。
-`register_entity`を`write_entity_attribute`の`allow_new_entity=true`フラグへ畳んで
-2本に減らす案もある（要確認事項2）。
+Expertは17→20本になる（決定事項2）。プロンプトのツール一覧文は4箇所
+（Expert 2経路・Detector 2パス）で更新が必要——BL-198/199/200で毎回更新している
+のと同じ箇所である。
+
+`did_you_mean`の近似一致は、`suggest_similar_verified_facts`（`cela_main.py:6032`）が
+採用している`difflib.get_close_matches`方式を踏襲した`entities`版を新設する
+（同関数は`verified_facts`固定のため直接は流用できない。新規依存は追加しない）。
 
 ### 5.2 実装順序
 
