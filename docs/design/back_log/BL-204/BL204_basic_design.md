@@ -257,6 +257,8 @@ BL-203で導入した`precision`フィールドと組み合わせ、以下を機
 - 属性の履歴（版管理）— 上書きのみ。`agreements`が既に決定履歴を持つ
 - タスクスコープ（`owns_variables`）との自動突き合わせ — Detectorのプロンプト誘導に留める
 - Expert以外のノード（Facilitator/Reflection等）への書き込み権限 — 読み取りのみ
+- **モデルからのalias入力**（軽4）— `register_entity`にalias引数を持たせない
+- **`read_entity`の属性名指定**（軽3）— 常に全属性を返す
 
 ---
 
