@@ -301,7 +301,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = gpt_5_6_luna
+model_user = laguna_S_2_1
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -311,43 +311,43 @@ model_user = gpt_5_6_luna
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = gpt_5_6_luna #laguna_S_2_1
+model_orchestrator = laguna_S_2_1
 
 client_expert = client_openrouter
-model_expert = gpt_5_6_luna #nemotron_3_ultra
+model_expert = laguna_S_2_1 #nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = gpt_5_6_luna #nemotron_3_ultra
+model_task_planner = laguna_S_2_1 #nemotron_3_ultra
 
 client_task_plan_reviewer = client_openrouter
-model_task_plan_reviewer = gpt_5_6_luna #nemotron_3_ultra
+model_task_plan_reviewer = nemotron_3_ultra
 
 client_detector_domain = client_openrouter
-model_detector_domain = gpt_5_6_luna # nemotron_3_ultra
+model_detector_domain = nemotron_3_ultra # nemotron_3_ultra
 
 client_detector_numeric = client_openrouter
-model_detector_numeric = gpt_5_6_luna
+model_detector_numeric = laguna_S_2_1
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = gpt_5_6_luna #laguna_S_2_1
+model_decision_extractor = laguna_S_2_1
 
 client_resource_arbiter = client_openrouter
-model_resource_arbiter = gpt_5_6_luna #nemotron_3_ultra
+model_resource_arbiter = laguna_S_2_1 #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = gpt_5_6_luna #nemotron_3_ultra
+model_reflection = nemotron_3_ultra
 
 client_facilitator = client_openrouter
-model_facilitator = gpt_5_6_luna #nemotron_3_ultra
+model_facilitator = nemotron_3_ultra
 
 client_integrator = client_openrouter
-model_integrator = gpt_5_6_luna #nemotron_3_ultra
+model_integrator = laguna_S_2_1 #nemotron_3_ultra
 
 client_reviewer_qa = client_openrouter
-model_reviewer_qa = gpt_5_6_luna #nemotron_3_ultra
+model_reviewer_qa = laguna_S_2_1 #nemotron_3_ultra
 
 client_goal_essence = client_openrouter
-model_goal_essence = gpt_5_6_luna #nemotron_3_ultra
+model_goal_essence = laguna_S_2_1 #nemotron_3_ultra
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -3099,7 +3099,19 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
                     break
         if entry_type == "Deliverable":
             edits = args.get("edits")
-            is_whiteboard = old_content.startswith("WHITEBOARD:")
+            # [BL-212] 従来はold_content（直前の「有効」なagreements行のdecision_what）が
+            # "WHITEBOARD:"で始まるかどうかで判定していたが、action_type=SUPERSEDEにBL-062の
+            # 「ホワイトボードには触れない短い無効化理由文」（raw_content<=200字）が渡されると、
+            # 下のSUPERSEDE分岐（本関数冒頭）はapply_whiteboard_patchを呼ばずcontent=raw_content
+            # のまま新しい「有効」行を作る。結果、次にこのUPDATEへ来たときのold_contentはその短い
+            # 理由文そのものであり、WHITEBOARD:プレフィックスを失っている。is_whiteboard=Falseと
+            # 誤判定されるため、base_content=old_content（短い理由文）に対してExpertの実際の
+            # ホワイトボード引用（whiteboard_drafts側には無傷で残っている）を照合してしまい、
+            # editsが必ず0件一致で失敗し続ける（実インシデント: log/2026-08-11/1034、
+            # write_agreement(edits=...)が17回連続失敗）。BL-131・BL-206と同じ設計方針
+            # （task_idを権威とし、agreements側の文字列表現は当てにしない）に揃え、
+            # whiteboard_draftsに実際にバージョンが存在するかどうかを直接判定する。
+            is_whiteboard = get_latest_whiteboard(conn, run_id, phase_id, tid) is not None
             if edits:
                 # editsが指定された場合、ホワイトボード済みならその最新版、未昇格の短文ならold_content自体を
                 # 編集対象のベースとする（どちらの場合も編集後はwhiteboard_draftsへ格納・昇格させる）。
