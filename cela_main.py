@@ -11799,6 +11799,34 @@ def _find_phase_containing_task(phases: list[dict], task_id: str) -> dict | None
     return None
 
 
+def _infer_directive_target_task_ids(item: dict, task_id_to_phase_id: dict) -> set[str]:
+    """[BL-211] Directiveイベントの構造化フィールド`task_id`が空文字のまま返された場合に、
+    同じイベントの自然文側（topic/content/rationale）とowned_variable_valuesから移行先task_idを
+    推定する。
+
+    [CONSTRAINT] 推定結果は計画に実在するtask_idのみに限定する（task_id_to_phase_idに存在する
+    ものだけを返す）。LLMが自然文中で言及しただけの架空タスクを遷移先に昇格させないため。
+
+    [REJECTED] 「最初に見つかったtask_idを採用する」案は、差し戻し文が「task_4_3ではなく
+    task_4_2の修正を先に」のように複数タスクへ言及するケースで誤った先読み切替を起こすため
+    採用しない。呼び出し側が候補が1件のときだけ補完するフェイルクローズ方針を取れるよう、
+    ここでは候補集合をそのまま返す。
+    """
+    haystack = " ".join(
+        str(v) for v in (
+            item.get("topic", ""), item.get("content", ""), item.get("rationale", ""),
+            *(item.get("owned_variable_values") or {}).values(),
+        ) if v
+    )
+    candidates = set()
+    # BL-039と同様、会話文中のドット区切り表記（task_4.3）もアンダースコア表記へ正規化する。
+    for raw in re.findall(r"task[_\s]?\d+[_.]\d+", haystack, flags=re.IGNORECASE):
+        normalized = re.sub(r"[\s.]", "_", raw.strip().lower())
+        if normalized in task_id_to_phase_id:
+            candidates.add(normalized)
+    return candidates
+
+
 def _apply_backward_redirect(state: LineageState, redirect: dict) -> None:
     """[BL-191] schedule_task_focus(decision_type="redirect_backward")による構造化された
     過去タスクへの一時的フォーカス切替を適用する。[CONSTRAINT] BL-125/BL-176のdeparting-task
@@ -12201,12 +12229,21 @@ def decision_extractor_node(state: LineageState) -> LineageState:
     # status="Deferred"（BL-082の明示的先送り）は「今は移行しない」という意思表示のため除外する。
     if target_role == "user" and not transition.get("advances_to_task_id"):
         departing_task_id = state.get("current_task_id", "")
+        # [BL-211] BL-139の補完はDirectiveの構造化フィールドtask_idが埋まっていることを前提と
+        # していたが、`log/2026-08-11/0941`のtask_4_2→task_4_3で、advances_to_task_idがnull
+        # かつDirective側もphase_id/task_idともに空文字で返され（移行先はtopicと
+        # owned_variable_values.対象タスクの自然文にしか存在しなかった）、安全網が二重に外れて
+        # 切替が永久に成立しなくなる事故が起きた。そこで、構造化フィールドによる補完（第1段）を
+        # 優先しつつ、それが空振りした場合のみ自然文からの推定（第2段）へフォールバックする。
+        # 第2段は候補が一意に定まるときだけ採用するフェイルクローズとし、複数タスクへ言及する
+        # 差し戻し文で誤った先読み切替が起きないようにする。
+        _fallback_candidates: set[str] = set()
         for item in extracted_items:
+            if item.get("entry_type") != "Directive" or item.get("status") == "Deferred":
+                continue
             candidate_task_id = item.get("task_id")
             if (
-                item.get("entry_type") == "Directive"
-                and item.get("status") != "Deferred"
-                and candidate_task_id
+                candidate_task_id
                 and candidate_task_id in task_id_to_phase_id
                 and candidate_task_id != departing_task_id
             ):
@@ -12217,6 +12254,26 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                     f"抽出されたDirective（task_id='{candidate_task_id}'）から遷移意図を補完しました。"
                 )
                 break
+            if not candidate_task_id:
+                _fallback_candidates |= {
+                    t for t in _infer_directive_target_task_ids(item, task_id_to_phase_id)
+                    if t != departing_task_id
+                }
+        else:
+            if len(_fallback_candidates) == 1:
+                inferred_task_id = _fallback_candidates.pop()
+                transition["advances_to_task_id"] = inferred_task_id
+                transition["advances_to_phase_id"] = task_id_to_phase_id[inferred_task_id]
+                print(
+                    f"  🔁 [BL-211] Directiveのtask_idが空だったため、自然文から移行先"
+                    f"（task_id='{inferred_task_id}'）を推定して遷移意図を補完しました。"
+                )
+            elif len(_fallback_candidates) > 1:
+                print(
+                    f"  ⚠️ [BL-211] Directiveのtask_idが空で、自然文から複数の移行先候補"
+                    f"（{sorted(_fallback_candidates)}）が見つかったため、誤った先読み切替を避けて"
+                    f"補完を見送りました。"
+                )
 
     _resolve_task_transition(state, transition, structured_redirect=_pending_redirect)
     _maybe_resume_forward_focus(state, _conn, _run_id)
