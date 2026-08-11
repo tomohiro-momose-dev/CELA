@@ -117,6 +117,9 @@ mcp_codebase-memo_get_architecture({ "project": "<display_name>" })
 4.  **Communication Preference**
     - **Language:** Always explain your plans, logic, and reasoning in Japanese. Keep the actual code, variables, and technical terms in English.
 
+5.  **Consuming LLM Output / Designing Fallbacks**
+    - Any code that reads LLM-produced JSON, or that falls back to `""` / a "current" value / a stub object (e.g. after a JSON parse error), is governed by **§13**. Read it before writing the fallback, not after the incident.
+
 **Index:** `docs/design/README.md`
 
 | Layer | File / location | Role |
@@ -210,3 +213,109 @@ When the user types the prefix on the left, you must autocomplete with the seman
   * **AI autocompletes:** `# Device firmware only accepts b'\\r\\n' endings; raw write() without endings will hang the parser`
 * **User types:** `def wait_and_drain_bytes(self, length, timeout_sec):` -> (presses Enter and types `# `)
   * **AI autocompletes:** `# Discard binary payload from buffer silently to prevent Tkinter rendering lag or memory exhaustion`
+
+---
+
+## 13. Defensive Handling of LLM-Produced Structured Data (CRITICAL)
+
+**Premise: an LLM can return an empty string — or omit a field entirely — for any field, at any
+time, including fields it filled correctly on every previous turn.** This is not a rare edge case;
+it is normal, recurring model behavior. Treat every field of every LLM-produced JSON object as
+*optionally absent and optionally empty*, regardless of what the prompt instructed.
+
+The same applies to any value that reaches your code through a lossy boundary: a JSON parser that
+fell back to a default object on a parse error, a retry layer that returned a stub, a tool result
+that was truncated. **Anything that can arrive as `""` will eventually arrive as `""`.**
+
+### 13.1 The empty-string trap (`.get(key, default)`)
+
+`d.get("key", default)` falls back **only when the key is absent**. `{"key": ""}` yields `""`,
+not the default. This single misunderstanding is the direct cause of multiple production incidents
+in this project.
+
+```python
+phase_id = item.get("phase_id", current_phase_id)   # BAD:  "" survives and poisons downstream
+phase_id = item.get("phase_id") or current_phase_id  # GOOD: "" is treated as missing
+```
+
+Apply the same scrutiny to truthiness checks used as guards. `if not args.get(f)` correctly rejects
+`""`; `if f not in args` does not.
+
+### 13.2 Investigate downstream before writing ANY fallback
+
+**This is the core rule of this section.** Before you write a fallback — to `""`, to a "current"
+value (`current_phase`, `current_task_id`, ...), to a default enum member, or to a stub object on a
+parse failure — you must **trace what the fallback value does to every consumer of that value**, and
+confirm the system degrades safely rather than breaking silently.
+
+Concretely, answer these before committing the fallback:
+
+1. **Who reads this value later?** Grep for every consumer — including other modules, DB columns
+   written from it, and prompts built from it. A fallback is not local; it propagates.
+2. **What happens at each consumer when the value is the fallback?** Walk each branch. Does an
+   `if x == "Deliverable"` become permanently false? Does a lookup silently match zero rows? Does a
+   record become invisible to a later query that filters on that column?
+3. **Is the failure loud or silent?** A fallback that produces a visible error is acceptable. A
+   fallback that produces a *plausible-looking but wrong* result is not — it is worse than a crash,
+   because nobody will notice. Prefer fail-closed (refuse and log) over fail-open (proceed with a
+   guessed value).
+4. **Can the corrupted value persist?** If the fallback value is written to a database, file, or
+   conversation history, the damage outlives the turn and can propagate to future turns. Persisted
+   state deserves stricter validation than transient state.
+5. **Does a more authoritative source exist?** See §13.3.
+
+If you cannot answer 1–4 with confidence, **do not add the fallback**. Ask the user, or make the
+code reject the input explicitly.
+
+### 13.3 Prefer the authoritative store over a derived representation
+
+When a value can be checked against the system of record, check the system of record — do not infer
+state from a string's shape or from a field that a lossy path may have overwritten.
+
+```python
+is_promoted = old_content.startswith("WHITEBOARD:")            # BAD:  depends on a string form
+is_promoted = get_latest_whiteboard(conn, run_id, ...) is not None  # GOOD: asks the real table
+```
+
+Likewise, when restoring such a derived representation, **regenerate it from the authority rather
+than copying the previous value forward** — copying propagates corruption across generations, while
+regenerating repairs already-corrupted records on the next write.
+
+### 13.4 Keep validation symmetric across all write paths
+
+If the same table/state can be written through more than one path, **every path must enforce the
+same invariants**. A heavily validated path plus an unvalidated "fallback" path is not a safety net;
+it is a second, unguarded front door. Whenever you add or discover a second write path, either route
+it through the existing validation or replicate the equivalent checks — and record which choice you
+made and why in `decision_log.md`.
+
+### 13.5 Fix the class, not the instance
+
+When a defect of this kind is found, **do not stop at the field that triggered it**. Inspect the
+sibling fields on the same line, the same dict, and the same code path — they almost certainly share
+the flaw. Then check whether the identical pattern exists on other paths. Fixing one field at a time
+guarantees the same bug returns from a route you have not walked yet.
+
+### 13.6 Checklist before merging code that consumes LLM output
+
+- [ ] Every `.get(k, default)` on LLM-derived data reviewed; switched to `.get(k) or default` where `""` must not survive
+- [ ] Enum-valued fields validated against their allowed set (empty string rejected)
+- [ ] Identity/lookup fields (ids, keys) validated for existence before use, not merely for non-`None`
+- [ ] Downstream consumers of each fallback value traced and confirmed safe (§13.2)
+- [ ] No state decision made from a string prefix/format when an authoritative store is reachable (§13.3)
+- [ ] All write paths to the same state enforce the same invariants (§13.4)
+- [ ] Failure mode is loud (error/log), never a silently plausible wrong value
+- [ ] Regression test added that **fails when the fix is reverted** (revert it and confirm)
+
+### 13.7 Reference incidents
+
+These are the real defects this section was distilled from. Read them before designing a new
+fallback; the full cross-cutting audit is in `docs/design/back_log/BL-213/BL213_investigation.md`.
+
+| BL | Trusted field | What broke |
+|----|---------------|------------|
+| BL-206 | `item["phase_id"]` (empty-string drift) | Deliverable records orphaned; every subsequent edit failed against an empty base |
+| BL-210 | `advances_to_phase_id` (null → "current" fallback) | Cross-phase task transitions rejected forever; run halted |
+| BL-211 | `item["task_id"]` (empty-string drift) | Transition safety net silently never fired; task switch never completed |
+| BL-212 | `old_content` string prefix | Whiteboard pointer lost; 17 consecutive edit failures |
+| BL-213 | (cross-cutting audit) | Validation asymmetry between two write paths identified as the structural root cause of all of the above |
