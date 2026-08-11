@@ -301,7 +301,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = laguna_S_2_1
+model_user = nemotron_3_ultra
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -326,13 +326,13 @@ client_detector_domain = client_openrouter
 model_detector_domain = nemotron_3_ultra # nemotron_3_ultra
 
 client_detector_numeric = client_openrouter
-model_detector_numeric = nemotron_3_ultra
+model_detector_numeric = nemotron_3_ultra # nemotron_3_ultra
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = laguna_S_2_1
+model_decision_extractor = laguna_S_2_1 # nemotron_3_ultra
 
 client_resource_arbiter = client_openrouter
-model_resource_arbiter = laguna_S_2_1 #nemotron_3_ultra
+model_resource_arbiter = nemotron_3_ultra #nemotron_3_ultra
 
 client_reflection = client_openrouter
 model_reflection = nemotron_3_ultra
@@ -341,13 +341,13 @@ client_facilitator = client_openrouter
 model_facilitator = nemotron_3_ultra
 
 client_integrator = client_openrouter
-model_integrator = laguna_S_2_1 #nemotron_3_ultra
+model_integrator = nemotron_3_ultra #nemotron_3_ultra
 
 client_reviewer_qa = client_openrouter
-model_reviewer_qa = laguna_S_2_1 #nemotron_3_ultra
+model_reviewer_qa = nemotron_3_ultra #nemotron_3_ultra
 
 client_goal_essence = client_openrouter
-model_goal_essence = laguna_S_2_1 #nemotron_3_ultra
+model_goal_essence = nemotron_3_ultra #nemotron_3_ultra
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -2119,6 +2119,23 @@ _CURRENT_PHASE_ID: str = ""     # [BL-079] verify_whiteboard_excerptツールの
 _CURRENT_GOAL_TEXT: str = ""    # [BL-086] revise_goalが編集対象とする現在のgoal本文
 _CURRENT_PHASES: list = []      # [BL-104] read_project_planツールが返すstate["phases"]のコピー
 
+
+def _new_record_id(prefix: str) -> str:
+    """[BL-215] 時刻ベースのレコードIDを一意に採番する。
+
+    [CONSTRAINT] 従来 agreements/decisions/goal_shift_events/plan_drafts は
+    `f"{prefix}-{int(time.time()*1000)}"` を使っており、同一ミリ秒に2回採番すると完全に同じIDの
+    行ができた（実DBで1724行中188行=10.9%が重複）。これらのテーブルにはPRIMARY KEYもUNIQUE制約も
+    無いため重複INSERTが素通りし、`WHERE id=?`のUPDATE（db_supersede_agreement/freeze_agreement）が
+    重複行を巻き込み、`depends_on`/`freeze_agreement_id`/citationsのAG-xxx参照も一意に定まらない。
+
+    goal_escalations（ESC-）が既に採っていた「ミリ秒＋uuid断片」方式へ全テーブルを揃える。
+    同じ「一意IDの作り方」という規則がテーブルごとにバラバラだったこと自体が
+    AGENTS.md §15.1（One rule, one place）の事例であり、ここを唯一の採番口とする。
+    """
+    return f"{prefix}-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
+
+
 # [F-3.1] R3b: 書き込みツール定義
 WRITE_AGREEMENT_TOOL = {
     "type": "function",
@@ -2468,7 +2485,7 @@ def db_create_goal_escalation(conn: sqlite3.Connection, run_id: str, phase_id: s
                                raised_by_role: str, concern_summary: str, implicated_constraint: str,
                                why_conflicts: str, suggested_reframe: str) -> str:
     """[BL-086] goal_escalationsへOpen状態で1行INSERTし、escalation_idを返す。"""
-    escalation_id = f"ESC-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
+    escalation_id = _new_record_id("ESC")
     conn.execute(
         "INSERT INTO goal_escalations (escalation_id, run_id, phase_id, task_id, raised_by_role, "
         "concern_summary, implicated_constraint, why_conflicts, suggested_reframe, status, created_at) "
@@ -2521,7 +2538,7 @@ def apply_goal_patch(conn: sqlite3.Connection, run_id: str, new_content: str,
     conn.execute(
         "INSERT INTO goal_drafts (draft_id, version, content, author_role, edit_summary, timestamp, run_id) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (f"GD-{int(time.time()*1000)}", new_version, new_content, author_role, edit_summary, time.time(), run_id)
+        (_new_record_id("GD"), new_version, new_content, author_role, edit_summary, time.time(), run_id)
     )
     print(f"  📝 [DB] goal_draftsへINSERT: version={new_version}, author={author_role}, "
           f"edit_summary={str(edit_summary)[:60]}")
@@ -2562,7 +2579,7 @@ def record_scheduling_decision(conn: sqlite3.Connection, run_id: str, decision_t
         "INSERT INTO scheduling_drafts (draft_id, version, content, author_role, decision_type, "
         "primary_task_id, primary_phase_id, companion_task_id, companion_phase_id, reason, "
         "timestamp, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (f"SCHED-{int(time.time()*1000)}", new_version, content, author_role, decision_type,
+        (_new_record_id("SCHED"), new_version, content, author_role, decision_type,
          primary_task_id, primary_phase_id, companion_task_id, companion_phase_id, reason,
          time.time(), run_id)
     )
@@ -3210,7 +3227,7 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
         "entry_type, phase_id, task_id, depends_on, resource_claims, timestamp, "
         "evidence, is_frozen, internal_thought_process, citations, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            f"AG-{int(time.time() * 1000)}", action_type, args.get("status", "Proposed"),
+            _new_record_id("AG"), action_type, args.get("status", "Proposed"),
             topic, content, args.get("reason_why", ""),
             caller_role, entry_type,
             phase_id, tid,
@@ -3452,6 +3469,34 @@ def _write_issue_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_
     perm_error = _check_issue_permission(args, caller_role)
     if perm_error:
         return {"success": False, "error": perm_error}
+
+    # [BL-214] task_idはツールスキーマ（WRITE_ISSUE_TOOL）で公開されているにもかかわらず、
+    # 従来は`args`側が完全に無視され呼び出し側引数だけが使われていた。その引数は`_task_id_from`
+    # 由来で初回タスク進行中は空文字だったため、LLMが正しく"task_id"を送っていても空で保存され、
+    # BL-125遷移ゲート/BL-144滞留追跡/BL-145再構成/BL-194 actionableが軒並み無効化されていた
+    # （log/2026-08-11/2030で8件全てがtask_id=''）。ここは実効解決が失敗した場合の最後の砦とする。
+    #
+    # [REJECTED] write_agreement（BL-040）と同型の「args優先」にはしない。task_idはBL-125の
+    # 遷移ゲートが「離脱元タスクに未解決issueが残っているか」を判定する鍵であり、申告を無条件に
+    # 採用すると、LLMが別タスクのtask_idを付けるだけで自分の離脱元から未解決issueを外せてしまう
+    # （静かに成立する抜け道＝AGENTS.md §13.2 問3のfail-openそのもの）。write_agreementの
+    # task_idは書き込み先の識別子でありゲートの鍵ではない、という役割の違いによる非対称である。
+    _declared_task_id = args.get("task_id") or ""
+    if _declared_task_id and _declared_task_id != task_id:
+        if task_id:
+            print(f"  ⚠️ [write_issue][BL-214] 申告されたtask_id '{_declared_task_id}' は現在のタスク "
+                  f"'{task_id}' と異なります。遷移ゲートの整合のため現在のタスクで記録します"
+                  f"（別タスクへ対応を委ねたい場合はaction_type='DEFER'とdefer_to_task_idを使ってください）。")
+        elif _phases_from(state) and not _find_phase_containing_task(_phases_from(state), _declared_task_id):
+            # 実効解決も失敗し、かつ申告先も計画に存在しない。採用すればどのゲートからも
+            # 参照されない迷子issueになるため、空のまま記録して下の警告に落とす。
+            print(f"  ⚠️ [write_issue][BL-214] 申告されたtask_id '{_declared_task_id}' が計画に存在せず、"
+                  "実効解決にも失敗しました。")
+        else:
+            task_id = _declared_task_id
+    if not task_id:
+        print(f"  ⚠️ [write_issue][BL-214] task_idを解決できませんでした（topic={topic!r}, caller={caller_role}）。"
+              "空のtask_idで記録するとBL-125遷移ゲート等がこのissueを検出できません。")
 
     existing_row = conn.execute(
         "SELECT * FROM issue_log WHERE run_id=? AND topic=? AND status != 'resolved'",
@@ -3702,10 +3747,15 @@ def get_issues_from_db(conn: sqlite3.Connection, run_id: str, topic_keyword: str
     """[BL-096] issue_logの検索ヘルパー。get_verified_facts_from_dbと同じ
     keyword/exact-match検索パターンを踏襲する。list_all=Trueの場合は他の引数を無視し、
     このrunの全issue（status不問）を返す。
+
+    [BL-215] issue_logのidは`str(uuid.uuid4())`のため、従来の`ORDER BY id`は挿入順ではなく
+    実質ランダム順を返していた（agreementsのミリ秒衝突とは症状が違うが「順序を持たない値で
+    並べている」という同じ欠陥クラス）。issue_logを引く全クエリを`ORDER BY rowid`＝真の起票順へ
+    揃える。順序が意味を持つのは提示順と「最初に一致したもの」の選択であり、起票順が正しい。
     """
     if list_all:
         rows = conn.execute(
-            "SELECT * FROM issue_log WHERE run_id=? ORDER BY id", (run_id,)
+            "SELECT * FROM issue_log WHERE run_id=? ORDER BY rowid", (run_id,)
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -3722,7 +3772,7 @@ def get_issues_from_db(conn: sqlite3.Connection, run_id: str, topic_keyword: str
         conditions.append("phase_id=?")
         params.append(phase_id)
     rows = conn.execute(
-        f"SELECT * FROM issue_log WHERE {' AND '.join(conditions)} ORDER BY id", tuple(params)
+        f"SELECT * FROM issue_log WHERE {' AND '.join(conditions)} ORDER BY rowid", tuple(params)
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -3733,7 +3783,7 @@ def _get_escalated_issues(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     判断に依存せずエスカレーション済み懸念を必ず取得できるようにする（BL-099対策）。
     """
     rows = conn.execute(
-        "SELECT * FROM issue_log WHERE run_id=? AND status='escalated' ORDER BY id", (run_id,)
+        "SELECT * FROM issue_log WHERE run_id=? AND status='escalated' ORDER BY rowid", (run_id,)
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -3882,7 +3932,7 @@ def _get_open_issues(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     （従来はread_issuesを能動的に呼ばない限り一切見えなかった）。
     """
     rows = conn.execute(
-        "SELECT * FROM issue_log WHERE run_id=? AND status='open' ORDER BY id", (run_id,)
+        "SELECT * FROM issue_log WHERE run_id=? AND status='open' ORDER BY rowid", (run_id,)
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -3911,7 +3961,7 @@ def _get_planned_issues(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     _get_open_issues/_get_escalated_issuesと同型。
     """
     rows = conn.execute(
-        "SELECT * FROM issue_log WHERE run_id=? AND status='planned' ORDER BY id", (run_id,)
+        "SELECT * FROM issue_log WHERE run_id=? AND status='planned' ORDER BY rowid", (run_id,)
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -3944,7 +3994,7 @@ def _build_escalation_resume_notice(state: LineageState) -> str:
     if not state.get("escalation_just_resolved_notice_pending"):
         return ""
     state["escalation_just_resolved_notice_pending"] = False
-    current_task_id = state.get("current_task_id", "")
+    current_task_id = _effective_current_task_id_from(state)
     _conn = get_active_conn()
     _recent_resolved = _conn.execute(
         "SELECT topic FROM issue_log WHERE run_id=? AND status='resolved' ORDER BY resolved_at DESC LIMIT 1",
@@ -3971,7 +4021,7 @@ def _build_task_transition_blocked_notice(state: LineageState) -> str:
     topics = state.get("task_transition_blocked_issue_topics")
     if topics:
         state["task_transition_blocked_issue_topics"] = []
-        current_task_id = state.get("current_task_id", "")
+        current_task_id = _effective_current_task_id_from(state)
         topics_text = "、".join(topics)
         print(f"  📣 [BL-125] タスク遷移ブロック通知をLLMプロンプトへ注入します（current_task_id: {current_task_id}、issues: {topics_text}）。")
         return (
@@ -4070,7 +4120,21 @@ def _run_id_from(state: dict | None) -> str:
 
 
 def _task_id_from(state: dict | None) -> str:
-    return state.get("current_task_id") or _CURRENT_TASK_ID if state else _CURRENT_TASK_ID
+    """[BL-214] 「現在のタスクは何か」に答える唯一の経路。
+
+    [CONSTRAINT] 生の`state["current_task_id"]`は初回タスク進行中は空文字のままである
+    （BL-024: 唯一の書き手`_resolve_task_transition`が最初の遷移まで発火しない）。
+    それをそのまま「現在タスク」として使うと、各フェーズの先頭タスク実行中だけ
+    機能が黙って無効化される（BL-177/178の承認検証が常に失敗、write_issueのtask_idが
+    空で保存され BL-125/144/145/194 が軒並み効かなくなる、が実測された）。
+    BL-146が確立した`_effective_current_task_id_from`（current_phase先頭タスクへの
+    フォールバック）へ集約し、AGENTS.md §15.1「One rule, one place」を満たす。
+
+    [REJECTED] `_resolve_task_transition`に初期値を書かせる案。BL-024が書き手を
+    単独に限定した設計意図（誰が現在タスクを動かしたか追跡可能にする）を壊し、
+    「まだ一度も遷移していない」という情報が失われるため。
+    """
+    return _effective_current_task_id_from(state) or _CURRENT_TASK_ID
 
 
 def _phase_id_from(state: dict | None) -> str:
@@ -4091,9 +4155,17 @@ def _effective_current_task_id_from(state: dict | None) -> str:
     `_resolve_task_transition`が最初の遷移までまだ一度も発火していない）、生のcurrent_task_idを
     そのまま比較すると初回タスクの正当な書き込みまで全滅する。`_get_current_task`と同じ
     current_phase先頭タスクへのフォールバックを再利用する。
+
+    [BL-214] `current_phase`を持たないstate（reflection/detector等、計画構造を必要としない
+    ノードの簡易state）では`_get_current_task`が`{}`を返すため、明示的に設定済みの
+    `current_task_id`まで取りこぼしていた。この関数を全経路の唯一の解決口へ昇格させた以上、
+    「既知の値を失う」ことは許されない（AGENTS.md §13.2 問2: フォールバックは安全に劣化する
+    ことを確認してから入れる）。phase由来の解決が空のときに限り生の値へ退避する。順序は
+    phase由来を先に保つ——BL-146が確立した「current_task_idがcurrent_phaseの一覧に無ければ
+    先頭タスクへ寄せる」挙動（BL-190の計画再構成中に依存）を変えないため。
     """
     if state:
-        return _get_current_task(state).get("task_id", "")
+        return _get_current_task(state).get("task_id", "") or state.get("current_task_id", "")
     if _CURRENT_TASK_ID:
         return _CURRENT_TASK_ID
     for phase in _CURRENT_PHASES:
@@ -5537,7 +5609,7 @@ def db_append_goal_shift_event(shift: dict, conn: sqlite3.Connection, run_id: st
         "INSERT INTO goal_shift_events (shift_id, timestamp, shift_kind, from_goal_state, to_goal_state, "
         "reason_why, evidence, triggered_by, triggering_agreement_id, run_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
         (
-            f"GS-{int(time.time() * 1000)}", time.time(), shift.get("shift_kind"),
+            _new_record_id("GS"), time.time(), shift.get("shift_kind"),
             shift.get("from_goal_state"), shift.get("to_goal_state"), shift.get("reason_why"),
             shift.get("evidence"), shift.get("triggered_by"), shift.get("triggering_agreement_id"),
             run_id,
@@ -5626,6 +5698,12 @@ def _is_task_completed(conn: sqlite3.Connection, run_id: str, task_id: str) -> b
     タスク再構築の対象から除外され続ける「永久迷子」issueを生んでいた（実ログで確認、BL-167）。
     """
     if not task_id:
+        # [BL-214] 空のtask_idで呼ばれた時点で呼び出し側の解決漏れであり、DBの中身に関わらず
+        # 常にFalseを返す＝機能が黙って無効化される。BL-177/178の承認検証がこれで初回タスク
+        # では必ず失敗し、ApprovalRecordingFailedを3回リトライ分のトークンごと量産していた。
+        # 二度と沈黙させない（AGENTS.md §13.2 問3: 失敗は必ず可視にする）。
+        print("  ⚠️ [_is_task_completed][BL-214] task_idが空のまま呼び出されました。常にFalseを返します"
+              "（呼び出し側は_effective_current_task_id_from/_task_id_fromで実効解決してください）。")
         return False
     for a in reversed(get_agreements_from_db(conn, run_id)):
         if a.get("entry_type") != "Deliverable" or a.get("task_id") != task_id:
@@ -5644,7 +5722,7 @@ def _resolve_directive_for_task(conn: sqlite3.Connection, run_id: str, task_id: 
         if a.get("entry_type") == "Directive" and a.get("task_id") == task_id and a.get("status") == "Proposed":
             db_supersede_agreement(a["id"], conn, run_id)
             resolved: Agreement = {
-                "id": f"AG-{int(time.time() * 1000)}", "timestamp": time.time(),
+                "id": _new_record_id("AG"), "timestamp": time.time(),
                 "action_type": "UPDATE", "entry_type": "Directive", "status": "Approved",
                 "topic": a["topic"], "decision_what": a.get("decision_what", ""),
                 "reason_why": f"対応するタスク（{task_id}）の成果物が承認されたため、指示は履行済みとして自動解決（BL-073）。",
@@ -5727,7 +5805,7 @@ def apply_whiteboard_patch(conn: sqlite3.Connection, run_id: str, phase_id: str,
     conn.execute(
         "INSERT INTO whiteboard_drafts (draft_id, phase_id, task_id, version, content, author_role, edit_summary, timestamp, run_id) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (f"DF-{int(time.time()*1000)}", phase_id, task_id, new_version, new_content, author_role, edit_summary, time.time(), run_id)
+        (_new_record_id("DF"), phase_id, task_id, new_version, new_content, author_role, edit_summary, time.time(), run_id)
     )
     _write_whiteboard_to_file(phase_id, task_id, new_version, new_content, author_role, edit_summary)
     print(f"  📄 [whiteboard_drafts] task_id={task_id}をVer.{new_version}に更新しました（author={author_role}）: {edit_summary}")
@@ -5792,7 +5870,7 @@ def apply_plan_patch(conn: sqlite3.Connection, run_id: str, phase_id: str, task_
     conn.execute(
         "INSERT INTO plan_drafts (draft_id, phase_id, task_id, version, content, author_role, edit_summary, timestamp, run_id) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (f"PL-{int(time.time()*1000)}", phase_id, task_id, new_version, new_content, author_role, edit_summary, time.time(), run_id)
+        (_new_record_id("PL"), phase_id, task_id, new_version, new_content, author_role, edit_summary, time.time(), run_id)
     )
     print(f"  📄 [plan_drafts] task_id={task_id}をVer.{new_version}に更新しました（author={author_role}）: {edit_summary}")
     return new_version
@@ -5958,7 +6036,7 @@ def _build_task_focus_state_text(state: LineageState) -> str:
     if stack:
         entry = stack[-1]
         lines.append(
-            f"現在task_id='{state.get('current_task_id', '')}'（過去タスク）へ一時的にフォーカス中"
+            f"現在task_id='{_effective_current_task_id_from(state)}'（過去タスク）へ一時的にフォーカス中"
             f"（理由: {entry.get('reason', '')}）。復帰待ちの元タスク: '{entry.get('task_id', '')}'。"
         )
     companion = state.get("task_focus_companion")
@@ -6065,7 +6143,8 @@ def _get_frozen_agreements_text(conn: sqlite3.Connection, run_id: str) -> str:
     渡すためのヘルパー（agreements_text全体を渡すと項目数に比例してコストが増える）。
     """
     rows = conn.execute(
-        "SELECT * FROM agreements WHERE run_id=? AND is_frozen=1 AND status != 'Superseded' ORDER BY id", (run_id,)
+        # [BL-215] idはミリ秒由来で同値衝突するため挿入順はrowidで取る。
+        "SELECT * FROM agreements WHERE run_id=? AND is_frozen=1 AND status != 'Superseded' ORDER BY rowid", (run_id,)
     ).fetchall()
     if not rows:
         return ""
@@ -6388,18 +6467,27 @@ def _annotate_whiteboard_with_detector_comment(
 
 def get_agreements_from_db(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     """【SLM要約】
-    指定run_idのagreementsをid昇順（登録順序保証）で全件取得する。
+    指定run_idのagreementsを挿入順（rowid昇順）で全件取得する。
     BL-001によりcontent/rationaleエイリアスは付与しない（decision_what/reason_whyをそのまま返す）。
+
+    [BL-215] 従来は`ORDER BY id`だったが、idは`AG-{ミリ秒}`であり同一ミリ秒の書き込みで
+    完全に同じ値になる。同値のタイの並びはクエリプラン依存で不定であり、実際に
+    「CREATE(→Superseded)とUPDATE(Approved)が逆順に並び、`reversed()`で最新を取る9箇所が
+    Supersededの方を最新と誤認する」ことを再現した。SQLiteの暗黙rowidは真の挿入順を保持
+    しており、`agreements`は`WITHOUT ROWID`でも`INTEGER PRIMARY KEY`でもないため、
+    スキーマ移行なしで既存DBにもそのまま効く。`SELECT *`にrowidは含まれないため、
+    下流のdictキーにも影響しない。
     """
-    rows = conn.execute("SELECT * FROM agreements WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
+    rows = conn.execute("SELECT * FROM agreements WHERE run_id=? ORDER BY rowid", (run_id,)).fetchall()
     return [dict(r) for r in rows]
 
 
 def get_decisions_from_db(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     """【SLM要約】
-    指定run_idのdecisionsをid昇順（登録順序保証）で全件取得する。
+    指定run_idのdecisionsを挿入順（rowid昇順）で全件取得する。
+    [BL-215] `ORDER BY id`はidが`D-{ミリ秒}`のため同一ミリ秒で不定になる。get_agreements_from_dbと同じ理由。
     """
-    rows = conn.execute("SELECT * FROM decisions WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
+    rows = conn.execute("SELECT * FROM decisions WHERE run_id=? ORDER BY rowid", (run_id,)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -7183,6 +7271,10 @@ def _build_agreements_context_from_db(conn: sqlite3.Connection, run_id: str) -> 
 def _get_current_task(state: LineageState) -> dict:
     """[CONSTRAINT] BL-023: current_task_id（BL-024でdecision_extractor_nodeのみが書き込む）から
     現在のTaskを検索する。未設定（初回ターン等）の場合はcurrent_phaseの先頭タスクにフォールバックする。
+
+    [BL-214][例外] ここが「現在タスク」実効解決の実装本体であり、
+    `_effective_current_task_id_from`はこの関数を呼ぶ。生のcurrent_task_idを読むのは
+    ここと`_reconcile_current_phase_after_replan`だけに閉じる（自己再帰を避けるため）。
     """
     current_phase = state.get("current_phase", {})
     tasks = current_phase.get("tasks", [])
@@ -7208,6 +7300,9 @@ def _reconcile_current_phase_after_replan(state: LineageState, phases: list[dict
     BL-146ガードが正当なwrite_agreement(UPDATE)まで拒否する事故があった
     （log/2026-08-07/2355で実見、SUPERSEDEへの切り替えで実害は回避されたが根本原因は未解消）。
     """
+    # [BL-214][例外] 生の値が正しい。この関数はcurrent_phaseそのものを決め直す側であり、
+    # 実効解決はcurrent_phaseに依存するため（循環する）。空文字は「まだ一度も遷移していない
+    # ＝追跡すべき既存タスクが無い」を意味し、直下でその分岐を明示的に処理している。
     current_task_id = state.get("current_task_id", "")
     if not current_task_id:
         # 初回計画（is_initial）、またはまだ一度もタスクに着手していない場合。
@@ -7755,7 +7850,7 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
     # 発生していた（Detector自身が「プロンプトのバグだと思う」と自己申告）。
     scope_ctx = _build_task_scope_context(state, _conn)
     current_task_context = (
-        f"【現在のタスク（current_task_id={state.get('current_task_id', '')!r}）】\n"
+        f"【現在のタスク（current_task_id={_effective_current_task_id_from(state)!r}）】\n"
         f"{scope_ctx['current_task_json']}\n"
         f"【このタスクの未充足の要求項目】\n{scope_ctx['remaining_criteria_text']}\n"
         f"【プロジェクト計画目次（詳細はread_project_planツールで確認可）】\n{project_plan_toc}\n"
@@ -7826,7 +7921,7 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
     )
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
     _CURRENT_CALLER_ROLE = "orchestrator"
-    _CURRENT_TASK_ID = state.get("current_task_id", "")
+    _CURRENT_TASK_ID = _effective_current_task_id_from(state)
     _reset_think_scratchpad()  # [BL-093]
     # [BL-148] 単発JSON応答からツールループへ変更。current_task_context（プロンプト埋め込み）に
     # 加え、詳細確認用の読み取り専用ツールを付与する。Orchestratorの出力は専門家選定メタデータ
@@ -8142,13 +8237,13 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         # [BL-103] facilitatorのエスカレーション名指しはchat_history末尾に追記されるだけで
         # chat_history_windowを過ぎると跡形もなく消える。issue_logのescalated行を毎ターン
         # DBから直接注入することで、その「発言が消えた後の穴」を埋める（recencyに関係ない pin）。
-        escalation_pin = _build_escalation_pin_text(_conn, state["run_id"], state.get("current_task_id", ""), state.get("round_count", 0))
+        escalation_pin = _build_escalation_pin_text(_conn, state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0))
         if escalation_pin:
             hydrate_context += f"\n\n【⚠️エスカレーション中の懸念（要対応、issue_log）】\n{escalation_pin}"
         # [BL-194] DEFER済み（別タスクへの受け皿が確定済み）の懸念は、非強制トーンで
         # 別見出しに分離する。「要対応」側に混ぜたままだと、現タスクのacceptance_criteria
         # に無い懸念をExpertが先取りして再導出し続ける事故（log/2026-08-08/1514）を招く。
-        deferred_issue_pin = _build_deferred_issue_pin_text(_conn, state["run_id"], state.get("current_task_id", ""))
+        deferred_issue_pin = _build_deferred_issue_pin_text(_conn, state["run_id"], _effective_current_task_id_from(state))
         if deferred_issue_pin:
             hydrate_context += f"\n\n【📤 対応予定が確定済みの懸念（参考・現タスクでは対応不要、issue_log）】\n{deferred_issue_pin}"
         # [BL-194] ACKNOWLEDGE中（現在タスクの責務であり対応中）の懸念も前向きなトーンで表示する。
@@ -8409,7 +8504,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
 
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
     _CURRENT_CALLER_ROLE = "expert"
-    _CURRENT_TASK_ID = state.get("current_task_id", "")
+    _CURRENT_TASK_ID = _effective_current_task_id_from(state)
     _reset_think_scratchpad()  # [BL-093]
     return query_AI(messages, client=client_expert, model=model_expert, label=f"Expert:{expert_name}",
                      tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, REGISTER_ENTITY_TOOL, WRITE_ENTITY_ATTRIBUTE_TOOL, READ_ENTITY_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)
@@ -8430,7 +8525,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
     # write_issue(CREATE)が誤って権限エラーになる実バグがあった（ドライラン2026-07-27/1551で検出）。
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID, _CURRENT_PHASE_ID
     _CURRENT_CALLER_ROLE = "detector"
-    _CURRENT_TASK_ID = state.get("current_task_id", "")
+    _CURRENT_TASK_ID = _effective_current_task_id_from(state)
     _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")
 
     # [BL-164] 従来はSELECT *の生行（internal_thought_process列込み、数千字規模）をそのままJSON化
@@ -8660,7 +8755,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
     # （BL-103のpin）を一切受け取っておらず、他ロールが既に折り込み済みの懸念を知らないまま
     # 独立に判定してしまっていた。ドメイン妥当性レビュー（前提・実現可能性等）と意味的に
     # 最も親和性が高いためPass 1にのみ注入する（Pass 2は算術検算に専念する設計のため対象外）。
-    escalation_pin = _build_escalation_pin_text(get_active_conn(), state["run_id"], state.get("current_task_id", ""), state.get("round_count", 0))
+    escalation_pin = _build_escalation_pin_text(get_active_conn(), state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0))
     escalation_pin_block = (
         f"【⚠️エスカレーション中の懸念（要対応、issue_log）】\n{escalation_pin}\n\n" if escalation_pin else ""
     )
@@ -8670,7 +8765,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
     # 逆方向の誤用（スコープ外を理由とした差し戻し）を塞ぐ。log/2026-08-08/1514で、
     # task_2_2スコープの車両台数issueを理由にDetectorがtask_2_1をmajor差し戻しし続けた
     # churnの再点火経路への直接の対処。
-    deferred_issue_pin = _build_deferred_issue_pin_text(get_active_conn(), state["run_id"], state.get("current_task_id", ""))
+    deferred_issue_pin = _build_deferred_issue_pin_text(get_active_conn(), state["run_id"], _effective_current_task_id_from(state))
     deferred_issue_pin_block = (
         f"【📤 対応予定が確定済みの懸念（参考・現タスクでは対応不要、issue_log）】\n{deferred_issue_pin}\n"
         "以下は担当タスクが別に確定している懸念です。現在タスクの成果物にこれらが反映されていない"
@@ -9561,7 +9656,7 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
     escalated_issues = _get_escalated_issues(_conn, state["run_id"])
     for i in escalated_issues:
         _defer_note = ""
-        if _is_issue_effectively_deferred(_conn, state["run_id"], i, state.get("current_task_id", "")):
+        if _is_issue_effectively_deferred(_conn, state["run_id"], i, _effective_current_task_id_from(state)):
             _defer_note = (
                 f"【対応予定task_id={i['defer_to_task_id']}が確定済み。"
                 "完了(completed)判定では未解決として扱うこと。ただし現在タスクでの停滞(stagnant)の"
@@ -10081,7 +10176,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     if _is_normal_review_turn:
         global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID, _CURRENT_GOAL_TEXT, _CURRENT_PHASE_ID
         _CURRENT_CALLER_ROLE = "user"
-        _CURRENT_TASK_ID = state.get("current_task_id", "")
+        _CURRENT_TASK_ID = _effective_current_task_id_from(state)
         _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")
         _CURRENT_GOAL_TEXT = user_goal
 
@@ -10176,7 +10271,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
 
         # ===== Stage 2: issue確認 =====
         _open_escalations_text = _get_open_escalations_text(_conn, state["run_id"])
-        _forced_escalated_issues_text = _get_forced_escalated_issues_text(_conn, state["run_id"], state.get("current_task_id", ""), state.get("round_count", 0))
+        _forced_escalated_issues_text = _get_forced_escalated_issues_text(_conn, state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0))
         issue_prompt = (
             f"あなたは目標達成のプロジェクトオーナー（発注者）です。これは4段階レビューの第2段"
             f"（issue確認）です。第1段のレビュー結果を踏まえ、issue_logの未解決事項を確認・整理して"
@@ -10599,14 +10694,14 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     # 際限なく肥大化するリスクがあった。Expertと同じ共通ヘルパーに統一し、issue_logの
     # escalated行（recencyに関係ない pin）も併せて注入する。
     timeline_str = _build_hydrate_context_from_db(_conn, state["run_id"], config)
-    escalation_pin = _build_escalation_pin_text(_conn, state["run_id"], state.get("current_task_id", ""), state.get("round_count", 0))
+    escalation_pin = _build_escalation_pin_text(_conn, state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0))
     if escalation_pin:
         timeline_str += f"\n\n【⚠️エスカレーション中の懸念（要対応、issue_log）】\n{escalation_pin}"
     # [BL-194] DEFER済み（別タスクへの受け皿が確定済み）の懸念は非強制トーンで別見出しに
     # 分離する。log/2026-08-08/1514で、task_2_1自身への自己先送り6件がここでも「要対応」
     # 側に混入し続け、User AIが同じ懸念を繰り返し督促され続けていた（DEFERの実効性が
     # 消えていた事故の一部）。
-    deferred_issue_pin = _build_deferred_issue_pin_text(_conn, state["run_id"], state.get("current_task_id", ""))
+    deferred_issue_pin = _build_deferred_issue_pin_text(_conn, state["run_id"], _effective_current_task_id_from(state))
     if deferred_issue_pin:
         timeline_str += f"\n\n【📤 対応予定が確定済みの懸念（参考・現タスクでは対応不要、issue_log）】\n{deferred_issue_pin}"
     # [BL-194] ACKNOWLEDGE中（現在タスクの責務であり対応中）の懸念も前向きなトーンで表示する。
@@ -10679,7 +10774,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
 
     # [BL-136] issue_logのescalated行（未先送り）についても、BL-086と同様に今回の発言で
     # 必ずRESOLVEかDEFERを呼ばせる（従来は受動的なpinのみで強制力がなかった）。
-    _forced_escalated_issues_text = _get_forced_escalated_issues_text(_conn, state["run_id"], state.get("current_task_id", ""), state.get("round_count", 0))
+    _forced_escalated_issues_text = _get_forced_escalated_issues_text(_conn, state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0))
     if _forced_escalated_issues_text:
         system_prompt_trailing += f"\n{_forced_escalated_issues_text}\n"
 
@@ -10819,7 +10914,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
 
     # [BL-177] globalは関数冒頭（_is_normal_review_turn分岐内）で宣言済みのため再宣言不要。
     _CURRENT_CALLER_ROLE = "user"
-    _CURRENT_TASK_ID = state.get("current_task_id", "")
+    _CURRENT_TASK_ID = _effective_current_task_id_from(state)
     _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")  # [BL-096] write_issueのphase_id用
     _CURRENT_GOAL_TEXT = user_goal  # [BL-086] revise_goalの編集対象
     _reset_think_scratchpad()  # [BL-093]
@@ -10830,7 +10925,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             print(f"⚠️ [User AI] 空応答を検知。リトライ {retry+1}/3...")
             # global宣言は既に上の行で完了しているため再宣言不要
             _CURRENT_CALLER_ROLE = "user"
-            _CURRENT_TASK_ID = state.get("current_task_id", "")
+            _CURRENT_TASK_ID = _effective_current_task_id_from(state)
             _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")
             _CURRENT_GOAL_TEXT = user_goal
             _reset_think_scratchpad()  # [BL-093]
@@ -10990,7 +11085,7 @@ def make_decision(who: str, what: str, why: str | None, internal_thought_process
     Decision creation by structuring input parameters into a standardized, time-stamped record.
     """
     return {
-        "id": f"D-{int(time.time() * 1000)}",
+        "id": _new_record_id("D"),
         "timestamp": time.time(),
         "who": who,
         "what": what,
@@ -11718,10 +11813,10 @@ Manages state updates including risk levels, constraint logging, and decision re
         # 発火する（BL-136の強制文言自体が無条件であることと整合）。
         if target_role == "user":
             _blocking_issues = _get_blocking_issues_for_transition(
-                get_active_conn(), state["run_id"], state.get("current_task_id", "")
+                get_active_conn(), state["run_id"], _effective_current_task_id_from(state)
             )
             print(
-                f"  🔎 [BL-158] 現在タスク'{state.get('current_task_id', '')}'のブロック対象issueチェック: "
+                f"  🔎 [BL-158] 現在タスク'{_effective_current_task_id_from(state)}'のブロック対象issueチェック: "
                 f"{len(_blocking_issues)}件検出、今回のwrite_issue(RESOLVE/DEFER)成功="
                 f"{state.get('user_wrote_issue_resolution', False)}"
             )
@@ -11733,7 +11828,7 @@ Manages state updates including risk levels, constraint logging, and decision re
                 )
                 result["constraint_issue"] = "major"
                 result["comment"] = (
-                    f"(BL-158機械的差し戻し) 現在のタスク（{state.get('current_task_id', '')}）に"
+                    f"(BL-158機械的差し戻し) 現在のタスク（{_effective_current_task_id_from(state)}）に"
                     f"未解決・未先送りの重大issue（{_topics}）が残っています。write_issue(RESOLVE)"
                     "で解決するか、write_issue(DEFER)で対応予定task_idを明示してください。 "
                     + result.get("comment", "")
@@ -11748,7 +11843,7 @@ Manages state updates including risk levels, constraint logging, and decision re
     state["constraint_issue"] = result["constraint_issue"]
 
     criteria_status = result.get("criteria_status", [])
-    current_task_id = state.get("current_task_id", "")
+    current_task_id = _effective_current_task_id_from(state)
     if criteria_status and current_task_id:
         state.setdefault("task_criteria_status", {})[current_task_id] = criteria_status
 
@@ -11859,7 +11954,7 @@ def _get_blocking_issues_for_transition(conn: sqlite3.Connection, run_id: str, d
         return []
     rows = conn.execute(
         "SELECT * FROM issue_log WHERE run_id=? AND status='escalated' AND severity='major' "
-        "AND last_seen_task_id=? AND (defer_to_task_id IS NULL OR defer_to_task_id='') ORDER BY id",
+        "AND last_seen_task_id=? AND (defer_to_task_id IS NULL OR defer_to_task_id='') ORDER BY rowid",
         (run_id, departing_task_id)
     ).fetchall()
     result = [dict(r) for r in rows]
@@ -11943,6 +12038,9 @@ def _resolve_task_transition(state: LineageState, transition: dict,
 
         # [BL-125] 離脱しようとしているtaskに未解決・未先送りのsevere issueが残っている場合は
         # 遷移を拒否する（BL-134の再発防止。defer_to_task_idで明示的に先送り済みのものは許容する）。
+        # [BL-214][例外] ここは生の値が正しい。departing_task_idは「実際に遷移が起きた履歴」で
+        # あり、初回タスク進行中は「まだ一度も遷移していない」ことを空文字で表す必要がある。
+        # 実効解決すると、初回遷移で「先頭タスクから離脱する」と誤認されBL-125ゲートが誤発火する。
         departing_task_id = state.get("current_task_id", "")
         if canonical_task_id != departing_task_id:
             blocking_issues = _get_blocking_issues_for_transition(
@@ -12042,7 +12140,7 @@ def _apply_backward_redirect(state: LineageState, redirect: dict) -> None:
     if stack:
         print("  ⚠️ [BL-191] 既に一時中断中のフォーカスがあるため、二重のredirect_backwardを無視しました（ツール側の深さ1ガードのはずが漏れています）。")
         return
-    current_task_id = state.get("current_task_id", "")
+    current_task_id = _effective_current_task_id_from(state)
     current_phase = state.get("current_phase", {})
     stack.append({
         "task_id": current_task_id, "phase_id": current_phase.get("phase_id", ""),
@@ -12072,7 +12170,7 @@ def _apply_joint_focus(state: LineageState, redirect: dict) -> None:
     state["task_focus_companion"] = {
         "companion_task_id": companion_task_id,
         "companion_phase_id": redirect.get("companion_phase_id", ""),
-        "primary_task_id": state.get("current_task_id", ""),
+        "primary_task_id": _effective_current_task_id_from(state),
         "reason": redirect.get("reason", ""),
         "declared_at_round": state.get("round_count", 0),
         "baseline_agreement_id": redirect.get("baseline_agreement_id", ""),
@@ -12088,6 +12186,10 @@ def _force_resume_forward_focus(state: LineageState) -> None:
     if not stack:
         print("  ⚠️ [BL-191] force_resume要求を受けましたが、中断中のフォーカスがありません。")
         return
+    # [BL-214][例外] 生の値が正しい。「実際にフォーカス中だった過去タスク」を指す必要があり、
+    # BUG-2経路（計画再構成でフォーカス中タスクが消失し空文字化）では空のままであるべき。
+    # 実効解決するとcurrent_phase先頭タスクを「放置された過去タスク」と誤って再起票する。
+    # 下の`if abandoned_task_id:`が空文字を明示的に除外している。
     abandoned_task_id = state.get("current_task_id", "")
     entry = stack[-1]
     resume_phase = _find_phase_containing_task(state.get("phases", []), entry["task_id"])
@@ -12132,6 +12234,8 @@ def _maybe_resume_forward_focus(state: LineageState, conn: sqlite3.Connection, r
     stack = state.get("task_focus_stack", [])
     if not stack:
         return
+    # [BL-214][例外] 生の値が正しい。直下のBUG-2検知が「空文字であること」自体を異常シグナル
+    # として使っているため、実効解決するとその検知が永久に発火しなくなる。
     focused_task_id = state.get("current_task_id", "")
     if not focused_task_id:
         print("  ⚠️ [BL-191] task_focus_stackが非空のままcurrent_task_idが空になっています"
@@ -12254,7 +12358,7 @@ def decision_extractor_node(state: LineageState) -> LineageState:
         # LLMが"phase_id": ""（空文字）を返すとそのまま採用されていた。tid（1行下）と同じ
         # `or`パターンへ揃える（BL-161がwrite_agreement経路で修正した同型のバグ）。
         phase_id = item.get("phase_id") or current_phase.get("phase_id", "unknown")
-        task_id = item.get("task_id") or state.get("current_task_id", "")
+        task_id = item.get("task_id") or _effective_current_task_id_from(state)
         depends_on = item.get("depends_on", [])
         resource_claims = item.get("resource_claims", {})
 
@@ -12355,7 +12459,7 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                     new_content = "(状態のみ更新)"
                 
                 agreement: Agreement = {
-                    "id": f"AG-{int(time.time() * 1000)}", "timestamp": time.time(),
+                    "id": _new_record_id("AG"), "timestamp": time.time(),
                     "action_type": "UPDATE", "entry_type": entry_type, "status": status,
                     "topic": target_topic, "decision_what": new_content, "reason_why": rationale,
                     "proposed_by": proposed_by, "phase_id": phase_id, "task_id": task_id,
@@ -12373,7 +12477,7 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                     _resolve_directive_for_task(_conn, _run_id, task_id, phase_id, resolved_by=proposed_by)
             else:
                 agreement: Agreement = {
-                    "id": f"AG-{int(time.time() * 1000)}", "timestamp": time.time(),
+                    "id": _new_record_id("AG"), "timestamp": time.time(),
                     "action_type": action_type, "entry_type": entry_type, "status": status,
                     "topic": topic, "decision_what": content, "reason_why": rationale,
                     "proposed_by": proposed_by, "phase_id": phase_id, "task_id": task_id,
@@ -12441,6 +12545,10 @@ def decision_extractor_node(state: LineageState) -> LineageState:
     # 遷移意図の代替シグナルとして採用する（BL-096の自動起票と同型の安全網）。
     # status="Deferred"（BL-082の明示的先送り）は「今は移行しない」という意思表示のため除外する。
     if target_role == "user" and not transition.get("advances_to_task_id"):
+        # [BL-214][例外] 生の値が正しい。ここでの用途は「Directiveのtask_idが現在タスクと
+        # 異なるか」＝遷移意図の検出であり、未遷移（空文字）はそのまま「どのタスクからも
+        # 離脱していない」を意味する。実効解決すると初回タスク宛のDirectiveが遷移要求と
+        # 誤認される。
         departing_task_id = state.get("current_task_id", "")
         # [BL-211] BL-139の補完はDirectiveの構造化フィールドtask_idが埋まっていることを前提と
         # していたが、`log/2026-08-11/0941`のtask_4_2→task_4_3で、advances_to_task_idがnull
@@ -12542,7 +12650,7 @@ It generates a formal decision based on reflection results, updating the overall
     # ため機械的にstagnantへ上書きされhaltした事故の一次修正（BL-194）。
     _escalated_now = _get_escalated_issues(get_active_conn(), state["run_id"])
     _actionable_escalated = _get_actionable_escalated_issues(
-        get_active_conn(), state["run_id"], state.get("current_task_id", ""),
+        get_active_conn(), state["run_id"], _effective_current_task_id_from(state),
         round_count=state.get("round_count", 0),
     )
     _escalated_first_seen = state.setdefault("escalated_issue_first_seen_round", {})
@@ -12694,7 +12802,7 @@ def facilitator_node(state: LineageState) -> LineageState:
     # 「need車両7〜8台」とtask_2_2の責務をtask_2_1の義務として誤って取り込む原因になっていた。
     _conn = get_active_conn()
     _escalated_for_facilitator = _get_actionable_escalated_issues(
-        _conn, state["run_id"], state.get("current_task_id", ""),
+        _conn, state["run_id"], _effective_current_task_id_from(state),
         round_count=state.get("round_count", 0),
     )
     escalated_issues_text = "\n".join(
@@ -12890,7 +12998,7 @@ def integrator_node(state: LineageState) -> LineageState:
 
         # 矛盾がなければ、完成した統合ドキュメントをDBに登録
         db_append_agreement({
-            "id": f"AG-MASTER-{int(time.time() * 1000)}", "timestamp": time.time(),
+            "id": _new_record_id("AG-MASTER"), "timestamp": time.time(),
             "action_type": "CREATE",
             "entry_type": "Deliverable",
             "status": "Proposed", # Reviewerの審査待ち
