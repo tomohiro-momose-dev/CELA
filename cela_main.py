@@ -11704,7 +11704,26 @@ def _resolve_task_transition(state: LineageState, transition: dict,
         return
 
     phase_lookup = {p["phase_id"]: p for p in state.get("phases", [])}
-    target_phase = phase_lookup.get(next_phase_id) if next_phase_id else state.get("current_phase")
+    target_phase = phase_lookup.get(next_phase_id) if next_phase_id else None
+
+    # [BL-210] next_phase_idが省略された場合、従来はstate["current_phase"]へ即決め打ちして
+    # いたため、フェーズをまたぐtask遷移（例: phase_3のtask_3_2からphase_4のtask_4_0）を
+    # call_decision_extractorがadvances_to_task_idだけ正しく抽出しadvances_to_phase_idを
+    # nullのまま返すと、探索対象がcurrent_phase（phase_3）に固定され、task_4_0はそこに
+    # 存在しないため「存在しないtask_id」として毎ターン拒否され続ける事故が発生した
+    # （実ドライラン`log/2026-08-11/0118`で8回連続、最終的にReflectionがこれを
+    # 「切替拒否の反復＝実質的な停滞」と判定しHALTした）。next_task_idの所属フェーズを
+    # 全フェーズ横断で探す（BL-191の_find_phase_containing_taskを流用、正規化前後の両方で
+    # 試す）。それでも見つからなければ、従来通りcurrent_phaseへフォールバックする
+    # （phase_idのみの遷移要求等、既存の挙動を壊さないため）。
+    if target_phase is None and next_task_id:
+        normalized_next_task_id = next_task_id.replace(".", "_")
+        target_phase = (
+            _find_phase_containing_task(state.get("phases", []), next_task_id)
+            or _find_phase_containing_task(state.get("phases", []), normalized_next_task_id)
+        )
+    if target_phase is None:
+        target_phase = state.get("current_phase")
     if not target_phase:
         print(f"  ⚠️ [decision_extractor] 存在しないphase_id '{next_phase_id}' への遷移要求を無視しました。")
         return
@@ -11759,9 +11778,14 @@ def _resolve_task_transition(state: LineageState, transition: dict,
         state["current_task_id"] = canonical_task_id
         print(f"  ➡️ [decision_extractor] current_task_id を '{canonical_task_id}' に更新しました。")
 
-    if next_phase_id:
+    # [BL-210] next_phase_idが明示されていなくても、next_task_idの全フェーズ横断探索で
+    # current_phaseと異なるフェーズが見つかった場合はcurrent_phaseも追従させる
+    # （そうしないとcurrent_task_idだけが新フェーズを指し、current_phaseは旧フェーズの
+    # ままという不整合状態になる）。
+    resolved_phase_id = target_phase.get("phase_id") if target_phase else None
+    if resolved_phase_id and resolved_phase_id != (state.get("current_phase") or {}).get("phase_id"):
         state["current_phase"] = target_phase
-        print(f"  ➡️ [decision_extractor] current_phase を '{next_phase_id}' に更新しました。")
+        print(f"  ➡️ [decision_extractor] current_phase を '{resolved_phase_id}' に更新しました。")
 
 
 def _find_phase_containing_task(phases: list[dict], task_id: str) -> dict | None:
