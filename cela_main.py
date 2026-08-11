@@ -21,7 +21,7 @@ import math  # [BL-204] verify_entity_geoの座標乖離の概算に使用
 import ast
 import subprocess
 import threading
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Callable, Literal, TypedDict
 from pathlib import Path
 
 def _take_latest(a, b):
@@ -5167,6 +5167,7 @@ def _safe_json_parse(raw: str | None, fallback: dict | list) -> dict | list:
 def _query_and_parse_with_retry(
     prompt: str, client: OpenAI, model: str, label: str,
     tools: list[dict] | None, fallback: dict, max_retries: int = 2, state: dict | None = None,
+    validator: "Callable[[dict], tuple[bool, str]] | None" = None,
 ) -> tuple[dict, bool]:
     """【SLM要約】
     D-005: ツール付与によりuse_json_mode=Falseとなるノード向けの層2リトライ。
@@ -5175,12 +5176,41 @@ def _query_and_parse_with_retry(
     戻り値: (parsed_or_fallback, parse_failed)。parse_failed=Trueは上限を使い切ったことを示す
     （呼び出し元でフェイルクローズ処理を行うこと）。
     [BL-131/TOOL_DISPATCH state化] `state`はquery_AIへそのまま透過する。
+
+    [BL-213 F3] `validator`は「JSONとしては読めたが、内容がスキーマ上不正」を検出するための
+    任意フック。`(ok, llm_facing_error_message)`を返す。従来のリトライはパース失敗時に
+    **同一プロンプトをそのまま再送**するだけで「何が悪かったか」をモデルへ一切伝えておらず、
+    自己修正の機会が無かった（ツール呼び出しの失敗が`{"success": False, "error": ...}`として
+    ツールループ内でモデルへ返り同一ターンで修正できるのとは対照的に、この経路はノード呼び出し
+    なのでフィードバック channel が存在しない）。validatorが不合格を返した場合は、その理由と
+    あるべき出力をプロンプトへ追記して再問い合わせすることで、ツール失敗時と同等の自己修正
+    ループを与える。リトライを使い切った場合はパース自体は成功しているため
+    `parse_failed=False`で最後の`parsed`を返す——不正項目の破棄/正規化は呼び出し元の責務
+    （フェイルクローズの方針は呼び出し元ごとに異なるため、ここでは判断しない）。
     """
+    _correction_note = ""
+    parsed: dict = fallback
     for attempt in range(max_retries + 1):
-        res = query_AI([{"role": "user", "content": prompt}], client=client, model=model, label=label, tools=tools, state=state)
+        _prompt = prompt if not _correction_note else f"{prompt}\n\n{_correction_note}"
+        res = query_AI([{"role": "user", "content": _prompt}], client=client, model=model, label=label, tools=tools, state=state)
         parsed = _safe_json_parse(res, fallback=fallback)
         if parsed is not fallback:
-            return parsed, False
+            if validator is None:
+                return parsed, False
+            ok, validation_error = validator(parsed)
+            if ok:
+                return parsed, False
+            if attempt >= max_retries:
+                print(f"⚠️ [{label}] 出力内容の検証に{max_retries + 1}回連続で失敗しました。"
+                      f"最後の出力をそのまま呼び出し元へ渡します（不正項目の扱いは呼び出し元の方針に従います）。")
+                return parsed, False
+            print(f"⚠️ [{label}] 出力はJSONとして読めましたが内容が不正です。理由をプロンプトへ追記して"
+                  f"自己修正を要求します（{attempt + 1}/{max_retries}）: {validation_error.splitlines()[0][:160]}")
+            _correction_note = (
+                "■ 直前のあなたの出力は不採用です。以下の問題を修正して、**JSON全体を最初から**"
+                "出力し直してください。\n" + validation_error
+            )
+            continue
         # [BL-133] パース失敗のたびに生レスポンスの先頭を残す。フェイルクローズ(major)が
         # 「モデルの誤判定」なのか「JSONを一切出力できていない」（例: ツールループが
         # 最終テキストを一度も生成しないままMAX_TOOL_ITERへ達した等）なのかは、原因を
@@ -9050,6 +9080,145 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         "criteria_status": criteria_status, "target_excerpt": target_excerpt, "observations": observations,
     }
 
+# [BL-213 F3] decision_extractorの抽出結果に対するスキーマ検証・正規化。
+#
+# 背景: `agreements`への書き込み経路は2本ある。`write_agreement`ツール経路は
+# `_write_agreement_impl`で6層（必須フィールドの空文字を含む不足チェック、enum検証、ロール権限、
+# depends_on参照整合性、BL-131 task_id実在/BL-146 current_task_id一致、BL-131 target_topic必須化）
+# を通るのに対し、`call_decision_extractor`→`decision_extractor_node`のフォールバック経路は
+# **検証0層**でLLMのJSONをそのままDBへ書いていた。実測でこの経路は全ターンの約46%で発火し、
+# 実runのagreements 177行中44行（25%）を書いており、稀な例外どころか常用経路である。
+# 実害も既に出ていた——BL-206修正前の期間に、この経路由来の行17件が`phase_id=''`で記録されていた。
+# AGENTS.md §15.4（同じ状態への書き込み経路が複数あるなら全経路で同じ不変条件を強制する）の適用。
+#
+# 方針（ユーザー承認済みのハイブリッド）:
+#   - 同一性に関わるフィールドが不正 → その項目を破棄（誤った行をDBに残さない）
+#   - それ以外が不正 → 既定値へ正規化して記録は残す（軽微な欠落で記録を失わない）
+# 破棄の前に、まずLLM自身へ自己修正の機会を与える（_query_and_parse_with_retryのvalidator）。
+
+_EXTRACTOR_VALID_ACTION_TYPES = {"CREATE", "UPDATE", "SUPERSEDE"}
+_EXTRACTOR_VALID_ENTRY_TYPES = {"Decision", "Directive", "Deliverable", "EssenceProposal"}
+_EXTRACTOR_VALID_STATUSES = {
+    "Proposed", "Approved", "Approved_with_Conditions", "Rejected", "Implicitly_Accepted", "Deferred",
+}
+
+
+def _check_extracted_event(item: dict) -> list[tuple[str, str, str]]:
+    """1項目を検査し、[(severity, field, llm_facing_reason), ...]を返す。
+    severityは"fatal"（同一性に関わる＝破棄対象）または"minor"（正規化対象）。
+
+    [CONSTRAINT] target_topicはaction_type='UPDATE'のとき全entry_typeで必須とする。
+    ツール経路のBL-131ガードはentry_type='Deliverable'を除外しているが、あちらはDeliverableを
+    `_find_active_deliverable_agreement`（phase_id/task_id識別）で特定するのに対し、この
+    フォールバック経路はtopic+entry_typeの線形探索で特定するため、Deliverableでもtarget_topicが
+    同一性の要である。同じBL-131の趣旨（target_topic省略時にtopicへ暗黙フォールバックすると
+    既存topicの検索に失敗し実質的な空振り更新になる）を、この経路の実装に合わせて適用する。
+    """
+    problems: list[tuple[str, str, str]] = []
+    if not isinstance(item, dict):
+        return [("fatal", "(item)", "配列の要素がオブジェクトではありません。各要素は必ずJSONオブジェクトにしてください。")]
+
+    action_type = item.get("action_type")
+    entry_type = item.get("entry_type")
+    status = item.get("status")
+
+    if entry_type not in _EXTRACTOR_VALID_ENTRY_TYPES:
+        problems.append((
+            "fatal", "entry_type",
+            f"entry_typeが{entry_type!r}です。{sorted(_EXTRACTOR_VALID_ENTRY_TYPES)}のいずれか必須で、"
+            "空文字や省略は許されません。entry_typeが正しくないと、この記録は合意DBの検索"
+            "（成果物の特定・最終文書への統合）から永久に発見できない孤児レコードになります。",
+        ))
+    if action_type not in _EXTRACTOR_VALID_ACTION_TYPES:
+        problems.append((
+            "fatal", "action_type",
+            f"action_typeが{action_type!r}です。{sorted(_EXTRACTOR_VALID_ACTION_TYPES)}のいずれか必須で、"
+            "空文字や省略は許されません。新規の話題ならCREATE、既存トピックの状態や内容を"
+            "変えるならUPDATEです。",
+        ))
+    if action_type == "UPDATE" and not item.get("target_topic"):
+        problems.append((
+            "fatal", "target_topic",
+            "action_typeがUPDATEなのにtarget_topicが空です。UPDATEでは更新対象の既存トピック名を"
+            "target_topicへ**そのままの文字列で**入れてください。省略すると更新対象を特定できず、"
+            "何も更新されないまま新しい行だけが増えます。",
+        ))
+
+    if status not in _EXTRACTOR_VALID_STATUSES:
+        problems.append((
+            "minor", "status",
+            f"statusが{status!r}です。{sorted(_EXTRACTOR_VALID_STATUSES)}のいずれかを入れてください。",
+        ))
+    if not item.get("topic"):
+        problems.append(("minor", "topic", "topicが空です。話題を識別できる簡潔なタイトルを入れてください。"))
+    if not item.get("proposed_by"):
+        problems.append(("minor", "proposed_by", "proposed_byが空です。'Agent'または'User'を入れてください。"))
+    return problems
+
+
+def _validate_extracted_events(parsed: dict) -> tuple[bool, str]:
+    """[BL-213 F3] `_query_and_parse_with_retry`のvalidatorフック。
+    LLMへ返す「なぜ不正か・どうすべきか」を組み立てる。fatalが1件でもあれば不合格とし、
+    minorのみなら合格として正規化に任せる（軽微な欠落でLLM呼び出しを浪費しない）。
+    """
+    events = parsed.get("extracted_events")
+    if events is None:
+        return True, ""   # 抽出0件はキー自体を省略しうるため正常扱い
+    if not isinstance(events, list):
+        return False, "extracted_eventsは配列でなければなりません。抽出が無い場合は空配列[]にしてください。"
+
+    lines: list[str] = []
+    for i, item in enumerate(events):
+        for severity, field, reason in _check_extracted_event(item):
+            if severity == "fatal":
+                lines.append(f"- extracted_events[{i}]（topic={(item.get('topic') if isinstance(item, dict) else None)!r}）の{field}: {reason}")
+    if not lines:
+        return True, ""
+    return False, "\n".join(lines)
+
+
+def _sanitize_extracted_events(events: list) -> list[dict]:
+    """[BL-213 F3] 自己修正リトライを使い切ってなお不正な項目に、承認済みのハイブリッド方針を適用する。
+    fatalを含む項目は破棄し、minorのみの項目は既定値へ正規化する。
+    人間向けに「なぜ破棄/正規化したか・何が失われたか」をログへ出す。
+    """
+    if not isinstance(events, list):
+        print("  🚫 [BL-213] extracted_eventsが配列ではないため、このターンの抽出を全て破棄しました。"
+              "合意DBへの記録は行われません（会話自体は継続します）。")
+        return []
+
+    clean: list[dict] = []
+    for i, item in enumerate(events):
+        problems = _check_extracted_event(item)
+        fatal = [p for p in problems if p[0] == "fatal"]
+        if fatal:
+            fields = "/".join(f for _, f, _ in fatal)
+            topic = item.get("topic") if isinstance(item, dict) else None
+            print(f"  🚫 [BL-213] 抽出項目[{i}]（topic={topic!r}）を破棄しました: {fields}が不正です。"
+                  f"このままDBへ書くと、検索から発見できない孤児レコードになるか、"
+                  f"更新対象を取り違えた行が残るためです。**この項目の内容は今回記録されません** — "
+                  f"重要な決定であれば、次ターン以降に再度抽出されるか、Expert/Userが"
+                  f"write_agreementツールで直接記録する必要があります。")
+            continue
+        item = dict(item)
+        for _, field, _reason in problems:   # ここに残るのはminorのみ
+            if field == "status":
+                print(f"  ⚠️ [BL-213] 抽出項目[{i}] のstatusが不正（{item.get('status')!r}）のため"
+                      f"'Proposed'へ正規化しました。承認・却下の状態が実際と異なる可能性があるため、"
+                      f"次ターンのDetector/User判断で確認してください。")
+                item["status"] = "Proposed"
+            elif field == "topic":
+                print(f"  ⚠️ [BL-213] 抽出項目[{i}] のtopicが空のため'Unknown Topic'へ正規化しました。"
+                      f"後続のUPDATEがこのトピックを名前で特定できなくなる可能性があります。")
+                item["topic"] = "Unknown Topic"
+            elif field == "proposed_by":
+                print(f"  ⚠️ [BL-213] 抽出項目[{i}] のproposed_byが空のため'Unknown'へ正規化しました"
+                      f"（記録の帰属が不明になりますが、内容自体は保持されます）。")
+                item["proposed_by"] = "Unknown"
+        clean.append(item)
+    return clean
+
+
 def call_decision_extractor(chat_history: list[dict], existing_topics: list[str], target_role: str,
                              owns_variables: list[str] | None = None,
                              valid_task_ids: list[str] | None = None) -> tuple[list[dict], dict]:
@@ -9227,9 +9396,13 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
     # 全損していた（call_reflection等の他ノードは既に_query_and_parse_with_retryで保護済み）。
     # 同水準の層2リトライ保護を追加する。
     _decision_extractor_fallback = {"extracted_events": []}
+    # [BL-213 F3] validatorを渡し、スキーマ違反を検出したらその理由をプロンプトへ追記して
+    # 再問い合わせする（ツール失敗が`{"success": False, "error": ...}`としてツールループ内で
+    # モデルへ返るのと同等の自己修正機会を、ノード呼び出しであるこの経路にも与える）。
     parsed, _decision_extractor_parse_failed = _query_and_parse_with_retry(
         prompt, client=client_decision_extractor, model=model_decision_extractor, label="Decision Extractor",
         tools=None, fallback=_decision_extractor_fallback,
+        validator=_validate_extracted_events,
     )
     if _decision_extractor_parse_failed:
         print("⚠️ [Decision Extractor] 層2リトライも失敗。このターンのDecision/Directive/Deliverable抽出は全て失われます。")
@@ -9241,10 +9414,14 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
             "advances_to_task_id": parsed.get("advances_to_task_id"),
         }
 
+    # [BL-213 F3] 自己修正リトライを使い切ってなお不正な項目にハイブリッド方針を適用する。
+    # validatorが合格した通常ケースでは_sanitize_extracted_eventsは実質no-opであり、
+    # 「検証を通った出力にだけ正規化が働く」という二度手間にはならない（fatalが残っていれば
+    # 破棄、minorだけなら既定値へ寄せる）。呼び出し元は常に検証済みのリストだけを受け取る。
     if isinstance(parsed, dict) and "extracted_events" in parsed:
-        return parsed["extracted_events"], transition
+        return _sanitize_extracted_events(parsed["extracted_events"]), transition
     elif isinstance(parsed, list):
-        return parsed, transition
+        return _sanitize_extracted_events(parsed), transition
     return [], transition
 
 def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goal_essence_text: str = "", state: dict | None = None) -> dict:

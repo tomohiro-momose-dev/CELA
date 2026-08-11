@@ -32,7 +32,11 @@ import cela_main  # noqa: E402
 def _captured_prompt(monkeypatch, target_role: str) -> str:
     captured = {}
 
-    def _fake_query_and_parse_with_retry(prompt, client, model, label, tools, fallback, max_retries=2, state=None):
+    # [BL-213 F3] `validator`引数が追加されたため**kwargsで受ける。このスタブはプロンプト本文の
+    # 検証だけが目的で、リトライ/検証の挙動自体は対象外（そちらは
+    # tests/test_bl213_f3_extractor_validation.py が担当する）。
+    def _fake_query_and_parse_with_retry(prompt, client, model, label, tools, fallback,
+                                          max_retries=2, state=None, **kwargs):
         captured["prompt"] = prompt
         return fallback, False
 
