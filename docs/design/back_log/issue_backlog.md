@@ -245,6 +245,8 @@
 | BL-211 | 高 | `cela_main.py`（`decision_extractor_node`のBL-139補完ブロック、`_infer_directive_target_task_ids`） | ユーザーが「0941ログの続き、停滞の原因は」と依頼。BL-210修正後の実ドライラン`log/2026-08-11/0941`で、今度はtask_4_2→task_4_3の切替が成立せず、Expertが「実行コンテキストがtask_4_2のまま」と応答し続ける同型の空転が再発した。User AIはtask_4_2を承認しtask_4_3を明示指示しており、Detectorも`criteria_status:[true,true,true]`／`risk=low, constraint_issue=none`で追認していたが、`call_decision_extractor`は`advances_to_task_id: null`を返し、さらに移行意図を表すDirectiveイベントも`phase_id`・`task_id`ともに空文字で、移行先が`topic`（「task_4_3運賃・住民負担配慮の設計着手指示」）と`owned_variable_values.対象タスク`の自然文にしか存在しない形で返っていた。この抽出漏れを救うはずの[BL-139](#bl-139-decision_extractor_nodeのtransition抽出がllm出力の1項目に依存しており明示的な次タスク指示があってもcurrent_task_idが更新されないことがあった)の安全網は補完条件にDirectiveの`task_id`が非空であることを要求していたため空振りし（実ログ中にBL-139の補完メッセージは0件）、安全網が二重に外れて`current_task_id`がtask_4_2に固定されたままになった。**実装完了（`done`）**：Directiveの`task_id`が空の場合に限り、`topic`・`content`・`rationale`・`owned_variable_values`の自然文から計画に実在するtask_idを推定する第2段フォールバック`_infer_directive_target_task_ids`を追加。候補が一意に定まるときだけ補完するフェイルクローズとし、複数タスクへ言及する差し戻し文での誤った先読み切替を防ぐ。離脱元task_idは候補から除外し自己遷移を起こさない。[BL-039](#bl-039-decision_extractorが出力するtask_idの表記ゆれドット-vs-アンダースコアによりタスク遷移がドライラン全体で1回も成功していない)のドット区切り正規化も踏襲。新規テスト`tests/test_bl211_directive_task_id_inference.py`11件、オフライン全テストスイート1154件通過。詳細は[BL-211詳細](#bl-211-bl-139の遷移補完がdirectiveのtask_idが空文字の場合に空振りしタスク切替が永久に成立しない)を参照。 | P1 |
 | BL-212 | 高 | `cela_main.py`（`_commit_agreement_from_tool`のis_whiteboard判定） | ユーザーが「1034ログ、edit失敗が連発」と報告。BL-211修正の検証run（`log/2026-08-11/1034`）で、task_4_2の承認撤回中にExpertの`write_agreement(edits=...)`が17回連続で「old_textが現在のホワイトボード内容に見つかりませんでした（緩い一致0件）」に失敗した。`read_whiteboard_excerpt`では同じ語句がmatch_type='exact'で存在確認できており、`whiteboard_drafts`側の実データは無傷だった。原因は、DetectorとUserが承認撤回のために`action_type=SUPERSEDE`＋200字以下の短い無効化理由文（[BL-062](#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)が想定した「ホワイトボードには触れない」用途）を使ったこと。[BL-080](#bl-080-write_agreementのsupersedeがdeliverableの全文更新を破棄し実質何もしないツール呼び出しになっていた)のSUPERSEDE分岐はraw_content>200字のときだけ`apply_whiteboard_patch`を呼ぶため、短い理由文の場合は`content=raw_content`のままDBへ書き込まれ、新しく「有効」になったDeliverable行のdecision_whatが短い理由文そのものになり`WHITEBOARD:`プレフィックスを失う。次にExpertが`UPDATE(edits=...)`を送ると、`is_whiteboard = old_content.startswith("WHITEBOARD:")`という旧判定が`False`になり、`base_content=old_content`（短い理由文）に対して実際のホワイトボード引用を照合するため必ず0件一致で失敗し続ける。**実装完了（`done`）**：[BL-131](#bl-131-task_plannerの正式なフェーズタスク計画に存在しないtask_idtask_1_1_review等でwrite_agreementwhiteboardが作成されてしまう構造的リスク)・[BL-206](#bl-206-write_agreementのedits照合が実際には空のホワイトボード内容に対して行われ本来一致するはずのold_textが繰り返し不一致になる)と同じ設計方針（task_idを権威としagreements側の文字列表現は当てにしない）に揃え、`is_whiteboard`の判定を`get_latest_whiteboard(conn, run_id, phase_id, tid) is not None`（whiteboard_draftsに実際にバージョンが存在するか）へ変更した。新規テスト`tests/test_bl212_supersede_short_reason_orphans_whiteboard.py`7件（うち3件は修正前ロジックへ戻すと実際に失敗することを確認済み）、オフライン全テストスイート1161件通過。詳細は[BL-212詳細](#bl-212-supersedeの短い無効化理由文がactiveなdeliverable行のwhiteboardプレフィックスを失わせeditsを永久失敗させる)を参照。 | P1 |
 | BL-213 | 高 | `cela_main.py`（`integrator_node`、`decision_extractor_node`、`call_decision_extractor`、`_resolve_task_transition`、`_resolve_deliverable_pointer`、`_build_agreements_context`） | ユーザーが「なかなかうまくはいきませんね....バグだらけだ」との認識を示したうえで、「一度立ち止まって、agreements/decision_extractor周りで構造化フィールドを無条件に信頼している箇所を横断的に洗い出す」ことを選択。[BL-206](#bl-206-write_agreementのedits照合が実際には空のホワイトボード内容に対して行われ本来一致するはずのold_textが繰り返し不一致になる)・[BL-210](#bl-210-_resolve_task_transitionがadvances_to_phase_id省略時にcurrent_phaseへ決め打ちしフェーズをまたぐ遷移を常に拒否する)・[BL-211](#bl-211-bl-139の遷移補完がdirectiveのtask_idが空文字の場合に空振りしタスク切替が永久に成立しない)・[BL-212](#bl-212-supersedeの短い無効化理由文がactiveなdeliverable行のwhiteboardプレフィックスを失わせeditsを永久失敗させる)の4連続バグに共通する構造（LLMが返すJSONの特定フィールドが必ず期待した形で埋まっている前提でコードが分岐し、その前提が崩れたときの防御がたまたま踏んだ1経路にしか実装されていない）を4類型（A:空文字が既定値を貫通／B:文字列形式から状態を判定／C:探索範囲の決め打ち／D:安全網の前提条件が厳しすぎる）へ整理し、`cela_main.py`全体をGrep＋実読で監査した。**最重要の構造的所見**：`agreements`テーブルへの書き込み経路が2本あり、`write_agreement`ツール経路は6層の検証を通るのに対し、`call_decision_extractor`→`decision_extractor_node`のフォールバック経路は**検証0層**（LLMのJSONを一切検証せずDBへ書く）という極端な非対称がある。7件を発見（F1〜F7）。**F1【高】**`integrator_node`が最終統合文書へ成果物本文の代わりに短文を出力しうる（警告なし・最後まで気づけない）。**F2【高】**BL-212の修正漏れ（保護分岐が`content = old_content`のままでポインタを復元せず汚染が世代を越えて伝播）。**F3【高】**フォールバック経路の空文字ドリフトが5フィールド分無防備（特に`entry_type=""`はBL-206と同じ孤児化へ至る第3の経路）。**F4【中】**BL-210の残穴（`advances_to_phase_id`が非空だが誤りの場合、横断探索がスキップされ修正前と同じ症状）。**F5【中】**フォールバック経路にBL-212同型の文字列判定が残存。**F6【低】**`_resolve_deliverable_pointer`がSuperseded行を除外していない。**F7【低】**`WHITEBOARD:`ポインタの表示ラベル欠如。**進捗**：F2・F5はユーザーの「まずF2+F5を修正して」を受けBL-212の追補として`done`。続いてユーザーの「F1を実行」を受けF1も`done`（`_resolve_deliverable_content_for_integration`へ切り出し、whiteboard_draftsを権威とする復元と警告出力、および欠損ポインタでのValueError防止を実装）。続いて「それではF3に移ります」を受けF3も`done`（`_query_and_parse_with_retry`へvalidatorフックを追加した自己修正リトライ＋ハイブリッドのフェイルクローズ）。F4・F6・F7は`open`。監査記録の全文（各発見の再現条件・影響・根拠・推奨対応、健全と確認した箇所の一覧、設計上の提言3案を含む）は`docs/design/back_log/BL-213/BL213_investigation.md`。詳細は[BL-213詳細](#bl-213-agreements-decision_extractor-周辺の構造化フィールドの無条件信頼横断監査f1f7)を参照。 | P1 |
+| BL-214 | 高 | `cela_main.py`（`_task_id_from`、`generate_user_utterance`のStage初期化、`_write_issue_impl`） | ユーザーが`log/2026-08-11/2030`（nemotronの新規ラン）について「ツール使用に苦戦しているようです」と報告し、User AI Stage3のBL-177/178警告ログを引用。調査の結果、**モデルは苦戦しておらず、検証側がモデルの正しい成功を認識できていなかった**ことが判明した。`generate_user_utterance`のStageパイプライン先頭（`cela_main.py:10084`）が`_CURRENT_TASK_ID`へ**生の**`state["current_task_id"]`を代入し、BL-177/178の検証（`cela_main.py:10315`）がそれを`_is_task_completed`へ渡している。`current_task_id`は唯一の書き手`_resolve_task_transition`（BL-024）が最初の遷移まで発火しないため**各フェーズの先頭タスク実行中は空文字**であり、`_is_task_completed`は`if not task_id: return False`で**DBの中身に関わらず必ずFalse**を返す。結果、正常な承認が3回リトライされ`ApprovalRecordingFailed`へ落ち、承認済みタスクが次へ進めない。**これはBL-146が既に発見・解決済みの問題**（`_effective_current_task_id_from`のdocstringが同じ現象を明記）であり、BL-146は`write_agreement`のゲート経路だけを直し他経路へ波及していなかった——AGENTS.md §15.1（One rule, one place）の再発事例である。同じ原因で`write_issue`（`TOOL_DISPATCH`が`_task_id_from`を渡す）も`args["task_id"]`を無視して`task_id=''`で保存しており、実runで**8件全てのissueが`task_id=''`/`last_seen_task_id=''`**で記録され、BL-125遷移ゲート・BL-144滞留追跡・BL-145再構成・BL-194 actionable集合が軒並み機能しない状態だった（`write_agreement`は`args.get("task_id") or task_id`のBL-040フォールバックがあったため無事）。**設計完了・実装未着手**。基本設計は`docs/design/back_log/BL-214/BL214_basic_design.md`（S1: `_task_id_from`を実効解決へ一元化／S2: Stageパイプラインの`_CURRENT_TASK_ID`／S3: `write_issue`のargs優先フォールバック／S4: 生`current_task_id`全件精査／S5: 沈黙の解消）。**なお初回の診断（ID衝突が原因）は誤りであり、設計書§0に訂正の経緯を記録した**（実runに重複IDは0件、AGENTS.md §14.1違反）。詳細は[BL-214詳細](#bl-214-current_task_idの実効解決が一部経路で未適用で各フェーズ先頭タスクの承認検証とissueのtask_id付与が壊れる)を参照。 | P1 |
+| BL-215 | 中 | `cela_main.py`（`agreements`/`decisions`/`goal_shift_events`/`plan_drafts`のID生成、`ORDER BY id`を使う全クエリ） | BL-214の調査過程で発見した独立した欠陥（**BL-214のインシデントの原因ではない**）。ID生成が`f"AG-{int(time.time() * 1000)}"`のミリ秒依存で、かつ`agreements`テーブルに**PRIMARY KEYもUNIQUE制約も無い**ため、同一ミリ秒の2回呼び出しで**完全に同じIDの行が重複INSERTされる**。実DB全体で**総行数1724／重複ID種類90／重複に巻き込まれた行188（10.9%）**、3重複も8件存在する。想定される実害は3種：①**順序の不定性**（`get_agreements_from_db`は`ORDER BY id`で最新順を再構成し9箇所が`reversed()`で最新行を取るが、同一IDのタイの並びはクエリプラン依存で不定。合成テストで実際に挿入順が反転しSuperseded行を最新と誤認させることを確認済み）、②**UPDATEの増幅**（`db_supersede_agreement`/`freeze_agreement`は`WHERE id=?`で重複IDの全行を巻き込む）、③**参照の曖昧化**（`depends_on`整合性チェック、`freeze_agreement_id`、`citations`の`AG-xxx`参照）。同型の脆弱性が`decisions`(`D-`)・`goal_shift_events`(`GS-`)・`plan_drafts`(`PL-`)にもある一方、**`goal_escalations`は既に`uuid.uuid4().hex[:6]`サフィックスで対策済み・`issue_log`は`str(uuid.uuid4())`**であり、「一意IDの作り方」という同じ規則がテーブルごとにバラバラという§15.1の事例でもある。修正方針（案・未実装）：順序は`ORDER BY id`→`ORDER BY rowid`（SQLiteの暗黙rowidが真の挿入順を保持しており**スキーマ移行なしで既存DBにも効く**ことを検証済み、`SELECT *`にrowidは含まれず下流のdictキーにも影響しない）、一意性は`goal_escalations`の先例に揃えてuuidサフィックスを追加、既存の重複行は遡及修正しない。詳細は`docs/design/back_log/BL-214/BL214_basic_design.md`§6および[BL-215詳細](#bl-215-agreementsdecisions等のidがミリ秒生成で衝突しorder-by-idの順序とid参照が不定になる)を参照。 | P2 |
 
 ---
 
@@ -7309,6 +7311,203 @@ D-xxxではなく、**毎セッション読み込まれるAGENTS.mdの恒久ル�
 
 ---
 
+### BL-214: `current_task_id`の実効解決が一部経路で未適用で、各フェーズ先頭タスクの承認検証とissueのtask_id付与が壊れる
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（基本設計完了・実装未着手） |
+| 優先度 | P1 |
+| 基本設計 | `docs/design/back_log/BL-214/BL214_basic_design.md`（全文・要約なし） |
+| 関連 | BL-146（`_effective_current_task_id_from`の導入元。本件はその適用漏れ）、BL-024（`current_task_id`の書き手を`_resolve_task_transition`単独に限定）、BL-177・BL-178（本件で失敗した検証機構）、BL-040（`args`優先フォールバックの先例）、BL-125・BL-144・BL-145・BL-194（`task_id`欠落の下流影響先）、BL-213（横断監査。本経路は監査対象外だった）、BL-215（調査過程で分離した別欠陥） |
+
+**内容:**
+
+ユーザーが`log/2026-08-11/2030`（nemotronによる新規ラン、run_id=`1786436794-a9d79ae6`）について
+「ツール使用に苦戦しているようです」と報告し、User AI Stage3の警告ログを引用した。
+
+```
+⚠️ [User AI Stage3] BL-177/BL-178: approval_status='Approved'ですが、
+   Expertの成果物（Deliverable）自体がApproved相当へ更新されたことを確認できません（試行1/3〜3/3）。
+🚨 [User AI Stage3] BL-177: リトライを使い切っても承認記録の食い違いが解消しませんでした。
+   ApprovalRecordingFailedとして扱います。
+```
+
+調査の結果、**モデルは苦戦しておらず、検証側がモデルの正しい成功を認識できていなかった**。
+User AIは最終的に`{"entry_type": "Deliverable", "action_type": "UPDATE", "status": "Approved",
+"task_id": "task_1_1", ...}`を送って`{'success': True}`を得ており、DBにも
+`AG-1786448723677 / Deliverable / UPDATE / status='Approved' / task_id='task_1_1'`が正しく
+記録されていた。
+
+**根本原因：**
+
+`generate_user_utterance`のStageパイプライン先頭（`cela_main.py:10084`）が、`_CURRENT_TASK_ID`へ
+**生の**`state["current_task_id"]`を代入している。
+
+```python
+_CURRENT_TASK_ID = state.get("current_task_id", "")     # ← 生の値
+```
+
+BL-177/178の検証（`cela_main.py:10315`）がその値をそのまま`_is_task_completed`へ渡す。
+
+```python
+if get_last_write_agreement_succeeded() and _is_task_completed(_conn, state["run_id"], _CURRENT_TASK_ID):
+    break
+```
+
+`_is_task_completed`は冒頭で`if not task_id: return False`を実行するため、`_CURRENT_TASK_ID`が
+空文字なら**DBの中身に関わらず必ずFalse**を返す。
+
+`state["current_task_id"]`が空だったのは異常ではなく**仕様どおり**である。唯一の書き手は
+`_resolve_task_transition`（BL-024）であり、**最初のタスク遷移が発生するまで空文字のまま**。
+今回は task_1_1（＝phase_1の先頭＝最初のタスク）実行中で、まだ一度も遷移していなかった。
+
+**この問題はBL-146が既に発見・解決している。** `_effective_current_task_id_from`
+（`cela_main.py:4088`）のdocstringが同じ現象を明記している。
+
+> `state["current_task_id"]`は初回タスク進行中は空文字のままなので（唯一の書き手
+> `_resolve_task_transition`が最初の遷移までまだ一度も発火していない）、生のcurrent_task_idを
+> そのまま比較すると初回タスクの正当な書き込みまで全滅する。
+
+実測でも確認済み。
+
+```
+生の state['current_task_id']            : ''
+_task_id_from(state)                    : ''
+_effective_current_task_id_from(state)  : 'task_1_1'     ← 正しい値
+```
+
+BL-146は`write_agreement`の`current_task_id`ゲート経路を修正したが、**同じ判断を必要とする
+他の経路へは波及していなかった**。AGENTS.md §15.1（One rule, one place）・§15.2（発火源の
+全列挙）そのものの再発事例である。BL-213の横断監査が`agreements`の書き込み経路のみを
+対象としていたため、この経路は監査の網からも漏れた。
+
+**確認済みの実害①：各フェーズ先頭タスクで承認が必ず失敗する**
+
+`_CURRENT_TASK_ID`が空 → `_is_task_completed`が常にFalse → Stage3が3回リトライして
+`ApprovalRecordingFailed`。3回分のLLM呼び出し（今回は最大iter=6のツールループ付き）が
+毎回無駄になり、さらに`ApprovalRecordingFailed`はStage4を「承認記録失敗の待機メッセージ」へ
+倒すため、**承認済みのタスクが次へ進めない**。
+
+**確認済みの実害②：`write_issue`の`task_id`が空で記録される**
+
+`TOOL_DISPATCH["write_issue"]`（`cela_main.py:4259`）も`_task_id_from(state)`を渡しており、
+`_write_issue_impl`は`args["task_id"]`ではなく**この引数を使う**ため、LLMが明示的に
+`"task_id": "task_1_1"`を送っていても**無視されて空文字が保存される**。
+
+```
+write_issue 実行: {"topic": "license_surrender_rate_derivation", ..., "task_id": "task_1_1"}
+→ 保存結果:      {'task_id': '', 'last_seen_task_id': '', 'phase_id': 'phase_1', ...}
+```
+
+実runで**8件すべてのissueが`task_id=''`/`last_seen_task_id=''`**で記録されていた
+（`phase_id`は`_phase_id_from`が`current_phase`から取れるため正常）。この破損は下流へ波及する。
+
+| 機構 | 影響 |
+|---|---|
+| BL-125 タスク遷移ゲート | 離脱元タスクのissueとして検出されず、**未解決issueがあっても遷移を止められない** |
+| BL-144 滞留追跡 / BL-096 再発カウント | `last_seen_task_id`が空で集計が壊れる |
+| BL-145 issue駆動タスク再構成 | 受け皿タスクの特定が不正確になる |
+| BL-194 actionable集合 | 現在タスクのissueを識別できない |
+
+なお`write_agreement`が無事だったのは、`_commit_agreement_from_tool`が
+`tid = args.get("task_id") or task_id`（BL-040）としてargsを優先するため。**同じ
+「task_idをどう決めるか」という規則が2つのツールで別々に実装されており片方だけが堅牢**
+という、これも§15.1の事例である。
+
+**設計方針（詳細は基本設計書）：**
+
+> 「現在のタスクは何か」という問いに答える方法は、システム内で1つだけとする。
+> それは`_effective_current_task_id_from(state)`であり、生の`state["current_task_id"]`を
+> 「現在タスク」として扱う実装を残さない。
+
+ただし**すべてを機械的に置換してはならない**。「まだ遷移していない」ことを判定したい箇所
+（`_resolve_task_transition`の`departing_task_id`等）では生の値が正しく、例外として明示する。
+また`_resolve_task_transition`に初期値を書き込ませる案は、BL-024が書き手を単独に限定した
+設計意図を壊すため`[REJECTED]`とした。
+
+実装はS1〜S5（S1: `_task_id_from`を実効解決へ一元化／S2: Stageパイプラインの`_CURRENT_TASK_ID`／
+S3: `write_issue`のargs優先フォールバック／S4: 生`current_task_id`の全件精査／S5: 沈黙の解消）。
+テストは9項目で、AGENTS.md §17.1に従い各修正を個別にリバートして失敗を確認したうえで固定する。
+
+**調査経過の訂正：**
+
+ユーザーへの初回報告「`agreements.id`のミリ秒衝突により`ORDER BY id`の順序が不定になり
+`_is_task_completed`が古いSuperseded行を最新と誤認していた」は**誤りだった**。合成テスト
+（LLMレイテンシなしの連続呼び出し）では確かにID衝突を再現できたが、**実runの重複IDは0種類**で
+あり、`ORDER BY id`と`ORDER BY rowid`の並びは完全に一致していた。AGENTS.md §14.1
+（表層的なパターン一致は診断ではない／実データで裏を取る）の違反であり、再現できた合成条件を
+実インシデントの説明として早合点した。経緯は基本設計書§0に記録した。
+
+---
+
+### BL-215: `agreements`/`decisions`等のIDがミリ秒生成で衝突し、`ORDER BY id`の順序とid参照が不定になる
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（調査完了・修正方針案あり・実装未着手） |
+| 優先度 | P2 |
+| 調査記録 | `docs/design/back_log/BL-214/BL214_basic_design.md` §6 |
+| 関連 | BL-214（発見契機。**ただし本件はBL-214のインシデントの原因ではない**）、BL-084・BL-206・BL-212（`reversed(get_agreements_from_db(...))`で最新行を取る経路の代表例）、BL-213（§15.1「同じ規則が複数箇所」の別事例として同型） |
+
+**内容:**
+
+BL-214の調査過程で発見した独立した欠陥。ID生成が`f"AG-{int(time.time() * 1000)}"`の
+ミリ秒依存で（`cela_main.py:3213 / 5647 / 12358 / 12376`）、かつ`agreements`テーブルに
+**PRIMARY KEYもUNIQUE制約も無い**ため、同一ミリ秒の2回呼び出しで**完全に同じIDの行が
+重複INSERTされる**。
+
+```sql
+CREATE TABLE IF NOT EXISTS agreements (
+    id TEXT, action_type TEXT, status TEXT, topic TEXT,   -- PRIMARY KEY も UNIQUE も無い
+```
+
+**実測：** 実DB全体で**総行数1724／重複ID種類90／重複に巻き込まれた行188（10.9%）**。
+3重複も8件存在する。稀な事故ではない。
+
+**想定される実害（3種）：**
+
+1. **順序の不定性**：`get_agreements_from_db`は`ORDER BY id`（`cela_main.py:6394`）で最新順を
+   再構成し、**9箇所**が`reversed(...)`で「最新の行」を取っている。同一IDのタイの並びは
+   **クエリプラン依存で不定**であり、合成テストでは`ORDER BY id`が実際に挿入順を**反転**させ、
+   Superseded行を最新と誤認させることを確認した。
+2. **UPDATEの増幅**：`db_supersede_agreement`／`freeze_agreement`は`WHERE id=?`で更新するため、
+   **重複IDの全行を巻き込む**。
+3. **参照の曖昧化**：`depends_on`の参照整合性チェック、`freeze_agreement_id`、`citations`の
+   `AG-xxx`参照が一意に定まらない。
+
+**同型の脆弱性と、既に対策済みのテーブル：**
+
+| テーブル | ID生成 | 状態 |
+|---|---|---|
+| `agreements` | `f"AG-{int(time.time()*1000)}"` | 脆弱（4箇所） |
+| `decisions` | `f"D-{int(time.time()*1000)}"`（`10993`） | 脆弱 |
+| `goal_shift_events` | `f"GS-{int(time.time()*1000)}"`（`5540`） | 脆弱 |
+| `plan_drafts` | `f"PL-{int(time.time()*1000)}"`（`5795`） | 脆弱 |
+| `goal_escalations` | `f"ESC-{int(time.time()*1000)}-{uuid.uuid4().hex[:6]}"`（`2471`） | **対策済み** |
+| `issue_log` | `str(uuid.uuid4())`（`3495`） | **対策済み** |
+
+「一意IDの作り方」という同じ規則がテーブルごとにバラバラであり、これもAGENTS.md §15.1の
+事例である。**先例（`goal_escalations`）が既にリポジトリ内に存在するのに他へ波及していない**
+という点で、BL-214とまったく同じ構造をしている。
+
+**修正方針（案・未実装）：**
+
+- **順序**：`ORDER BY id` → `ORDER BY rowid`。`agreements`は`WITHOUT ROWID`でも
+  `INTEGER PRIMARY KEY`でもないため**SQLiteの暗黙rowidが真の挿入順を保持しており、
+  スキーマ移行なしで既存DBにもそのまま効く**（検証済み）。`SELECT *`にrowidは含まれない
+  ため下流のdictキーにも影響しない（検証済み）。
+- **一意性**：ID生成を`goal_escalations`の既存先例に揃え、
+  `f"AG-{int(time.time()*1000)}-{uuid.uuid4().hex[:6]}"`とする。
+- **既存の重複行**：過去runのデータであり遡及修正はしない（rowid順序修正で読み取り側は
+  正しく動く）。
+
+**注意：** `issue_log`は`uuid4`をIDに使いながら`ORDER BY id`で取得している箇所が複数あり
+（`3708 / 3725 / 3736 / 3885 / 3914 / 11862`）、**時系列順ではなくランダムなuuid順**に
+なっている。実害の有無（表示順序のみか、ロジックが順序に依存しているか）は未調査。
+本BLの対応時に併せて確認する。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -7496,3 +7695,4 @@ D-xxxではなく、**毎セッション読み込まれるAGENTS.mdの恒久ル�
 | 2026-08-11 | ユーザーが「LLMは潜在的に空文字を返す可能性がある。（中略）""にフォールバックする設計をするときは、後続の処理やシステム全体への影響を十分調査し、動作が破綻しないように設計・実装をする趣旨の教訓を書いてください」と指示。BL-206/210/211/212の4連続バグとBL-213横断監査から得た教訓を、個別のBL修正やD-xxxではなく**毎セッション読み込まれるAGENTS.mdの恒久ルール**として明文化した（D-189）。`AGENTS.md`へ§13「Defensive Handling of LLM-Produced Structured Data (CRITICAL)」を新設（既存§1〜§12の番号は変更せず末尾へ追加、§5へ相互参照）。単なる注意喚起では行動が変わらないため実行可能な手順の形とし、§13.1 `.get(k, default)`の落とし穴、§13.2 フォールバックを書く前に答えるべき5つの問い（中核）、§13.3 権威あるストアの優先とderived表現の再生成、§13.4 書き込み経路間の検証対称性、§13.5 クラス単位で直す規律、§13.6 マージ前チェックリスト8項目、§13.7 実インシデント表、で構成した。 |
 | 2026-08-11 | ユーザーが「この開発を通して、他にagents.mdに書くべき教訓やインストラクションを調査してまとめ、追記してください」と指示。`decision_lineage.md`の147論点（明示的な教訓記述22件）、`decision_log.md`のD-001〜D-189、`issue_backlog.md`のBL-001〜BL-213、および運用メモを機械的に走査し、AGENTS.md §13（LLM出力の空文字ドリフト）でカバーされない再発パターンを抽出してAGENTS.md §14〜§18として追記した（D-190）。最大の発見は「同じ規則が複数箇所に書かれ、どれかが更新漏れする」パターンが少なくとも5回（D-163・D-169・D-179・D-182・BL-207）異なる文脈で繰り返されていたことで、これを§15として独立させた。§14は診断規律（表層パターン一致は診断ではない／値は最初に生み出した主体まで遡る／期待されるログの不在は証拠／チェックポイント復元はDBを巻き戻さない）、§16は提案・レビュー・報告の誠実さ、§17はテスト規律（回帰テストはリバートすると失敗しなければならない／モックテスト通過は動作の証拠ではない／`-k`の部分一致禁止）、§18はgitとrun状態の衛生。各規則にはそれを生んだ実インシデントのBL/D番号を必ず併記し、規則自体が検証可能なlineageを持つ形とした（CELAの中核思想の自己適用）。あわせて、これまでClaude固有の記憶にのみあった運用知見も、複数AIツールが読む唯一の共有規約層であるAGENTS.mdへ移した。 |
 | 2026-08-11 | ユーザーが「それではF3に移ります」と指示。実装前にフォールバック経路の重みを実測し、全ログ591ターン中271回（46%）発火・実runのagreements 177行中44行（25%）を書いている常用経路であること、およびBL-206修正前の期間にこの経路由来の17行が`phase_id`空文字で記録されていた実害を確認した。この数字から調査記録§5の提言(c)（読み取り専用へ縮退＝記録の25%を失う）と(b)（`_write_agreement_impl`経由に統一＝BL-146/BL-169のゲートが正当な抽出を弾く）を却下し、(a)（境界に検証層を追加）を採用。方針選択にあたりユーザーは「ハイブリット（同一性フィールド不正→破棄／その他→正規化）」を選び、あわせて「破棄後は他のツール失敗時と同じくLLMの自己修正にゆだねるという事でよいか」「警告には、なぜエラーで、どうするべきかを明記して」と条件を付けた。前者について、`call_decision_extractor`はツールではなくノードでありモデルへ結果を返す経路が存在しないため**そのままでは自己修正は起きない**ことを説明したうえで、`_query_and_parse_with_retry`へvalidatorフックを追加し検証不合格時に理由をプロンプトへ追記して再問い合わせする機構を新設した（ツール失敗時と機能的に等価）。D-191として記録。新規テスト27件、うちE2E4件と配線テスト1件は3箇所を個別リバートすると実際に失敗することを確認。オフライン全テストスイート1208件通過。 |
+| 2026-08-11 | ユーザーが`log/2026-08-11/2030`（nemotronの新規ラン）について「ツール使用に苦戦しているようです」と報告。調査の結果、モデルは苦戦しておらず**検証側がモデルの正しい成功を認識できていなかった**ことが判明し、BL-214として起票・基本設計を作成した。`generate_user_utterance`のStageパイプラインが`_CURRENT_TASK_ID`へ生の`state["current_task_id"]`を代入しており、これは`_resolve_task_transition`（BL-024）が最初の遷移まで発火しないため各フェーズ先頭タスクでは空文字であり、BL-177/178の検証が`_is_task_completed`の`if not task_id: return False`により**DBの中身に関わらず必ず失敗**していた。BL-146が`_effective_current_task_id_from`として既に解決済みの問題が他経路へ波及していなかったもので、AGENTS.md §15.1の再発事例。同じ原因で`write_issue`も`args["task_id"]`を無視し、実runで8件全てのissueが`task_id=''`で記録されBL-125/144/145/194が機能しない状態だった。あわせて調査過程で発見した独立した欠陥（`agreements`等のIDがミリ秒生成で衝突、実DBで1724行中188行が重複ID）をBL-215として分離起票。**初回の診断はこのID衝突を原因としたが誤りであり**（実runの重複IDは0件）、AGENTS.md §14.1違反として基本設計書§0に訂正の経緯を記録した。基本設計は`docs/design/back_log/BL-214/BL214_basic_design.md`。実装は未着手で、未決事項3点（BL-215を同時実施するか／S4の精査結果が広がった場合の扱い／進行中runを止めるか）をユーザー判断待ち。 |

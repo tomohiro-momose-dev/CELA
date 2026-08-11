@@ -357,6 +357,107 @@ AGENTS.md §17.1 に従い、**各修正を個別にリバートすると対応�
 
 ---
 
+## 10. 実装記録（2026-08-11）
+
+対象コミット: `f35016d` の作業ツリー。BL-214 → BL-215 の順で実装し、フルオフラインスイートは
+**1229 passed / 5 deselected**（deselected の内訳は `test_bl168_*::test_revise_goal_marking_is_idempotent_on_repeated_revision` 1件＋
+`tests/test_f26_detection.py` 4件＝ AGENTS.md §17.4 の想定どおり）。
+
+### 10.1 S4 全件精査の結果
+
+生の `state["current_task_id"]` を読む全 35 箇所を「現在タスクとして使うのか／遷移履歴として
+使うのか」で分類した。**28 箇所を実効解決へ変更、7 箇所を例外として据え置き**、例外側には
+すべて `[BL-214][例外]` コメントで理由を明記した（AGENTS.md §15.2：発火源を全列挙してから
+完了と宣言する）。
+
+| 分類 | 件数 | 内訳 |
+|---|---|---|
+| 実効解決へ変更 | 28 | ピン留め（`_build_escalation_pin_text` / `_build_deferred_issue_pin_text`）6、`_CURRENT_TASK_ID`設定 5、`_get_forced_escalated_issues_text` 2、reflection/facilitator の actionable 取得 2、BL-158 ブロックissueチェック 3、Orchestratorプロンプト 1、`_is_issue_effectively_deferred` 1、one-shot通知文 2、`task_criteria_status` のキー 1、`_apply_redirect_backward` の復帰先 1、`_apply_joint_focus` の `primary_task_id` 1、decision_extractor のフォールバック 1、その他 2 |
+| 例外（生の値が正しい） | 7 | `_resolve_task_transition` の `departing_task_id`（2箇所。「まだ遷移していない」を空文字で表す必要がある）、`_get_current_task`（実効解決の実装本体）、`_reconcile_current_phase_after_replan`（2箇所。current_phase を決め直す側なので実効解決に依存すると循環する）、`_force_resume_forward_focus` の `abandoned_task_id`、`_maybe_resume_forward_focus` の BUG-2 検知（空文字であること自体を異常シグナルに使っている） |
+
+### 10.2 設計からの逸脱 2件（実装中に判明）
+
+**(a) `_effective_current_task_id_from` が既知の値を取りこぼしていた（追加修正）**
+
+S1 適用後に既存テスト4件が落ちて発覚した、設計時に見落としていた実在の欠陥。
+`current_phase` を持たない簡易 state（reflection / detector など、計画構造を必要としない
+ノードが組み立てる state）では `_get_current_task` が `{}` を返すため、**明示的に設定済みの
+`current_task_id` まで失われていた**。この関数を全経路の唯一の解決口へ昇格させる以上、
+「既知の値を失う」ことは許されない（AGENTS.md §13.2 問2）。
+
+```python
+return _get_current_task(state).get("task_id", "") or state.get("current_task_id", "")
+```
+
+順序は phase 由来を先に保った。BL-146 が確立した「`current_task_id` が `current_phase` の
+一覧に無ければ先頭タスクへ寄せる」挙動に BL-190 の計画再構成が依存しているため。
+
+**(b) S3 を「args 優先」から「実効解決が失敗したときだけ args を採用」へ変更**
+
+§4.3 では `write_agreement`（BL-040）と同型の `args.get("task_id") or task_id` を提案していたが、
+実装後のリバート検証で**この案には遷移ゲート回避の穴がある**ことが判明した。
+
+`task_id` は BL-125 の遷移ゲートが「離脱元タスクに未解決 issue が残っているか」を判定する鍵で
+あり、申告を無条件に採用すると、**LLM が別タスクの `task_id` を付けるだけで自分の離脱元から
+未解決 issue を外せてしまう**。静かに成立し、もっともらしい結果を返す fail-open であり、
+AGENTS.md §13.2 問3 が禁じているものそのものである。`write_agreement` の `task_id` は
+書き込み先の識別子でありゲートの鍵ではない、という**役割の違いによる非対称**として扱う。
+
+最終的な実装:
+
+- 申告値が実効値と一致 → そのまま採用
+- 申告値が実効値と**不一致** → 採用せず現在タスクで記録し、`DEFER` を使うよう警告
+- 実効解決が**空**（＝適用漏れの再発） → 申告値を採用（最後の砦。ただし計画に実在する場合のみ）
+
+なお、リバート検証で「S3 をリバートしてもテストが落ちない」ことに気付いたのがこの穴の
+発見契機である。§17.1 のリバート検証は回帰の担保だけでなく、**その修正が本当に必要か**を
+問い直す装置としても働いた。
+
+### 10.3 BL-215 も同時に実装した理由
+
+§8 の未決事項1に対するユーザー判断は当初「実害はないので後回し」だったが、BL-214 の
+インシデント再現テスト（初回タスクで Deliverable を Approved にした直後に
+`_is_task_completed` が成功と判定すること）が**5回中3回失敗する flaky**になり、その原因が
+まさに BL-215 の ID 衝突だった。連続する2回の `write_agreement` が同一ミリ秒に収まると
+`ORDER BY id` が CREATE(→Superseded) と UPDATE(Approved) を逆順に並べ、`reversed()` が
+Superseded を最新と誤認する。**BL-214 の修正を検証できるようにするために BL-215 が必要**
+だったため、ユーザー了承のうえ続けて実装した。実装後は5回連続で安定。
+
+実装は §6.3 の方針に加えて2点を広げた。
+
+- **採番の一元化**: `_new_record_id(prefix)` を新設し、`AG-` / `D-` / `GS-` / `PL-` に加えて
+  既に対策済みだった `ESC-` と、未対策だった `GD-` / `SCHED-` / `DF-` / `AG-MASTER-` も
+  すべてここへ寄せた。「同じ一意ID採番という規則がテーブルごとにバラバラ」という §15.1 の
+  事例そのものだったため、テーブル単位ではなく採番口を1つにする形で潰した。
+  素のミリ秒採番が再導入されないよう、ソース走査による配線固定テストを置いた。
+- **`issue_log` の順序**: id が `uuid4` のため `ORDER BY id` が挿入順ではなく**実質ランダム順**を
+  返していた（agreements のミリ秒衝突とは症状が違うが「順序を持たない値で並べている」という
+  同じ欠陥クラス。AGENTS.md §13.5「クラスを直す」）。6箇所すべてを `ORDER BY rowid` へ揃えた。
+
+### 10.4 変更ファイル
+
+- `cela_main.py`
+- `tests/test_bl214_effective_task_id_resolution.py`（新規・13件）
+- `tests/test_bl215_record_id_uniqueness_and_ordering.py`（新規・8件）
+- `tests/test_bl148_orchestrator_tool_loop.py`（実効アクセサへの追随）
+- `tests/test_r4_smoke.py`（`max(rows, key=id)` → `rows[-1]`。id の文字列大小は挿入順を表さない）
+
+### 10.5 リバート検証（AGENTS.md §17.1）
+
+各修正箇所を**個別に**リバートし、対応するテストが実際に失敗することを確認した。
+
+| 修正箇所 | リバート時 |
+|---|---|
+| S1 `_task_id_from` の実効解決 | 4 failed |
+| S2 Stageパイプラインの `_CURRENT_TASK_ID` | 2 failed |
+| S3 write_issue の申告値フォールバック | 1 failed |
+| S5 `_is_task_completed` の警告 | 1 failed |
+| BL-215 採番の uuid 断片 | 2 failed |
+| BL-215 agreements `ORDER BY rowid` | 4 failed |
+| BL-215 issue_log `ORDER BY rowid` | 1 failed |
+
+---
+
 ## 9. 参照
 
 - `docs/design/back_log/issue_backlog.md`: BL-146（`_effective_current_task_id_from` の導入元）、
