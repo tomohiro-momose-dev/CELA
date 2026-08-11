@@ -12585,6 +12585,73 @@ def verify_budget_arithmetic(text: str) -> list[str]:
     return warnings
 
 
+def _resolve_deliverable_content_for_integration(
+    conn: sqlite3.Connection, run_id: str, agreement: dict
+) -> str:
+    """[BL-213 F1] 承認済みDeliverable行から、最終統合文書へ載せる実本文を解決する。
+
+    従来はintegrator_node内に直書きされており、`decision_what`が`FILE_PATH:`でも
+    `WHITEBOARD:`でもない場合はその文字列を**そのまま最終文書へ出力**していた。
+    BL-212の短文汚染（承認撤回の理由文45〜105字がDeliverable行のdecision_whatに
+    残る）と組み合わさると、27KBの設計本文の代わりに「承認を撤回する」の1行が
+    プロジェクト最終成果物へ載る——しかも`else`分岐は正常系として扱われるため
+    警告が一切出ず、run全体が無駄になったことに最後まで気づけない。
+
+    [CONSTRAINT] BL-212/D-187で書き込み側の汚染源は塞いだが、過去のrunで既に
+    生まれた汚染行に対する保険として読み取り側にも防御を置く。D-186と同じく
+    whiteboard_draftsを権威とし、agreements側の文字列表現は当てにしない。
+
+    [REJECTED] 「ポインタ形式でなければ常に異常として警告する」案は採らない。
+    200字以下でホワイトボード化されなかった短文Deliverable（BL-180/H2の正当な経路）
+    が存在し、その場合decision_what自体が実本文だからである。両者は
+    「そのtask_idにwhiteboard_draftsの実体があるか」で機械的に区別できる。
+    """
+    content_data = agreement.get("decision_what", "") or ""
+    task_id = agreement.get("task_id", "") or ""
+    phase_id = agreement.get("phase_id", "") or ""
+    topic = agreement.get("topic", "") or "(topic不明)"
+
+    if content_data.startswith("FILE_PATH:"):
+        filepath = content_data[len("FILE_PATH:"):]
+        if os.path.exists(filepath):
+            with open(filepath, "r", encoding="utf-8") as f:
+                return f.read()
+        print(f"  ⚠️ [integrator] '{topic}' の成果物ファイルが見つかりません: {filepath}")
+        return f"(⚠️ファイルが見つかりません: {filepath})"
+
+    if content_data.startswith("WHITEBOARD:"):
+        # [R4] "WHITEBOARD:{phase_id}:{task_id}"。phase_idが空文字の場合もあるためmaxsplit=2。
+        # [BL-213 F1] 従来は3要素への直接アンパックだったため、"WHITEBOARD:"のような
+        # 欠損したポインタでValueErrorとなりrun最終段のintegrator_nodeごと落ちていた。
+        # 要素不足時はagreements行自身のphase_id/task_idへフォールバックする。
+        parts = content_data.split(":", 2)
+        wb_phase_id = parts[1] if len(parts) > 1 else phase_id
+        wb_task_id = parts[2] if len(parts) > 2 else task_id
+        wb = get_latest_whiteboard(conn, run_id, wb_phase_id, wb_task_id)
+        if wb is None and task_id and wb_task_id != task_id:
+            # ポインタ内のtask_idが壊れていても、agreements行のtask_idで救えることがある。
+            wb = get_latest_whiteboard(conn, run_id, phase_id, task_id)
+            if wb is not None:
+                print(f"  🔧 [integrator] '{topic}' のポインタ内task_id='{wb_task_id}'では"
+                      f"引けなかったため、agreements行のtask_id='{task_id}'で復元しました。")
+        if wb:
+            return wb["content"]
+        print(f"  ⚠️ [integrator] '{topic}' のホワイトボードが見つかりません: "
+              f"phase={wb_phase_id}, task={wb_task_id}")
+        return f"(⚠️ホワイトボードが見つかりません: phase={wb_phase_id}, task={wb_task_id})"
+
+    # ポインタ形式ではない。whiteboard_draftsに実体があれば、この行は汚染されている
+    # （BL-212の残留）と判断し、実本文を復元する。実体が無ければ未昇格の短文Deliverable
+    # という正当な状態なので、decision_whatをそのまま本文として扱う。
+    wb = get_latest_whiteboard(conn, run_id, phase_id, task_id) if task_id else None
+    if wb:
+        print(f"  🔧 [BL-213] '{topic}' のagreements行がホワイトボードポインタを失っていた"
+              f"（decision_what={content_data[:40]!r}...）ため、whiteboard_drafts "
+              f"Ver.{wb['version']}（task_id={task_id}）から実本文を復元して統合しました。")
+        return wb["content"]
+    return content_data
+
+
 def integrator_node(state: LineageState) -> LineageState:
     """【SLM要約】
     Aggregation and Lineage attribution of approved deliverables into a final master specification document, followed by contradiction checking.
@@ -12608,21 +12675,9 @@ def integrator_node(state: LineageState) -> LineageState:
 
     for d in deliverables:
         # ===== ファイル/ホワイトボードから内容を読み込む =====
-        content_data = d['decision_what']
-        if content_data.startswith("FILE_PATH:"):
-            filepath = content_data.split("FILE_PATH:")[1]
-            if os.path.exists(filepath):
-                with open(filepath, "r", encoding="utf-8") as f:
-                    content_text = f.read()
-            else:
-                content_text = f"(⚠️ファイルが見つかりません: {filepath})"
-        elif content_data.startswith("WHITEBOARD:"):
-            # [R4] "WHITEBOARD:{phase_id}:{task_id}"（phase_idが空文字の場合もあるためmaxsplit=2で分割）
-            _, wb_phase_id, wb_task_id = content_data.split(":", 2)
-            wb = get_latest_whiteboard(_conn, _run_id, wb_phase_id, wb_task_id)
-            content_text = wb["content"] if wb else f"(⚠️ホワイトボードが見つかりません: phase={wb_phase_id}, task={wb_task_id})"
-        else:
-            content_text = content_data
+        # [BL-213 F1] 解決ロジックは_resolve_deliverable_content_for_integrationへ切り出した。
+        # ポインタを失った汚染行からの本文復元と、各失敗ケースでの警告出力もそちらが担う。
+        content_text = _resolve_deliverable_content_for_integration(_conn, _run_id, d)
         # ==========================================
 
         master_document.append(f"## {d['topic']}\n")
