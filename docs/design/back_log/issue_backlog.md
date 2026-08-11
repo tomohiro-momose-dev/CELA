@@ -244,6 +244,7 @@
 | BL-210 | 高 | `cela_main.py`（`_resolve_task_transition`のphase解決ロジック） | ユーザーが「0118のログを確認、議論停滞の原因は？」と依頼。`log/2026-08-11/0118`でReflectionが`stagnant`と判定しシステムがHALTしていた。原因を追うと、User承認後に`call_decision_extractor`が`{"advances_to_phase_id": null, "advances_to_task_id": "task_4_0"}`を8回にわたり正しく抽出していたにもかかわらず、毎回「⚠️ 存在しないtask_id 'task_4_0' への遷移要求を無視しました」で拒否され、current_task_idがphase_3のtask_3_2に固定されたままだったことが判明。`_resolve_task_transition`（`cela_main.py:11707`）は`advances_to_phase_id`が省略された場合に**探索対象フェーズをcurrent_phaseへ決め打ち**していたため、`task_4_0`（phase_4所属）を`task_3_2`の所属フェーズ（phase_3）のタスク一覧から探し、必ず「存在しない」と判定していた——実際にはtask_4_0はDBに受入基準まで定義された正式なタスクとして存在していた。直後（`cela_main.py:11767`）にBL-191で定義済みの`_find_phase_containing_task`（task_idの所属フェーズを全フェーズ横断で探すヘルパー）が既にあったが、`redirect_backward`専用経路でのみ使われ、この自由文脈`advances_to_task_id`抽出経路には配線されていなかった。**実装完了（`done`）**：`advances_to_phase_id`が省略され`advances_to_task_id`がcurrent_phaseに存在しない場合、`_find_phase_containing_task`で全フェーズ横断探索してから最終的に「存在しない」と判定するよう変更。あわせて、探索で見つかったフェーズがcurrent_phaseと異なる場合はcurrent_phaseも追従して更新するようにし（従来はadvances_to_phase_idが明示された時にしか更新しておらず、current_task_idとcurrent_phaseが不整合になるリスクがあった）、BL-125（未解決issueゲート）・BL-176（未承認ゲート）は変更後の経路にも引き続き適用されることを確認した。新規テスト`tests/test_bl210_cross_phase_transition.py`7件、関連の既存テスト（BL-125/136/139/146/154/157/160/176/181/182/183/190/191/206系）185件を含め無退行、オフライン全テストスイート1143件通過。詳細は[BL-210詳細](#bl-210-_resolve_task_transitionがadvances_to_phase_id省略時にcurrent_phaseへ決め打ちしフェーズをまたぐ遷移を常に拒否する)を参照。 | P1 |
 | BL-211 | 高 | `cela_main.py`（`decision_extractor_node`のBL-139補完ブロック、`_infer_directive_target_task_ids`） | ユーザーが「0941ログの続き、停滞の原因は」と依頼。BL-210修正後の実ドライラン`log/2026-08-11/0941`で、今度はtask_4_2→task_4_3の切替が成立せず、Expertが「実行コンテキストがtask_4_2のまま」と応答し続ける同型の空転が再発した。User AIはtask_4_2を承認しtask_4_3を明示指示しており、Detectorも`criteria_status:[true,true,true]`／`risk=low, constraint_issue=none`で追認していたが、`call_decision_extractor`は`advances_to_task_id: null`を返し、さらに移行意図を表すDirectiveイベントも`phase_id`・`task_id`ともに空文字で、移行先が`topic`（「task_4_3運賃・住民負担配慮の設計着手指示」）と`owned_variable_values.対象タスク`の自然文にしか存在しない形で返っていた。この抽出漏れを救うはずの[BL-139](#bl-139-decision_extractor_nodeのtransition抽出がllm出力の1項目に依存しており明示的な次タスク指示があってもcurrent_task_idが更新されないことがあった)の安全網は補完条件にDirectiveの`task_id`が非空であることを要求していたため空振りし（実ログ中にBL-139の補完メッセージは0件）、安全網が二重に外れて`current_task_id`がtask_4_2に固定されたままになった。**実装完了（`done`）**：Directiveの`task_id`が空の場合に限り、`topic`・`content`・`rationale`・`owned_variable_values`の自然文から計画に実在するtask_idを推定する第2段フォールバック`_infer_directive_target_task_ids`を追加。候補が一意に定まるときだけ補完するフェイルクローズとし、複数タスクへ言及する差し戻し文での誤った先読み切替を防ぐ。離脱元task_idは候補から除外し自己遷移を起こさない。[BL-039](#bl-039-decision_extractorが出力するtask_idの表記ゆれドット-vs-アンダースコアによりタスク遷移がドライラン全体で1回も成功していない)のドット区切り正規化も踏襲。新規テスト`tests/test_bl211_directive_task_id_inference.py`11件、オフライン全テストスイート1154件通過。詳細は[BL-211詳細](#bl-211-bl-139の遷移補完がdirectiveのtask_idが空文字の場合に空振りしタスク切替が永久に成立しない)を参照。 | P1 |
 | BL-212 | 高 | `cela_main.py`（`_commit_agreement_from_tool`のis_whiteboard判定） | ユーザーが「1034ログ、edit失敗が連発」と報告。BL-211修正の検証run（`log/2026-08-11/1034`）で、task_4_2の承認撤回中にExpertの`write_agreement(edits=...)`が17回連続で「old_textが現在のホワイトボード内容に見つかりませんでした（緩い一致0件）」に失敗した。`read_whiteboard_excerpt`では同じ語句がmatch_type='exact'で存在確認できており、`whiteboard_drafts`側の実データは無傷だった。原因は、DetectorとUserが承認撤回のために`action_type=SUPERSEDE`＋200字以下の短い無効化理由文（[BL-062](#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)が想定した「ホワイトボードには触れない」用途）を使ったこと。[BL-080](#bl-080-write_agreementのsupersedeがdeliverableの全文更新を破棄し実質何もしないツール呼び出しになっていた)のSUPERSEDE分岐はraw_content>200字のときだけ`apply_whiteboard_patch`を呼ぶため、短い理由文の場合は`content=raw_content`のままDBへ書き込まれ、新しく「有効」になったDeliverable行のdecision_whatが短い理由文そのものになり`WHITEBOARD:`プレフィックスを失う。次にExpertが`UPDATE(edits=...)`を送ると、`is_whiteboard = old_content.startswith("WHITEBOARD:")`という旧判定が`False`になり、`base_content=old_content`（短い理由文）に対して実際のホワイトボード引用を照合するため必ず0件一致で失敗し続ける。**実装完了（`done`）**：[BL-131](#bl-131-task_plannerの正式なフェーズタスク計画に存在しないtask_idtask_1_1_review等でwrite_agreementwhiteboardが作成されてしまう構造的リスク)・[BL-206](#bl-206-write_agreementのedits照合が実際には空のホワイトボード内容に対して行われ本来一致するはずのold_textが繰り返し不一致になる)と同じ設計方針（task_idを権威としagreements側の文字列表現は当てにしない）に揃え、`is_whiteboard`の判定を`get_latest_whiteboard(conn, run_id, phase_id, tid) is not None`（whiteboard_draftsに実際にバージョンが存在するか）へ変更した。新規テスト`tests/test_bl212_supersede_short_reason_orphans_whiteboard.py`7件（うち3件は修正前ロジックへ戻すと実際に失敗することを確認済み）、オフライン全テストスイート1161件通過。詳細は[BL-212詳細](#bl-212-supersedeの短い無効化理由文がactiveなdeliverable行のwhiteboardプレフィックスを失わせeditsを永久失敗させる)を参照。 | P1 |
+| BL-213 | 高 | `cela_main.py`（`integrator_node`、`decision_extractor_node`、`call_decision_extractor`、`_resolve_task_transition`、`_resolve_deliverable_pointer`、`_build_agreements_context`） | ユーザーが「なかなかうまくはいきませんね....バグだらけだ」との認識を示したうえで、「一度立ち止まって、agreements/decision_extractor周りで構造化フィールドを無条件に信頼している箇所を横断的に洗い出す」ことを選択。[BL-206](#bl-206-write_agreementのedits照合が実際には空のホワイトボード内容に対して行われ本来一致するはずのold_textが繰り返し不一致になる)・[BL-210](#bl-210-_resolve_task_transitionがadvances_to_phase_id省略時にcurrent_phaseへ決め打ちしフェーズをまたぐ遷移を常に拒否する)・[BL-211](#bl-211-bl-139の遷移補完がdirectiveのtask_idが空文字の場合に空振りしタスク切替が永久に成立しない)・[BL-212](#bl-212-supersedeの短い無効化理由文がactiveなdeliverable行のwhiteboardプレフィックスを失わせeditsを永久失敗させる)の4連続バグに共通する構造（LLMが返すJSONの特定フィールドが必ず期待した形で埋まっている前提でコードが分岐し、その前提が崩れたときの防御がたまたま踏んだ1経路にしか実装されていない）を4類型（A:空文字が既定値を貫通／B:文字列形式から状態を判定／C:探索範囲の決め打ち／D:安全網の前提条件が厳しすぎる）へ整理し、`cela_main.py`全体をGrep＋実読で監査した。**最重要の構造的所見**：`agreements`テーブルへの書き込み経路が2本あり、`write_agreement`ツール経路は6層の検証を通るのに対し、`call_decision_extractor`→`decision_extractor_node`のフォールバック経路は**検証0層**（LLMのJSONを一切検証せずDBへ書く）という極端な非対称がある。7件を発見（F1〜F7）。**F1【高】**`integrator_node`が最終統合文書へ成果物本文の代わりに短文を出力しうる（警告なし・最後まで気づけない）。**F2【高】**BL-212の修正漏れ（保護分岐が`content = old_content`のままでポインタを復元せず汚染が世代を越えて伝播）。**F3【高】**フォールバック経路の空文字ドリフトが5フィールド分無防備（特に`entry_type=""`はBL-206と同じ孤児化へ至る第3の経路）。**F4【中】**BL-210の残穴（`advances_to_phase_id`が非空だが誤りの場合、横断探索がスキップされ修正前と同じ症状）。**F5【中】**フォールバック経路にBL-212同型の文字列判定が残存。**F6【低】**`_resolve_deliverable_pointer`がSuperseded行を除外していない。**F7【低】**`WHITEBOARD:`ポインタの表示ラベル欠如。**進捗**：F2・F5はユーザーの「まずF2+F5を修正して」を受けBL-212の追補として`done`。続いてユーザーの「F1を実行」を受けF1も`done`（`_resolve_deliverable_content_for_integration`へ切り出し、whiteboard_draftsを権威とする復元と警告出力、および欠損ポインタでのValueError防止を実装）。続いて「それではF3に移ります」を受けF3も`done`（`_query_and_parse_with_retry`へvalidatorフックを追加した自己修正リトライ＋ハイブリッドのフェイルクローズ）。F4・F6・F7は`open`。監査記録の全文（各発見の再現条件・影響・根拠・推奨対応、健全と確認した箇所の一覧、設計上の提言3案を含む）は`docs/design/back_log/BL-213/BL213_investigation.md`。詳細は[BL-213詳細](#bl-213-agreements-decision_extractor-周辺の構造化フィールドの無条件信頼横断監査f1f7)を参照。 | P1 |
 
 ---
 
@@ -7092,6 +7093,220 @@ editsフローが壊れていないこと、ホワイトボードが一度も作
 このうち3件は、修正前のロジック（`old_content.startswith("WHITEBOARD:")`）へ戻すと実際に
 失敗することを確認した上で固定した。オフライン全テストスイート1161件通過。`python -m py_compile`合格。
 
+**追補（BL-213横断監査 F2/F5、2026-08-11）：**
+
+BL-213の横断監査で、上記の初回修正が**不完全**であったことが判明した。`is_whiteboard`の
+**判定**はwhiteboard_drafts直接参照へ直したが、その判定を使う**保護分岐の中身**が
+`content = old_content`のままだったため、一度BL-212の短文行が生まれると、以降の全ての
+更新へ短文がコピーされ続け、`agreements`側は永久に`WHITEBOARD:`ポインタを取り戻せなかった
+（**汚染が世代を越えて伝播する**）。これは、BL-213のF1（`integrator_node`が最終統合文書へ
+成果物本文の代わりに短文を出力する）の前提条件を成立させる直接の経路でもあった。
+
+さらに、同型の文字列プレフィックス判定が`decision_extractor_node`のフォールバック経路
+（`write_agreement`が呼ばれなかったターンの安全網）にも残っており、そちらでは保護が
+発火せずLLMの200字要約で上書きされて**フル本文が孤立する**（その分岐のコメント自身が
+警告している事故そのもの）状態だった。
+
+対応は次の3点。
+
+1. **F2-a**（`_commit_agreement_from_tool`、`elif is_whiteboard:`分岐）：`content = old_content`
+   から`content = f"WHITEBOARD:{phase_id}:{tid}"`へ変更。`is_whiteboard`が真ならwhiteboard_drafts
+   に実体が存在することは確定しているため、`old_content`の中身に依存せず正典のポインタを
+   再生成する。これによりBL-212の残留行は**次の更新で自動的に修復される**。
+2. **F2-b**（同、`decision_what`/`edits`いずれも無い`else`分岐）：`is_whiteboard`が真の場合のみ
+   ポインタへ差し替え、偽（＝まだホワイトボード化されていない短文Deliverable）なら従来通り
+   `old_content`を維持する。
+3. **F5**（`decision_extractor_node`のフォールバック経路）：`old_content`がポインタ形式でなく、
+   かつ`entry_type == "Deliverable"`かつwhiteboard_draftsに実体が存在する場合に限り、
+   ポインタを復元する分岐（`_wb_recoverable`）を追加。判定を**Deliverableに限定**したのは、
+   非Deliverableへ広げると同一task_idにホワイトボードがあるだけでDecision/Directiveの本文まで
+   ポインタ文字列へ差し替わってしまうため。
+
+テストを7件→13件へ拡充した（追加6件）。短文SUPERSEDE後の保護UPDATEでポインタが復元されること、
+その結果`integrator_node`の抽出条件に載る行が短文ではなく実本文を指すこと（F1の実害条件が
+解消されること）、decision_what無しのUPDATEでも復元されること、フォールバック経路でも
+復元されること、および非退行2件（ホワイトボード未作成の短文Deliverableへポインタを**捏造しない**
+こと、Deliverable以外の本文をポインタへ差し替えないこと）。追加分のうち4件は、F2・F5それぞれを
+個別に修正前へ戻すと実際に失敗することを確認した上で固定した。オフライン全テストスイート
+1167件通過。`python -m py_compile`合格。
+
+---
+
+### BL-213: agreements / decision_extractor 周辺の「構造化フィールドの無条件信頼」横断監査（F1〜F7）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（F1・F3は`done`、F2・F5は[BL-212](#bl-212-supersedeの短い無効化理由文がactiveなdeliverable行のwhiteboardプレフィックスを失わせeditsを永久失敗させる)の追補として`done`、F4・F6・F7が未対応） |
+| 優先度 | P1 |
+| 関連 | [BL-206](#bl-206-write_agreementのedits照合が実際には空のホワイトボード内容に対して行われ本来一致するはずのold_textが繰り返し不一致になる)、[BL-210](#bl-210-_resolve_task_transitionがadvances_to_phase_id省略時にcurrent_phaseへ決め打ちしフェーズをまたぐ遷移を常に拒否する)、[BL-211](#bl-211-bl-139の遷移補完がdirectiveのtask_idが空文字の場合に空振りしタスク切替が永久に成立しない)、[BL-212](#bl-212-supersedeの短い無効化理由文がactiveなdeliverable行のwhiteboardプレフィックスを失わせeditsを永久失敗させる)（本監査の起点となった4連続バグ）、BL-139、BL-131、BL-084、BL-062、BL-080 |
+| 調査記録 | `docs/design/back_log/BL-213/BL213_investigation.md`（全文・要約なし） |
+
+**内容:**
+
+BL-212修正の直後、ユーザーが「なかなかうまくはいきませんね....バグだらけだ」との認識を示した。
+AIが「point-fix運用を続ける」か「一度立ち止まって同系バグを横断的に洗い出す」かの2択を提示し、
+ユーザーは後者を選択した（「ドライランが止まって時間の無駄なので、ここで同系のバグを洗い出しましょう」）。
+
+**監査の起点：** 2026-08-10〜11の連続ドライランで、**同一の症状（タスクが進まない／編集が通らない）が
+毎回異なる原因で4連続発生**していた。
+
+| BL | 症状 | 直接原因 | 信頼していた構造化フィールド |
+|----|------|----------|------------------------------|
+| BL-206 | edits失敗の連発 | Deliverable行の孤児化 | `item["phase_id"]`（空文字ドリフト）、`topic`のみでのsupersede対象特定 |
+| BL-210 | task_3_2→task_4_0の遷移が毎回拒否 | フェーズ探索範囲の決め打ち | `transition["advances_to_phase_id"]`（null時のフォールバック先） |
+| BL-211 | task_4_2→task_4_3の遷移が成立しない | BL-139安全網の空振り | `item["task_id"]`（空文字ドリフト） |
+| BL-212 | edits失敗が17回連発 | WHITEBOARD:プレフィックスの喪失 | `old_content`の文字列形式 |
+
+**構造的所見（最重要）：**
+
+`agreements`テーブルへの書き込み経路は2本あり、**検証の厳しさが極端に非対称**である。
+
+- **経路1**（`write_agreement`ツール → `_write_agreement_impl` → `_commit_agreement_from_tool`）：
+  必須フィールドの空文字を含む不足チェック、enum検証、ロール別権限、`depends_on`参照整合性、
+  BL-131 task_id実在チェック／BL-146 current_task_id一致ゲート、BL-131 target_topic必須化の**6層**。
+- **経路2**（`call_decision_extractor` → `decision_extractor_node`のフォールバック書き込み）：
+  `parsed["extracted_events"]`を**一切検証せずそのまま返し**、そのままDBへ書く**0層**。
+
+BL-206で`phase_id`を、BL-211で`task_id`を個別に`or`パターンへ直したが、**同じ行に並んでいる
+他の5フィールドは無防備のまま**である。そしてこの経路で書かれた行は経路1と同じテーブルに入り、
+`_find_active_deliverable_agreement` / `integrator_node` / `_is_task_completed` など下流の
+全機構が同じ前提で読む。**検証の厚みが6層と0層に分かれている限り、同じクラスのバグは
+「まだ踏んでいない経路」で再発し続ける。これが4連続バグの構造的な原因である。**
+
+**発見事項（詳細は調査記録を参照）：**
+
+| # | 深刻度 | 概要 | 状態 |
+|---|--------|------|------|
+| F1 | 高 | `integrator_node`が、`decision_what`が`WHITEBOARD:`/`FILE_PATH:`のどちらでもないとき、その文字列をそのまま最終統合文書へ出力する。BL-212の残留（撤回理由文45〜105字）が`Approved`になると、27KBの設計本文の代わりに「承認を撤回する」の1行が載る。警告は一切出ない | **`done`**（下記「F1の対応」参照） |
+| F2 | 高 | BL-212の修正漏れ。`is_whiteboard`の判定は直したが保護分岐の中身が`content = old_content`のままで、短文汚染が世代を越えて伝播しポインタを永久に取り戻せない | **`done`**（BL-212追補） |
+| F3 | 高 | 経路2の空文字ドリフトが5フィールド分無防備（`action_type`/`entry_type`/`status`/`topic`/`proposed_by`＋`target_topic`）。特に`entry_type=""`はBL-206と同じ孤児化へ至る独立した第3の経路。`target_topic`は経路1ではBL-131のガードで塞がれているのに経路2にだけ穴が残る典型例 | **`done`**（下記「F3の対応」参照） |
+| F4 | 中 | BL-210の残穴。`advances_to_phase_id`が非空だが誤り（例：LLMが現在のphase_idをエコーバック）の場合、`target_phase`が非Noneになりフェーズ横断探索をスキップするため、BL-210修正前とまったく同じ症状になる | `open` |
+| F5 | 中 | 経路2にBL-212同型の文字列判定が残存。保護が発火せずLLMの200字要約でフル本文が孤立する | **`done`**（BL-212追補） |
+| F6 | 低 | `_resolve_deliverable_pointer`が`status != "Superseded"`を除外しておらず、`FILE_PATH:`の場合にアーカイブ済みファイルを返しうる | `open` |
+| F7 | 低 | `_build_agreements_context`が`FILE_PATH:`には親切なラベルを付けるのに`WHITEBOARD:`は生の内部表現のままLLMへ提示する | `open` |
+
+**F1の対応（実装済み、2026-08-11）：**
+
+ユーザーの「F1を実行」を受けて実装した。解決ロジックを`integrator_node`から
+`_resolve_deliverable_content_for_integration(conn, run_id, agreement)`へ切り出し、
+次の3点を実装した。
+
+1. **汚染行からの本文復元**：`decision_what`が`FILE_PATH:`でも`WHITEBOARD:`でもない場合、
+   従来はその文字列をそのまま最終文書へ出力していた。whiteboard_draftsに当該task_idの
+   実体が存在する場合は、その行が汚染されている（BL-212の残留）と判断し、
+   whiteboard_draftsから実本文を復元して統合する（D-186「whiteboard_draftsを権威とする」
+   を**読み取り側にも適用**）。
+2. **警告の出力**：F1の核心は「`else`分岐が正常系として扱われ警告が一切出ない」ことだった。
+   復元時・ファイル欠損時・ホワイトボード欠損時のいずれもログへ痕跡を残し、
+   後からログを読めば汚染があったと分かるようにした。
+3. **欠損ポインタでのクラッシュ防止**：`"WHITEBOARD:"`のような要素不足のポインタは、
+   従来`content_data.split(":", 2)`の3要素直接アンパックで`ValueError`となり、
+   **run最終段の`integrator_node`ごと落ちていた**。要素不足時はagreements行自身の
+   `phase_id`/`task_id`へフォールバックする。あわせて、ポインタ内のtask_idが壊れていても
+   agreements行のtask_idで救えるフォールバックも追加した。
+
+**[REJECTED]**「ポインタ形式でなければ常に異常として警告する」案は採らなかった。
+200字以下でホワイトボード化されなかった短文Deliverable（BL-180/H2の正当な経路）が存在し、
+その場合`decision_what`自体が実本文だからである。両者は「そのtask_idに
+whiteboard_draftsの実体があるか」で機械的に区別できる。
+
+新規テスト`tests/test_bl213_f1_integrator_content_resolution.py`14件。実インシデント再現
+（撤回理由文が実本文へ置き換わること、警告が出ること）、過剰検知の防止（正当な短文
+Deliverableをそのまま出力し警告も出さないこと、別タスクのホワイトボードが紛れ込まないこと）、
+非退行5件（正常なポインタ解決、最新バージョンの選択、FILE_PATH解決、欠損時の警告文字列）、
+欠損ポインタでのクラッシュ防止3件、`integrator_node`本体の配線のソースレベル固定。
+このうち4件は、復元分岐とアンパック防御をそれぞれ個別に修正前へ戻すと実際に失敗することを
+確認した上で固定した。オフライン全テストスイート1181件通過。`python -m py_compile`合格。
+
+**F3の対応（実装済み、2026-08-11）：**
+
+実装前に、この経路の実際の重みを実測した。
+
+- **発火率**：全ログ591ターン中271回（46%）でフォールバック経路が動いていた。直近runでも9〜35%。
+- **書き込み実績**：実run（`1786337594-17df8ff3`）のagreements 177行のうち**44行（25%）**がこの経路
+  由来（`proposed_by`が`Agent`/`User`＝LLM申告のものが指紋。ツール経路は`caller_role`なので
+  `expert`/`user`/`detector`/`task_planner`）。内訳はDirective 27／Decision 12／Deliverable 5。
+- **既に出ていた実害**：`phase_id=''`の行が18件、`task_id=''`が7件。うち`proposed_by`が
+  `Agent`/`User`のもの＝**この経路由来が17件**で、いずれもBL-206修正前の期間（08-10 18:32〜
+  08-11 00:39）に集中していた。`entry_type`/`status`/`topic`/`action_type`が空の行は0件だったが、
+  同じ行に並ぶフィールドが免れていると考える根拠はない。
+
+この数字から選択肢を絞った。調査記録§5の提言(c)（読み取り専用へ縮退）は決定記録の25%を失い、
+しかもこの経路が動くのは「LLMがツールを使わなかったターン」＝既に何かおかしいターンであるため
+**見えなくなると困る場面でちょうど見えなくなる**ので却下。(b)（`_write_agreement_impl`経由に統一）は
+BL-146（current_task_id一致ゲート）とBL-169（ロール権限）が`proposed_by="User"`で他タスク向けに
+書く正当な抽出まで弾くため却下。(a)（境界に検証層を追加）を採用した。
+
+実装は3点。
+
+1. **自己修正の付与**：`_query_and_parse_with_retry`へ`validator`フック（`(ok, llm_facing_message)`を
+   返す）を追加した。ユーザーから「破棄後は他のツール失敗時と同じくLLMの自己修正にゆだねると
+   いう事でよいか」という確認があったが、**このままでは自己修正は起きない**。`write_agreement`等の
+   ツール失敗は`{"success": False, "error": ...}`がツールループ内でモデルへ返り同一ターンで
+   直せるのに対し、`call_decision_extractor`はツールではなく**ノード**であり、結果をモデルへ返す
+   経路が存在しない。既存のBL-160リトライも**同一プロンプトをそのまま再送**するだけで何が悪かったかを
+   伝えていなかった。そこで検証不合格時は理由とあるべき出力をプロンプトへ追記して再問い合わせする
+   ようにし、ツール失敗時と機能的に等価な自己修正ループを与えた。
+2. **ハイブリッドのフェイルクローズ**（ユーザー承認）：リトライを使い切ってなお不正な場合、
+   同一性に関わるフィールド（`entry_type`／`action_type`／UPDATE時の`target_topic`）が不正なら
+   その項目を破棄し、それ以外（`status`／`topic`／`proposed_by`）は既定値へ正規化して記録は残す。
+   `status`等の軽微な欠落だけではvalidatorを不合格にしない（LLM呼び出しを浪費しないため）。
+3. **警告文**（ユーザー指示「なぜエラーで、どうするべきかを明記して」）：LLM向け（再問い合わせ
+   プロンプト）は「entry_typeが正しくないとDBの検索から永久に発見できない孤児レコードになる」
+   のように結果まで書く。人間向け（ログ）は「何を破棄／正規化したか」に加えて「**この項目の内容は
+   今回記録されません** — 重要な決定であれば次ターン以降に再抽出されるか、write_agreementツールで
+   直接記録する必要があります」と、失われるものと回復手段を明記する。
+
+`target_topic`はUPDATE時に**全entry_typeで必須**とした。ツール経路のBL-131ガードは
+`entry_type='Deliverable'`を除外しているが、あちらはDeliverableを`_find_active_deliverable_agreement`
+（phase_id/task_id識別）で特定するのに対し、このフォールバック経路はtopic+entry_typeの線形探索で
+特定するため、Deliverableでも`target_topic`が同一性の要だからである。
+
+新規テスト`tests/test_bl213_f3_extractor_validation.py`27件。validator単体（各fatal/minorの判定、
+不正項目の位置特定、minorのみならリトライしない）、正規化・破棄（破棄ログに結果と回復手段が
+含まれること、入力を破壊的変更しないこと）、自己修正リトライ（再問い合わせプロンプトに理由が
+追記されること、使い切り時の責務分離、非退行としてvalidator未指定時の従来挙動とBL-160の
+パース失敗フェイルクローズ）、および**`call_decision_extractor`を通したE2Eの振る舞い**4件。
+初回はソースレベルの配線テストしか落ちない弱いテストになっていたことがリバート検証で判明したため
+（AGENTS.md §17.1が想定するとおりの弱点）、E2Eテストを追加してから3箇所（validator配線／
+sanitizer配線／リトライ時のプロンプト追記）を**個別に**リバートし、それぞれ対応するテストが実際に
+落ちることを確認した。既存テスト`test_bl182_...`のスタブは新引数に追随させた（`**kwargs`受け）。
+オフライン全テストスイート1208件通過。`python -m py_compile`合格。
+
+**推奨する着手順（調査記録§5）：**
+
+1. **F2 + F5**（BL-212追補）— 短文行が生まれ続ける・伝播し続ける大元を止める。**これを先に止めないと他を直しても汚染データが増え続ける** → ユーザー指示により実施済み
+2. **F1** — 既に汚染された状態でも最終文書が壊れないようにする防御。過去のrunで生まれた行への保険としてF2の後でも必要
+3. **F3** — 経路2の検証層を追加。最も設計判断を要する
+4. **F4** → **F7** → **F6**
+
+**恒久ルール化（AGENTS.md §13、2026-08-11）：**
+
+ユーザーが「LLMは潜在的に空文字を返す可能性がある。引数が""の時、またはjsonパーサーなどで
+エラーになった時などに""にフォールバックする設計をするときは、後続の処理やシステム全体への
+影響を十分調査し、動作が破綻しないように設計・実装をする趣旨の教訓を書いてください」と指示。
+
+BL-206/210/211/212がいずれも「発見された1経路だけを直す」形で個別に修正され、そのたびに
+別経路で同型の障害が再発したのは、コードの欠陥そのものより**設計時の思考手順が明文化されて
+いなかったこと**に原因がある。暗黙知はセッションをまたいで失われ、AIが主導する開発では
+とくに失われやすい（AGENTS.md §4-9で既に規定した属人化リスクの別形態）。よって個別のBL修正や
+D-xxxではなく、**毎セッション読み込まれるAGENTS.mdの恒久ルール**として明文化した（D-189）。
+
+`AGENTS.md`へ**§13「Defensive Handling of LLM-Produced Structured Data (CRITICAL)」**を新設
+（既存§1〜§12の番号は変更せず末尾へ追加し、§5へ相互参照を張った）。単なる注意喚起では行動が
+変わらないため、実行可能な手順の形にしている：§13.1 `.get(k, default)`の落とし穴、
+**§13.2 フォールバックを書く前に答えるべき5つの問い（本節の中核）**、§13.3 権威あるストアの
+優先とderived表現の再生成、§13.4 書き込み経路間の検証対称性、§13.5 クラス単位で直す規律、
+§13.6 マージ前チェックリスト8項目、§13.7 実インシデント表（BL-206/210/211/212/213）。
+
+**設計上の提言（未決）：**
+
+個別修正に加え、経路2（`decision_extractor`フォールバック）の位置づけそのものを再考する価値がある。
+この経路は「`write_agreement`が呼ばれなかったターンの安全網」として導入されたが、現状では
+**検証を一切通さずに本番テーブルへ書き込む第2の正規経路**になっている。調査記録§5に3案
+（(a)検証層を追加して対称にする／(b)`_write_agreement_impl`経由に統一する／
+(c)読み取り専用へ縮退させる）を提示し、選択はユーザーへ委ねている。
+
 ---
 
 | 日付 | 内容 |
@@ -7275,3 +7490,9 @@ editsフローが壊れていないこと、ホワイトボードが一度も作
 | 2026-08-11 | ユーザーが「0118のログを確認、議論停滞の原因は？」と依頼。Reflectionが`stagnant`と判定しシステムがHALTしていた実ドライラン（`log/2026-08-11/0118`）を調査し、BL-210を新規起票・`done`化。User承認後に`call_decision_extractor`が`{"advances_to_phase_id": null, "advances_to_task_id": "task_4_0"}`を8回正しく抽出したにもかかわらず、`_resolve_task_transition`が探索対象フェーズをcurrent_phase（phase_3）へ決め打ちしていたためtask_4_0（phase_4所属）を常に「存在しない」と拒否し続けていたことを特定。BL-191で定義済みの`_find_phase_containing_task`（task_idの所属フェーズを全フェーズ横断で探すヘルパー）が既に存在していたのに、この自由文脈`advances_to_task_id`抽出経路には配線されていなかった。ユーザーの「修正して」を受け、`advances_to_phase_id`省略時に全フェーズ横断探索してからcurrent_phaseへフォールバックするよう修正し、current_phaseの追従更新も追加。D-184として「フェーズ解決はphase_id明示→task_id探索→current_phaseフォールバックの順」という設計方針を記録。新規テスト`tests/test_bl210_cross_phase_transition.py`7件、関連既存185件を含め無退行、オフライン全テストスイート1143件通過。 |
 | 2026-08-11 | ユーザーが「0941ログの続き、停滞の原因は」と依頼。BL-210修正後の実ドライラン`log/2026-08-11/0941`で、今度はtask_4_2→task_4_3の切替が成立しない同型の空転が再発していることを確認し、BL-211を新規起票・`done`化。User AIの明示的なtask_4_3指示とDetectorの全基準充足判定にもかかわらず、`call_decision_extractor`が`advances_to_task_id: null`を返し、かつ代替シグナルであるDirectiveの`task_id`まで空文字（移行先は`topic`と`owned_variable_values`の自然文にのみ存在）だったため、BL-139の安全網が空振りしていた（実ログ中のBL-139補完メッセージ0件）ことを特定。ユーザーの「修正してください」を受け、Directiveの`task_id`が空の場合に自然文から実在task_idを推定する第2段フォールバック`_infer_directive_target_task_ids`を追加し、候補が一意のときだけ補完するフェイルクローズとした。D-185として「遷移意図の回収は構造化フィールド優先・自然文推定は一意性を条件とする最終手段」という設計方針を記録。新規テスト`tests/test_bl211_directive_task_id_inference.py`11件、オフライン全テストスイート1154件通過。 |
 | 2026-08-11 | ユーザーが「1034ログ、edit失敗が連発」と報告。BL-211修正の検証runでtask_4_2承認撤回中にExpertのwrite_agreement(edits=...)が17回連続失敗していることを確認し、BL-212を新規起票・`done`化。DBを直接確認し、DetectorとUserが承認撤回のためaction_type=SUPERSEDE＋200字以下の短い無効化理由文（BL-062が想定した「ホワイトボードには触れない」用途）を使った結果、BL-080のSUPERSEDE分岐が短い理由文をそのままdecision_whatへ書き込みWHITEBOARDプレフィックスを失わせ、後続のUPDATE(edits)のis_whiteboard判定（old_content.startswith("WHITEBOARD:")）が誤ってFalseになっていたことを特定。ユーザーの「修正して」の意図（edit失敗の連発を解消すること）を受け、BL-131・BL-206と同じ設計方針に揃えis_whiteboardの判定をwhiteboard_draftsテーブルの直接参照へ変更した。修正前ロジックへ戻すと新規テスト3件が実際に失敗することを確認した上で固定。D-186として「agreements側の文字列表現ではなくwhiteboard_draftsの実在を権威とする」という設計方針を記録。新規テスト`tests/test_bl212_supersede_short_reason_orphans_whiteboard.py`7件、オフライン全テストスイート1161件通過。 |
+| 2026-08-11 | ユーザーが「全体的にnullチェックが適当すぎる設計をしているわけですね」との認識のもと「まずF2+F5を修正して」と指示。BL-213横断監査で判明したBL-212の修正漏れ（保護分岐が`content = old_content`のままでポインタを復元せず、短文汚染が世代を越えて伝播する）と、同型の文字列判定が`decision_extractor_node`のフォールバック経路に残存していた件を、BL-212の追補として修正した。3箇所（`elif is_whiteboard:`分岐、`decision_what`/`edits`無しの`else`分岐、フォールバック経路の`_wb_recoverable`分岐）を修正し、フォールバック側は非Deliverableの本文をポインタへ差し替えないよう`entry_type == "Deliverable"`で限定した。この修正によりBL-213 F1（最終統合文書に短文が載る）の前提条件も解消される。テストを7件→13件へ拡充し、追加分のうち4件はF2・F5それぞれを個別に修正前へ戻すと実際に失敗することを確認した上で固定。オフライン全テストスイート1167件通過。 |
+| 2026-08-11 | ユーザーが「一度立ち止まって、agreements/decision_extractor周りで構造化フィールドを無条件に信頼している箇所を横断的に洗い出す」を選択し、BL-213として横断監査を実施・起票。BL-206/210/211/212の4連続バグに共通する構造を4類型へ整理し`cela_main.py`全体を監査した結果、7件（F1〜F7）を発見。最重要の構造的所見として、`agreements`への書き込み経路が2本あり検証の厚みが6層と0層という極端な非対称になっていること（これが4連続バグの構造的原因）を特定した。監査記録全文を`docs/design/back_log/BL-213/BL213_investigation.md`へ保存（AGENTS.md §4-7のBL単位調査記録の規約に従い要約せず保存）。F2・F5はユーザー指示により即日BL-212の追補として`done`化、残るF1・F3・F4・F6・F7は`open`。 |
+| 2026-08-11 | ユーザーが「F1を実行」と指示。BL-213 F1（`integrator_node`が承認済みDeliverable行の`decision_what`をポインタ形式でないときそのまま最終統合文書へ出力し、BL-212の短文汚染と組み合わさると27KBの設計本文の代わりに撤回理由文1行が載る。しかも警告が一切出ないためrun全体が無駄になったことに最後まで気づけない）を`done`化。解決ロジックを`_resolve_deliverable_content_for_integration`へ切り出し、①whiteboard_draftsに実体があれば汚染行と判断して実本文を復元（D-186を読み取り側へ適用）、②復元時・各欠損時に警告を出力、③`"WHITEBOARD:"`のような欠損ポインタでの`ValueError`（run最終段のintegrator_nodeごとクラッシュ）を防止、の3点を実装。正当な短文Deliverable（BL-180/H2）を壊さないよう、判定は「そのtask_idにwhiteboard_draftsの実体があるか」で行う。新規テスト`tests/test_bl213_f1_integrator_content_resolution.py`14件、うち4件は復元分岐とアンパック防御を個別に修正前へ戻すと実際に失敗することを確認した上で固定。オフライン全テストスイート1181件通過。 |
+| 2026-08-11 | ユーザーが「LLMは潜在的に空文字を返す可能性がある。（中略）""にフォールバックする設計をするときは、後続の処理やシステム全体への影響を十分調査し、動作が破綻しないように設計・実装をする趣旨の教訓を書いてください」と指示。BL-206/210/211/212の4連続バグとBL-213横断監査から得た教訓を、個別のBL修正やD-xxxではなく**毎セッション読み込まれるAGENTS.mdの恒久ルール**として明文化した（D-189）。`AGENTS.md`へ§13「Defensive Handling of LLM-Produced Structured Data (CRITICAL)」を新設（既存§1〜§12の番号は変更せず末尾へ追加、§5へ相互参照）。単なる注意喚起では行動が変わらないため実行可能な手順の形とし、§13.1 `.get(k, default)`の落とし穴、§13.2 フォールバックを書く前に答えるべき5つの問い（中核）、§13.3 権威あるストアの優先とderived表現の再生成、§13.4 書き込み経路間の検証対称性、§13.5 クラス単位で直す規律、§13.6 マージ前チェックリスト8項目、§13.7 実インシデント表、で構成した。 |
+| 2026-08-11 | ユーザーが「この開発を通して、他にagents.mdに書くべき教訓やインストラクションを調査してまとめ、追記してください」と指示。`decision_lineage.md`の147論点（明示的な教訓記述22件）、`decision_log.md`のD-001〜D-189、`issue_backlog.md`のBL-001〜BL-213、および運用メモを機械的に走査し、AGENTS.md §13（LLM出力の空文字ドリフト）でカバーされない再発パターンを抽出してAGENTS.md §14〜§18として追記した（D-190）。最大の発見は「同じ規則が複数箇所に書かれ、どれかが更新漏れする」パターンが少なくとも5回（D-163・D-169・D-179・D-182・BL-207）異なる文脈で繰り返されていたことで、これを§15として独立させた。§14は診断規律（表層パターン一致は診断ではない／値は最初に生み出した主体まで遡る／期待されるログの不在は証拠／チェックポイント復元はDBを巻き戻さない）、§16は提案・レビュー・報告の誠実さ、§17はテスト規律（回帰テストはリバートすると失敗しなければならない／モックテスト通過は動作の証拠ではない／`-k`の部分一致禁止）、§18はgitとrun状態の衛生。各規則にはそれを生んだ実インシデントのBL/D番号を必ず併記し、規則自体が検証可能なlineageを持つ形とした（CELAの中核思想の自己適用）。あわせて、これまでClaude固有の記憶にのみあった運用知見も、複数AIツールが読む唯一の共有規約層であるAGENTS.mdへ移した。 |
+| 2026-08-11 | ユーザーが「それではF3に移ります」と指示。実装前にフォールバック経路の重みを実測し、全ログ591ターン中271回（46%）発火・実runのagreements 177行中44行（25%）を書いている常用経路であること、およびBL-206修正前の期間にこの経路由来の17行が`phase_id`空文字で記録されていた実害を確認した。この数字から調査記録§5の提言(c)（読み取り専用へ縮退＝記録の25%を失う）と(b)（`_write_agreement_impl`経由に統一＝BL-146/BL-169のゲートが正当な抽出を弾く）を却下し、(a)（境界に検証層を追加）を採用。方針選択にあたりユーザーは「ハイブリット（同一性フィールド不正→破棄／その他→正規化）」を選び、あわせて「破棄後は他のツール失敗時と同じくLLMの自己修正にゆだねるという事でよいか」「警告には、なぜエラーで、どうするべきかを明記して」と条件を付けた。前者について、`call_decision_extractor`はツールではなくノードでありモデルへ結果を返す経路が存在しないため**そのままでは自己修正は起きない**ことを説明したうえで、`_query_and_parse_with_retry`へvalidatorフックを追加し検証不合格時に理由をプロンプトへ追記して再問い合わせする機構を新設した（ツール失敗時と機能的に等価）。D-191として記録。新規テスト27件、うちE2E4件と配線テスト1件は3箇所を個別リバートすると実際に失敗することを確認。オフライン全テストスイート1208件通過。 |

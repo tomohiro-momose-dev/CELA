@@ -105,7 +105,7 @@ BL-206で `phase_id` を、BL-211で `task_id` を個別に `or` パターンへ
 
 ### F1【高】`integrator_node`が最終統合文書に成果物本文の代わりに短文を出力しうる
 
-**場所**: `cela_main.py:12586-12601`
+**場所**: `cela_main.py:12587-12601`
 
 ```python
 content_data = d['decision_what']
@@ -144,6 +144,16 @@ AG-1786412167516  proposed_by=user      decision_what="task_4_2の承認およ�
 「whiteboard_draftsを権威とする」方針の適用）。どちらも取れない場合は
 `content_text` に警告文を入れ、`print` でも明示する。
 
+> **【対応済み 2026-08-11】** ユーザーの「F1を実行」を受けて実装した。解決ロジックを
+> `_resolve_deliverable_content_for_integration` へ切り出し、上記の推奨対応に加えて、
+> 監査時には気づいていなかった**欠損ポインタでのクラッシュ**も同時に修正した——
+> `"WHITEBOARD:"` のような要素不足のポインタは `content_data.split(":", 2)` の3要素
+> 直接アンパックで `ValueError` となり、**run最終段の `integrator_node` ごと落ちていた**。
+> なお「ポインタ形式でなければ常に異常として警告する」案は採らなかった。200字以下で
+> ホワイトボード化されなかった短文Deliverable（BL-180/H2の正当な経路）では
+> `decision_what` 自体が実本文であり、両者は「そのtask_idにwhiteboard_draftsの実体が
+> あるか」で機械的に区別できるためである。新規テスト14件（うち4件はリバート検証済み）。
+
 ---
 
 ### F2【高】BL-212の修正が不完全：保護分岐が`WHITEBOARD:`ポインタを復元しない
@@ -176,6 +186,12 @@ edits未指定のUPDATE（＝承認コメント等、User AI/Detectorが日常�
 **推奨対応**: `is_whiteboard` が真なら `content = f"WHITEBOARD:{phase_id}:{tid}"` を代入する。
 `old_content` の中身に依存しない。BL-212の修正と完全に同じ思想であり、
 **BL-212の修正漏れとして扱うのが正しい**（新規BLではなくBL-212の追補）。
+
+> **【対応済み 2026-08-11】** ユーザーの「まずF2+F5を修正して」を受け、BL-212の追補として
+> 実装した（D-187）。「ポインタは維持ではなく毎回再生成する」という方針を採ったため、
+> **過去のrunで既に生まれた汚染行も次の更新で自動的に修復される**（一回限りの修復
+> マイグレーションが不要になる）という副次効果が得られた。あわせて、ホワイトボードが
+> 未作成の短文Deliverableへポインタを捏造しないことも保証している。
 
 ---
 
@@ -276,6 +292,11 @@ BL-212で `_commit_agreement_from_tool` 側（経路1）の同型判定は直し
 **推奨対応**: F2と同じ。`get_latest_whiteboard(_conn, _run_id, phase_id, task_id) is not None`
 で判定し、真なら `content = f"WHITEBOARD:{phase_id}:{task_id}"` を代入する。
 
+> **【対応済み 2026-08-11】** F2と同時に実装した。ただし判定は `entry_type == "Deliverable"`
+> に**限定**した——非Deliverableへ広げると、同一task_idにホワイトボードがあるだけで
+> Decision/Directive の本文までポインタ文字列へ差し替わってしまうためである
+> （この副作用は実装時に気づいたもので、監査時点では見落としていた）。
+
 ---
 
 ### F6【低】`_resolve_deliverable_pointer`がSuperseded行を除外していない
@@ -332,13 +353,13 @@ F1と同じ「ポインタと本文の混同」を助長する。
 
 | # | 深刻度 | 概要 | 推奨扱い |
 |---|--------|------|----------|
-| F1 | 高 | 最終統合文書に短文が載る | 新規BL |
-| F2 | 高 | BL-212の修正漏れ（ポインタ復元） | **BL-212の追補** |
-| F3 | 高 | 経路2の空文字ドリフト5フィールド＋スキーマ検証欠如 | 新規BL |
-| F4 | 中 | BL-210の残穴（誤phase_id時） | **BL-210の追補** |
-| F5 | 中 | 経路2にBL-212同型の文字列判定が残存 | **BL-212の追補**（F2と同時） |
-| F6 | 低 | Superseded行が逆引き候補に混入 | 保留（F1/F2の後に再評価） |
-| F7 | 低 | WHITEBOARD:ポインタの表示ラベル欠如 | 低リスク、ついでに実施 |
+| F1 | 高 | 最終統合文書に短文が載る | **対応済み**（2026-08-11） |
+| F2 | 高 | BL-212の修正漏れ（ポインタ復元） | **対応済み**（BL-212の追補、2026-08-11） |
+| F3 | 高 | 経路2の空文字ドリフト5フィールド＋スキーマ検証欠如 | 未対応（新規BL） |
+| F4 | 中 | BL-210の残穴（誤phase_id時） | 未対応（BL-210の追補） |
+| F5 | 中 | 経路2にBL-212同型の文字列判定が残存 | **対応済み**（BL-212の追補、F2と同時） |
+| F6 | 低 | Superseded行が逆引き候補に混入 | 保留（F1/F2の対応が済んだため再評価可） |
+| F7 | 低 | WHITEBOARD:ポインタの表示ラベル欠如 | 未対応（低リスク、ついでに実施） |
 
 ### 推奨する着手順
 
@@ -380,7 +401,7 @@ F1と同じ「ポインタと本文の混同」を助長する。
 | `_write_agreement_impl` の必須チェック（`cela_main.py:3240`） | `if not args.get(f)` の真偽判定のため空文字も正しく弾く。類型Aの穴は無い |
 | `_write_issue_impl` の `severity`（`cela_main.py:3477`） | `.get("severity","minor")` だが直後にenum検証があり空文字は弾かれる |
 | `_write_issue_impl` の `defer_to_task_id`（`cela_main.py:3467-3471`） | すべて真偽判定（`if candidate_defer_to_task_id:`）で空文字を正しく扱っている |
-| `get_latest_whiteboard`（`cela_main.py:5620`） | BL-131によりtask_id単独検索。phase_id不一致は警告のみ。健全 |
+| `get_latest_whiteboard`（`cela_main.py:5624`） | BL-131によりtask_id単独検索。phase_id不一致は警告のみ。健全 |
 | `_find_active_deliverable_agreement`（`cela_main.py:2978`） | BL-206によりtask_id単独検索へ修正済み。健全 |
 | `_is_task_completed`（`cela_main.py:5592`） | 最新Deliverable行のstatusのみを見る。BL-212の短文行が最新の場合は`Rejected`となりゲートが閉じる＝フェイルクローズ側。健全 |
 | `_resolve_task_transition` の BL-125 / BL-176 ゲート | F4の経路（誤phase_id）でも、遷移が拒否される側に倒れるためゲート自体は迂回されない |
