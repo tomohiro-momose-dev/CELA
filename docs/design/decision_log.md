@@ -2597,6 +2597,32 @@
 
 ---
 
+### D-185: 遷移意図の回収は構造化フィールドを優先し、自然文からの推定は候補が一意に定まる場合に限る最終手段とする
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | `log/2026-08-11/0941`で、User AIがtask_4_2を承認しtask_4_3を明示指示、Detectorも`criteria_status:[true,true,true]`で追認したにもかかわらず、`call_decision_extractor`が`advances_to_task_id: null`を返し、さらに移行意図を表すDirectiveイベントも`phase_id`・`task_id`ともに空文字で、移行先が`topic`と`owned_variable_values`の自然文にしか存在しない形で返った。この抽出漏れを救うために導入されたBL-139の安全網は、Directiveの構造化`task_id`が非空であることを発火条件としていたため空振りし（実ログ中の補完メッセージ0件）、`current_task_id`がtask_4_2に固定されたまま空転した。安全網をどこまで広げるか。 |
+| **決定理由** | LLMが構造化フィールドを空にしたまま情報を自然文側へ置くドリフトは、BL-206（`phase_id: ""`）に続く2例目であり、この運用モデルの反復傾向として扱うべき段階に来た。したがって「構造化フィールドが埋まっている」という前提に依存した安全網は、それ自体がもう一段の安全網を必要とする。一方で自然文からのtask_id推定は、差し戻し文や引継ぎ文が複数タスクへ言及するのが常態であるため、単純に「最初に見つかったものを採る」と誤った先読み切替を引き起こす——BL-176の未承認ゲートやBL-125の未解決issueゲートが守ろうとしている「承認されていないタスクへ勝手に進まない」という不変条件を、安全網自身が破壊しかねない。そこで、推定は実在task_idかつ離脱元を除いた候補が**一意に定まる場合に限る**フェイルクローズとし、曖昧なら補完せず従来どおり停止する。停滞は検知可能（Reflectionのstagnant判定）だが、誤った先読み切替は静かに状態を壊すため、両者を天秤にかければ後者を避ける方が損失が小さい。 |
+| 決定内容 | 遷移意図の回収を3段構成とする。①`advances_to_task_id`がLLMから明示されていればそれを最優先（従来どおり）、②省略時はDirectiveの構造化`task_id`から補完（BL-139、従来どおり）、③それも空の場合に限り、Directiveの`topic`・`content`・`rationale`・`owned_variable_values`の自然文から計画に実在するtask_idを推定する（BL-211）。③は離脱元task_idを除外したうえで候補が一意のときだけ採用し、複数候補なら警告のみを出して補完しない。`status="Deferred"`の除外と`target_role == "user"`限定というBL-139の既存ガードは③にも継承する。 |
+| 影響 | `cela_main.py`（`_infer_directive_target_task_ids`新設、`decision_extractor_node`のBL-139補完ブロック）、`tests/test_bl211_directive_task_id_inference.py`。 |
+| 関連 BL | [BL-211](back_log/issue_backlog.md#bl-211-bl-139の遷移補完がdirectiveのtask_idが空文字の場合に空振りしタスク切替が永久に成立しない)、BL-139、BL-210、BL-206、BL-039 |
+
+---
+
+### D-186: Deliverableの「ホワイトボード済みか」の判定は、agreements側の文字列表現ではなくwhiteboard_draftsテーブルの実在を権威とする
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | `log/2026-08-11/1034`で、DetectorとUserがtask_4_2の承認撤回にaction_type=SUPERSEDE＋200字以下の短い無効化理由文（BL-062が想定した「ホワイトボードには触れない」用途）を使った結果、新しく「有効」になったDeliverable行のdecision_whatがその短い理由文そのものになり`WHITEBOARD:`プレフィックスを失った。後続のUPDATE(edits)は`old_content.startswith("WHITEBOARD:")`で「ホワイトボード済みか」を判定していたためFalseと誤判定し、短い理由文に対してExpertの実在するold_textを照合してしまい、editsが17回連続で失敗した。whiteboard_draftsテーブル自体には実データが無傷で残っていたにもかかわらず、判定ロジックが別のテーブル（agreements）の、しかも用途次第で信頼できなくなる文字列表現に依存していたことが原因である。この判定をどう直すか。 |
+| **決定理由** | BL-131（`get_latest_whiteboard`はphase_idをWHERE句に含めずtask_id単独で検索する）・BL-206（`_find_active_deliverable_agreement`もtask_id単独で検索し、phase_id不一致は警告に留める）は、いずれも同じ教訓——「agreements側に記録された文字列（phase_idやdecision_whatの形式）は、LLMの出力揺れやSUPERSEDEの用途分岐によって容易に信頼できなくなるため、真に権威とすべきは実データを保持する側のテーブル（whiteboard_drafts）である」——を別の角度から確立していた。今回の`is_whiteboard`判定もまったく同じ構造の脆弱性であり、対症療法（SUPERSEDEの短文分岐で`content`にWHITEBOARD:ポインタを人工的に埋め込む等）ではなく、既に確立された設計方針を一貫して適用する方が、将来同種の経路（SUPERSEDE以外の新しいaction_typeや呼び出し元）で同じ症状が再発するのを防げる。 |
+| 決定内容 | `_commit_agreement_from_tool`のUPDATE分岐における`is_whiteboard`判定を、`old_content.startswith("WHITEBOARD:")`から`get_latest_whiteboard(conn, run_id, phase_id, tid) is not None`へ変更する。SUPERSEDEの「短い理由文はホワイトボードに触れない」という既存の挙動（BL-062）自体は変更しない——変わるのは、その後のUPDATE(edits)が「ホワイトボード済みか」をどこで判定するかのみである。 |
+| 影響 | `cela_main.py`（`_commit_agreement_from_tool`）、`tests/test_bl212_supersede_short_reason_orphans_whiteboard.py`。 |
+| 関連 BL | [BL-212](back_log/issue_backlog.md#bl-212-supersedeの短い無効化理由文がactiveなdeliverable行のwhiteboardプレフィックスを失わせeditsを永久失敗させる)、BL-062、BL-080、BL-131、BL-206 |
+
+---
+
 ## 未決定（pending）
 
 ---

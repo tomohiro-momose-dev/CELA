@@ -242,6 +242,8 @@
 | BL-208 | 低 | `web_tools.py`（`_MAX_FETCH_BYTES`定数） | ユーザーが「web検索のpdfが2MBに引っかかることがしばしばある」と報告し、「5MB〜10MB程度まで増やしてください」と定数変更を承認（AGENTS.md §7）。政府・自治体配布のPDF一次資料はページ数・図表が多く2MBを超える例が実運用で頻発していた。**実装完了（`done`）**：`_MAX_FETCH_BYTES`を2MB→8MB（要求範囲5〜10MBの中間値）へ変更。HTML/PDF共通の上限であり、この定数を参照する`tests/test_bl184_web_tools.py`のサイズ上限拒否テストは`web_tools._MAX_FETCH_BYTES`を動的参照しているため無改修で追随、47件通過。`python -m py_compile`合格。 | P3 |
 | BL-209 | 高 | `cela_main.py`（`call_orchestrator`のプロンプト、BL-078の`focus_guidance`指示ブロック直後） | ユーザーが「0016のログを見るとまたtask_2_3で空転しています」と報告。BL-207修正後もtask_2_3が承認に至らない空転が続いていたため調査したところ、今回はBL-181差し戻し（`major`）は再発しておらず、別種の空転と判明。決定的だったのは、Detector自身が受入基準3項目すべてを`criteria_status: [true, true, true]`で**充足済みと判定した後も**User AIが承認せず、Orchestratorが次のExpertへ渡す`focus_guidance`が「各路線で『予約到着数→実効供給力→予約処理能力→SLA内処理件数→超過・補完・重大未充足量』を時間帯別に接続」「補完交通は…複数シナリオで算定」「冬季は…通常運行、区間短縮、運休、再開を再現可能に」と、**task_2_3のacceptance_criteria（3項目：同一単位での比較／未充足需要と補完手段の明示／採用根拠の説明）に一切書かれていない新規の成果物・分析・モデルを要求していた**こと。BL-196（task_planner）・BL-197（User AI Stage3/4）で同種の「要求水準の青天井」は既に塞いでいたが、**Orchestratorの`focus_guidance`だけが素通しのまま残っていた**（BL-078導入時にこの観点が存在しなかったため）。ラウンドを重ねるたびに要求が具体化・高度化し、受入基準を満たしても完了しない構造になっていた。**実装完了（`done`）**：`call_orchestrator`のプロンプトのBL-078ブロック直後へ、focus_guidanceはacceptance_criteriaを**達成しやすくするための着眼点**であり**新しい要求項目を追加する場所ではない**旨のガードレールを追加。受入基準に無い成果物・分析・モデル（時間帯別シミュレーション、複数シナリオの感度分析、状態遷移モデル、追加の判定軸等）を新たに義務付けないこと、既に充足済みの項目にさらに高い水準を求めないことを明記し、実ログ（`log/2026-08-11/0016`）を根拠として併記した。配置はBL-104/BL-114のプロンプトキャッシュ方針（固定指示文を先頭・動的内容を末尾）を壊さない位置を選定。新規テスト`tests/test_bl209_orchestrator_focus_guidance_scope.py`6件、オフライン全テストスイート1043件通過。詳細は[BL-209詳細](#bl-209-orchestratorのfocus_guidanceに要求水準の上限が無くacceptance_criteriaを超える要求を毎ラウンド積み増す)を参照。 | P1 |
 | BL-210 | 高 | `cela_main.py`（`_resolve_task_transition`のphase解決ロジック） | ユーザーが「0118のログを確認、議論停滞の原因は？」と依頼。`log/2026-08-11/0118`でReflectionが`stagnant`と判定しシステムがHALTしていた。原因を追うと、User承認後に`call_decision_extractor`が`{"advances_to_phase_id": null, "advances_to_task_id": "task_4_0"}`を8回にわたり正しく抽出していたにもかかわらず、毎回「⚠️ 存在しないtask_id 'task_4_0' への遷移要求を無視しました」で拒否され、current_task_idがphase_3のtask_3_2に固定されたままだったことが判明。`_resolve_task_transition`（`cela_main.py:11707`）は`advances_to_phase_id`が省略された場合に**探索対象フェーズをcurrent_phaseへ決め打ち**していたため、`task_4_0`（phase_4所属）を`task_3_2`の所属フェーズ（phase_3）のタスク一覧から探し、必ず「存在しない」と判定していた——実際にはtask_4_0はDBに受入基準まで定義された正式なタスクとして存在していた。直後（`cela_main.py:11767`）にBL-191で定義済みの`_find_phase_containing_task`（task_idの所属フェーズを全フェーズ横断で探すヘルパー）が既にあったが、`redirect_backward`専用経路でのみ使われ、この自由文脈`advances_to_task_id`抽出経路には配線されていなかった。**実装完了（`done`）**：`advances_to_phase_id`が省略され`advances_to_task_id`がcurrent_phaseに存在しない場合、`_find_phase_containing_task`で全フェーズ横断探索してから最終的に「存在しない」と判定するよう変更。あわせて、探索で見つかったフェーズがcurrent_phaseと異なる場合はcurrent_phaseも追従して更新するようにし（従来はadvances_to_phase_idが明示された時にしか更新しておらず、current_task_idとcurrent_phaseが不整合になるリスクがあった）、BL-125（未解決issueゲート）・BL-176（未承認ゲート）は変更後の経路にも引き続き適用されることを確認した。新規テスト`tests/test_bl210_cross_phase_transition.py`7件、関連の既存テスト（BL-125/136/139/146/154/157/160/176/181/182/183/190/191/206系）185件を含め無退行、オフライン全テストスイート1143件通過。詳細は[BL-210詳細](#bl-210-_resolve_task_transitionがadvances_to_phase_id省略時にcurrent_phaseへ決め打ちしフェーズをまたぐ遷移を常に拒否する)を参照。 | P1 |
+| BL-211 | 高 | `cela_main.py`（`decision_extractor_node`のBL-139補完ブロック、`_infer_directive_target_task_ids`） | ユーザーが「0941ログの続き、停滞の原因は」と依頼。BL-210修正後の実ドライラン`log/2026-08-11/0941`で、今度はtask_4_2→task_4_3の切替が成立せず、Expertが「実行コンテキストがtask_4_2のまま」と応答し続ける同型の空転が再発した。User AIはtask_4_2を承認しtask_4_3を明示指示しており、Detectorも`criteria_status:[true,true,true]`／`risk=low, constraint_issue=none`で追認していたが、`call_decision_extractor`は`advances_to_task_id: null`を返し、さらに移行意図を表すDirectiveイベントも`phase_id`・`task_id`ともに空文字で、移行先が`topic`（「task_4_3運賃・住民負担配慮の設計着手指示」）と`owned_variable_values.対象タスク`の自然文にしか存在しない形で返っていた。この抽出漏れを救うはずの[BL-139](#bl-139-decision_extractor_nodeのtransition抽出がllm出力の1項目に依存しており明示的な次タスク指示があってもcurrent_task_idが更新されないことがあった)の安全網は補完条件にDirectiveの`task_id`が非空であることを要求していたため空振りし（実ログ中にBL-139の補完メッセージは0件）、安全網が二重に外れて`current_task_id`がtask_4_2に固定されたままになった。**実装完了（`done`）**：Directiveの`task_id`が空の場合に限り、`topic`・`content`・`rationale`・`owned_variable_values`の自然文から計画に実在するtask_idを推定する第2段フォールバック`_infer_directive_target_task_ids`を追加。候補が一意に定まるときだけ補完するフェイルクローズとし、複数タスクへ言及する差し戻し文での誤った先読み切替を防ぐ。離脱元task_idは候補から除外し自己遷移を起こさない。[BL-039](#bl-039-decision_extractorが出力するtask_idの表記ゆれドット-vs-アンダースコアによりタスク遷移がドライラン全体で1回も成功していない)のドット区切り正規化も踏襲。新規テスト`tests/test_bl211_directive_task_id_inference.py`11件、オフライン全テストスイート1154件通過。詳細は[BL-211詳細](#bl-211-bl-139の遷移補完がdirectiveのtask_idが空文字の場合に空振りしタスク切替が永久に成立しない)を参照。 | P1 |
+| BL-212 | 高 | `cela_main.py`（`_commit_agreement_from_tool`のis_whiteboard判定） | ユーザーが「1034ログ、edit失敗が連発」と報告。BL-211修正の検証run（`log/2026-08-11/1034`）で、task_4_2の承認撤回中にExpertの`write_agreement(edits=...)`が17回連続で「old_textが現在のホワイトボード内容に見つかりませんでした（緩い一致0件）」に失敗した。`read_whiteboard_excerpt`では同じ語句がmatch_type='exact'で存在確認できており、`whiteboard_drafts`側の実データは無傷だった。原因は、DetectorとUserが承認撤回のために`action_type=SUPERSEDE`＋200字以下の短い無効化理由文（[BL-062](#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)が想定した「ホワイトボードには触れない」用途）を使ったこと。[BL-080](#bl-080-write_agreementのsupersedeがdeliverableの全文更新を破棄し実質何もしないツール呼び出しになっていた)のSUPERSEDE分岐はraw_content>200字のときだけ`apply_whiteboard_patch`を呼ぶため、短い理由文の場合は`content=raw_content`のままDBへ書き込まれ、新しく「有効」になったDeliverable行のdecision_whatが短い理由文そのものになり`WHITEBOARD:`プレフィックスを失う。次にExpertが`UPDATE(edits=...)`を送ると、`is_whiteboard = old_content.startswith("WHITEBOARD:")`という旧判定が`False`になり、`base_content=old_content`（短い理由文）に対して実際のホワイトボード引用を照合するため必ず0件一致で失敗し続ける。**実装完了（`done`）**：[BL-131](#bl-131-task_plannerの正式なフェーズタスク計画に存在しないtask_idtask_1_1_review等でwrite_agreementwhiteboardが作成されてしまう構造的リスク)・[BL-206](#bl-206-write_agreementのedits照合が実際には空のホワイトボード内容に対して行われ本来一致するはずのold_textが繰り返し不一致になる)と同じ設計方針（task_idを権威としagreements側の文字列表現は当てにしない）に揃え、`is_whiteboard`の判定を`get_latest_whiteboard(conn, run_id, phase_id, tid) is not None`（whiteboard_draftsに実際にバージョンが存在するか）へ変更した。新規テスト`tests/test_bl212_supersede_short_reason_orphans_whiteboard.py`7件（うち3件は修正前ロジックへ戻すと実際に失敗することを確認済み）、オフライン全テストスイート1161件通過。詳細は[BL-212詳細](#bl-212-supersedeの短い無効化理由文がactiveなdeliverable行のwhiteboardプレフィックスを失わせeditsを永久失敗させる)を参照。 | P1 |
 
 ---
 
@@ -6898,6 +6900,200 @@ BL-125（離脱task の未解決issueブロック）・BL-176（離脱task の�
 
 ---
 
+### BL-211: BL-139の遷移補完がDirectiveの`task_id`が空文字の場合に空振りし、タスク切替が永久に成立しない
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | [BL-139](#bl-139-decision_extractor_nodeのtransition抽出がllm出力の1項目に依存しており明示的な次タスク指示があってもcurrent_task_idが更新されないことがあった)（本修正が拡張する安全網の導入元）、[BL-210](#bl-210-_resolve_task_transitionがadvances_to_phase_id省略時にcurrent_phaseへ決め打ちしフェーズをまたぐ遷移を常に拒否する)（同じ「タスク切替が成立しない」症状の別原因、直前に修正済み）、[BL-206](#bl-206-write_agreementのedits照合が実際には空のホワイトボード内容に対して行われ本来一致するはずのold_textが繰り返し不一致になる)（同じ「LLMが構造化フィールドを空文字で返す」ドリフトの別事例）、[BL-039](#bl-039-decision_extractorが出力するtask_idの表記ゆれドット-vs-アンダースコアによりタスク遷移がドライラン全体で1回も成功していない)（task_id表記ゆれの正規化、推定側でも踏襲） |
+
+**内容:**
+
+ユーザーが「0941ログの続き、停滞の原因は」と依頼。BL-210を修正した後の実ドライラン
+`log/2026-08-11/0941`で、今度は**task_4_2 → task_4_3**の切替が成立しない同型の空転が再発した。
+
+- ラウンド40でUser AIが**task_4_2を承認し、task_4_3「運賃・住民負担配慮の設計」を明示指示**
+- Detectorも`criteria_status:[true,true,true]` / `risk=low, constraint_issue=none`で追認
+- しかし`current_task_id`は`task_4_2`のまま。ログ全体で`current_task_id を 'task_4_3' に更新`は
+  一度も出力されていない（更新ログはtask_4_0 / task_4_1 / task_4_2の3回で停止）
+- 結果、Expertは「task_4_3は未着手、コンテキストがtask_4_2のまま」と応答し続け、
+  ホワイトボードは`phase_4_task_4_2_V17.md`まで版だけが増え続けた
+
+BL-210とは異なり、`存在しないtask_id ... への遷移要求を無視しました`という**拒否ログすら出ていない**。
+遷移要求そのものが`_resolve_task_transition`へ到達していなかった。
+
+**根本原因：**
+
+`call_decision_extractor`が該当ターンで返したのは次のとおり。
+
+```json
+"advances_to_phase_id": null,
+"advances_to_task_id": null
+```
+
+移行意思自体はDirectiveイベントとして抽出できていたが、**その構造化フィールドが空文字**だった。
+
+```json
+{
+  "entry_type": "Directive",
+  "topic": "task_4_3運賃・住民負担配慮の設計着手指示",
+  "phase_id": "",
+  "task_id": "",
+  "owned_variable_values": {"対象タスク": "task_4_3"}
+}
+```
+
+つまり移行先`task_4_3`は`topic`と`owned_variable_values`の**自然文にしか存在しなかった**。
+
+まさにこの`advances_to_task_id`抽出漏れを救うために導入されたのがBL-139の安全網だが、
+その発火条件はDirectiveの構造化フィールド`task_id`が非空であることを前提としていた。実ログ中に
+BL-139の補完メッセージは**0件**であり、安全網が空振りしたことが裏付けられる。
+
+事故の連鎖は次の二重の抜けによる。
+
+1. LLMが`advances_to_task_id`をnullで返す（BL-139が想定した既知の抽出漏れ）
+2. 加えて、代替シグナルであるDirectiveの`task_id`まで空文字だった（BL-139の想定外）
+
+なお`phase_id`が空文字になるドリフトはBL-206で観測したものと同型であり、このモデルは
+構造化フィールドを空にしたまま情報を自然文側へ置く傾向を反復して示している。BL-206は
+「空文字は欠損とみなしてフォールバックする」という受け側の修正で対応したが、本件は
+「構造化フィールドが空でも自然文から回収する」という一段深いフォールバックを要した。
+
+**対応（実装済み）：**
+
+`_infer_directive_target_task_ids`（`cela_main.py`、`_find_phase_containing_task`の直後）を新設し、
+`decision_extractor_node`のBL-139補完ブロックへ第2段フォールバックとして配線した。
+
+- **第1段（BL-139、従来どおり優先）**：Directiveの構造化`task_id`が有効なら即座に採用する
+- **第2段（BL-211、第1段が空振りした場合のみ）**：`task_id`が空のDirectiveについて、
+  `topic`・`content`・`rationale`・`owned_variable_values`の値を連結した文字列から
+  task_idパターンを抽出し、**計画に実在するtask_id**（`task_id_to_phase_id`に
+  存在するもの）だけを候補とする
+- **フェイルクローズ**：候補が**一意に定まるときだけ**補完する。「task_4_3ではなくtask_4_2の
+  修正を先に」「運賃はtask_5_2へ、感度分析はtask_5_3へ」のように複数タスクへ言及する
+  差し戻し・引継ぎ文で、誤った先読み切替が起きないようにするため。候補が複数の場合は
+  警告のみを出力して補完を見送る
+- **離脱元の除外**：現在の`current_task_id`は候補から除外し、自己遷移を起こさない
+- **表記ゆれ対応**：BL-039と同様、会話文中のドット区切り（`task_4.3`）もアンダースコアへ
+  正規化してから実在判定する
+- `status="Deferred"`（BL-082の明示的先送り）の除外、`target_role == "user"`限定という
+  BL-139の既存ガードはそのまま維持する
+
+**検証：**
+
+新規テスト`tests/test_bl211_directive_task_id_inference.py`11件。推定ヘルパ単体（実インシデントの
+topic＋owned_variable_valuesからの抽出、ドット区切り、計画に無いtask_idの除外）、補完ロジック
+（実インシデント再現、複数候補時のフェイルクローズ、離脱元のみ言及時の自己遷移抑止）、
+非退行（BL-139の第1段優先、Deferred除外、明示`advances_to_task_id`の非上書き、Expertロール除外）、
+および`decision_extractor_node`が実際に推定ヘルパを呼んでいることのソースレベル固定
+（テスト側の写しと本体の配線が乖離しても検知できるようにするため）を検証。
+オフライン全テストスイート1154件通過。`python -m py_compile`合格。
+
+---
+
+### BL-212: SUPERSEDEの短い無効化理由文が、activeなDeliverable行のWHITEBOARDプレフィックスを失わせ、editsを永久失敗させる
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | [BL-062](#bl-062-detector等のmajor判定rejected書き込みが既存agreementを構造的に上書き無効化できないwrite_agreement権限モデルの監査ガバナンス欠落)（短い無効化理由文によるSUPERSEDEの導入元）、[BL-080](#bl-080-write_agreementのsupersedeがdeliverableの全文更新を破棄し実質何もしないツール呼び出しになっていた)（SUPERSEDEの200字閾値によるホワイトボード全文置換ロジックの導入元）、[BL-131](#bl-131-task_plannerの正式なフェーズタスク計画に存在しないtask_idtask_1_1_review等でwrite_agreementwhiteboardが作成されてしまう構造的リスク)・[BL-206](#bl-206-write_agreementのedits照合が実際には空のホワイトボード内容に対して行われ本来一致するはずのold_textが繰り返し不一致になる)（「task_idを権威としagreements側の文字列表現は当てにしない」という本修正が踏襲した設計方針の先行例）、BL-211（同一runの直前の修正、切替が成立してから初めて到達した状態） |
+
+**内容:**
+
+ユーザーが「1034ログ、edit失敗が連発」と報告。BL-211修正の検証run（`log/2026-08-11/1034`、
+`checkpoint_id=1f19521c-4bc7-669e-8132-efb4949b1bda`から再開）で、Userがtask_4_2の承認を
+撤回し修正を指示した直後、Expertの`write_agreement(action_type=UPDATE, edits=...)`が
+**17回連続**で次のエラーに失敗した。
+
+```
+⚠️ [edits失敗] edits[0]: old_textが現在のホワイトボード内容に見つかりませんでした（緩い一致0件）。
+```
+
+9文字・16文字・24文字といった極めて短いold_textでも失敗し、事前に`read_whiteboard_excerpt`で
+`match_type='exact'`として存在確認したばかりの語句すら一致しなかった。BL-206と類似の症状だが、
+BL-206の2つの原因（entry_typeドリフト・phase_id空文字ドリフト）はいずれも該当しないことを
+DB調査で確認した。
+
+**根本原因：**
+
+`cela.db`のagreements行を直接確認したところ、task_4_2のDeliverable系列に次の3行が見つかった。
+
+```
+AG-1786411194396  action_type=SUPERSEDE  proposed_by=detector
+  decision_what: "task_4_2の承認維持・task_4_3移行の根拠となった承認済み成果物を無効化する。"（45字）
+AG-1786411230279  action_type=UPDATE     proposed_by=user
+  decision_what: "task_4_2の承認およびtask_4_3への移行判断を撤回し...Rejectedとする。"（62字）
+AG-1786412167516  action_type=UPDATE     proposed_by=user
+  decision_what: "task_4_2の承認およびtask_4_3への移行判断を明確に撤回し...task_4_3以降へ進めない。"（105字）
+```
+
+いずれも`decision_what`が短い**理由文そのもの**であり、`WHITEBOARD:phase_4:task_4_2`という
+本来のポインタ形式になっていない。
+
+`_commit_agreement_from_tool`のSUPERSEDE分岐（BL-080）は次のロジックだった。
+
+```python
+content = raw_content
+if entry_type == "Deliverable" and action_type in ("CREATE", "SUPERSEDE") and len(raw_content) > 200:
+    v = apply_whiteboard_patch(conn, run_id, phase_id, tid, raw_content, ...)
+    content = f"WHITEBOARD:{phase_id}:{tid}"
+```
+
+これはBL-062が想定した「Detectorが短い理由文だけでDeliverableを無効化し、ホワイトボード本文
+には触れない」という用途を正しく実現していた（`len(raw_content) > 200`が偽のため
+`apply_whiteboard_patch`は呼ばれない）。しかし`content = raw_content`のままDBへINSERTされる
+ため、新しく「有効」（status≠Superseded）になったDeliverable行のdecision_whatが、実際の
+ホワイトボード内容ではなく短い理由文そのものになってしまう。
+
+次にExpertが同じtopicへ`UPDATE(edits=...)`を送ると、`_commit_agreement_from_tool`のUPDATE
+分岐は次の判定を使っていた。
+
+```python
+old_content = target["decision_what"]          # ← 短い理由文
+is_whiteboard = old_content.startswith("WHITEBOARD:")   # ← False と誤判定
+...
+base_content = old_content if not is_whiteboard else latest["content"]
+merged, err = _apply_text_edits(base_content, edits)    # ← 短い理由文に対してold_textを照合
+```
+
+`whiteboard_drafts`テーブル自体には実際の本文（V17まで）が無傷で残っているにもかかわらず、
+`is_whiteboard`の判定材料が「直前の`agreements`行のdecision_what文字列」という、SUPERSEDEの
+用途次第で信頼できなくなるフィールドに依存していたため、editsの照合対象が常に間違った
+（短い）文字列になっていた。
+
+**対応（実装済み）：**
+
+`is_whiteboard`の判定を、`old_content`の文字列プレフィックス検査から
+
+```python
+is_whiteboard = get_latest_whiteboard(conn, run_id, phase_id, tid) is not None
+```
+
+へ変更した。BL-131（`get_latest_plan_draft_by_task_id`／`get_latest_whiteboard`はphase_idを
+WHERE句に含めずtask_id単独で検索する）・BL-206（`_find_active_deliverable_agreement`もtask_id
+単独で検索する）と同じ設計方針——**agreements側の文字列表現がどうであれ、whiteboard_drafts
+テーブルに実際にバージョンが存在するかどうかを直接見る**——に揃えたことで、SUPERSEDEが
+何回短い理由文を挟んでも、editsは常に`whiteboard_drafts`の最新版を正しく参照できるようになる。
+
+なお、SUPERSEDE自体の「短い理由文はホワイトボードに触れない」という挙動（BL-062の意図）は
+変更していない。変わったのは、その後のUPDATE(edits)がどこを見て「ホワイトボード済みか」を
+判定するかだけである。
+
+**検証：**
+
+新規テスト`tests/test_bl212_supersede_short_reason_orphans_whiteboard.py`7件。実インシデントの
+再現（短い理由文によるSUPERSEDEの直後にeditsが成功すること）、3件連鎖（detector 1回＋user 2回、
+実ログと同じ順序）での再現、is_whiteboard判定ロジックのソースレベル固定、非退行
+（200字超の全文置換SUPERSEDEは従来通り新バージョンを作ること、SUPERSEDEを経由しない通常の
+editsフローが壊れていないこと、ホワイトボードが一度も作られていないtask_idへのeditsは従来通り
+拒否されること、短い理由文SUPERSEDEでも旧行のSuperseded化自体は機能すること）を検証。
+このうち3件は、修正前のロジック（`old_content.startswith("WHITEBOARD:")`）へ戻すと実際に
+失敗することを確認した上で固定した。オフライン全テストスイート1161件通過。`python -m py_compile`合格。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -7076,3 +7272,6 @@ BL-125（離脱task の未解決issueブロック）・BL-176（離脱task の�
 | 2026-08-09 | ユーザーが「実装に移ってください」と指示。BL-194のS1〜S8を因果的に結合したまま一括実装した（設計書§7の「S1〜S6を先行リリース」という段階リリース推奨は、実装前に私が再検証で誤りと訂正済みだったため不採用）。①述語の単一化（`_is_issue_effectively_deferred`/`_get_actionable_escalated_issues`新設）で、Camp A（BL-136強制解決文・BL-145計画化）とCamp B（BL-096/144停滞判定・facilitator名指し）の重複フィルタ4箇所を一元化（BL-125遷移ゲートのみ安全装置として明示的に例外で据え置き）。②自己先送り（defer_to_task_id==実行中タスク自身）をtool boundaryで拒否（`_write_issue_impl`のDEFER分岐）。③Reflection/Facilitatorへ軽量スコープ要約`_build_current_task_scope_brief`を新設・注入（`_build_task_scope_context`は無関係な50KB超のホワイトボード全文を含むため再利用せず却下）。④第3のissue状態`ACKNOWLEDGE`をstatus語彙拡張ではなくTTL付き補助列（`acknowledged_until_round`等3列）で実装しD-079/D-080の不変条件を保護、定数はユーザー承認済み値（TTL=3ラウンド・累計上限2回）で実装。⑤DEFER成功時に受け皿タスクのスコープをエコーバック（機械的ゲートは追加せずプロンプト誘導のみ）。⑥BL-103 pinを「要対応」「対応予定確定済み」「対応中」の3見出しへ分離（和集合で従来の可視性を保存）。実装中に既存テスト2件（`test_bl145_issue_driven_plan_formalization.py`/`test_bl167_defer_to_task_id_completed_target.py`）のフィクスチャが偶然「自己先送り」または「BL-194が意図的に変更する挙動（正当にDEFER済みの懸念はもはやstagnantの根拠にならない）」を検証していたことが判明し、コメント付きで修正した（テスト側の期待値を弱めるのではなく、フィクスチャの実態を読み替える形）。新規テスト`tests/test_bl194_deferred_issue_consistency.py`26件、`tests/test_bl194_issue_acknowledge.py`18件を追加。既存の関連テスト134件（BL-096/103/123/136/144/145/154/157/158/167系）およびBL-186/190/191/192/193系69件と合わせて無退行を確認、オフライン全テストスイート885件通過、`python -m py_compile`合格、`check_docs_consistency.py`合格。 |
 | 2026-08-11 | ユーザーが「0016のログを見るとまたtask_2_3で空転しています」と報告。調査の結果、BL-207の修正自体は効いており（BL-181名指しの`major`差し戻しは再発せず、Detector判定は一貫して`minor`/`none`）、別種の空転と判明。決定的だったのは、Detectorが受入基準3項目すべてを`criteria_status=[true,true,true]`で充足済みと判定した後もUser AIが承認せず、Orchestratorの`focus_guidance`がtask_2_3のacceptance_criteria（3項目）に一切書かれていない時間帯別シミュレーション・複数シナリオの補完交通モデル・冬季運休の状態遷移モデルを要求し続けていたこと。BL-196（task_planner）・BL-197（User AI Stage3/4）で同種の「要求水準の青天井」は塞いでいたが、BL-078で導入した`focus_guidance`という第3の経路だけが素通しだった。ユーザーの「Orchestratorのfocus_guidanceにガードレールを入れてください」を受けBL-209として実装・`done`化し、D-182に「要求を出しうる全経路に同じ上限を置く」という方針として記録。新規テスト6件、オフライン全テストスイート1043件通過。あわせて同メッセージの「やはりedit失敗が連発しています」を受けBL-206を再調査し、**根本原因を確定**：`decision_extractor_node`のUPDATE分岐がtopic文字列だけでsupersede対象を探し（`entry_type`も`phase_id`も条件に無い）、アクティブなDeliverableをSuperseded化した上で`_find_active_deliverable_agreement`が見つけられない識別子（`entry_type='Decision'`、または`phase_id=''`）で置き換えるため、Deliverableが孤児化し`base_content=""`で全editsが失敗していた。0016のtask_2_3（entry_typeドリフト3回）、1905のtask_1_4・2100のtask_2_2（phase_idドリフト）の計3タスクで、孤児化からExpertのSUPERSEDE自己修復までの窓がedits失敗クラスタと完全一致することを実DBで検証。修正方針3案を提示し、実装はユーザー承認待ち。 |
 | 2026-08-11 | ユーザーが「実行してください」とBL-209（Orchestratorガードレール）とBL-206（edit失敗の修正）の両方を承認。BL-209は既に実装・コミット済み。BL-206は3点の修正を実装：①`decision_extractor_node`のsupersedeループへ`entry_type`一致条件を追加（entry_typeドリフトによるDeliverable乗っ取りを防止）、②`phase_id`のフォールバックを`item.get(key, default)`から`item.get(key) or default`へ修正（`task_id`と同型、BL-161の同種バグをdecision_extractor経路にも適用）、③`_find_active_deliverable_agreement`をBL-131/`get_latest_whiteboard`と同じtask_id単独検索＋不一致時警告のみの設計へ変更しフェイルセーフ化。D-183として「識別は一意性の根拠となる列で検索し、他の列は完全一致ではなくフェイルセーフな整合性チェックに留める」という設計方針を記録。新規テスト`tests/test_bl206_deliverable_orphaning.py`6件、既存`test_bl161_write_agreement_phase_id_fallback.py`の1件は仕様変更（task_idのみでも発見できるようになった）に合わせ期待値を反転。作業中、`pytest -k "not live"`という除外フィルタが「deliverable」を「live」の部分文字列として誤検出し、deliverable関連テストを大量に除外していたことが判明（本セッションのメモリへ記録）。正しい除外指定（`--deselect`によるファイル・テスト名指定）でオフライン全テストスイート1136件通過（既知flaky1件・live API 4件を除く）を確認。`python -m py_compile`合格、`check_docs_consistency.py`合格。 |
+| 2026-08-11 | ユーザーが「0118のログを確認、議論停滞の原因は？」と依頼。Reflectionが`stagnant`と判定しシステムがHALTしていた実ドライラン（`log/2026-08-11/0118`）を調査し、BL-210を新規起票・`done`化。User承認後に`call_decision_extractor`が`{"advances_to_phase_id": null, "advances_to_task_id": "task_4_0"}`を8回正しく抽出したにもかかわらず、`_resolve_task_transition`が探索対象フェーズをcurrent_phase（phase_3）へ決め打ちしていたためtask_4_0（phase_4所属）を常に「存在しない」と拒否し続けていたことを特定。BL-191で定義済みの`_find_phase_containing_task`（task_idの所属フェーズを全フェーズ横断で探すヘルパー）が既に存在していたのに、この自由文脈`advances_to_task_id`抽出経路には配線されていなかった。ユーザーの「修正して」を受け、`advances_to_phase_id`省略時に全フェーズ横断探索してからcurrent_phaseへフォールバックするよう修正し、current_phaseの追従更新も追加。D-184として「フェーズ解決はphase_id明示→task_id探索→current_phaseフォールバックの順」という設計方針を記録。新規テスト`tests/test_bl210_cross_phase_transition.py`7件、関連既存185件を含め無退行、オフライン全テストスイート1143件通過。 |
+| 2026-08-11 | ユーザーが「0941ログの続き、停滞の原因は」と依頼。BL-210修正後の実ドライラン`log/2026-08-11/0941`で、今度はtask_4_2→task_4_3の切替が成立しない同型の空転が再発していることを確認し、BL-211を新規起票・`done`化。User AIの明示的なtask_4_3指示とDetectorの全基準充足判定にもかかわらず、`call_decision_extractor`が`advances_to_task_id: null`を返し、かつ代替シグナルであるDirectiveの`task_id`まで空文字（移行先は`topic`と`owned_variable_values`の自然文にのみ存在）だったため、BL-139の安全網が空振りしていた（実ログ中のBL-139補完メッセージ0件）ことを特定。ユーザーの「修正してください」を受け、Directiveの`task_id`が空の場合に自然文から実在task_idを推定する第2段フォールバック`_infer_directive_target_task_ids`を追加し、候補が一意のときだけ補完するフェイルクローズとした。D-185として「遷移意図の回収は構造化フィールド優先・自然文推定は一意性を条件とする最終手段」という設計方針を記録。新規テスト`tests/test_bl211_directive_task_id_inference.py`11件、オフライン全テストスイート1154件通過。 |
+| 2026-08-11 | ユーザーが「1034ログ、edit失敗が連発」と報告。BL-211修正の検証runでtask_4_2承認撤回中にExpertのwrite_agreement(edits=...)が17回連続失敗していることを確認し、BL-212を新規起票・`done`化。DBを直接確認し、DetectorとUserが承認撤回のためaction_type=SUPERSEDE＋200字以下の短い無効化理由文（BL-062が想定した「ホワイトボードには触れない」用途）を使った結果、BL-080のSUPERSEDE分岐が短い理由文をそのままdecision_whatへ書き込みWHITEBOARDプレフィックスを失わせ、後続のUPDATE(edits)のis_whiteboard判定（old_content.startswith("WHITEBOARD:")）が誤ってFalseになっていたことを特定。ユーザーの「修正して」の意図（edit失敗の連発を解消すること）を受け、BL-131・BL-206と同じ設計方針に揃えis_whiteboardの判定をwhiteboard_draftsテーブルの直接参照へ変更した。修正前ロジックへ戻すと新規テスト3件が実際に失敗することを確認した上で固定。D-186として「agreements側の文字列表現ではなくwhiteboard_draftsの実在を権威とする」という設計方針を記録。新規テスト`tests/test_bl212_supersede_short_reason_orphans_whiteboard.py`7件、オフライン全テストスイート1161件通過。 |
