@@ -241,6 +241,7 @@
 | BL-207 | 高 | `cela_main.py`（`call_detector`のuser向け`role_specific_instruction`、BL-181節） | ユーザーの依頼で`log/2026-08-10/2100`（ライブ中のドライラン）のtask_2_3→task_3_1移行の膠着を調査。DBを確認すると該当issue（`winter_vehicle_capex_conflict`）は`defer_to_task_id=task_3_1`が既に設定済みだったにもかかわらず、Userが承認・移行を試みるたびにDetectorが`constraint_issue=major`（BL-181名指し）で差し戻しを繰り返し、ラウンド31から36以上にわたり同じサイクル（承認→差し戻し→撤回→Expertがほぼ同内容を再提出→minor判定→再度承認→また差し戻し）が続いていたことを発見。原因は、`write_issue(DEFER)`が仕様上`status`を`'escalated'`のまま変更せず`defer_to_task_id`のみを記録する設計（BL-136）に対し、実際の遷移をブロックする機械的ゲート（`_get_blocking_issues_for_transition`、BL-125/158）は`defer_to_task_id`の有無を正しく見て先送り済みissueを除外しているのに、**Detector自身のLLM判定に渡すBL-181のプロンプト指示だけが`defer_to_task_id`を一切見ず、`status='escalated'`の残存だけを根拠にし、しかも「今回の発言内で」RESOLVE/DEFERが実行されたことを要求していた**こと。DEFERは一度実行すれば恒久的に記録が残るのに、承認を試みるたびに同じラウンド内での再実行を求める基準になっており、機械的ゲート（正しい）とDetectorの自然文判定（過剰に厳しい）が矛盾し、無限ループを生んでいた。BL-076/BL-193（BL-202/D-176）と同型の「同じ規則を複数箇所に書いた結果、一方だけ更新漏れが起きる」パターン。**実装完了（`done`）**：BL-181の指示文を、`defer_to_task_id`が（いつ設定されたかに関わらず）既に設定済みであれば正式に先送り済みとみなし`major`としないよう修正。`defer_to_task_id`が未設定のまま残るissueがある場合のみ、従来通り`major`で差し戻す。新規テスト`tests/test_bl207_defer_gate_ignores_prior_round.py`5件、既存の`test_bl181_task_transition_block_stops_orchestrator.py`・`test_bl183_task_transition_block_severe_issue_flag.py`を含め無退行、オフライン全テストスイート1037件通過。詳細は[BL-207詳細](#bl-207-bl-181のdetectorプロンプトがdefer_to_task_id設定済みのissueにも毎ラウンド再deferを要求し無限に差し戻し続ける)を参照。 | P1 |
 | BL-208 | 低 | `web_tools.py`（`_MAX_FETCH_BYTES`定数） | ユーザーが「web検索のpdfが2MBに引っかかることがしばしばある」と報告し、「5MB〜10MB程度まで増やしてください」と定数変更を承認（AGENTS.md §7）。政府・自治体配布のPDF一次資料はページ数・図表が多く2MBを超える例が実運用で頻発していた。**実装完了（`done`）**：`_MAX_FETCH_BYTES`を2MB→8MB（要求範囲5〜10MBの中間値）へ変更。HTML/PDF共通の上限であり、この定数を参照する`tests/test_bl184_web_tools.py`のサイズ上限拒否テストは`web_tools._MAX_FETCH_BYTES`を動的参照しているため無改修で追随、47件通過。`python -m py_compile`合格。 | P3 |
 | BL-209 | 高 | `cela_main.py`（`call_orchestrator`のプロンプト、BL-078の`focus_guidance`指示ブロック直後） | ユーザーが「0016のログを見るとまたtask_2_3で空転しています」と報告。BL-207修正後もtask_2_3が承認に至らない空転が続いていたため調査したところ、今回はBL-181差し戻し（`major`）は再発しておらず、別種の空転と判明。決定的だったのは、Detector自身が受入基準3項目すべてを`criteria_status: [true, true, true]`で**充足済みと判定した後も**User AIが承認せず、Orchestratorが次のExpertへ渡す`focus_guidance`が「各路線で『予約到着数→実効供給力→予約処理能力→SLA内処理件数→超過・補完・重大未充足量』を時間帯別に接続」「補完交通は…複数シナリオで算定」「冬季は…通常運行、区間短縮、運休、再開を再現可能に」と、**task_2_3のacceptance_criteria（3項目：同一単位での比較／未充足需要と補完手段の明示／採用根拠の説明）に一切書かれていない新規の成果物・分析・モデルを要求していた**こと。BL-196（task_planner）・BL-197（User AI Stage3/4）で同種の「要求水準の青天井」は既に塞いでいたが、**Orchestratorの`focus_guidance`だけが素通しのまま残っていた**（BL-078導入時にこの観点が存在しなかったため）。ラウンドを重ねるたびに要求が具体化・高度化し、受入基準を満たしても完了しない構造になっていた。**実装完了（`done`）**：`call_orchestrator`のプロンプトのBL-078ブロック直後へ、focus_guidanceはacceptance_criteriaを**達成しやすくするための着眼点**であり**新しい要求項目を追加する場所ではない**旨のガードレールを追加。受入基準に無い成果物・分析・モデル（時間帯別シミュレーション、複数シナリオの感度分析、状態遷移モデル、追加の判定軸等）を新たに義務付けないこと、既に充足済みの項目にさらに高い水準を求めないことを明記し、実ログ（`log/2026-08-11/0016`）を根拠として併記した。配置はBL-104/BL-114のプロンプトキャッシュ方針（固定指示文を先頭・動的内容を末尾）を壊さない位置を選定。新規テスト`tests/test_bl209_orchestrator_focus_guidance_scope.py`6件、オフライン全テストスイート1043件通過。詳細は[BL-209詳細](#bl-209-orchestratorのfocus_guidanceに要求水準の上限が無くacceptance_criteriaを超える要求を毎ラウンド積み増す)を参照。 | P1 |
+| BL-210 | 高 | `cela_main.py`（`_resolve_task_transition`のphase解決ロジック） | ユーザーが「0118のログを確認、議論停滞の原因は？」と依頼。`log/2026-08-11/0118`でReflectionが`stagnant`と判定しシステムがHALTしていた。原因を追うと、User承認後に`call_decision_extractor`が`{"advances_to_phase_id": null, "advances_to_task_id": "task_4_0"}`を8回にわたり正しく抽出していたにもかかわらず、毎回「⚠️ 存在しないtask_id 'task_4_0' への遷移要求を無視しました」で拒否され、current_task_idがphase_3のtask_3_2に固定されたままだったことが判明。`_resolve_task_transition`（`cela_main.py:11707`）は`advances_to_phase_id`が省略された場合に**探索対象フェーズをcurrent_phaseへ決め打ち**していたため、`task_4_0`（phase_4所属）を`task_3_2`の所属フェーズ（phase_3）のタスク一覧から探し、必ず「存在しない」と判定していた——実際にはtask_4_0はDBに受入基準まで定義された正式なタスクとして存在していた。直後（`cela_main.py:11767`）にBL-191で定義済みの`_find_phase_containing_task`（task_idの所属フェーズを全フェーズ横断で探すヘルパー）が既にあったが、`redirect_backward`専用経路でのみ使われ、この自由文脈`advances_to_task_id`抽出経路には配線されていなかった。**実装完了（`done`）**：`advances_to_phase_id`が省略され`advances_to_task_id`がcurrent_phaseに存在しない場合、`_find_phase_containing_task`で全フェーズ横断探索してから最終的に「存在しない」と判定するよう変更。あわせて、探索で見つかったフェーズがcurrent_phaseと異なる場合はcurrent_phaseも追従して更新するようにし（従来はadvances_to_phase_idが明示された時にしか更新しておらず、current_task_idとcurrent_phaseが不整合になるリスクがあった）、BL-125（未解決issueゲート）・BL-176（未承認ゲート）は変更後の経路にも引き続き適用されることを確認した。新規テスト`tests/test_bl210_cross_phase_transition.py`7件、関連の既存テスト（BL-125/136/139/146/154/157/160/176/181/182/183/190/191/206系）185件を含め無退行、オフライン全テストスイート1143件通過。詳細は[BL-210詳細](#bl-210-_resolve_task_transitionがadvances_to_phase_id省略時にcurrent_phaseへ決め打ちしフェーズをまたぐ遷移を常に拒否する)を参照。 | P1 |
 
 ---
 
@@ -6820,6 +6821,83 @@ BL-078本来の意図（1〜3点の着眼点出力）を壊していないこと
 
 ---
 
+### BL-210: `_resolve_task_transition`がadvances_to_phase_id省略時にcurrent_phaseへ決め打ちし、フェーズをまたぐ遷移を常に拒否する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-191（`_find_phase_containing_task`の導入元）、[BL-125](#bl-125-_resolve_task_transitionはissue_logの未解決状態を参照しておらずフェーズ単位の足止めは実装されていない全体停止の安全弁のみ)（未解決issueゲート、変更後も適用継続を確認）、[BL-176](#bl-176-_resolve_task_transitionが離脱先task_idの承認成立を検証しておらずuserが1発言で承認と次タスク指示を同時に行うと状態が壊れうる)（未承認ゲート、変更後も適用継続を確認）、[BL-039](#bl-039-decision_extractorが出力するtask_idの表記ゆれドット-vs-アンダースコアによりタスク遷移がドライラン全体で1回も成功していない)（task_id表記ゆれの正規化、本修正と併存） |
+
+**内容:**
+
+ユーザーが「0118のログを確認、議論停滞の原因は？」と依頼。`log/2026-08-11/0118`で
+Reflectionが`stagnant`と判定し、システムが`HALT`していた。
+
+調査の結果、User承認後に`call_decision_extractor`が
+
+```
+{"advances_to_phase_id": null, "advances_to_task_id": "task_4_0"}
+```
+
+を8回にわたり正しく抽出していたにもかかわらず、毎回
+
+```
+⚠️ [decision_extractor] 存在しないtask_id 'task_4_0' への遷移要求を無視しました。
+```
+
+で拒否され続け、`current_task_id`がphase_3の`task_3_2`に固定されたままだったことが判明。
+Expertは「実行コンテキストがtask_3_2のまま」として`task_4_0`の成果物作成を一切開始できず、
+同一の切替拒否が複数ラウンド続いたことをReflectionが「実質的な停滞」と判定し、システムを
+自動停止させていた。
+
+DBを確認すると、`task_4_0`は受入基準（電話予約手順・本人確認・キャンセル処理等）まで
+定義された正式なタスクとして実在しており、`存在しないtask_id`という判定自体が誤りだった。
+
+**根本原因：**
+
+`_resolve_task_transition`（`cela_main.py:11707`）は、`advances_to_phase_id`が省略された
+場合、探索対象フェーズを**常にcurrent_phaseへ決め打ち**していた。
+
+```python
+target_phase = phase_lookup.get(next_phase_id) if next_phase_id else state.get("current_phase")
+```
+
+`task_4_0`はphase_4に属するが、探索対象は`current_task_id=task_3_2`が属するphase_3に
+固定されるため、phase_3のタスク一覧に`task_4_0`が存在するはずがなく、**必ず「存在しない」
+と判定される**構造になっていた。`call_decision_extractor`が`advances_to_task_id`だけを
+正しく抽出し`advances_to_phase_id`をnullのまま返すケースは珍しくなく、フェーズをまたぐ
+遷移のたびに再発しうる一般的な欠陥だった。
+
+直後（`cela_main.py:11767`）に、BL-191で`redirect_backward`用に定義済みの
+`_find_phase_containing_task`（task_idの所属フェーズを全フェーズ横断で探すヘルパー）が
+既に存在していたが、この自由文脈`advances_to_task_id`抽出の通常経路には一度も配線されて
+いなかった。
+
+**実装完了（`done`）**：
+
+`advances_to_phase_id`が省略された場合、まず`_find_phase_containing_task`で
+`advances_to_task_id`の所属フェーズを全フェーズ横断で探索し（BL-039の正規化前後の両方の
+表記で試行）、それでも見つからない場合のみ従来通りcurrent_phaseへフォールバックするよう
+変更した。あわせて、探索で見つかったフェーズがcurrent_phaseと異なる場合は
+`advances_to_phase_id`が明示されていなくても`current_phase`を追従させるよう修正した
+（従来は`next_phase_id`が明示された時にしか`current_phase`を更新しておらず、
+`current_task_id`だけ新フェーズを指し`current_phase`は旧フェーズのままという不整合が
+起こりうる設計だった）。
+
+BL-125（離脱task の未解決issueブロック）・BL-176（離脱task の未承認ブロック）は、
+フェーズ横断探索で解決した遷移にも従来通り適用されることをテストで確認した。
+
+新規テスト`tests/test_bl210_cross_phase_transition.py`（7件）：フェーズをまたぐ遷移が
+`advances_to_phase_id`無しで解決すること（実インシデントの再現）、ドット区切り表記でも
+機能すること、同一フェーズ内遷移の非退行、存在しないtask_idは全フェーズ探索後も引き続き
+拒否されること、`advances_to_phase_id`明示時は従来通り優先されること、BL-125/BL-176の
+ゲートがフェーズ横断遷移にも適用されること、task_id無しのフェーズのみ遷移の非退行を検証。
+関連の既存テスト（BL-125/136/139/146/154/157/160/176/181/182/183/190/191/206系）185件を
+含め無退行を確認、オフライン全テストスイート1143件通過。`python -m py_compile`合格。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -6997,3 +7075,4 @@ BL-078本来の意図（1〜3点の着眼点出力）を壊していないこと
 | 2026-08-11 | ユーザーが「edit失敗の件ですが、clineに詳細調査させました」とBL-206について別AI（cline）による独立調査結果（「`call_expert`が`_CURRENT_PHASE_ID`を設定しないため`phase_id`が空になる」という仮説）を共有。実コード（`_commit_agreement_from_tool`の`phase_id = args.get("phase_id") or phase_id`、BL-161で既に実装済み）と実ログ（失敗した全呼び出しに`"phase_id"`が明示されていたこと）を突き合わせて検証した結果、症状の特定は妥当だが原因の特定は誤り（BL-161が既に解決した別問題と取り違えている）と判定し、Cline提案の修正は実装しないと結論。BL-206の記録へ検証結果を追記。続けてユーザーが「様子を見ます」と保留を承認し、「web検索のpdfが2MBに引っかかることがしばしばある。5MB〜10MB程度まで増やしてください」と別件（BL-208）の定数変更を依頼。AGENTS.md §7の定数変更手続に従いユーザー承認を得た上で、`web_tools.py`の`_MAX_FETCH_BYTES`を2MB→8MBへ変更、`tests/test_bl184_web_tools.py`（定数を動的参照するため無改修で追随）47件通過を確認しBL-208として`done`起票。 |
 | 2026-08-09 | ユーザーが「実装に移ってください」と指示。BL-194のS1〜S8を因果的に結合したまま一括実装した（設計書§7の「S1〜S6を先行リリース」という段階リリース推奨は、実装前に私が再検証で誤りと訂正済みだったため不採用）。①述語の単一化（`_is_issue_effectively_deferred`/`_get_actionable_escalated_issues`新設）で、Camp A（BL-136強制解決文・BL-145計画化）とCamp B（BL-096/144停滞判定・facilitator名指し）の重複フィルタ4箇所を一元化（BL-125遷移ゲートのみ安全装置として明示的に例外で据え置き）。②自己先送り（defer_to_task_id==実行中タスク自身）をtool boundaryで拒否（`_write_issue_impl`のDEFER分岐）。③Reflection/Facilitatorへ軽量スコープ要約`_build_current_task_scope_brief`を新設・注入（`_build_task_scope_context`は無関係な50KB超のホワイトボード全文を含むため再利用せず却下）。④第3のissue状態`ACKNOWLEDGE`をstatus語彙拡張ではなくTTL付き補助列（`acknowledged_until_round`等3列）で実装しD-079/D-080の不変条件を保護、定数はユーザー承認済み値（TTL=3ラウンド・累計上限2回）で実装。⑤DEFER成功時に受け皿タスクのスコープをエコーバック（機械的ゲートは追加せずプロンプト誘導のみ）。⑥BL-103 pinを「要対応」「対応予定確定済み」「対応中」の3見出しへ分離（和集合で従来の可視性を保存）。実装中に既存テスト2件（`test_bl145_issue_driven_plan_formalization.py`/`test_bl167_defer_to_task_id_completed_target.py`）のフィクスチャが偶然「自己先送り」または「BL-194が意図的に変更する挙動（正当にDEFER済みの懸念はもはやstagnantの根拠にならない）」を検証していたことが判明し、コメント付きで修正した（テスト側の期待値を弱めるのではなく、フィクスチャの実態を読み替える形）。新規テスト`tests/test_bl194_deferred_issue_consistency.py`26件、`tests/test_bl194_issue_acknowledge.py`18件を追加。既存の関連テスト134件（BL-096/103/123/136/144/145/154/157/158/167系）およびBL-186/190/191/192/193系69件と合わせて無退行を確認、オフライン全テストスイート885件通過、`python -m py_compile`合格、`check_docs_consistency.py`合格。 |
 | 2026-08-11 | ユーザーが「0016のログを見るとまたtask_2_3で空転しています」と報告。調査の結果、BL-207の修正自体は効いており（BL-181名指しの`major`差し戻しは再発せず、Detector判定は一貫して`minor`/`none`）、別種の空転と判明。決定的だったのは、Detectorが受入基準3項目すべてを`criteria_status=[true,true,true]`で充足済みと判定した後もUser AIが承認せず、Orchestratorの`focus_guidance`がtask_2_3のacceptance_criteria（3項目）に一切書かれていない時間帯別シミュレーション・複数シナリオの補完交通モデル・冬季運休の状態遷移モデルを要求し続けていたこと。BL-196（task_planner）・BL-197（User AI Stage3/4）で同種の「要求水準の青天井」は塞いでいたが、BL-078で導入した`focus_guidance`という第3の経路だけが素通しだった。ユーザーの「Orchestratorのfocus_guidanceにガードレールを入れてください」を受けBL-209として実装・`done`化し、D-182に「要求を出しうる全経路に同じ上限を置く」という方針として記録。新規テスト6件、オフライン全テストスイート1043件通過。あわせて同メッセージの「やはりedit失敗が連発しています」を受けBL-206を再調査し、**根本原因を確定**：`decision_extractor_node`のUPDATE分岐がtopic文字列だけでsupersede対象を探し（`entry_type`も`phase_id`も条件に無い）、アクティブなDeliverableをSuperseded化した上で`_find_active_deliverable_agreement`が見つけられない識別子（`entry_type='Decision'`、または`phase_id=''`）で置き換えるため、Deliverableが孤児化し`base_content=""`で全editsが失敗していた。0016のtask_2_3（entry_typeドリフト3回）、1905のtask_1_4・2100のtask_2_2（phase_idドリフト）の計3タスクで、孤児化からExpertのSUPERSEDE自己修復までの窓がedits失敗クラスタと完全一致することを実DBで検証。修正方針3案を提示し、実装はユーザー承認待ち。 |
+| 2026-08-11 | ユーザーが「実行してください」とBL-209（Orchestratorガードレール）とBL-206（edit失敗の修正）の両方を承認。BL-209は既に実装・コミット済み。BL-206は3点の修正を実装：①`decision_extractor_node`のsupersedeループへ`entry_type`一致条件を追加（entry_typeドリフトによるDeliverable乗っ取りを防止）、②`phase_id`のフォールバックを`item.get(key, default)`から`item.get(key) or default`へ修正（`task_id`と同型、BL-161の同種バグをdecision_extractor経路にも適用）、③`_find_active_deliverable_agreement`をBL-131/`get_latest_whiteboard`と同じtask_id単独検索＋不一致時警告のみの設計へ変更しフェイルセーフ化。D-183として「識別は一意性の根拠となる列で検索し、他の列は完全一致ではなくフェイルセーフな整合性チェックに留める」という設計方針を記録。新規テスト`tests/test_bl206_deliverable_orphaning.py`6件、既存`test_bl161_write_agreement_phase_id_fallback.py`の1件は仕様変更（task_idのみでも発見できるようになった）に合わせ期待値を反転。作業中、`pytest -k "not live"`という除外フィルタが「deliverable」を「live」の部分文字列として誤検出し、deliverable関連テストを大量に除外していたことが判明（本セッションのメモリへ記録）。正しい除外指定（`--deselect`によるファイル・テスト名指定）でオフライン全テストスイート1136件通過（既知flaky1件・live API 4件を除く）を確認。`python -m py_compile`合格、`check_docs_consistency.py`合格。 |

@@ -2584,6 +2584,19 @@
 
 ---
 
+### D-184: タスク遷移先のフェーズ解決は、phase_idが省略されても常にtask_idから探索し、current_phaseへの決め打ちはフォールバックに留める
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | `log/2026-08-11/0118`で、User承認後に`call_decision_extractor`が`{"advances_to_phase_id": null, "advances_to_task_id": "task_4_0"}`を正しく抽出し続けたにもかかわらず、`_resolve_task_transition`が`task_4_0`（phase_4所属）を`current_phase`（phase_3）のタスク一覧から探し「存在しない」と拒否し続け、Reflectionが`stagnant`と判定してシステムをHALTさせた。BL-191で`_find_phase_containing_task`（task_idの所属フェーズを全フェーズ横断で探すヘルパー）は既に存在していたが、`redirect_backward`専用経路でしか使われていなかった。フェーズ解決ロジックをどう直すか。 |
+| **決定理由** | `advances_to_phase_id`が省略され`advances_to_task_id`だけが返るケースは、今回の実データで8回連続発生しており、稀な例外ではなく通常運転で起こりうるパターンだと確認できた。「phase_idが無ければcurrent_phaseとみなす」という決め打ちは、同一フェーズ内遷移では偶然正しく動くため長らく見過ごされてきたが、フェーズをまたぐ遷移では原理的に常に失敗する構造的欠陥だった。既に同じ目的の全フェーズ探索ヘルパー（`_find_phase_containing_task`）が存在していたにもかかわらず配線されていなかった事実は、BL-205/D-179・BL-207/D-180・BL-209/D-182で繰り返し確認してきた「同じ規則・同じ解決策を複数の経路に個別に書く設計は、どれか1経路で更新・配線漏れが起きる」というこのプロジェクトの再発パターンの、また別のインスタンスである。 |
+| 決定内容 | `_resolve_task_transition`のフェーズ解決順序を、①`advances_to_phase_id`が明示されていればそれを最優先、②省略時は`advances_to_task_id`から`_find_phase_containing_task`で全フェーズ横断探索、③それでも見つからない場合のみ`current_phase`へフォールバック、という優先順位に変更する。あわせて、探索で解決したフェーズが`current_phase`と異なる場合は、`advances_to_phase_id`の明示有無に関わらず`current_phase`を追従させる（`current_task_id`と`current_phase`の不整合を防ぐため）。 |
+| 影響 | `cela_main.py`（`_resolve_task_transition`）、`tests/test_bl210_cross_phase_transition.py`。 |
+| 関連 BL | [BL-210](back_log/issue_backlog.md#bl-210-_resolve_task_transitionがadvances_to_phase_id省略時にcurrent_phaseへ決め打ちしフェーズをまたぐ遷移を常に拒否する)、BL-191、BL-125、BL-176 |
+
+---
+
 ## 未決定（pending）
 
 ---
