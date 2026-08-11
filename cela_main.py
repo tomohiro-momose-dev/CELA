@@ -314,10 +314,10 @@ client_orchestrator = client_openrouter
 model_orchestrator = laguna_S_2_1
 
 client_expert = client_openrouter
-model_expert = laguna_S_2_1 #nemotron_3_ultra
+model_expert = nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = laguna_S_2_1 #nemotron_3_ultra
+model_task_planner = nemotron_3_ultra
 
 client_task_plan_reviewer = client_openrouter
 model_task_plan_reviewer = nemotron_3_ultra
@@ -326,7 +326,7 @@ client_detector_domain = client_openrouter
 model_detector_domain = nemotron_3_ultra # nemotron_3_ultra
 
 client_detector_numeric = client_openrouter
-model_detector_numeric = laguna_S_2_1
+model_detector_numeric = nemotron_3_ultra
 
 client_decision_extractor = client_openrouter
 model_decision_extractor = laguna_S_2_1
@@ -3149,7 +3149,13 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
                     # [H2踏襲] 既にホワイトボード化済みの完全版に対し、200文字以下の短い要約が
                     # 送られてきた場合、または200字を超えていてもexpert以外からの更新の場合は
                     # 「承認/却下コメント」等とみなし、既存の完全版を上書きしない（BL-180）。
-                    content = old_content
+                    # [BL-212追補] 従来は`content = old_content`としていたが、old_content自体が
+                    # BL-212の短い無効化理由文（WHITEBOARDプレフィックスを失った行）である場合、
+                    # その短文が新しい行へコピーされ、agreements側は二度とポインタを取り戻せない
+                    # （汚染が世代を越えて伝播する）。is_whiteboardが真ならwhiteboard_draftsに
+                    # 実体が存在することは確定しているため、old_contentの中身に依存せず正典の
+                    # ポインタを再生成する。これによりBL-212の残留行は次の更新で自動的に修復される。
+                    content = f"WHITEBOARD:{phase_id}:{tid}"
                     # [BL-127] 従来はprint()のみでLLMへは一切伝わらず、ホワイトボード本体が
                     # 実際には更新されていないのに「成功」と返るためExpertが誤って自己申告する
                     # 実インシデントが発生していた。呼び出し元へ返す警告として明示する。
@@ -3172,7 +3178,10 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
                     print(f"  🔒 [Whiteboard Protected] '{target_topic}' への更新（caller_role={caller_role}）が既存の完全版を上書きしないよう保護しました。")
                 # 200文字以下かつ未昇格ならそのまま短文としてagreementsに保持（content=raw_contentのまま）
             else:
-                content = old_content
+                # [BL-212追補] 上のelif分岐と同じ理由でポインタを再生成する。ここはis_whiteboardが
+                # 偽（＝まだホワイトボード化されていない短文Deliverable）の場合もあるため、
+                # 真の場合のみポインタへ差し替え、偽なら従来通りold_contentを維持する。
+                content = f"WHITEBOARD:{phase_id}:{tid}" if is_whiteboard else old_content
                 protected_warning = (
                     f"⚠️ '{target_topic}'への更新は反映されませんでした：decision_what/editsの"
                     f"いずれも指定がなく実質的な変更内容がなかったため、既存バージョンを維持しました。"
@@ -12131,6 +12140,18 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                             proposed_by = a.get("proposed_by", "Unknown")
                         break
                         
+                # [BL-212追補/F5] 従来はold_contentの文字列プレフィックスだけで「ホワイトボード
+                # 済みか」を判定していたため、BL-212の短い無効化理由文がold_contentに入っていると
+                # 保護が発火せず、下の`content = raw_content`（LLMの200字要約）で上書きされ、
+                # 直下のコメントが警告している「フル本文の孤立」がまさに起きる。
+                # entry_typeがDeliverableの場合に限り、whiteboard_draftsの実在を直接確認する
+                # （非Deliverableにこの判定を広げると、同じtask_idにホワイトボードがあるだけで
+                # Decision/Directiveの本文までポインタ文字列へ差し替わってしまうため限定する）。
+                _wb_recoverable = (
+                    entry_type == "Deliverable"
+                    and not old_content.startswith(("WHITEBOARD:", "FILE_PATH:"))
+                    and get_latest_whiteboard(_conn, _run_id, phase_id, task_id) is not None
+                )
                 if old_content.startswith("WHITEBOARD:"):
                     # [BL-038/R4] このフォールバック経路（write_agreement未使用時の安全網）には、
                     # ホワイトボードへ差分パッチを当てる手段がない。プレーンテキストで無条件に
@@ -12139,6 +12160,9 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                     # 正しい更新経路は write_agreement の edits であり、ここでは常に保護する。
                     content = old_content
                     print(f"  🔒 [Whiteboard Protected] 成果物 '{target_topic}' のホワイトボードポインタを保護し、次ターンへ引き継ぎました（フォールバック経路からの上書きを禁止）。")
+                elif _wb_recoverable:
+                    content = f"WHITEBOARD:{phase_id}:{task_id}"
+                    print(f"  🔧 [BL-212] 成果物 '{target_topic}' のagreements行がホワイトボードポインタを失っていたため、whiteboard_drafts（task_id={task_id}）の実在を確認してポインタを復元しました。")
                 elif old_content.startswith("FILE_PATH:"):
                     if not content or (not content.startswith("FILE_PATH:") and len(content) < 200):
                         content = old_content

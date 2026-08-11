@@ -162,6 +162,211 @@ def test_is_whiteboard_flag_survives_short_reason_supersede():
 
 
 # ---------------------------------------------------------------------------
+# 1.5. BL-212追補（F2/F5）: 汚染された短文行が「伝播し続けない」こと
+#
+# BL-213横断監査のF2で、is_whiteboardの判定は直したが保護分岐の中身が
+# `content = old_content`のままだったため、一度BL-212の短文行が生まれると
+# 以降の全ての更新へ短文がコピーされ、agreements側は永久にポインタを取り戻せない
+# （汚染が世代を越えて伝播する）ことが判明した。F5は同じ問題が
+# decision_extractor_nodeのフォールバック経路にも残っていたもの。
+# ---------------------------------------------------------------------------
+
+def _short_comment_update(conn, run_id, topic, caller_role, decision_what):
+    """edits未指定・短文のUPDATE（User AI/Detectorの承認・却下コメントの典型形）。"""
+    cela_main._CURRENT_CALLER_ROLE = caller_role
+    return cela_main.TOOL_DISPATCH["write_agreement"](
+        {
+            "action_type": "UPDATE", "status": "Approved", "topic": topic,
+            "target_topic": topic, "decision_what": decision_what, "reason_why": "承認",
+            "entry_type": "Deliverable", "phase_id": "phase_4", "task_id": "task_4_2",
+        },
+        _state(run_id),
+    )
+
+
+def _active_deliverable_row(conn, run_id):
+    return cela_main._find_active_deliverable_agreement(conn, run_id, "phase_4", "task_4_2")
+
+
+def test_short_reason_residue_is_repaired_on_next_protected_update(db_conn):
+    """[F2] 短文SUPERSEDEで汚染された後、次の保護されたUPDATEでポインタが復元されること。
+    従来は`content = old_content`のため短文が伝播し続けていた。"""
+    conn, run_id = db_conn
+    topic = _create_deliverable(conn, run_id)
+    _short_reason_supersede(conn, run_id, topic, "detector", "承認済み成果物を無効化する。")
+
+    # 汚染の確認（この時点ではポインタを失っている）
+    assert not _active_deliverable_row(conn, run_id)["decision_what"].startswith("WHITEBOARD:")
+
+    result = _short_comment_update(conn, run_id, topic, "user", "内容を確認し承認します。")
+    assert result["success"] is True, result.get("error")
+
+    row = _active_deliverable_row(conn, run_id)
+    assert row["decision_what"] == "WHITEBOARD:phase_4:task_4_2", (
+        f"保護分岐がポインタを復元していない（BL-213 F2再発）: {row['decision_what']!r}"
+    )
+
+
+def test_repaired_pointer_makes_integrator_see_real_content(db_conn):
+    """[F2→F1] ポインタが復元された結果、`integrator_node`の抽出条件
+    （entry_type='Deliverable' かつ status='Approved'）に載る行が、短文ではなく
+    実際のホワイトボード本文を指すこと。F1（最終統合文書に短文が載る）の前提条件が
+    F2の修正によって解消されることの確認。"""
+    conn, run_id = db_conn
+    topic = _create_deliverable(conn, run_id)
+    _short_reason_supersede(conn, run_id, topic, "detector", "承認済み成果物を無効化する。")
+    _short_comment_update(conn, run_id, topic, "user", "内容を確認し承認します。")
+
+    approved = [
+        a for a in cela_main.get_agreements_from_db(conn, run_id)
+        if a["entry_type"] == "Deliverable" and a["status"] == "Approved"
+    ]
+    assert approved, "承認済みDeliverableが1件も無い"
+    for a in approved:
+        assert a["decision_what"].startswith(("WHITEBOARD:", "FILE_PATH:")), (
+            f"承認済みDeliverableがポインタではなく短文を保持している（F1の実害条件）: {a['decision_what']!r}"
+        )
+
+
+def test_no_decision_what_update_also_repairs_pointer(db_conn):
+    """[F2] decision_what/editsのいずれも無いUPDATE（状態のみ更新）でも、
+    ホワイトボードが実在するならポインタへ復元されること。"""
+    conn, run_id = db_conn
+    topic = _create_deliverable(conn, run_id)
+    _short_reason_supersede(conn, run_id, topic, "detector", "承認済み成果物を無効化する。")
+
+    cela_main._CURRENT_CALLER_ROLE = "user"
+    result = cela_main.TOOL_DISPATCH["write_agreement"](
+        {
+            "action_type": "UPDATE", "status": "Approved", "topic": topic,
+            "target_topic": topic, "decision_what": "状態のみ更新します。", "reason_why": "承認",
+            "entry_type": "Deliverable", "phase_id": "phase_4", "task_id": "task_4_2",
+        },
+        _state(run_id),
+    )
+    assert result["success"] is True, result.get("error")
+    assert _active_deliverable_row(conn, run_id)["decision_what"] == "WHITEBOARD:phase_4:task_4_2"
+
+
+def test_unpromoted_short_deliverable_is_not_falsely_pointed(db_conn):
+    """[F2 非退行] ホワイトボードが一度も作られていない短文Deliverableに対しては、
+    ポインタを捏造しないこと（is_whiteboardが偽なら従来通りold_contentを維持）。"""
+    conn, run_id = db_conn
+    cela_main._CURRENT_CALLER_ROLE = "expert"
+    create = cela_main.TOOL_DISPATCH["write_agreement"](
+        {
+            "action_type": "CREATE", "status": "Proposed", "topic": "task_4_2 短い暫定メモ",
+            "decision_what": "暫定メモ（200字未満のためホワイトボード化されない）",
+            "reason_why": "初版", "entry_type": "Deliverable",
+            "phase_id": "phase_4", "task_id": "task_4_2",
+        },
+        _state(run_id),
+    )
+    assert create["success"] is True, create.get("error")
+    assert cela_main.get_latest_whiteboard(conn, run_id, "phase_4", "task_4_2") is None
+
+    cela_main._CURRENT_CALLER_ROLE = "user"
+    result = cela_main.TOOL_DISPATCH["write_agreement"](
+        {
+            "action_type": "UPDATE", "status": "Approved", "topic": "task_4_2 短い暫定メモ",
+            "target_topic": "task_4_2 短い暫定メモ", "decision_what": "承認します。",
+            "reason_why": "承認", "entry_type": "Deliverable",
+            "phase_id": "phase_4", "task_id": "task_4_2",
+        },
+        _state(run_id),
+    )
+    assert result["success"] is True, result.get("error")
+    row = _active_deliverable_row(conn, run_id)
+    assert not row["decision_what"].startswith("WHITEBOARD:"), (
+        "ホワイトボード未作成なのにポインタを捏造した（存在しない実体を指す行が生まれる）"
+    )
+
+
+def test_decision_extractor_fallback_repairs_pointer(db_conn, monkeypatch):
+    """[F5] write_agreementが呼ばれなかったターンのフォールバック経路でも、
+    ポインタを失った行がホワイトボード実在の確認によって復元されること。
+    従来は`old_content.startswith("WHITEBOARD:")`が偽になり保護が発火せず、
+    LLMの200字要約で上書きされてフル本文が孤立していた。"""
+    conn, run_id = db_conn
+    cela_main._DB_CONN = conn
+    cela_main._CURRENT_RUN_ID = run_id
+    topic = _create_deliverable(conn, run_id)
+    _short_reason_supersede(conn, run_id, topic, "detector", "承認済み成果物を無効化する。")
+    active_topic = _active_deliverable_row(conn, run_id)["topic"]
+
+    def _fake(chat_history, existing_topics, target_role, owns_variables=None, valid_task_ids=None):
+        return ([{
+            "action_type": "UPDATE", "entry_type": "Deliverable", "status": "Approved",
+            "target_topic": active_topic, "topic": active_topic,
+            "content": "承認しました。（LLMによる短い要約）", "rationale": "受入基準を満たすため",
+            "proposed_by": "User", "phase_id": "phase_4", "task_id": "task_4_2",
+        }], {"advances_to_phase_id": None, "advances_to_task_id": None})
+
+    monkeypatch.setattr(cela_main, "call_decision_extractor", _fake)
+
+    state = {
+        "run_id": run_id, "phases": _phases(), "current_phase": _phases()[0],
+        "current_task_id": "task_4_2",
+        "chat_history": [{"role": "user", "content": "task_4_2を承認します。"}],
+        "task_transition_blocked_issue_topics": [],
+        "expert_wrote_agreement": False, "user_wrote_agreement": False,
+    }
+    cela_main.decision_extractor_node(state)
+
+    row = _active_deliverable_row(conn, run_id)
+    assert row["decision_what"] == "WHITEBOARD:phase_4:task_4_2", (
+        f"フォールバック経路でポインタが復元されず、短い要約で上書きされた（BL-213 F5再発）: "
+        f"{row['decision_what']!r}"
+    )
+
+
+def test_decision_extractor_fallback_does_not_touch_non_deliverable(db_conn, monkeypatch):
+    """[F5 非退行] 同じtask_idにホワイトボードが存在しても、entry_typeがDeliverable以外の
+    項目の本文をポインタ文字列へ差し替えないこと（判定をDeliverableに限定していることの確認）。"""
+    conn, run_id = db_conn
+    cela_main._DB_CONN = conn
+    cela_main._CURRENT_RUN_ID = run_id
+    _create_deliverable(conn, run_id)
+
+    cela_main._CURRENT_CALLER_ROLE = "user"
+    cela_main.TOOL_DISPATCH["write_agreement"](
+        {
+            "action_type": "CREATE", "status": "Proposed", "topic": "task_4_2 運用方針の合意",
+            "decision_what": "初回の合意内容", "reason_why": "r", "entry_type": "Decision",
+            "phase_id": "phase_4", "task_id": "task_4_2",
+        },
+        _state(run_id),
+    )
+
+    def _fake(chat_history, existing_topics, target_role, owns_variables=None, valid_task_ids=None):
+        return ([{
+            "action_type": "UPDATE", "entry_type": "Decision", "status": "Approved",
+            "target_topic": "task_4_2 運用方針の合意", "topic": "task_4_2 運用方針の合意",
+            "content": "改訂後の合意内容", "rationale": "見直したため",
+            "proposed_by": "User", "phase_id": "phase_4", "task_id": "task_4_2",
+        }], {"advances_to_phase_id": None, "advances_to_task_id": None})
+
+    monkeypatch.setattr(cela_main, "call_decision_extractor", _fake)
+
+    state = {
+        "run_id": run_id, "phases": _phases(), "current_phase": _phases()[0],
+        "current_task_id": "task_4_2",
+        "chat_history": [{"role": "user", "content": "合意を改訂します。"}],
+        "task_transition_blocked_issue_topics": [],
+        "expert_wrote_agreement": False, "user_wrote_agreement": False,
+    }
+    cela_main.decision_extractor_node(state)
+
+    decision = next(
+        a for a in reversed(cela_main.get_agreements_from_db(conn, run_id))
+        if a.get("entry_type") == "Decision" and a.get("status") != "Superseded"
+    )
+    assert decision["decision_what"] == "改訂後の合意内容", (
+        f"Deliverable以外の本文までポインタへ差し替わった: {decision['decision_what']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 2. 非退行確認
 # ---------------------------------------------------------------------------
 
