@@ -389,6 +389,23 @@ def strip_cache_header(content: str) -> str:
     return content
 
 
+_CACHE_PREVIEW_BODY_CHARS = 300
+
+
+def _cache_preview(path: Path) -> str:
+    """[BL-216] キャッシュ候補一覧向けの短い要約。Source URL（write_cacheのヘッダ）に加え、
+    本文冒頭を添えることで、モデルがファイルを開かずにどの候補が目的のページかを判断できる
+    ようにする。ファイル名自体はsha256ハッシュで人間にもモデルにも意味を持たないため。"""
+    content = path.read_text(encoding="utf-8", errors="ignore")
+    lines = content.split("\n", 2)
+    source_line = lines[0] if lines and lines[0].startswith("# Source:") else ""
+    body = strip_cache_header(content).strip().replace("\n", " ")
+    snippet = body[:_CACHE_PREVIEW_BODY_CHARS]
+    if len(body) > _CACHE_PREVIEW_BODY_CHARS:
+        snippet += "…"
+    return f"{source_line}\n{snippet}" if source_line else snippet
+
+
 # ---------------------------------------------------------------------------
 # ツールハンドラ本体
 # ---------------------------------------------------------------------------
@@ -493,10 +510,18 @@ def read_reference_file_handler(args: dict, state: dict) -> dict | str:
         if not matches:
             return {"status": "not_found", "message": f"'{keyword}'に該当するキャッシュファイルが見つかりませんでした。"}
         if len(matches) > 1:
+            # [BL-216] ファイル名はsha256(url)[:16]のハッシュのため、候補一覧だけでは
+            # どれが目的のページか一切判別できず、モデルは1件ずつpathで開いて中身を確認する
+            # しかなかった（keyword検索の目的である「再取得の回避」が事実上働かなくなる）。
+            # 一覧の段階でSource URLと本文冒頭を添え、開かずに選べるようにする。
+            candidates = [
+                {"path": name, "preview": _cache_preview(base_dir / name)}
+                for name in matches
+            ]
             return {
                 "status": "multiple_matches",
-                "message": "複数のキャッシュファイルが該当しました。pathを指定して再取得してください。",
-                "candidates": matches,
+                "message": "複数のキャッシュファイルが該当しました。previewを確認し、pathを指定して再取得してください。",
+                "candidates": candidates,
             }
         return (base_dir / matches[0]).read_text(encoding="utf-8")[:_MAX_READ_REFERENCE_CHARS]
 

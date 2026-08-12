@@ -584,6 +584,39 @@ def test_read_reference_file_by_keyword_multiple_matches(monkeypatch, tmp_path):
     assert len(result["candidates"]) == 2
 
 
+def test_read_reference_file_multiple_matches_candidates_include_preview(monkeypatch, tmp_path):
+    """[BL-216] キャッシュファイル名はsha256ハッシュで意味を持たないため、候補一覧に
+    Source URLと本文冒頭のpreviewを添え、開かずに目的のファイルを選べるようにする。"""
+    monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))
+    p1 = web_tools.cache_file_path("https://example.com/a")
+    p2 = web_tools.cache_file_path("https://example.com/b")
+    web_tools.write_cache(p1, "https://example.com/a", "これはAページの本文です。")
+    web_tools.write_cache(p2, "https://example.com/b", "これはBページの本文です。")
+    state = {"run_id": "run-1"}
+    result = web_tools.read_reference_file_handler({"keyword": "example.com"}, state)
+    assert result["status"] == "multiple_matches"
+    by_path = {c["path"]: c["preview"] for c in result["candidates"]}
+    assert set(by_path) == {p1.name, p2.name}
+    assert "https://example.com/a" in by_path[p1.name]
+    assert "Aページの本文" in by_path[p1.name]
+    assert "https://example.com/b" in by_path[p2.name]
+    assert "Bページの本文" in by_path[p2.name]
+
+
+def test_read_reference_file_preview_truncates_long_body(monkeypatch, tmp_path):
+    monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))
+    p1 = web_tools.cache_file_path("https://example.com/a")
+    p2 = web_tools.cache_file_path("https://example.com/b")
+    long_body = "x" * 1000
+    web_tools.write_cache(p1, "https://example.com/a", long_body)
+    web_tools.write_cache(p2, "https://example.com/b", "short")
+    state = {"run_id": "run-1"}
+    result = web_tools.read_reference_file_handler({"keyword": "example.com"}, state)
+    by_path = {c["path"]: c["preview"] for c in result["candidates"]}
+    preview_body = by_path[p1.name].split("\n", 1)[1]
+    assert preview_body == "x" * 300 + "…"
+
+
 def test_read_reference_file_reads_cache_written_by_a_different_run(monkeypatch, tmp_path):
     """[BL-200] read_reference_fileはstate["run_id"]でベースディレクトリを絞らなくなった
     ため、別runが書いたキャッシュも読める。"""
