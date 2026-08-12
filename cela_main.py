@@ -301,7 +301,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = nemotron_3_ultra
+model_user = mimo_2_5
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -311,7 +311,7 @@ model_user = nemotron_3_ultra
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = laguna_S_2_1
+model_orchestrator = mimo_2_5 # nemotron_3_ultra
 
 client_expert = client_openrouter
 model_expert = nemotron_3_ultra
@@ -323,22 +323,22 @@ client_task_plan_reviewer = client_openrouter
 model_task_plan_reviewer = nemotron_3_ultra
 
 client_detector_domain = client_openrouter
-model_detector_domain = nemotron_3_ultra # nemotron_3_ultra
+model_detector_domain = mimo_2_5 # nemotron_3_ultra
 
 client_detector_numeric = client_openrouter
-model_detector_numeric = nemotron_3_ultra # nemotron_3_ultra
+model_detector_numeric = mimo_2_5 # nemotron_3_ultra
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = laguna_S_2_1 # nemotron_3_ultra
+model_decision_extractor = mimo_2_5 # nemotron_3_ultra
 
 client_resource_arbiter = client_openrouter
 model_resource_arbiter = nemotron_3_ultra #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = nemotron_3_ultra
+model_reflection = mimo_2_5 # nemotron_3_ultra  
 
 client_facilitator = client_openrouter
-model_facilitator = nemotron_3_ultra
+model_facilitator = mimo_2_5 # nemotron_3_ultra 
 
 client_integrator = client_openrouter
 model_integrator = nemotron_3_ultra #nemotron_3_ultra
@@ -743,6 +743,11 @@ WRITE_ISSUE_TOOL = {
             "（対応していない先へ送ると、そのタスクの担当者に解けない問題を押し付けることになります）。"
             "判断に迷う場合はread_project_planで各タスクのスコープを確認してから指定してください。"
             "自分自身が実行中のタスクへのDEFERはできません（成立していないため拒否されます）。"
+            "[BL-217] 重要: DEFER先のtask_idは、あなたと同じAIが実行します。実地ヒアリング・電話確認・"
+            "現地調査など、AIには原理的に実行できないことを「後続タスクが解決する」としてDEFERしては"
+            "いけません（後続タスクでも同じ壁にぶつかるか、期限を理由に数値を捏造するリスクがあります）。"
+            "計画中のどのtask_idにも解決能力がない場合は、DEFERではなくflag_needs_human_inputを"
+            "使ってください。"
             "[BL-194] ACKNOWLEDGEは「この懸念は確かに現在のタスクの責務であり、今まさに対応中である」"
             "と表明するためのものです。RESOLVE（本当に解決した）でもDEFER（別のタスクの責務である）"
             "でもない、正直な第三の選択肢です。督促は一時的に止まりますが、この懸念を未解決のまま"
@@ -790,6 +795,57 @@ WRITE_ISSUE_TOOL = {
             "required": ["action_type", "topic"]
         }
     }
+}
+
+# [BL-217] task_1_1（免許自主返納者数）で、AIが「市独自統計未公表、後続タスクでヒアリング実施」と
+# write_issue(DEFER)で先送りしていた実例から新設。DEFERは「別のAIタスクが後で解決できる」ことを
+# 前提とした仕組みだが、実地調査は後続タスクも同じAIが実行する以上、原理的に解決不可能であり、
+# DEFERは「後で解決される」という体裁だけを整えた偽の解決計画になっていた。
+# [CONSTRAINT] defer_to_task_id相当のパラメータを意図的に持たせない——「AIタスクへの先送り」と
+# 「人間への先送り」が同一issue上で混在する余地を、バリデーションではなく構造で無くすため。
+FLAG_NEEDS_HUMAN_INPUT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "flag_needs_human_input",
+        "description": (
+            "計画中のどのtask_idにも解決能力がない懸念（実地ヒアリング・電話確認・現地調査など、"
+            "AIには原理的に実行できないこと）を、正直に「人間の回答待ち」として記録します。"
+            "write_issueのDEFERとは異なり、先送り先のtask_idは指定しません（存在しないため）。"
+            "この懸念は、開発者が専用CLI（--answer-human-input）で回答するまで未解決のまま残ります"
+            "（severity='major'の場合、write_issueの未解決majorと同様にタスク遷移をブロックします）。"
+            "少しでもAI自身の推測・web_search・python_replで導出できる可能性がある値には使わず、"
+            "先にそれらを試してください。"
+            "[BL-110] Optionally call `think` (with a `summary`) alongside this or any other tool call "
+            "to record your reasoning -- it is no longer required, and other tool calls are no "
+            "longer rejected for omitting it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "description": "固定の検索可能な識別文字列（write_issueのtopicと同じ規約）"
+                },
+                "variable_name": {
+                    "type": "string",
+                    "description": "人間の回答後、read_verified_factで引けるようになる変数名"
+                },
+                "human_research_prompt": {
+                    "type": "string",
+                    "description": "人間が具体的に何を確認すればよいか（誰に、何を、どう確認するか）"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "なぜAI自身では導出できないか（何を試して、なぜ不可能だったか）"
+                },
+                "severity": {
+                    "type": "string", "enum": ["minor", "major"],
+                    "description": "この値が無いと現在タスクのacceptance_criteriaを満たせない場合はmajor（既定）"
+                },
+            },
+            "required": ["topic", "variable_name", "human_research_prompt", "description"],
+        },
+    },
 }
 
 SCHEDULE_TASK_FOCUS_TOOL = {
@@ -1009,7 +1065,7 @@ REGISTER_ENTITY_TOOL = {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "type": {"type": "string", "enum": ["web", "goal_text", "prior_agreement", "expert_calculation", "user_input", "document"]},
+                            "type": {"type": "string", "enum": ["web", "goal_text", "prior_agreement", "expert_calculation", "user_input", "document", "human_field_research"]},
                             "detail": {"type": "string"},
                         },
                     },
@@ -1051,7 +1107,7 @@ WRITE_ENTITY_ATTRIBUTE_TOOL = {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "type": {"type": "string", "enum": ["web", "goal_text", "prior_agreement", "expert_calculation", "user_input", "document"]},
+                            "type": {"type": "string", "enum": ["web", "goal_text", "prior_agreement", "expert_calculation", "user_input", "document", "human_field_research"]},
                             "detail": {"type": "string"},
                         },
                     },
@@ -2209,7 +2265,7 @@ WRITE_AGREEMENT_TOOL = {
                         "properties": {
                             "type": {
                                 "type": "string",
-                                "enum": ["web", "goal_text", "prior_agreement", "expert_calculation", "user_input", "document"],
+                                "enum": ["web", "goal_text", "prior_agreement", "expert_calculation", "user_input", "document", "human_field_research"],
                             },
                             "detail": {"type": "string", "description": "URL (for 'web'), quoted text, agreement id, or a short description of the source."},
                         },
@@ -2274,7 +2330,7 @@ WRITE_AGREEMENT_TOOL = {
                                 "items": {
                                     "type": "object",
                                     "properties": {
-                                        "type": {"type": "string", "enum": ["web", "goal_text", "prior_agreement", "expert_calculation", "user_input", "document"]},
+                                        "type": {"type": "string", "enum": ["web", "goal_text", "prior_agreement", "expert_calculation", "user_input", "document", "human_field_research"]},
                                         "detail": {"type": "string"},
                                     },
                                     "required": ["type", "detail"],
@@ -3706,6 +3762,63 @@ def _write_issue_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_
     }
 
 
+def _flag_needs_human_input_tool_impl(args: dict, conn: sqlite3.Connection, run_id: str,
+                                       caller_role: str, phase_id: str, task_id: str) -> dict:
+    """[BL-217] flag_needs_human_inputツールの実体。expertのみ許可。write_issueのCREATE分岐と
+    違い、defer_to_task_id相当のパラメータを一切受け取らない（構造的にDEFERと排他）ため、
+    重複・再発カウントロジックは流用せず独立実装とする（BL-096の再発検知は「同じ懸念が
+    何度も繰り返し起きている」ことを捉える設計だが、本ツールは初回時点で「人間にしか解決
+    できない」と分かっている前提のため、再発カウントの意味が異なる）。
+    """
+    if caller_role != "expert":
+        return {"success": False, "error": f"{caller_role}はflag_needs_human_inputを呼び出せません（expertロールのみ許可）"}
+
+    topic = args.get("topic")
+    variable_name = args.get("variable_name")
+    human_research_prompt = args.get("human_research_prompt")
+    description = args.get("description")
+    if not topic:
+        return {"success": False, "error": "topicは必須です"}
+    if not variable_name:
+        return {"success": False, "error": "variable_nameは必須です"}
+    if not human_research_prompt:
+        return {"success": False, "error": "human_research_promptは必須です"}
+    if not description:
+        return {"success": False, "error": "descriptionは必須です"}
+
+    severity = args.get("severity") or "major"
+    if severity not in ("minor", "major"):
+        return {"success": False, "error": f"不正なseverity: {severity}"}
+    # [BL-096 レビューB] severity='major'の行は常にstatus='escalated'を伴う不変条件を踏襲する。
+    status = "escalated" if severity == "major" else "open"
+
+    existing_row = conn.execute(
+        "SELECT id FROM issue_log WHERE run_id=? AND topic=? AND status != 'resolved'",
+        (run_id, topic)
+    ).fetchone()
+    if existing_row:
+        return {"success": False, "error": f"topic='{topic}'は既に未解決issueとして存在します（read_issuesで確認してください）"}
+
+    now = time.time()
+    issue_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO issue_log (id, run_id, topic, raised_by, phase_id, task_id, severity, status, "
+        "description, occurrence_count, last_seen_task_id, defer_to_task_id, human_research_prompt, "
+        "human_variable_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, '', ?, ?, ?, ?)",
+        (issue_id, run_id, topic, caller_role, phase_id, task_id, severity, status,
+         description, task_id, human_research_prompt, variable_name, now, now)
+    )
+    conn.commit()
+    print(f"  🙋 [flag_needs_human_input] {caller_role}が人間の回答待ちissueを起票しました: "
+          f"topic={topic}, variable_name={variable_name}, severity={severity}, id={issue_id}")
+    print(f"     └ 確認事項: {human_research_prompt}")
+    return {
+        "success": True,
+        "message": "人間の回答待ちとして記録しました。--pending-human-inputで確認できます。",
+        "id": issue_id,
+    }
+
+
 def _mark_issue_planned(conn: sqlite3.Connection, run_id: str, issue_id: str,
                          embedded_task_ids: list[str]) -> bool:
     """[BL-145] task_planner_nodeが、issue駆動のラン途中計画再構成成功直後に、吸収した
@@ -4334,6 +4447,9 @@ TOOL_DISPATCH = {
     "write_issue": lambda args, state=None: _write_issue_impl(
         args, get_active_conn(), _run_id_from(state), _CURRENT_CALLER_ROLE, _phase_id_from(state), _task_id_from(state),
         state=state
+    ),
+    "flag_needs_human_input": lambda args, state=None: _flag_needs_human_input_tool_impl(
+        args, get_active_conn(), _run_id_from(state), _CURRENT_CALLER_ROLE, _phase_id_from(state), _task_id_from(state)
     ),
     "schedule_task_focus": lambda args, state=None: _schedule_task_focus_tool_impl(
         args, get_active_conn(), _run_id_from(state), _CURRENT_CALLER_ROLE, state
@@ -5518,6 +5634,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_verified_facts_r3a_columns(conn)
     _ensure_issue_log_defer_column(conn)
     _ensure_issue_log_acknowledge_columns(conn)
+    _ensure_issue_log_human_input_columns(conn)
 
 
 def _ensure_issue_log_defer_column(conn: sqlite3.Connection) -> None:
@@ -5546,6 +5663,28 @@ def _ensure_issue_log_acknowledge_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE issue_log ADD COLUMN acknowledged_until_round INTEGER DEFAULT 0")
         conn.execute("ALTER TABLE issue_log ADD COLUMN acknowledged_count INTEGER DEFAULT 0")
         conn.execute("ALTER TABLE issue_log ADD COLUMN acknowledge_reason TEXT DEFAULT ''")
+        conn.commit()
+
+
+def _ensure_issue_log_human_input_columns(conn: sqlite3.Connection) -> None:
+    """[BL-217] issue_logへhuman_research_prompt/human_notice_delivered_atを追加する。
+    DEFERは「別のAIタスクが後で解決できる」ことを前提とした仕組みだが、実地ヒアリング等
+    AIには原理的に実行不可能な事柄まで将来task_idへ先送りすると、後続タスクも同じAIが実行する
+    以上、偽の解決計画になる（AGENTS.md §13相当のクラス）。human_research_prompt非空を
+    「人間にしか解決できない」の明示フラグとし、defer_to_task_idとは構造的に排他にする
+    （flag_needs_human_inputツールはdefer_to_task_id相当のパラメータを持たない）。
+    human_notice_delivered_atは、人間の回答を各ノードへ知らせる一度きりの通知
+    （_build_human_input_answered_notice）の消費済みマーカー。stateのフラグではなくDB列に
+    持たせるのは、チェックポイント跨ぎでの状態ドリフトを避けるため（AGENTS.md §13.3：
+    権威は常にDB、派生表現ではなく）。"""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(issue_log)").fetchall()}
+    if "human_research_prompt" not in cols:
+        print("  🛠️ [schema migration] issue_logへhuman_research_prompt/human_notice_delivered_at/human_variable_name列を追加します（BL-217）。")
+        conn.execute("ALTER TABLE issue_log ADD COLUMN human_research_prompt TEXT DEFAULT ''")
+        conn.execute("ALTER TABLE issue_log ADD COLUMN human_notice_delivered_at REAL DEFAULT NULL")
+        # [BL-217] --answer-human-inputがupsert_verified_factへ渡すvariable_name。write_issueの
+        # 既存列と衝突しない名前にする（issue_log自体にvariable_nameという概念は元々無い）。
+        conn.execute("ALTER TABLE issue_log ADD COLUMN human_variable_name TEXT DEFAULT ''")
         conn.commit()
 
 
@@ -6530,6 +6669,87 @@ def upsert_verified_fact(conn: sqlite3.Connection, run_id: str, variable_name: s
         print(f"  🔒 [verified_facts] {variable_name}={value}{unit}（{confidence}）をby={confirmed_by}で保存しました。")
 
 
+# ---------------------------------------------------------------------------
+# [BL-217] Human-in-the-Loop: flag_needs_human_inputで起票されたissueの一覧・回答用CLI関数。
+# scripts/配下の一回性メンテナンススクリプト群とは違い、これはリポジトリ本体の恒久機能として
+# ここに置く（毎ドライランで使う想定のため）。
+# ---------------------------------------------------------------------------
+
+def _flag_needs_human_input_report(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    """[BL-217] 未回答（open/escalated）かつhuman_research_prompt非空の全issueを返す。
+    読み取り専用、runの動作状態（実行中/halt/checkpoint途中）に関わらずいつでも呼べる。"""
+    rows = conn.execute(
+        "SELECT topic, severity, human_variable_name, human_research_prompt, description, "
+        "phase_id, task_id FROM issue_log "
+        "WHERE run_id=? AND human_research_prompt != '' AND status != 'resolved' ORDER BY rowid",
+        (run_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _answer_human_input(conn: sqlite3.Connection, run_id: str, topic: str, value, unit: str,
+                         source: str, comment: str) -> dict:
+    """[BL-217] 人間が実地調査で得た確定値を書き込む。
+    ①verified_factsへconfidence='confirmed'で書き込み（以降の全タスクが自動的に参照する）、
+    ②対応するissue_logをresolved化する（BL-125の遷移ゲートはstatus='escalated'の行のみ見るため、
+    これだけで自然にブロックが解除される——新しいゲートロジックは不要）。
+    human_notice_delivered_atはここでは触らない。通知の消費は_build_human_input_answered_notice
+    （毎ターンのpin構築側）の責務であり、CLI側の責務は「確定値と解決」だけに閉じる。
+    """
+    row = conn.execute(
+        "SELECT id, task_id, phase_id, human_variable_name FROM issue_log "
+        "WHERE run_id=? AND topic=? AND human_research_prompt != '' AND status != 'resolved'",
+        (run_id, topic)
+    ).fetchone()
+    if row is None:
+        return {"success": False, "error": f"topic='{topic}'に該当する未回答issue（human_research_prompt付き）が見つかりません"}
+
+    upsert_verified_fact(
+        conn, run_id, variable_name=row["human_variable_name"], value=value, unit=unit,
+        source_task_id=row["task_id"], source_phase_id=row["phase_id"],
+        confirmed_by="human_operator", confidence="confirmed",
+        citations=[{"type": "human_field_research", "detail": source}],
+    )
+    now = time.time()
+    conn.execute(
+        "UPDATE issue_log SET status='resolved', resolved_by='human_operator', resolved_at=?, "
+        "resolution_note=? WHERE id=? AND run_id=?",
+        (now, comment, row["id"], run_id)
+    )
+    conn.commit()
+    print(f"  🙋 [answer-human-input] topic={topic} を variable_name={row['human_variable_name']}="
+          f"{value}{unit}（confirmed, by=human_operator）として記録し、issueを解決しました。")
+    return {"success": True, "variable_name": row["human_variable_name"]}
+
+
+def _build_human_input_answered_notice(conn: sqlite3.Connection, run_id: str) -> str:
+    """[BL-217] 人間が--answer-human-inputで回答した直後、次にAIが動くターンで一度だけ
+    知らせる通知文を組み立てる。_build_escalation_pin_text/_build_deferred_issue_pin_textと
+    同じ「毎ターン呼び出し・一度だけ届く」パターン。resume専用フックにしない設計にすることで、
+    runが動き続けたまま（別ターミナルでCLIが書き込んだ場合も）次ターンで確実に拾える。
+    [CONSTRAINT] 消費済みマーカー（human_notice_delivered_at）はstate側のフラグではなくDB列に
+    持たせる。チェックポイント跨ぎでの状態ドリフトを避けるため（AGENTS.md §13.3）。
+    """
+    rows = conn.execute(
+        "SELECT topic, resolution_note FROM issue_log "
+        "WHERE run_id=? AND human_research_prompt != '' AND status='resolved' "
+        "AND resolved_by='human_operator' AND human_notice_delivered_at IS NULL ORDER BY rowid",
+        (run_id,)
+    ).fetchall()
+    if not rows:
+        return ""
+    now = time.time()
+    lines = ["【🙋 人間による実地調査の回答がありました】"]
+    for r in rows:
+        lines.append(f"- {r['topic']}: {r['resolution_note']}")
+        conn.execute(
+            "UPDATE issue_log SET human_notice_delivered_at=? WHERE run_id=? AND topic=?",
+            (now, run_id, r["topic"])
+        )
+    conn.commit()
+    return "\n".join(lines)
+
+
 def get_verified_facts_from_db(conn: sqlite3.Connection, run_id: str,
                                 variable_names: list[str] | None = None,
                                 topic: str | None = None) -> list[dict]:
@@ -6840,7 +7060,9 @@ class Agreement(TypedDict):
     # statusに"Deferred"を追加（既存: Proposed/Approved/Approved_with_Conditions/Rejected/Implicitly_Accepted）
     # "Deferred"の場合、topicは先送りされた論点名、reason_whyに「どのタスクで扱うか」を含める
     citations: list[dict]  # [BL-188] 引用元: [{"type": "web"/"goal_text"/"prior_agreement"/
-                            # "expert_calculation"/"user_input"/"document", "detail": "..."}]
+                            # "expert_calculation"/"user_input"/"document"/"human_field_research"（BL-217:
+                            # 実際の人間が実地調査で確認した値。"user_input"はUser AI役の発言を指し
+                            # 実際の人間ではないため区別する）, "detail": "..."}]
 
 class RiskRegister(TypedDict):
     """致命的リスクの専用台帳"""
@@ -8257,6 +8479,11 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         open_issue_pin = _build_open_issue_pin_text(_conn, state["run_id"])
         if open_issue_pin:
             hydrate_context += f"\n\n【ℹ️ 未解決の軽微な懸念（参考、issue_log）】\n{open_issue_pin}"
+        # [BL-217] flag_needs_human_inputで人間の回答待ちにしたissueへ、人間が--answer-human-input
+        # で回答した直後、一度だけ知らせる。
+        human_input_notice = _build_human_input_answered_notice(_conn, state["run_id"])
+        if human_input_notice:
+            hydrate_context += f"\n\n{human_input_notice}"
         # [BL-178] 過去の圧縮ログは「これから直近の会話を示す」という次の導入文より前に置き、
         # 「直近の会話です」という予告の直後には実際に直近のraw chat_historyが来るようにする。
         system_prompt_leading += f"\n【過去の会話を圧縮したシステム判断ログ】\n{hydrate_context}\n"
@@ -8510,7 +8737,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     _CURRENT_TASK_ID = _effective_current_task_id_from(state)
     _reset_think_scratchpad()  # [BL-093]
     return query_AI(messages, client=client_expert, model=model_expert, label=f"Expert:{expert_name}",
-                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, REGISTER_ENTITY_TOOL, WRITE_ENTITY_ATTRIBUTE_TOOL, READ_ENTITY_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)
+                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, REGISTER_ENTITY_TOOL, WRITE_ENTITY_ATTRIBUTE_TOOL, READ_ENTITY_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)
 
 
 #def call_detector(goal: str, user_input: str, expert_output: str, decisions: list[Decision], current_phase: dict) -> dict:
@@ -8780,6 +9007,10 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
     acknowledged_issue_pin_block = (
         f"【🛠 現在のタスクで対応中の懸念（issue_log）】\n{acknowledged_issue_pin}\n\n" if acknowledged_issue_pin else ""
     )
+    # [BL-217] flag_needs_human_inputで人間の回答待ちにしたissueへ、人間が--answer-human-input
+    # で回答した直後、一度だけ知らせる。
+    human_input_notice = _build_human_input_answered_notice(get_active_conn(), state["run_id"])
+    human_input_notice_block = f"{human_input_notice}\n\n" if human_input_notice else ""
 
     # [BL-054] 第1段: ドメイン妥当性レビューを検算より先に実行する。
     # 検算を先に済ませると「数値は合っている」という結果に引きずられ、そもそもの前提・設計
@@ -8875,6 +9106,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"{escalation_pin_block}"
         f"{deferred_issue_pin_block}"
         f"{acknowledged_issue_pin_block}"
+        f"{human_input_notice_block}"
         f"System Goal: {goal}\n"
         f"{_get_goal_essence_text(get_active_conn(), state['run_id'])}\n"
         f"[BL-087 Stage4] 上記【🎯 本質】に照らして、数値・条件設定自体は妥当でも本質から"
@@ -10720,6 +10952,11 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     planned_issue_pin = _build_planned_issue_pin_text(_conn, state["run_id"])
     if planned_issue_pin:
         timeline_str += f"\n\n【📋 計画済みissue（参考、対応task_idあり、issue_log）】\n{planned_issue_pin}"
+    # [BL-217] flag_needs_human_inputで人間の回答待ちにしたissueへ、人間が--answer-human-input
+    # で回答した直後、一度だけ知らせる。
+    human_input_notice = _build_human_input_answered_notice(_conn, state["run_id"])
+    if human_input_notice:
+        timeline_str += f"\n\n{human_input_notice}"
 
     system_prompt_trailing += (f"""
         \n現在までの決定事項・検討状況DB】\n
@@ -13788,12 +14025,61 @@ if __name__ == "__main__":
         help="--resumeと併用し、--list-checkpointsで確認したcheckpoint_idを指定して、"
              "threadの最新状態ではなくその時点から再開する（省略時は従来通り最新から再開）。",
     )
+    # [BL-217] flag_needs_human_inputで起票された「実地調査が必要」なissueの一覧・回答用CLI。
+    # runの動作状態（実行中/halt/checkpoint途中）に関わらずいつでも実行できる（読み取り/書き込み
+    # とも別プロセスからsqlite fileへ直接アクセスするだけで、LangGraphのstate/checkpointには
+    # 一切触れない）。
+    _cli_parser.add_argument(
+        "--pending-human-input", metavar="RUN_ID", default=None,
+        help="指定run_idで、実地調査待ち（flag_needs_human_input）のまま未回答のissue一覧を表示して終了する。",
+    )
+    _cli_parser.add_argument(
+        "--answer-human-input", metavar="RUN_ID", default=None,
+        help="--topic/--value/--unit/--source/--commentと併用し、実地調査待ちのissueへ人間の確定値を回答する。",
+    )
+    _cli_parser.add_argument("--topic", default=None, help="--answer-human-input対象issueのtopic。")
+    _cli_parser.add_argument("--value", default=None, help="--answer-human-inputで書き込む確定値。")
+    _cli_parser.add_argument("--unit", default="", help="--answer-human-inputで書き込む確定値の単位。")
+    _cli_parser.add_argument("--source", default="", help="--answer-human-inputの出典（誰に確認したか等）。")
+    _cli_parser.add_argument("--comment", default="", help="--answer-human-inputの自由記載コメント（issue解決時の申し送りとして記録）。")
     _cli_args = _cli_parser.parse_args()
 
     if _cli_args.list_checkpoints:
         # [BL-174] 純粋な閲覧用コマンドのため、ai_vs_ai_loop本体もMultiLoggerによる
         # log/<日付>/<時刻>/ ディレクトリ作成も一切行わず、素のstdoutへ表示してすぐ終了する。
         list_checkpoints(_cli_args.list_checkpoints)
+        sys.exit(0)
+
+    if _cli_args.pending_human_input:
+        _conn = get_db_connection()
+        init_db(_conn)
+        _rows = _flag_needs_human_input_report(_conn, _cli_args.pending_human_input)
+        if not _rows:
+            print(f"run_id={_cli_args.pending_human_input}: 実地調査待ちのissueはありません。")
+        else:
+            print(f"run_id={_cli_args.pending_human_input}: 実地調査待ちのissue {len(_rows)}件")
+            for _r in _rows:
+                print(f"\n[{_r['severity']}] topic={_r['topic']} (variable_name={_r['human_variable_name']})")
+                print(f"  task={_r['task_id']} phase={_r['phase_id']}")
+                print(f"  確認事項: {_r['human_research_prompt']}")
+                print(f"  背景: {_r['description']}")
+        _conn.close()
+        sys.exit(0)
+
+    if _cli_args.answer_human_input:
+        if not _cli_args.topic or _cli_args.value is None:
+            print("エラー: --answer-human-inputには--topicと--valueが必須です。")
+            sys.exit(1)
+        _conn = get_db_connection()
+        init_db(_conn)
+        _result = _answer_human_input(
+            _conn, _cli_args.answer_human_input, _cli_args.topic, _cli_args.value,
+            _cli_args.unit, _cli_args.source, _cli_args.comment,
+        )
+        _conn.close()
+        if not _result["success"]:
+            print(f"エラー: {_result['error']}")
+            sys.exit(1)
         sys.exit(0)
 
     # カスタムロガーを標準出力に設定（importのみでは発火させない。BL-027）

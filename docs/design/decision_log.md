@@ -2726,6 +2726,18 @@
 | 関連 BL | [BL-215](back_log/issue_backlog.md#bl-215-agreementsdecisions等のidがミリ秒生成で衝突しorder-by-idの順序とid参照が不定になる)、[BL-214](back_log/issue_backlog.md#bl-214-current_task_idの実効解決が一部経路で未適用で各フェーズ先頭タスクの承認検証とissueのtask_id付与が壊れる)（発見契機）、BL-084・BL-206・BL-212（`reversed(get_agreements_from_db(...))`経路）、D-190（AGENTS.md §13.5/§15.1/§17.1） |
 ---
 
+### D-195: 実地調査が必要な暫定値は、DEFERで「後続タスクが解決する」と偽装せず、専用ツールで「人間にしか解決できない」と正直に宣言させ、既存のBL-125ゲートへそのまま乗せる
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | ユーザーが`task_1_1`の暫定値（免許自主返納者数、「市独自統計未公表、task_1_3でヒアリング実施」として`write_issue(DEFER)`で先送り）を見て、実地調査が必要な暫定値へフィードバックを与える機構が要ると指摘した。調査の結果、これは単なる機能不足ではなく、DEFER機構の誤用だと判明した——DEFERは「別のAIタスクが後で解決できる」ことを前提とした仕組みだが、task_1_3も同じAIが実行するため実地ヒアリングは原理的に実行不可能で、AIは「後で解決される」という体裁だけを整えた偽の解決計画を作っていた。あわせて、既存の`ask_user_question`（BL-130）が「User」役（実際は`generate_user_utterance`が演じる発注者AI）にしか届かず、実際の人間には一切届いていないことも判明した。 |
+| **決定理由** | 実装の起点は「新しいゲート機構を作ること」ではなく「AIに正直な区別をさせること」だと判断した。DEFERの`defer_to_task_id`は実在するtask_idであることしか検証しておらず、その関連性チェック（受け皿タスクが本当に対応できるか）は`cela_main.py:3625-3630`で「LLM判断/キーワード一致はコスト・非決定性・誤検知が理由」として既に意図的に却下されている。この先例に従えば、新たな「人間にしか解決できない」という区別も、DEFER側に機械的な妥当性検証を追加する形では実装すべきではない——同じ理由（コスト・非決定性）がそのまま当てはまる。代わりに、新規ツール`flag_needs_human_input`に`defer_to_task_id`相当のパラメータを一切持たせず、「AIタスクへの先送り」と「人間への先送り」が同一issue上で混在する余地を構造で無くすことにした。この設計の直接の帰結として、**BL-125の遷移ゲート（`_get_blocking_issues_for_transition`）を1行も変更する必要がなくなった**——新ツールで起票したissueは`defer_to_task_id`が常に空のため、既存SQL（`status='escalated' AND defer_to_task_id IS NULL OR ''`）が`severity='major'`の場合に自然にタスク遷移をブロックし、人間が専用CLIで`status='resolved'`にすれば同じSQLから自然に外れる。新しい検証ロジックを足すのではなく、既存のゲートが正しく機能する条件（`defer_to_task_id`が空であること）を維持したまま、AIに嘘をつかせない設計へ倒したことで、ゲート自体の複雑性が増えないまま正しい挙動が手に入った。回答経路については、`docs/refs/`＋`read_goal_reference`（BL-199）という既存の「人間がファイルを置けばAIが自動的に拾う」経路が既に稼働していたが、ユーザーは「専用CLIで人間が直接書き込む」ことを明示的に選んだ——AIが再確認・再抽出する工程に依存せず、確実に伝わることを優先した判断である。あわせて「各ノードへ人間が回答したことを知らせる通知機構」の追加要望を受け、消費済みマーカーはstate側のフラグではなくDB列（`human_notice_delivered_at`）に持たせることにした。チェックポイント跨ぎでの状態ドリフトを避けるためであり、これはAGENTS.md §13.3（権威は常にDB、派生表現ではなく）の直接適用である。 |
+| 決定内容 | ①Expert専用ツール`flag_needs_human_input`（`topic`/`variable_name`/`human_research_prompt`/`description`/`severity`を受け取り、`defer_to_task_id`相当のパラメータを持たない）を新設する。②`issue_log`へ`human_research_prompt`（非空＝フラグ）・`human_variable_name`（回答時に`upsert_verified_fact`へ渡す変数名。設計時に欠落し実装中に追加）・`human_notice_delivered_at`（一度だけ通知の消費済みマーカー）を追加する。③専用CLI`--pending-human-input`/`--answer-human-input`を新設し、後者は`upsert_verified_fact`で`confidence='confirmed'`・`citations=[{"type":"human_field_research",...}]`として確定値を書き込み、対応issueを`resolved`にする（自由記載コメントは既存の`resolution_note`列を再利用）。④`_build_human_input_answered_notice`を、既存のpin текст構築箇所（`_build_escalation_pin_text`等と同じ、`call_expert`/`call_detector`/`generate_user_utterance`の3関数の毎ターン呼び出し）へ追加し、resume専用フックにしない（runが動き続けたまま、別ターミナルでのCLI書き込みも次ターンで拾える）。⑤`citations`の`type`enumへ`"human_field_research"`を追加する（既存の`"user_input"`はUser AI役の発言を指し実際の人間ではないため、混同を避けるため流用しない）。 |
+| 影響 | `cela_main.py`（`_ensure_issue_log_human_input_columns`、`FLAG_NEEDS_HUMAN_INPUT_TOOL`／`_flag_needs_human_input_tool_impl`、`TOOL_DISPATCH`配線、`call_expert`のツール一覧、`_flag_needs_human_input_report`／`_answer_human_input`／`_build_human_input_answered_notice`、argparseへの`--pending-human-input`/`--answer-human-input`、citations enum4箇所＋コメント、`WRITE_ISSUE_TOOL`説明文）、`tests/test_bl217_human_in_the_loop.py`（新規20件）。 |
+| 関連 BL | [BL-217](back_log/issue_backlog.md#bl-217-実地調査が必要な暫定値へaiがdeferで誤魔化さず正直に人間しか解決できないと宣言し専用cliで人間が回答できるようにするhuman-in-the-loop)、BL-096（Expertへwrite_issueを直接与えない既存方針からの意図的な逸脱）、BL-130（`ask_user_question`が実は人間に届いていなかった発見）、BL-136（DEFERの関連性チェック却下の先例）、BL-125（無改修で機能した遷移ゲート）、BL-199（検討したが採らなかった間接経路）、D-189（AGENTS.md §13.3） |
+---
+
 ## 未決定（pending）
 
 ---
