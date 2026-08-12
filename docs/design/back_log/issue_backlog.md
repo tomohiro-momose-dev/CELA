@@ -7632,9 +7632,41 @@ DEFER側へは実装しない方針とした。
 `owns_variables`の機械的整合チェック（DEFERと同じ理由で却下）、Detector/User AIへのツール付与。
 
 **中断の経緯：** Plan modeで設計完了・ExitPlanModeで承認を求めたところ、ユーザーが別件
-（web_fetchのmarkitdown対応形式拡張、BL-218）を優先して割り込んだため、実装承認は保留のまま。
-設計内容の全文は本セッションの会話記録に残っている（doc化は未実施、実装着手前にBL-217設計書として
-`docs/design/back_log/BL-217/`へ保存する）。
+（web_fetchのmarkitdown対応形式拡張、BL-218）を優先して割り込んだため、実装承認は一旦保留。
+その後BL-218完了後にユーザーが「実装してください」と改めて指示し、実装に着手した。
+
+**実装（`done`）：**
+- `_ensure_issue_log_human_input_columns`：設計時の3列（`human_research_prompt`/
+  `human_notice_delivered_at`）に加え、**`human_variable_name`列を実装中に追加**した。
+  設計書は「`--answer-human-input`が`upsert_verified_fact`へ渡す`variable_name`」の
+  永続化先を明記しておらず、この欠落は実装着手時に気づいて是正した（issue_log自体には
+  元々`variable_name`という概念が無いため、write_issueの既存列と衝突しない新規列とした）。
+- `FLAG_NEEDS_HUMAN_INPUT_TOOL`／`_flag_needs_human_input_tool_impl`：設計通りexpertのみ許可、
+  `defer_to_task_id`相当のパラメータを構造的に持たない。ツール一覧への配線は
+  「`call_expert`の2経路」という設計時の想定が誤りで、実際には**1箇所のみ**だったため
+  そこへ追加した（`call_detector`にも同名の`tools=[...]`が2箇所あり、設計段階でこれと
+  混同していたと判明）。
+- `WRITE_ISSUE_TOOL`の説明文に「DEFER先がAIには実行不可能な事柄なら`flag_needs_human_input`を
+  使え」という誘導を追加。
+- `_flag_needs_human_input_report`／`_answer_human_input`：設計通り実装。`_answer_human_input`は
+  未回答issueが存在しない場合・既に解決済みの場合はエラーを返し二重書き込みを防ぐ。
+- **BL-125ゲートは設計通り無改修で正しく機能することを実データで確認**：`flag_needs_human_input`
+  （severity=major）で起票した直後は`_get_blocking_issues_for_transition`がそれを検出し、
+  `_answer_human_input`実行後は同じissueがブロック対象から自然に外れることを、モックに頼らず
+  実際の関数呼び出しの連鎖（起票→レポート→回答→検算）で確認した（AGENTS.md §17.2）。
+- `_build_human_input_answered_notice`：`call_expert`／`call_detector`（Pass 1）／
+  `generate_user_utterance`の3箇所（設計時の見積り「4箇所」は`_build_escalation_pin_text`と
+  `_build_deferred_issue_pin_text`を別々に数えた誤りで、実際の呼び出し箇所は3関数）へ配線。
+  一度届けたら`human_notice_delivered_at`をDBへ書き込み、二重通知しないことを確認した。
+- `--pending-human-input`／`--answer-human-input`CLIをargparseへ追加。読み取り専用の前者は
+  runの動作状態に関わらず即座に実行できる（`--list-checkpoints`と同じ、MultiLogger初期化前の
+  早期exitパターンを踏襲）。
+
+新規テスト20件（`tests/test_bl217_human_in_the_loop.py`）、フルオフラインスイート
+1257 passed / 6 deselected（内訳: 従来からの5件＋BL-215の6桁hex接尾辞に起因する既知の
+統計的フレーク1件——birthday paradoxにより2000回抽選で約12%の確率で衝突する設計上の
+性質で、本BLの変更とは無関係。再実行で解消することを確認済み）。7箇所の修正すべてを
+個別リバートし、対応テストの失敗を確認した（AGENTS.md §17.1）。
 
 ---
 
