@@ -2688,6 +2688,44 @@
 
 ---
 
+### D-192: 「現在のタスクは何か」の解決口を`_task_id_from`一本に集約し、生の`current_task_id`は「まだ遷移していない」を判定する箇所にのみ残す
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | BL-214で、`current_task_id`の実効解決（BL-146の`_effective_current_task_id_from`＝`current_phase`先頭タスクへのフォールバック）が`write_agreement`のゲート経路にしか適用されておらず、BL-177/178の承認検証と`write_issue`のtask_id付与が各フェーズ先頭タスクで壊れていた。生の`state["current_task_id"]`を読む箇所は全35箇所ある。どこまでを実効解決へ寄せるか、そして機械的な一括置換をしてよいかを決める。 |
+| **決定理由** | 一括置換は誤りである。`current_task_id`が空文字であることには**2つの異なる意味**があり、コードはそのどちらを問うているかで分かれる——(A)「現在どのタスクを実行中か」（空文字は答えになっていない。実効解決すべき）と(B)「まだ一度もタスク遷移が起きていないか」（空文字そのものが答え。実効解決すると情報が失われる）。全35箇所を1件ずつこの軸で分類したところ、28箇所が(A)、7箇所が(B)だった。(B)を実効解決へ寄せると、`_resolve_task_transition`の`departing_task_id`が初回遷移で「先頭タスクから離脱する」と誤認されBL-125/176ゲートが誤発火し、`_maybe_resume_forward_focus`のBUG-2検知（空文字であること自体を異常シグナルに使う）は永久に発火しなくなる。**[REJECTED]** 「`_resolve_task_transition`に初期値として先頭タスクを書き込ませれば全経路が生の値のままでよくなる」案は採らない。BL-024が書き手を単独に限定した設計意図（誰が現在タスクを動かしたか追跡可能にする）を壊し、かつ(B)の判定が不可能になるため。実装中に、`_effective_current_task_id_from`自身が**`current_phase`を持たない簡易stateで、明示的に設定済みの`current_task_id`を取りこぼしていた**ことが既存テスト4件の失敗により判明した。全経路の唯一の解決口へ昇格させる以上「既知の値を失う」ことは許されない（AGENTS.md §13.2 問2）ため、phase由来の解決が空のときに限り生の値へ退避する形へ修正した。順序はphase由来を先に保った——BL-146が確立した「`current_task_id`が`current_phase`の一覧に無ければ先頭タスクへ寄せる」挙動にBL-190の計画再構成が依存しているためである。 |
+| 決定内容 | `_task_id_from(state)`を`_effective_current_task_id_from(state) or _CURRENT_TASK_ID`とし、TOOL_DISPATCH経由の全ツールが自動的に実効解決を得る形にする（最小の変更で最大の被覆）。(A)に分類した28箇所を実効解決へ変更し、(B)の7箇所は据え置いたうえで**すべてに`[BL-214][例外]`コメントで「なぜ生の値が正しいか」を明記する**——例外が無記述だと、次に横断監査する者が「直し漏れ」と誤認して壊すため。`_effective_current_task_id_from`は`_get_current_task(state).get("task_id", "") or state.get("current_task_id", "")`とする。あわせて`_is_task_completed`が空のtask_idで呼ばれた場合に警告を出す（従来は黙って`False`を返し、DBの中身に関わらず機能が無効化されていることが誰にも見えなかった）。 |
+| 影響 | `cela_main.py`（`_task_id_from`／`_effective_current_task_id_from`／28箇所の呼び出し／7箇所の例外コメント／`_is_task_completed`の警告）、`tests/test_bl214_effective_task_id_resolution.py`（新規13件）、`tests/test_bl148_orchestrator_tool_loop.py`（実効アクセサへの追随）。 |
+| 関連 BL | [BL-214](back_log/issue_backlog.md#bl-214-current_task_idの実効解決が一部経路で未適用で各フェーズ先頭タスクの承認検証とissueのtask_id付与が壊れる)、BL-146（導入元）、BL-024（書き手の限定）、BL-177・BL-178（壊れていた検証機構）、BL-190（計画再構成の依存先）、BL-191（BUG-2検知）、D-190（AGENTS.md §15.1/§15.2） |
+
+---
+
+### D-193: `write_issue`のtask_idはLLMの申告より現在タスクを優先する（`write_agreement`とは非対称にする）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | BL-214で`write_issue`が`args["task_id"]`を完全に無視し、実runの9件すべてのissueが`task_id=''`で保存されていたことが判明した。BL214基本設計§4.3では`write_agreement`（BL-040）と同型の`args.get("task_id") or task_id`＝**args優先**にすることを提案していた。「同じ規則が2つのツールで別々に実装され片方だけが堅牢」という§15.1の是正として自然に見えたが、実装後のリバート検証で再検討が必要になった。 |
+| **決定理由** | args優先には**遷移ゲート回避の穴がある**。`write_issue`の`task_id`はBL-125の遷移ゲートが「離脱元タスクに未解決issueが残っているか」を判定する鍵であり、申告を無条件に採用すると**LLMが別タスクのtask_idを付けるだけで、自分の離脱元から未解決issueを外して先へ進める**。静かに成立し、もっともらしい結果を返すfail-openであり、AGENTS.md §13.2 問3が明確に禁じている型である。`write_agreement`の`task_id`は**書き込み先の識別子**でありゲートの鍵ではない——だからこそBL-040でargs優先が妥当だった。したがってこれは「規則の不統一」ではなく**役割の違いに由来する正当な非対称**であり、揃えること自体が誤りだった。なおこの穴は、§17.1のリバート検証で「S3をリバートしてもテストが落ちない」ことに気付いたのが発見契機である。リバート検証が回帰の担保だけでなく、**その修正が本当に必要か・正しい形か**を問い直す装置としても働いた。 |
+| 決定内容 | `_write_issue_impl`のtask_id決定を3分岐にする。①申告値が実効値と一致→採用、②申告値が実効値と**不一致**→採用せず現在タスクで記録し「別タスクへ委ねたい場合は`action_type='DEFER'`と`defer_to_task_id`を使え」と警告（正規の手段へ誘導する）、③実効解決が**空**（＝実効アクセサの適用漏れが将来再発した場合）→申告値を採用（最後の砦。ただし計画に実在する場合のみ。実在しない申告は採用すればどのゲートからも参照されない迷子issueになるため拒否する）。これにより、D-192の一元化が将来また漏れても**LLMが明示していれば壊れない**という二重の防御を保ちつつ、ゲート回避は成立しない。 |
+| 影響 | `cela_main.py`（`_write_issue_impl`）、`tests/test_bl214_effective_task_id_resolution.py`。 |
+| 関連 BL | [BL-214](back_log/issue_backlog.md#bl-214-current_task_idの実効解決が一部経路で未適用で各フェーズ先頭タスクの承認検証とissueのtask_id付与が壊れる)、BL-040（args優先の先例。役割が違うため踏襲しない）、BL-125（遷移ゲート）、BL-136（DEFER）、D-192、D-190（AGENTS.md §13.2/§17.1） |
+
+---
+
+### D-194: 時刻ベースIDの採番を`_new_record_id`一箇所へ集約し、順序は`rowid`で取る
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | BL-215（`agreements`等のidが`f"AG-{ミリ秒}"`で衝突し`ORDER BY id`の順序が不定になる）は、当初ユーザー判断で「実害はないので後回し」とされていた。しかしBL-214のインシデント再現テスト（初回タスクでDeliverableをApprovedにした直後に`_is_task_completed`が成功と判定すること）が**5回中3回失敗するflaky**になり、原因がまさにこのID衝突だった。BL-214の修正を検証できるようにするために必要となったため、実施可否と範囲を再判断する。 |
+| **決定理由** | 「実害はない」という当初の見立ては、**実runでは重複IDが0件だった**という観測に基づいており正しかった。実LLMのレイテンシが連続書き込みを同一ミリ秒に収めないためである。しかしテスト環境ではLLM呼び出しが無く連続書き込みが同一ミリ秒に収まるため、**BL-214の回帰テストが恒久的にflakyになる**。flakyなテストは「失敗しても誰も驚かない」状態を作り、いずれ本物の回帰を隠す。したがって修正の動機は「実害の除去」ではなく「**BL-214の修正を検証可能にすること**」である。範囲については、§6.3の方針（agreementsの`ORDER BY rowid`＋uuidサフィックス）を2点広げた。**①採番の一元化**：`goal_escalations`（`ESC-`）だけが既にuuidサフィックスを持ち、`agreements`/`decisions`/`goal_shift_events`/`plan_drafts`/`goal_drafts`/`scheduling_decisions`/`deliverable_files`が素のミリ秒という状態そのものが、「同じ一意ID採番という規則がテーブルごとにバラバラ」＝§15.1の事例である。テーブル単位で潰すと次に追加されるテーブルで同じ欠陥が戻るため、**採番口を1つにする**形で潰した。**②`issue_log`の順序**：idが`uuid4`のため`ORDER BY id`は挿入順ではなく**実質ランダム順**を返していた。ミリ秒衝突とは症状が違うが「順序を持たない値で並べている」という同じ欠陥クラスであり、AGENTS.md §13.5（インスタンスではなくクラスを直す）に従い6箇所すべてを是正した。既存の重複行（実DB全体で1724行中188行）は遡及修正しない——SQLiteの暗黙rowidが真の挿入順を保持しているため、`ORDER BY rowid`にすれば**読み取り側が既存DBに対しても正しく動く**からである。 |
+| 決定内容 | `_new_record_id(prefix)`（`f"{prefix}-{ミリ秒}-{uuid4.hex[:6]}"`）を新設し、`AG-`／`D-`／`GS-`／`PL-`／`ESC-`／`GD-`／`SCHED-`／`DF-`／`AG-MASTER-`のすべてをここへ寄せる。接頭辞は既存のログ表記・`citations`の`AG-xxx`参照との互換のため保つ。`agreements`／`decisions`／`issue_log`を引く全クエリの`ORDER BY id`を`ORDER BY rowid`へ変更する（スキーマ移行不要、`SELECT *`にrowidは含まれないため下流のdictキーにも影響しない——いずれも検証済み）。素のミリ秒採番が再導入されないよう、ソース走査による配線固定テストを置く。 |
+| 影響 | `cela_main.py`（`_new_record_id`新設、9箇所の採番、`agreements`/`decisions`/`issue_log`の`ORDER BY` 9箇所）、`tests/test_bl215_record_id_uniqueness_and_ordering.py`（新規8件）、`tests/test_r4_smoke.py`（`max(rows, key=id)`→`rows[-1]`。idの文字列大小は挿入順を表さない）。 |
+| 関連 BL | [BL-215](back_log/issue_backlog.md#bl-215-agreementsdecisions等のidがミリ秒生成で衝突しorder-by-idの順序とid参照が不定になる)、[BL-214](back_log/issue_backlog.md#bl-214-current_task_idの実効解決が一部経路で未適用で各フェーズ先頭タスクの承認検証とissueのtask_id付与が壊れる)（発見契機）、BL-084・BL-206・BL-212（`reversed(get_agreements_from_db(...))`経路）、D-190（AGENTS.md §13.5/§15.1/§17.1） |
+---
+
 ## 未決定（pending）
 
 ---

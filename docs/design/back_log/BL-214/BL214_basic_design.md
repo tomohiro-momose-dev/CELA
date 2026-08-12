@@ -357,6 +357,21 @@ AGENTS.md §17.1 に従い、**各修正を個別にリバートすると対応�
 
 ---
 
+## 9. 参照
+
+- `docs/design/back_log/issue_backlog.md`: BL-146（`_effective_current_task_id_from` の導入元）、
+  BL-024（`current_task_id` の書き手限定）、BL-177 / BL-178（本件で失敗した検証機構）、
+  BL-040（`args` 優先フォールバックの先例）、BL-125 / BL-176 / BL-194（下流の影響先）、
+  BL-213（横断監査、本件は監査対象外だった）
+- `docs/design/decision_log.md`: D-189（AGENTS.md §13）、D-190（§14〜§18）
+- `AGENTS.md`: §13.1（空文字が既定値を貫通）、§13.2（フォールバック前の下流追跡）、
+  §14.1（表層一致は診断ではない）、§15.1（One rule, one place）、§15.2（発火源の全列挙）、
+  §17.1（リバート検証）
+- 実ログ: `log/2026-08-11/2030/log_no_prompt.md`
+- 実DB: `cela.db`（run_id=`1786436794-a9d79ae6`）
+
+---
+
 ## 10. 実装記録（2026-08-11）
 
 対象コミット: `f35016d` の作業ツリー。BL-214 → BL-215 の順で実装し、フルオフラインスイートは
@@ -457,16 +472,3 @@ Superseded を最新と誤認する。**BL-214 の修正を検証できるよう
 | BL-215 issue_log `ORDER BY rowid` | 1 failed |
 
 ---
-
-## 9. 参照
-
-- `docs/design/back_log/issue_backlog.md`: BL-146（`_effective_current_task_id_from` の導入元）、
-  BL-024（`current_task_id` の書き手限定）、BL-177 / BL-178（本件で失敗した検証機構）、
-  BL-040（`args` 優先フォールバックの先例）、BL-125 / BL-176 / BL-194（下流の影響先）、
-  BL-213（横断監査、本件は監査対象外だった）
-- `docs/design/decision_log.md`: D-189（AGENTS.md §13）、D-190（§14〜§18）
-- `AGENTS.md`: §13.1（空文字が既定値を貫通）、§13.2（フォールバック前の下流追跡）、
-  §14.1（表層一致は診断ではない）、§15.1（One rule, one place）、§15.2（発火源の全列挙）、
-  §17.1（リバート検証）
-- 実ログ: `log/2026-08-11/2030/log_no_prompt.md`
-- 実DB: `cela.db`（run_id=`1786436794-a9d79ae6`）
