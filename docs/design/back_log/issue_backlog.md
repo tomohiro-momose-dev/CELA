@@ -248,6 +248,8 @@
 | BL-214 | 高 | `cela_main.py`（`_task_id_from`、`generate_user_utterance`のStage初期化、`_write_issue_impl`） | ユーザーが`log/2026-08-11/2030`（nemotronの新規ラン）について「ツール使用に苦戦しているようです」と報告し、User AI Stage3のBL-177/178警告ログを引用。調査の結果、**モデルは苦戦しておらず、検証側がモデルの正しい成功を認識できていなかった**ことが判明した。`generate_user_utterance`のStageパイプライン先頭（`cela_main.py:10084`）が`_CURRENT_TASK_ID`へ**生の**`state["current_task_id"]`を代入し、BL-177/178の検証（`cela_main.py:10315`）がそれを`_is_task_completed`へ渡している。`current_task_id`は唯一の書き手`_resolve_task_transition`（BL-024）が最初の遷移まで発火しないため**各フェーズの先頭タスク実行中は空文字**であり、`_is_task_completed`は`if not task_id: return False`で**DBの中身に関わらず必ずFalse**を返す。結果、正常な承認が3回リトライされ`ApprovalRecordingFailed`へ落ち、承認済みタスクが次へ進めない。**これはBL-146が既に発見・解決済みの問題**（`_effective_current_task_id_from`のdocstringが同じ現象を明記）であり、BL-146は`write_agreement`のゲート経路だけを直し他経路へ波及していなかった——AGENTS.md §15.1（One rule, one place）の再発事例である。同じ原因で`write_issue`（`TOOL_DISPATCH`が`_task_id_from`を渡す）も`args["task_id"]`を無視して`task_id=''`で保存しており、実runで**8件全てのissueが`task_id=''`/`last_seen_task_id=''`**で記録され、BL-125遷移ゲート・BL-144滞留追跡・BL-145再構成・BL-194 actionable集合が軒並み機能しない状態だった（`write_agreement`は`args.get("task_id") or task_id`のBL-040フォールバックがあったため無事）。**実装完了（2026-08-11）**。基本設計は`docs/design/back_log/BL-214/BL214_basic_design.md`（S1: `_task_id_from`を実効解決へ一元化／S2: Stageパイプラインの`_CURRENT_TASK_ID`／S3: `write_issue`のargs優先フォールバック／S4: 生`current_task_id`全件精査／S5: 沈黙の解消）。**なお初回の診断（ID衝突が原因）は誤りであり、設計書§0に訂正の経緯を記録した**（実runに重複IDは0件、AGENTS.md §14.1違反）。詳細は[BL-214詳細](#bl-214-current_task_idの実効解決が一部経路で未適用で各フェーズ先頭タスクの承認検証とissueのtask_id付与が壊れる)を参照。 | P1 |
 | BL-215 | 中 | `cela_main.py`（`agreements`/`decisions`/`goal_shift_events`/`plan_drafts`のID生成、`ORDER BY id`を使う全クエリ） | BL-214の調査過程で発見した独立した欠陥（**BL-214のインシデントの原因ではない**）。ID生成が`f"AG-{int(time.time() * 1000)}"`のミリ秒依存で、かつ`agreements`テーブルに**PRIMARY KEYもUNIQUE制約も無い**ため、同一ミリ秒の2回呼び出しで**完全に同じIDの行が重複INSERTされる**。実DB全体で**総行数1724／重複ID種類90／重複に巻き込まれた行188（10.9%）**、3重複も8件存在する。想定される実害は3種：①**順序の不定性**（`get_agreements_from_db`は`ORDER BY id`で最新順を再構成し9箇所が`reversed()`で最新行を取るが、同一IDのタイの並びはクエリプラン依存で不定。合成テストで実際に挿入順が反転しSuperseded行を最新と誤認させることを確認済み）、②**UPDATEの増幅**（`db_supersede_agreement`/`freeze_agreement`は`WHERE id=?`で重複IDの全行を巻き込む）、③**参照の曖昧化**（`depends_on`整合性チェック、`freeze_agreement_id`、`citations`の`AG-xxx`参照）。同型の脆弱性が`decisions`(`D-`)・`goal_shift_events`(`GS-`)・`plan_drafts`(`PL-`)にもある一方、**`goal_escalations`は既に`uuid.uuid4().hex[:6]`サフィックスで対策済み・`issue_log`は`str(uuid.uuid4())`**であり、「一意IDの作り方」という同じ規則がテーブルごとにバラバラという§15.1の事例でもある。修正方針（実装済み）：順序は`ORDER BY id`→`ORDER BY rowid`（SQLiteの暗黙rowidが真の挿入順を保持しており**スキーマ移行なしで既存DBにも効く**ことを検証済み、`SELECT *`にrowidは含まれず下流のdictキーにも影響しない）、一意性は`goal_escalations`の先例に揃えてuuidサフィックスを追加、既存の重複行は遡及修正しない。詳細は`docs/design/back_log/BL-214/BL214_basic_design.md`§6および[BL-215詳細](#bl-215-agreementsdecisions等のidがミリ秒生成で衝突しorder-by-idの順序とid参照が不定になる)を参照。 | P2 |
 | BL-216 | 中 | `web_tools.py`（`read_reference_file_handler`のkeyword検索、`_cache_preview`新設） | ユーザーが「web_cacheをAIが探すときに、検索で引っかかるファイルがランダムな文字列で開くまで中身がわかりません。先頭300字程度を出して、どの文章が欲しいファイルか一覧の段階で出してあげてはどうか」と提案。`web_cache/`のファイル名は`sha256(url)[:16]`のハッシュ（`cache_file_path`）で人間にもモデルにも無意味な文字列であり、`keyword`検索が複数件ヒットした場合、`status="multiple_matches"`の`candidates`にはこのハッシュファイル名しか入っていなかった。モデルは目的のファイルを当てるために各候補を`path`指定で1件ずつ開いて中身を確認するしかなく、`read_reference_file`が本来の目的（`web_search`/`web_fetch`の再呼び出しを避けるための再取得）を果たせていなかった。**実装完了（`done`）**：`_cache_preview(path)`ヘルパーを新設し、各候補に`write_cache`が付与するSource URL行と本文冒頭300字（1行に整形、超過時は`…`を付与）から成る`preview`を添えて返すよう変更。`candidates`の要素は`str`（ファイル名）から`{"path": ..., "preview": ...}`の辞書へ変更（破壊的変更だが呼び出し元はモデルのみで永続化されないため後方互換は不要と判断）。同型の`read_goal_reference_handler`（`docs/refs/`の開発者キュレーション済み参照データ）は、ファイル名自体が人間可読な相対パス（例: `chino_city/chino_city_data.md`）であり同じ欠陥が成立しないため対象外とした（AGENTS.md §13.5「クラスを直す」の適用範囲を欠陥の実際の原因——ハッシュ化されたファイル名——に限定）。ツールスキーマ（`READ_REFERENCE_FILE_TOOL`）の説明文にもpreviewの存在を明記し、モデルが開かずに選べることを伝える。新規テスト2件（`test_read_reference_file_multiple_matches_candidates_include_preview`・`test_read_reference_file_preview_truncates_long_body`）、既存テスト47件を含め`tests/test_bl184_web_tools.py`49件通過。`_cache_preview`を導入前の実装へ戻すと新規2件が失敗することを確認済み（AGENTS.md §17.1）。 | P3 |
+| BL-217 | 中 | `cela_main.py`（新規`flag_needs_human_input`ツール、`issue_log`スキーマ、CLI追加） | ユーザーが`task_1_1`の暫定値（免許自主返納者数、「市独自統計未公表、task_1_3でヒアリング実施」として先送り）を見て、実地調査が必要な暫定値に人間がフィードバックを与える機構が要ると指摘。調査の結果、既存の`ask_user_question`は「User」役（実際はLLMが演じる発注者AI）にしか届かず、実際の人間には一切届いていないことが判明。さらに深刻な点として、`write_issue(DEFER)`で「task_1_3が解決する」と申し送っていたが、task_1_3も同じAIが実行するため実地ヒアリングを行う能力がなく、**AIが「後で解決される」という体裁だけを整えた偽の解決計画**になっていた（DEFERの関連性チェックは`cela_main.py:3625-3630`で意図的に未実装——機械的な関連性検証はコスト・非決定性を理由に既に却下されている先例があり、新たな「人間しか解決できない」区別も同じ理由でDEFERへは実装しない）。一方、下流の伝播経路（`verified_facts`の`confidence`/`citations`/`upsert_verified_fact`による上書き、BL-199の`docs/refs/`＋`read_goal_reference`のライブ読み取り）は実証済みで、欠けているのは①AIが「人間にしか解決できない」と正直に宣言する経路、②人間がその場で確定値を書き込める経路、③回答があったことを各ノードへ知らせる通知、の3点のみと特定した。ユーザー判断：起票経路は**Expertへ新規専用ツールを直接付与**（decision_extractorの自動抽出拡張ではなく、BL-096の既存方針から外れることを承知のうえで実装の単純さを優先）、回答経路は**専用CLIで人間が直接`verified_facts`へ書き込み**、加えて「各ノードへ人間が回答したことを知らせる通知機構」と「自由記載のコメント欄」を追加要件とした。設計はPlan modeで完了：新規ツール`flag_needs_human_input`（`defer_to_task_id`相当のパラメータを持たせず構造的にDEFERと排他にする）、`issue_log`への新規列`human_research_prompt`/`human_notice_delivered_at`、新規CLI`--pending-human-input`/`--answer-human-input`、既存のpin текст構築箇所（`_build_escalation_pin_text`等と同じ毎ターン呼び出し）へ`_build_human_input_answered_notice`を追加（resume専用フックではなく、runが動き続けたまま人間の回答を拾える設計）。**設計完了・承認待ち（ユーザーが実装承認前に別件へ割り込んだため中断）**。詳細な設計は本セッションの会話記録を参照（doc化は未実施）。 | P2 |
+| BL-218 | 高 | `web_tools.py`（`fetch_and_extract`のContent-Type/拡張子判定、`requirements.txt`） | ユーザーが「markitdownで扱えるすべての形式をDLできるようにしたい（docx/xlsx等、茅野市のHPで実例あり）」「検索結果の読み込めない形式・容量超過を機械的に落としたい」と要望。調査の結果、`web_tools.py`は既にmarkitdown（BL-188）を使っていたが、その手前の独自Content-Type許可リスト（`text/*`と`application/pdf`のみ）がdocx/xlsx等を弾いていたことが直接原因と判明。サイズ超過（`_MAX_FETCH_BYTES`超）は既に`SsrfBlockedError`として機械的に落ちており（`web_fetch_call_count`はtry成功後のみ加算されるため呼び出し回数も消費しない）、この部分は追加実装不要と確認した。ユーザーは「文書系のみ」への限定拡張を選択（Zip・Image・Audioは対象外——Zipはzip爆弾的なリソース消費リスク、Image/Audioはこのプロジェクトが未設定のLLM client連携が必要で実質使えないため）。**実装完了（`done`）**：markitdownの各コンバータが実際に受理する`ACCEPTED_MIME_TYPE_PREFIXES`/`ACCEPTED_FILE_EXTENSIONS`（Docx/Xlsx/Xls/Pptx/Csv/Epub、PDF既存分含む）から`_DOCUMENT_MIME_TYPE_PREFIXES`/`_DOCUMENT_EXTENSIONS`を構築し、Content-Type判定を拡張。さらに自治体サイトはContent-Typeが不正確（`application/octet-stream`等）なことが珍しくないため、**URLパス末尾の拡張子もヒントとして判定に使い、`StreamInfo(extension=...)`としてmarkitdownへも渡す**よう変更（Content-Type誤設定でも拡張子側で正しく変換できる）。`requirements.txt`の`markitdown[pdf]`を`markitdown[pdf,docx,xlsx,xls,pptx]`へ拡張しインストール（epubは追加依存不要、markitdown内蔵の`zipfile`/`xml.dom.minidom`のみで動作）。実際に生成したdocx/xlsxバイナリを本物のmarkitdown変換パイプラインへ通し、正しいContent-Type・誤ったContent-Type（`application/octet-stream`）の両方で見出し・表構造を保ったまま変換できること、zip等は引き続き拒否されることを実データで確認した（モックだけに頼らない検証、AGENTS.md §17.2）。あわせて、実ログで「5件では目的の情報に届かず同じqueryで何度もweb_searchを呼び直す」傾向が確認されたため、`web_search`の`max_results`既定値を5→10（既存の上限と同値）へ引き上げた。新規テスト6件（`tests/test_bl184_web_tools.py`、docx/xlsx/xls/pptx/epub/csvの受理・Content-Type誤設定時の拡張子フォールバック・非退行としてのzip拒否）、既存50件を含め56件通過。2箇所の修正を個別リバートして失敗を確認済み（AGENTS.md §17.1）、フルオフラインスイート1238 passed / 5 deselected。 | P2 |
 
 ---
 
@@ -7560,6 +7562,131 @@ CREATE TABLE IF NOT EXISTS agreements (
 新規テスト2件（`test_read_reference_file_multiple_matches_candidates_include_preview`・
 `test_read_reference_file_preview_truncates_long_body`）を`_cache_preview`導入前のロジックへ
 戻すと実際に失敗することを確認した（AGENTS.md §17.1）。
+
+---
+
+### BL-217: 実地調査が必要な暫定値へ、AIがDEFERで誤魔化さず正直に「人間しか解決できない」と宣言し、専用CLIで人間が回答できるようにする（Human-in-the-Loop）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計完了・承認待ち。実装未着手） |
+| 優先度 | P2 |
+| 関連 | BL-096（issue_log/write_issueの導入元、Expertへwrite_issueを直接与えない既存方針）、BL-130（`ask_user_question`）、BL-136（DEFER、`defer_to_task_id`の関連性チェック却下の先例）、BL-125（遷移ゲート、`_get_blocking_issues_for_transition`）、BL-194（`_is_issue_effectively_deferred`）、BL-199（`read_goal_reference`、`docs/refs/`のライブ読み取り先例）、R3a（`verified_facts`の`confidence`/`citations`/`upsert_verified_fact`） |
+
+**内容:**
+
+ユーザーが`log/2026-08-12/1046/whiteboards/phase_1_task_1_1_V5.md`の暫定値
+（`license_return_annual`＝免許自主返納者数、「市独自統計未公表、task_1_3で茅野署・市高齢福祉課
+ヒアリング実施」として先送り）を見て、実地調査が必要な暫定値に人間がフィードバックを与える機構が
+要ると指摘した。
+
+調査の結果、2つの欠落が判明した。**①** 既存の`ask_user_question`（BL-130）は「User」役へ質問する
+ものだが、その「User」役は実際には`generate_user_utterance`が演じる発注者AIであり、**実際の人間には
+一切届いていない**。**②** より深刻な点として、`write_issue(action_type="DEFER")`で「task_1_3が
+解決する」と申し送っていたが、task_1_3も同じAIが実行するタスクであり、警察署・福祉課への実地
+ヒアリングを実際に行う能力はない。つまりAIは**「後で解決される」という体裁だけを整えた偽の
+解決計画**を作っていた。DEFERの`defer_to_task_id`は実在するtask_idであることしか検証しておらず
+（関連性の機械的チェックは`cela_main.py:3625-3630`で「LLM判断/キーワード一致はコスト・非決定性・
+誤検知が理由」として意図的に却下済み）、この先例に従い、新たな「人間しか解決できない」区別も
+DEFER側へは実装しない方針とした。
+
+一方、下流の伝播経路はほぼ実証済みだった。`verified_facts`の`confidence`（`confirmed`/`provisional`）
+と`citations`、`upsert_verified_fact`による上書き更新は既存機能でテスト済み。`docs/refs/<goal>/`＋
+`read_goal_reference`（BL-199）はURL引数を毎呼び出し都度readする実装のため、人間がファイルを
+置けば次のツール呼び出しで即座に拾われることも確認した。欠けているのは①AIが正直に「人間にしか
+解決できない」と宣言する経路、②人間がその場で確定値を書き込める経路、③回答があったことを各ノードへ
+知らせる通知、の3点のみと特定した。
+
+**ユーザー判断（2点）：**
+1. 起票経路は**Expertへ新規専用ツールを直接付与**する（decision_extractorの自動抽出拡張ではなく、
+   BL-096の「Expertへwrite_issueを直接与えない」という既存方針から意図的に外れる。理由：LLM抽出
+   フィールドを増やさない安全性と、実装の単純さを優先）。
+2. 回答経路は**専用CLIで人間が直接`verified_facts`へ書き込む**（`docs/refs/`頼みの間接経路は
+   採らない）。追加要件として、**各ノードへ「人間が回答した」ことを知らせる通知機構**と
+   **自由記載のコメント欄**を必ず含める。
+
+**設計（Plan modeで完了、承認待ちで中断）：**
+- 新規ツール`flag_needs_human_input`（Expertのみ）：`topic`/`variable_name`/`human_research_prompt`/
+  `description`/`severity`を受け取り、`defer_to_task_id`相当のパラメータを一切持たせない
+  （構造的にDEFERと排他）。
+- `issue_log`へ新規列`human_research_prompt`（非空＝フラグ）・`human_notice_delivered_at`
+  （一度だけ通知するための消費済みマーカー、DBを権威としAGENTS.md §13.3に従いstate側フラグに
+  依存しない）。
+- **BL-125/158の遷移ゲートは無改修で正しく機能する**：新ツールで起票したissueは`defer_to_task_id`
+  が常に空のため、`severity='major'`なら既存SQL（`status='escalated' AND defer_to_task_id IS NULL
+  OR ''`）が自然にタスク遷移をブロックする。人間が専用CLIで`status='resolved'`にすれば同じSQLから
+  自然に外れる——新しいゲートロジックは1行も不要。
+- 新規CLI `--pending-human-input RUN_ID`（未回答一覧の読み取り専用レポート）、
+  `--answer-human-input RUN_ID --topic ... --value ... --unit ... --source ... --comment ...`
+  （`upsert_verified_fact`で確定値を書き込み、対応issueを`resolved`にする。自由記載コメントは
+  既存の`resolution_note`列を再利用）。
+- 通知`_build_human_input_answered_notice`は、既存のpin текст構築箇所（`_build_escalation_pin_text`
+  等と同じ、`generate_user_utterance`/Detector両パスの毎ターン呼び出し）へ追加する。resume専用
+  フックにしない設計とすることで、runが動き続けたまま（別ターミナルでCLIが書き込んだ場合も）
+  次ターンで確実に拾える。
+- citations`type`enumへ`"human_field_research"`を追加（既存の`"user_input"`はUser AI役の発言を
+  指し実際の人間ではないため、混同を避けるため流用しない）。
+
+**スコープ外（v1）：** 特定issueに紐付かない任意タイミングでの人間コメント投入、`variable_name`と
+`owns_variables`の機械的整合チェック（DEFERと同じ理由で却下）、Detector/User AIへのツール付与。
+
+**中断の経緯：** Plan modeで設計完了・ExitPlanModeで承認を求めたところ、ユーザーが別件
+（web_fetchのmarkitdown対応形式拡張、BL-218）を優先して割り込んだため、実装承認は保留のまま。
+設計内容の全文は本セッションの会話記録に残っている（doc化は未実施、実装着手前にBL-217設計書として
+`docs/design/back_log/BL-217/`へ保存する）。
+
+---
+
+### BL-218: web_fetchがdocx/xlsx等markitdown対応の文書形式を独自Content-Type許可リストで弾いていた
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（2026-08-12 実装・テスト完了） |
+| 優先度 | P2 |
+| テスト | `tests/test_bl184_web_tools.py`（新規6件を含む56件）。リバート検証済み |
+| 関連 | BL-184（web_search/web_fetch導入元）、BL-188（markitdown統一の導入元、Content-Type許可リストの元設計） |
+
+**内容:**
+
+ユーザーが「markitdownで扱えるすべての形式をDLできるようにしたい（docx/xlsxがある、茅野市のHPで
+実例あり）」「検索結果の読み込めない形式・容量超過を機械的に落としたい（fetchして初めて容量超過が
+わかる）」と要望した。
+
+調査の結果、`web_tools.py`は既にmarkitdown（BL-188）でHTML/PDFを変換していたが、その手前で
+独自のContent-Type許可リスト（`text/*`と`application/pdf`のみ）を通しており、これがdocx/xlsx等を
+markitdown自体は変換できるにもかかわらず弾いていたことが直接原因と判明した。サイズ超過
+（`_MAX_FETCH_BYTES`=8MB超）は既に`SsrfBlockedError`として機械的に落ちており（`web_fetch_handler`は
+`state["web_fetch_call_count"]`をtry成功後のみ加算するため、失敗した取得は呼び出し回数を消費
+しない）、この部分は追加実装が不要であることを確認した。
+
+**ユーザー判断：** markitdownの対応形式拡張は「文書系のみ」に限定する。Zip（zip爆弾的なリソース
+消費リスクがあり、既存のサイズ上限は圧縮後サイズにしか効かない）とImage/Audio（markitdownの
+vision/音声変換にはこのプロジェクトが未設定の`llm_client`が別途必要で実質使えない）は対象外とした。
+
+**実装（`done`）：**
+- markitdownの各コンバータ（Docx/Xlsx/Xls/Pptx/Csv/Epub）が実際に受理する
+  `ACCEPTED_MIME_TYPE_PREFIXES`/`ACCEPTED_FILE_EXTENSIONS`を確認したうえで
+  `_DOCUMENT_MIME_TYPE_PREFIXES`/`_DOCUMENT_EXTENSIONS`を`web_tools.py`へ追加し、
+  `fetch_and_extract`のContent-Type許可判定を拡張した。
+- 自治体サイトはContent-Typeが不正確（`application/octet-stream`等）なことが珍しくないため、
+  **URLパス末尾の拡張子も判定のヒントとして使い**、`StreamInfo(mimetype=..., extension=...)`として
+  markitdownへも渡すよう変更した。Content-Typeと拡張子のどちらか一致すれば受理される
+  （markitdown自体の`accepts()`実装に合わせた）。
+- `requirements.txt`の`markitdown[pdf]`を`markitdown[pdf,docx,xlsx,xls,pptx]`へ拡張し
+  インストール（`mammoth`/`openpyxl`/`python-pptx`/`xlrd`等が追加される。epubは追加依存不要、
+  markitdown内蔵の標準ライブラリ`zipfile`/`xml.dom.minidom`のみで動作することを確認済み）。
+- 実際に生成したdocx/xlsxバイナリ（見出し・表を含む）を本物のmarkitdown変換パイプラインへ通し、
+  正しいContent-Typeでも誤ったContent-Type（`application/octet-stream`）でも、見出し・表構造を
+  保ったまま正しく変換できることを確認した（モックだけに頼らない実データ検証、AGENTS.md §17.2）。
+  zip等、文書系に含めなかった形式は引き続き拒否されることも確認した。
+- 副次的対応：実ログで「5件では目的の情報に届かず同じqueryで何度もweb_searchを呼び直す」傾向が
+  確認されたため（ユーザー指摘）、`web_search`の`max_results`既定値を5→10（既存の上限10と同値）へ
+  引き上げた。
+
+新規テスト6件（docx/xlsx/xls/pptx/epub/csvの受理、Content-Type誤設定時の拡張子フォールバック、
+非退行としてのzip拒否）を含め`tests/test_bl184_web_tools.py`56件が通過。Content-Type/拡張子判定と
+`StreamInfo`拡張子ヒントの2箇所を個別にリバートし、対応するテストが実際に失敗することを確認した
+（AGENTS.md §17.1）。フルオフラインスイート1238 passed / 5 deselected。
 
 ---
 
