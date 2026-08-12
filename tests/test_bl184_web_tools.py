@@ -401,6 +401,59 @@ def test_fetch_and_extract_wraps_markitdown_exception(monkeypatch):
         web_tools.fetch_and_extract("https://example.com/broken.pdf")
 
 
+def test_fetch_and_extract_accepts_docx_content_type(monkeypatch):
+    """[BL-218] 自治体サイトが配布するWord文書を、正しいContent-Typeで受理できること。"""
+    monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    resp = _FakeFetchResponse(
+        content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    _patch_httpx_client(monkeypatch, resp)
+    capture = {}
+    _patch_markitdown(monkeypatch, text_content="Word本文のMarkdown", capture=capture)
+    text = web_tools.fetch_and_extract("https://www.city.chino.lg.jp/soshiki/report.docx")
+    assert "Word本文のMarkdown" in text
+    assert capture["stream_info"].extension == ".docx"
+
+
+def test_fetch_and_extract_accepts_xlsx_via_extension_when_content_type_is_wrong(monkeypatch):
+    """[BL-218] 自治体サイトはContent-Typeが不正確（application/octet-stream等）なことが
+    珍しくない。URLパスの拡張子で救えることを確認する（本テストの直接動機）。"""
+    monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    resp = _FakeFetchResponse(content_type="application/octet-stream")
+    _patch_httpx_client(monkeypatch, resp)
+    capture = {}
+    _patch_markitdown(monkeypatch, text_content="Excel本文のMarkdown", capture=capture)
+    text = web_tools.fetch_and_extract("https://www.city.chino.lg.jp/soshiki/data.xlsx")
+    assert "Excel本文のMarkdown" in text
+    assert capture["stream_info"].extension == ".xlsx"
+    assert capture["stream_info"].mimetype == "application/octet-stream"
+
+
+@pytest.mark.parametrize("ext,content_type", [
+    (".xls", "application/vnd.ms-excel"),
+    (".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+    (".epub", "application/epub+zip"),
+    (".csv", "text/csv"),
+])
+def test_fetch_and_extract_accepts_document_formats(monkeypatch, ext, content_type):
+    """[BL-218] Excel(旧形式)/PowerPoint/EPUB/CSVも受理する。"""
+    monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    resp = _FakeFetchResponse(content_type=content_type)
+    _patch_httpx_client(monkeypatch, resp)
+    _patch_markitdown(monkeypatch, text_content="変換結果")
+    text = web_tools.fetch_and_extract(f"https://example.com/file{ext}")
+    assert "変換結果" in text
+
+
+def test_fetch_and_extract_still_rejects_content_type_and_extension_both_unrecognized(monkeypatch):
+    """[BL-218] 非退行：Content-Type・拡張子のどちらも文書系と認識できない場合は
+    引き続き拒否する（zip爆弾リスク等を理由に対象外としたzip等を含む）。"""
+    monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    _patch_httpx_client(monkeypatch, _FakeFetchResponse(content_type="application/zip"))
+    with pytest.raises(web_tools.SsrfBlockedError):
+        web_tools.fetch_and_extract("https://example.com/archive.zip")
+
+
 def test_fetch_and_extract_truncates_long_output(monkeypatch):
     monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
     _patch_httpx_client(monkeypatch, _FakeFetchResponse())

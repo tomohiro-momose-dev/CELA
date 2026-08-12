@@ -43,8 +43,28 @@ _MAX_READ_REFERENCE_CHARS = 10000
 _DDG_MIN_REQUEST_INTERVAL_SECONDS = 1.0
 # [BL-188] 公的機関・自治体の一次資料はPDF配布が多く、text/*限定ではweb_fetchで読めない
 # 実例が実ドライラン（log/2026-08-07/1244）で確認されたため、application/pdfを追加許可する。
-_ALLOWED_CONTENT_TYPE_PREFIXES = ("text/",)
-_PDF_CONTENT_TYPE = "application/pdf"
+# [BL-218] 自治体サイトはWord/Excel等のOffice文書も配布することが多い（ユーザー指摘：茅野市HP）。
+# markitdownは各コンバータが対応するmimetype/拡張子のどちらかが一致すれば変換できるため、
+# ここでの事前許可判定もContent-Typeと「URLパス末尾の拡張子」の両方を見る——自治体サイトは
+# Content-Typeが不正確（application/octet-stream等）なことも珍しくなく、拡張子だけが正しい
+# 手がかりというケースを取りこぼさないため。
+# 対象は意図的に「文書系」に限定する：Zip（zip爆弾的なリソース消費リスクがあり、SSRF対策の
+# サイズ上限（_MAX_FETCH_BYTES）は圧縮後サイズにしか効かない）、Image/Audio（markitdownの
+# vision/音声変換にはllm_clientが別途必要で、このプロジェクトでは未設定のため実質使えない）は
+# 除外した（ユーザー承認）。
+_DOCUMENT_MIME_TYPE_PREFIXES = (
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",        # .xlsx
+    "application/vnd.openxmlformats-officedocument.presentationml",             # .pptx
+    "application/vnd.ms-excel",  # .xls（旧形式）
+    "application/excel",         # .xls（旧形式の別表記）
+    "application/csv",           # text/csvは既存のtext/プレフィックスで既に許可済み
+    "application/epub",
+    "application/epub+zip",
+    "application/x-epub+zip",
+)
+_DOCUMENT_EXTENSIONS = (".pdf", ".docx", ".xlsx", ".xls", ".pptx", ".epub", ".csv")
 _USER_AGENT = "Mozilla/5.0 (compatible; CELA-research-bot/1.0)"
 
 # [BL-188] HTML/PDFの本文抽出をMicrosoft markitdown（Markdown化）へ一本化する。
@@ -327,10 +347,16 @@ def fetch_and_extract(url: str) -> str:
         )
     resp.raise_for_status()
     content_type = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-    is_pdf = content_type == _PDF_CONTENT_TYPE
-    if not is_pdf and not any(content_type.startswith(p) for p in _ALLOWED_CONTENT_TYPE_PREFIXES):
+    # [BL-218] URLパス末尾の拡張子もヒントとして使う。自治体サイトはContent-Typeが不正確
+    # （application/octet-stream等）なことがあり、拡張子だけが正しい手がかりというケースを
+    # Content-Type単独の判定では取りこぼす。
+    url_extension = Path(urlparse(url).path).suffix.lower()
+    is_recognized_mimetype = content_type.startswith("text/") or content_type.startswith(_DOCUMENT_MIME_TYPE_PREFIXES)
+    is_recognized_extension = url_extension in _DOCUMENT_EXTENSIONS
+    if not is_recognized_mimetype and not is_recognized_extension:
         raise SsrfBlockedError(
-            f"許可されていないContent-Typeです: {content_type!r}（text/*またはapplication/pdfのみ許可）"
+            f"許可されていない形式です（Content-Type={content_type!r}, 拡張子={url_extension!r}）。"
+            "対応形式: text/*, PDF, Word(.docx), Excel(.xlsx/.xls), PowerPoint(.pptx), CSV, EPUB"
         )
     raw = resp.content
     # [SAFETY] PDFはバイナリ構造（xrefテーブル等）を持つため途中切り捨てが安全でない
@@ -345,7 +371,9 @@ def fetch_and_extract(url: str) -> str:
     try:
         result = _MARKITDOWN.convert_stream(
             io.BytesIO(raw),
-            stream_info=StreamInfo(mimetype=content_type),
+            # [BL-218] extensionも渡す。markitdownの各コンバータはmimetype/extensionのいずれか
+            # 一致すれば受理するため、Content-Typeが誤っていても拡張子側で正しく変換できる。
+            stream_info=StreamInfo(mimetype=content_type, extension=url_extension or None),
             url=url,
         )
     except MarkItDownException as e:
@@ -416,11 +444,15 @@ def web_search_handler(args: dict, state: dict, config: dict) -> dict:
     query = (args.get("query") or "").strip()
     if not query:
         return {"status": "error", "message": "queryは必須です。"}
-    max_results = args.get("max_results", 5)
+    # [BL-218] 既定を5→10へ引き上げ。実ログで、5件では目的の情報に届かず同じqueryや
+    # 近い言い換えで何度もweb_searchを呼び直す（run単位の呼び出し上限を無駄に消費する）
+    # 傾向が確認されたため（ユーザー指摘）。上限（10）と揃えることで、通常時は追加の
+    # 呼び出し判断をモデルに委ねず最初から候補を広く見せる。
+    max_results = args.get("max_results", 10)
     try:
         max_results = max(1, min(int(max_results), 10))
     except (TypeError, ValueError):
-        max_results = 5
+        max_results = 10
 
     count = state.get("web_search_call_count", 0)
     limit = config.get("max_web_search_calls", _DEFAULT_MAX_WEB_SEARCH_CALLS)

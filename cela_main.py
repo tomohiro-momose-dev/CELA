@@ -900,7 +900,7 @@ WEB_SEARCH_TOOL = {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query text."},
-                "max_results": {"type": "integer", "description": "Max results to return (1-10, default 5)."},
+                "max_results": {"type": "integer", "description": "Max results to return (1-10, default 10)."},
             },
             "required": ["query"],
         },

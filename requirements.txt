@@ -8,4 +8,7 @@ langgraph-checkpoint-sqlite
 # 追加したが、実ドライランで表構造が失われる実害が確認されたため、見出し・表・リンクの文脈的
 # 位置を保持できるmarkitdownへ置き換えた（D-161）。依存重量（onnxruntime/numpy/Pillow等、
 # 約100MB）は増えるが、情報取得の質を優先するとユーザーが判断した。
-markitdown[pdf]
+# BL-218で、自治体サイト（茅野市HP等）が配布するWord/Excel/PowerPoint文書もweb_fetchで
+# 読めるようdocx/xlsx/xls/pptxのextraを追加した（ユーザー承認、文書系のみに限定。
+# zip/audio-transcription等は意図的に対象外——docs/design/back_log/issue_backlog.md BL-218参照）。
+markitdown[pdf,docx,xlsx,xls,pptx]
