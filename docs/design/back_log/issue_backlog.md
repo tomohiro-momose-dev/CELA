@@ -7569,8 +7569,9 @@ CREATE TABLE IF NOT EXISTS agreements (
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（設計完了・承認待ち。実装未着手） |
+| 状態 | `done`（2026-08-12 実装・テスト完了） |
 | 優先度 | P2 |
+| テスト | `tests/test_bl217_human_in_the_loop.py`（新規20件）。7箇所すべてリバート検証済み |
 | 関連 | BL-096（issue_log/write_issueの導入元、Expertへwrite_issueを直接与えない既存方針）、BL-130（`ask_user_question`）、BL-136（DEFER、`defer_to_task_id`の関連性チェック却下の先例）、BL-125（遷移ゲート、`_get_blocking_issues_for_transition`）、BL-194（`_is_issue_effectively_deferred`）、BL-199（`read_goal_reference`、`docs/refs/`のライブ読み取り先例）、R3a（`verified_facts`の`confidence`/`citations`/`upsert_verified_fact`） |
 
 **内容:**
