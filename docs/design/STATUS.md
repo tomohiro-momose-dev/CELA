@@ -125,6 +125,15 @@ Phase 1（R1）・Phase 2（R2）はともにDone。**R3a（自律的DB/ファ�
 26. [x] **ドキュメント/フォルダのR番号一本化（ユーザー指摘、2026-07-21）**: `phaseN/`という旧v23由来のフォルダ命名が現行のR番号（R1〜R5）と対応せず混乱の原因になっていた（例: 旧`phase3/`の中身が実際にはR5設計書だった）ため、`phase0/`→`r0_planning/`、`phase1/`→`r1_r2_r3b_core/`（内部ファイルも`cela_r1_r2_r3b_design_v7.md`等へリネーム）、`phase2/cela_phase2_design_R4.md`→`r4/cela_r4_design.md`、`phase2/cela_phase2_design_BL023_task_state.md`→`r1_r2_r3b_core/cela_r2_design_BL023_task_state.md`、`phase3/cela_phase3_design_R5_v2.md`→`r5/cela_r5_design_v2.md`にリネーム。`phase6plus/`（旧`phase6/`）はロードマップ自身が「Phase 6以降」という非R番号の呼称を使っているためそのまま維持。全相互リンクを`scripts/check_docs_consistency.py`で検証しPass
 27. [ ] **R3a詳細設計**: F-3.8（自律的DB/ファイル読み取りツール）・F-3.9（構造化ファクトストア）の詳細設計書を`r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md`への追記、または新規`r3a/`フォルダに作成し、`_build_task_scope_context`のフェーズ横断バグ（BL-035）をどう解消するかの実装方針を確定する
 
+28. [ ] **乖離マップ是正①（高・低コスト）: ⚠️/🗑️の3箇所に注記を入れる** — `_build_hydrate_context`（`cela_main.py:7436-7449`、F-8.1/8.2の5節構造未満）、`agreements.depends_on`（書き込みのみ・消費なし）、`chat_history`/`current_goal`表（未使用）の各コードへ「この名前は要件Fxxを示すが実装は満たしていない／この列・表は誰も読まない」と明示。実害: AIが`depends_on`を「未使用列」と誤認しBL-224初版設計を誤った。BL-224本体実装より**先に**入れるべき。詳細: [requirements_gap_map.md §6.2](requirements_gap_map.md)（高）・[bl_history_audit.md](bl_history_audit.md) #5
+29. [ ] **乖離マップ是正②（高）: F-8.4(2) 時系列復元読みの実装** — 「なぜ今この方向か」を後続AIがたどれるよう、topic文字列一致のみの`_find_prior_superseded`（`cela_main.py:7571-7584`）を系譜ベースの変遷連鎖へ置換。**BL-224（C1）で対応予定**。実害: BL-219の8,500人問題の再発防止に直結。詳細: [requirements_gap_map.md §6.2](requirements_gap_map.md)（高）
+30. [ ] **乖離マップ是正③（中）: F-2.6の機械的ゲートをDetector以外の3ロールへ展開** — `call_detector`の数値検算ゲート（`cela_main.py:12262-12272`付近）と同型のゲートをReviewer/Integrator/Arbiterへ。現在はDetectorのみが数値検算し他は承認できる（§15.2「部分的な保護は無いより危険」）。詳細: [requirements_gap_map.md §6.2](requirements_gap_map.md)（中）
+31. [ ] **乖離マップ是正④（中・低コスト）: モデル二層化の設定変更** — `model_*`の設定値を変え、監査役（Reviewer/Arbiter）を即答モデルから分離。現状は二重防衛線の「システム2」が名目上のものになっている（F-5.2/F-10.1/F-7.4）。設定値変更のみで要件に近づく。詳細: [requirements_gap_map.md §6.2](requirements_gap_map.md)（中）
+32. [ ] **乖離マップ是正⑤（中）: F-3.9③ provisional値の再検討トリガー** — 暫定値が制約変化後も暫定のまま参照され続ける問題。F-3.9が求めた再検討の切り口が働いていない。**BL-224のC4（前方伝播）で部分的に対応予定**。詳細: [requirements_gap_map.md §6.2](requirements_gap_map.md)（中）
+33. [ ] **乖離マップ是正⑥（低）: 意図的不実装を要件定義書へ書き戻す** — F-7.3（ロールバックは実装済みだが要件の一部は意図的見送り）・F-9.1（経験伝承の一部）へ「D-047により撤廃／意図的に不採用」を追記。次に読む人が「やり残し」と誤解して不要な作業を始めるのを防ぐ。詳細: [requirements_gap_map.md §6.2](requirements_gap_map.md)（低）
+34. [ ] **乖離マップ是正⑦（保留・監視）: F-9/F-5.3・F-10.4/10.6/10.7・F-22・F-21の実害観測** — 経験DNA伝承・平行世界探索・市場センシングは未実装だが現状run内代替で回っており実害未観測。次の実LLMドライラン監査でF-1.4（主観注入軸）の欠落等を注視し、具体例が出たら起票。詳細: [requirements_gap_map.md §6.2](requirements_gap_map.md)（保留）
+35. [ ] **BL-224実装 vs 実LLM再ドライラン、どちらを先行するか（ユーザー判断待ち）** — (A) 実LLM再ドライラン（R4 A/Bテスト＋R5実効性確認＋BL-062 SUPERSEDE発火確認）→指標C実測→BL-065〜070着手、または (B) BL-224実装着手（乖離マップ⚠️/🗑️是正①＋負債監査#1申し送り一元化を同時解決）。[乖離マップ§5](requirements_gap_map.md)・[負債監査§0](bl_history_audit.md)結論参照
+
 ---
 
 ## ドキュメント健全性
