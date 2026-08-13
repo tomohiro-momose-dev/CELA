@@ -83,7 +83,8 @@ Phase 1（R1）・Phase 2（R2）はともにDone。**R3a（自律的DB/ファ�
 
 | ID | 論点 | 関連 |
 |----|------|------|
-| — | | [decision_log.md](decision_log.md) |
+| — | **BL-224実装 vs 実LLM再ドライラン、どちらを先行するか** | [requirements_gap_map.md §5](requirements_gap_map.md)・[bl_history_audit.md §0](bl_history_audit.md)・[BL-224設計](back_log/BL-224/BL224_basic_design.md)。Next Actions 35 も参照 |
+| — | **BL-224の未決事項3点（最大探索深度10/表示3段、単独Rejectedへのエッジ不張り、2段階実装）** | [BL-224設計・未決事項](back_log/BL-224/BL224_basic_design.md)（いずれもAGENTS.md §7により新規定数は明示承認が必要） |
 
 ---
 
