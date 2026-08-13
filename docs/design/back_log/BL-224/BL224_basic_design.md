@@ -301,3 +301,137 @@ SELECT DISTINCT ref, MIN(depth) AS depth FROM backward GROUP BY ref ORDER BY dep
   (b) 提案を置き換えるシナリオで`--audit-report --ref agreement:<id>`が棄却された旧案と負の理由を
   表示する、(c) 上流値の変更で下流の`reason`に陳腐化マーカーが付く、(d) C1導入後はHydrate
   コンテキストに変遷の連鎖が現れ、トークン量が許容範囲に収まること
+
+---
+
+## 独立レビュー所見（hy3, 2026-08-13）
+
+別モデル（claude opus）が作成した本設計書を、hy3 が実コード（`cela_main.py`）に対して各主張を
+逐一照合してレビューした。骨格（汎用エッジテーブル・3 ref プレフィックス・3 関係種別・§15.4 の
+「死蔵 depends_on を復活」という動機）は正しいが、実装に着手すると詰まる／誤動作する抜けと論理
+バグが複数あった。以下、A1 は議論により解決済み（設計書へ反映）、A2〜A5・B5〜B8 は**未解決課題**
+として残す（実装前に設計で解決または方針確定すること）。
+
+### 検証済みで正しかった点（実コード確認）
+
+- `db_supersede_agreement`（実際は 5875、doc は誤って 5904 等と記載）は status を `'Superseded'`
+  へ flip するだけで新 id は作らない — 設計の前提通り。
+- コードベースに `WITH RECURSIVE` は存在せず「初の再帰CTE」は真。
+- `_find_prior_superseded` の呼び出し元は `_build_agreements_context` 内の 1 箇所（実際は 7582）のみ
+  — C1 置換は安全。
+- `db_supersede_agreement` の呼び出しは 5 箇所（数は合っているが、実際の行番号は doc と ~+20 ズレ）。
+- 5924（`_resolve_directive_for_task`）では supersede 直後に `resolved_id = _new_record_id("AG")` で
+  新 id が採番される — W2 の好例。
+
+### A1: W1 の新 agreement id 引き回し — 【解決済み・本ファイルへ反映】
+
+**問題**: 設計書は W1 を「`_commit_agreement_from_tool` の confirmed_variables ループ（3444-3458）」
+としていたが、実際にはそのループは `_write_agreement_impl`（3444-3458）にあり、
+`_commit_agreement_from_tool` は 3315 で `(None, protected_warning)` を返して終わる。新 agreement id
+は同関数の 3303（`_new_record_id("AG")`）で局所生成されるだけで**外部に出ない**。よって
+`agreement:<新id>` → `fact:` エッジを書くための id がどこにも存在しなかった。また entity 側も
+`upsert_entity_attribute`（実際は 7086）は agreement id 引数を持たない。
+
+**解決策（合意済み）**:
+
+1. `_commit_agreement_from_tool` の戻り値を `(None, protected_warning)` →
+   `(agreement_id, protected_warning)` へ変更。全パスで INSERT が1回行われるため返すべき id は
+   常に1つ；未生成パスは `None` を返すようガード。
+2. `_write_agreement_impl` で `new_agreement_id, protected_warning = _commit_agreement_from_tool(...)`
+   と捕捉し、confirmed_variables ループ内で `upsert_verified_fact` 成功後に
+   `_write_relation_edge(conn, run_id, from_ref=f"agreement:{new_agreement_id}",
+   to_ref=f"fact:{var_name}", relation_type="derived_from", ...)` を書く（LLM 非依存・骨格）。
+3. `_write_relation_edge` を**単一検証ゲート**（§15.1）にする：from/to 両 ref が実テーブル
+   （`agreements`/`verified_facts`/`entity_attributes`）に実在しない限り書き込みを拒否し warning を
+   返す。消費側も `EXISTS` で未解決 ref をスキップ。→ `agreement:None` などの不良 ref は
+   構造的に書かれない（§13/§15.3）。
+4. **entity 側**: `upsert_entity_attribute` 内で `agreement:` → `entity:{id}:{attr}` エッジを書く。
+   親 agreement の概念が無いため、タイムスタンプ推論は §13.3/§15.3 の lossy 推論 anti-pattern として
+   不採用とし、**task_id → phase_id → 計画センチネル** の順に agreement を探して結ぶ
+   （`agreements` も task_id/phase_id を保持、確認済み）。最新の非 Superseded agreement 1件に限定。
+   **task_id が空でもスキップせず** phase_id で結ぶこと——計画時（タスクプラン段階）に生成される
+   グローバル制約等は task_id 空・phase_id のみであり、ここで落とすと「出所不明」が再発する
+   （過去ランの実害）。両方空ならセンチネルでタグ付けし追跡可能性を保持（エッジは結ばないが
+   事実は失われない）。
+
+**孤立 fact の検索性（確認済み）**: `verified_facts` は `relation_edges` とは別の
+ソース・オブ・トゥルース。エッジは追加であり置換ではないため、agreement に紐づかない fact も
+`read_verified_fact` / `_audit_report --ref` / `_build_task_scope_context` で常に検索にひっかかる
+（親無き root として残る）。前方トラバーサルで orphan に到達させたい場合は上記 task_id/phase_id
+ブリッジが補う。
+
+### 未解決課題（実装前に設計で解決または方針確定すること）
+
+- **A2: C3 のスキーマ混同＋タイミング誤り（ブロッキング）**
+  `owns_variables` は `list[str]`（変数名のみ、7181行）であり `confidence` フィールドは存在しない。
+  設計書の「owns_variables のうち `confidence='provisional'`」は存在しないフィールドを見ている。
+  さらに `task_plan_reviewer_node`（実際は 12072）は**実行開始前に1回だけ**発火する計画レビュー
+  ゲートであり、その時点では `verified_facts` は未書き込み。provisional な fact の「上流をたどる」
+  は何も見つからない。意図（expert_calculation のみの暫定値を捕捉）は **upsert 時（W1/C4 付近）**
+  にすべき。C3 は設計として書き直しが必要。
+
+- **A3: C1「前提（depends_on）」行のデータソース欠如（ブロッキング）**
+  表示例には「系譜（supersedes）」と「前提（depends_on）」の両方が描かれているが、
+  `_get_lineage_chain` は `relation_type='supersedes'` のみを返す。depends_on の後方エッジ
+  （＝「前提」行）を取得・描画するクエリと分岐が指定されていない。C1 は supersedes 連鎖だけでなく
+  depends_on 後方エッジも描くよう設計すること。
+
+- **A4: W3 の depends_on→`agreement:<id>` マッピング未定義（ブロッキング）**
+  スキーマ（実際は 2295-2306）は `depends_on: ['42']`（system prompt の括弧番号）を期待し、検証
+  （3367-3375）はその値を `agreements.id` と直接照合する。これを `agreement:<id>` エッジ ref にどう
+  マッピングするか、および既存検証を**再利用**するか置換するかが未指定（§15.4 非対称・壊れた ref の
+  懸念）。格納される `depends_on` の実際のフォーマットと `agreement:<real_id>` 形式の整合を、W3
+  実装前にピン留めすること。
+
+- **A5 / C5: `trace_lineage` ツール（AI オンデマンド消費経路）の欠如（ブロッキング・最重要）**
+  現状の消費経路は C1（自動・agreement のみ・深度限定・オンデマンド不可）・C2（`_audit_report` は
+  **CLI 専用**、`--audit-report` 引数 14339/14391、**AI ツールとして未公開**）・C3/C4（特定用途）のみ。
+  **「AI が fact X や entity Y に興味を持った → 辿る」という経路が存在しない**。これはまさに BL-224
+  の出発点だった「書き込み口はあるが消費経路が欠けている」（§15.4）の再発。W1-W4 でエッジを書いても
+  AI から辿れなければ点と線は繋がらない。
+  **新ツール `trace_lineage(ref, direction="both", max_depth=10)` を消費経路 C5 として追加する**。
+  ref は `agreement:<id>` / `fact:<variable_name>` / `entity:<entity_id>:<attr_name>`。内部で再帰的に
+  edges をたどり各 ref を**解決して内容も添える**（agreement なら decision_what/reason_why、fact なら
+  value/reason、entity なら value）。読み取り専用・LLM 呼び出しなし（C2 と同型）・全ノードから呼べる。
+  ref 記法はツール schema ＋ 共有ヘルパー1本（§15.1）で全ノードへ注入。サイクル安全は A7 の
+  Python 反復＋訪問済み set を用いる。
+
+- **B5: C4 が BL-168 のプレフィックスを「そのまま再利用」は誤り**
+  BL-168 のマーカーは「⚠️[BL-168: **ゴール改定後未確認**]」（2839）でトリガーは「ゴール改定」。
+  C4 の前方伝播は「上流値の変更」という別トリガー。同じ文字列を使うと (a) 監査レポートを読む人に
+  誤った理由を提示し、(b) BL-168 のスキップ判定（`startswith` 同一文字列、2850）と C4 の判定が
+  **相互に食い合う**（片方がもう片方を「既マーク済み」と誤認）。別の冪等プレフィックス
+  （例 `⚠️[BL-224: 上流変更で要再確認]`）を定義すること。
+
+- **B6: W2 の「5箇所に `_link_supersession`」は BL-226 が警告する散在パターン（§15.2）**
+  5箇所のうち 3箇所（3139/3284/3288）は同一関数内。5924 は直後に新 id あり。しかし
+  **12923（Integrator パス）では新 id がスコープ内に存在しない**（後で別経路で作られる）。
+  「5箇所一律に呼ぶ」だけでは 12923 の新 id をどう捕まえるかが未解決。単一ラッパー
+  `supersede_agreement(old_id, new_id, reason)`（flip＋edge 書き込みを一括）か、最低でも
+  write_agreement 内の3箇所を集中させることを推奨。
+
+- **B7: 再帰CTE のサイクル対策が「未決」のまま**
+  2案を挙げて実装者に委ねている。再帰CTE の前例ゼロ＋自身がサイクル懸念を挙げている以上、
+  **訪問済み set を持つ Python 反復方式**を明示的に選定すること（実装者の裁量に残さない）。
+
+- **B8: 既存 `depends_on` 行の移行（backfill）が無い**
+  BL-224 前の agreements は既に `depends_on` を保持しているが、それらのエッジは `relation_edges` に
+  入らない。進行中／過去 run の系譜が不完全になる。一回性の backfill スクリプトを検討すること。
+
+- **C（ドキュメント精度）: 行番号が系統的に ~+20 ズレ**
+  `db_supersede_agreement` 呼び出し 5904→5924・12903→12923、`upsert_verified_fact` 6699→6719、
+  `upsert_entity_attribute` 7066→7086、`_audit_report` 6825→6845、
+  `task_plan_reviewer_node` 12052→12072。また C4 の根拠 `verified_facts_json` が 7759-7760 とあるが
+  その行は Detector コンテキストの return（`_build_task_scope_context` は 7763 開始）であり誤引用。
+  W1 の場所も `_commit_agreement_from_tool` 3444-3458 → 実際は `_write_agreement_impl`。
+  **関数名で引く**ことを推奨。
+
+### 総評
+
+アーキテクチャの方向性は正しく、要件定義§4.2 の「DAG系譜」を死蔵から復活させる動機も適切。
+A1 の解決策（戻り値変更＋ループ内エッジ＋`_write_relation_edge` 単一検証ゲート＋entity は
+task_id/phase_id ブリッジ）を骨格として採用する。実装着手前に A2・A3・A4・A5/C5 を設計で解決し、
+B5・B6 を方針として確定させること。実装は「スキーマ＋W1/W2/W3（骨格）＋C2（CLI）＋**C5（trace_lineage）**」
+を先に入れ、実ドライランで系譜が AI からも人間からもたどれることを確認してから、C1（Hydrate 表示）・
+C3・C4・W4 を追加する2段階を推奨（A5/C5 が無いと書いたエッジが AI から辿れず §15.4 に抵触するため、
+C5 を第1段階に含めるよう未決事項3を修正）。
