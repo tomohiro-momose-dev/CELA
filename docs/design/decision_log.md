@@ -2738,6 +2738,95 @@
 | 関連 BL | [BL-217](back_log/issue_backlog.md#bl-217-実地調査が必要な暫定値へaiがdeferで誤魔化さず正直に人間しか解決できないと宣言し専用cliで人間が回答できるようにするhuman-in-the-loop)、BL-096（Expertへwrite_issueを直接与えない既存方針からの意図的な逸脱）、BL-130（`ask_user_question`が実は人間に届いていなかった発見）、BL-136（DEFERの関連性チェック却下の先例）、BL-125（無改修で機能した遷移ゲート）、BL-199（検討したが採らなかった間接経路）、D-189（AGENTS.md §13.3） |
 ---
 
+### D-196: task_plannerの暫定係数とtask_plan_reviewerの承認時コメントを、新規ツール・新規権限なしで構造化記録に載せる
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | ユーザーが実run（`run_id=1786457890-3273d6dd`）を調査し「1日の需要8,500人という根拠が見つからない」と指摘した。調査の結果、この数値はtask_1_4が実際に導出したものではなく、task_plannerが計画分解の段階でピーク3時間の外挿という自己流の概算を行い、後続タスクのacceptance_criteriaへ「task_1_4で確定した」という体裁で先に埋め込んでいたことが判明した。task_plan_reviewerは`think`ツール呼び出しの中でこの数値を「derived number, need to check calculation」と自ら疑問視していたが、その指摘は`per_task_comments`としてplan_draftsの「レビュワーからの指摘」セクションへ書き込まれるのみで、`constraint_issue="none"`（承認）の場合はtask_plannerが差し戻し後に`read_plan_draft`で読み返す経路しか存在しないため、実行フェーズのExpert/Detector/User AIには一切届いていなかった（AGENTS.md §15.4: 消費経路のない記録）。ユーザーは当初、①task_plannerへ`upsert_verified_fact`ツールを追加、②task_plan_reviewerへ「差し戻すほどではないが後続タスクへ残すべき懸念」を書ける手段（write_issue等）を追加、という2方針を提案した。 |
+| **決定理由** | 提案をそのまま実装する前にコードを精査したところ、両方とも見た目より軽い実装で足りることが判明した。①`upsert_verified_fact`はどのロールにも存在しない独立ツールで、実体は`write_agreement`の`confirmed_variables[]`パラメータ経由でのみ内部関数として呼ばれる（`cela_main.py:3430-3444`）。task_plannerは既に`write_agreement`を保有しており（BL-095、指示10で分解全体の判断根拠を記録する用途に既に使用）、`confirmed_variables`のvariable_name一致チェックは`current task`が無いケース（task_plannerには「現在のタスク」が無い）でも既存のガード（`cela_main.py:3363-3389`）に抵触しないことをコードで確認した。新規ツール追加ではなく既存指示の拡張で足りると判断した。②task_plan_reviewerへの`write_issue`付与は、`_check_issue_permission`（`cela_main.py:3019-3025`）を見るとDEFERは`user`ロールのみに限定されており、これはBL-136で「明示的な先送り判断はUser AIのみが行う」と確立した意図的な設計原則である。task_plan_reviewerにDEFER権限を与えることはこの原則を破る変更であり、AGENTS.md §7相当の重さを持つと判断し、より軽い代替を優先した（AGENTS.md §16.1: ユーザー提案でも軽い代替を提示する）。代替として、task_plan_reviewerが**既に**`per_task_comments`で書き込んでいる「レビュワーからの指摘」セクションは、単に自動注入されていないだけであり、BL-082が「先送り事項」セクションに対して確立済みの自動注入パターン（`_get_deferred_notes_text`→`call_expert`/`call_detector`/`generate_user_utterance`の3箇所）をそのまま横展開すれば、新規ツール・新規権限なしで消費経路の欠落だけを塞げると判断した。 |
+| 決定内容 | ①task_plannerのプロンプト（指示6・指示10）を拡張し、acceptance_criteria/descriptionの計算で使った派生値・暫定係数のうち、いずれかのタスクのowns_variablesに対応するものは、同じ`write_agreement`呼び出しの`confirmed_variables`へ`confidence="provisional"`・`citations type="expert_calculation"`として登録するよう指示した（テキスト埋め込みのみではアンカリングリスクが残る旨も明記）。②`_get_reviewer_comments_text`を新設し、plan_draftsの「レビュワーからの指摘」セクションを`_get_deferred_notes_text`と同型の手順で抽出、`_build_task_scope_context`へ`reviewer_comments_text`として追加、`call_expert`/`call_detector`/`generate_user_utterance`の3箇所（BL-082と同じ配線）へ自動注入した。新規ツール・`ALLOWED_ISSUE_ACTIONS_BY_ROLE`への新規ロール追加のいずれも行っていない。 |
+| 影響 | `cela_main.py`（`call_task_planner`プロンプト指示6・10、`_get_reviewer_comments_text`新設、`_build_task_scope_context`、`call_expert`/`call_detector`/`generate_user_utterance`の3箇所）、`tests/test_bl219_reviewer_comments_and_planner_provisional.py`（新規10件、うち1件は`write_issue`への新規権限付与が行われていないことの回帰防止テスト）。 |
+| 関連 BL | BL-219、BL-082（先送り事項の自動注入の前例）、BL-087 Stage2（task_plan_reviewerのper_task_comments配線）、BL-095（task_plannerのwrite_agreement経路）、BL-136（DEFERはUser AIのみという既存原則、今回は変更しなかった） |
+---
+
+### D-197: scratch_concernsの最終出力前チェックは、新規フィールドを増やさず既存の懸念欄への導線を一元的な指示で繋ぐ
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | BL-219の調査で、task_plan_reviewerが`think`の`scratch_concerns`で「約8,500人/日は要検算」という懸念を追跡していたにもかかわらず、最終出力までにそれが構造化記録として一切外部化されなかったことが判明した。ユーザーは「thinkと`write_issue`の両方が使えるノードは最終出力前に整理してissue起票、使えないノードは最終出力で懸念を示す」という方針を指示した。`think`ツールを持つ呼び出し箇所は`call_task_planner`・`call_orchestrator`・`call_expert`（本体・light_system_prompt）・`call_detector`（2モード）・`call_resource_arbiter`・`call_facilitator`（2分岐）・`call_integrator`・`call_reviewer`・`generate_user_utterance`（Stage1-4＋特殊モード）・`call_goal_essence_analyst`・`call_task_plan_reviewer`の計16箇所に及ぶ。 |
+| **決定理由** | 16箇所それぞれに新規の「懸念欄」を追加する案は検討したが、調査の結果、大半のノードには既に「気づき・懸念」を書ける出力フィールドが存在していた（`call_detector`の`observations`、`generate_user_utterance` Stage1の`domain_concerns`、Stage2の`remaining_concerns`、Stage3の`approval_reason`、`call_task_plan_reviewer`の`observations`、`call_goal_essence_analyst`の`feasibility_notes`、`call_resource_arbiter`の`rationale`、`call_integrator`の`details`、`call_reviewer`の`feedback`、`call_orchestrator`の`reason`）。新規フィールドを増やすことは、同じ目的の欄が2つ併存する重複（AGENTS.md §15.1）を生むだけだった。そこで、既存フィールドへの導線を一元的な指示文（共有ヘルパー）で繋ぐ方針とした。ヘルパーは`escalation_tools`（`write_issue`・`escalate_premise_concern`・`flag_needs_human_input`等、ノードが実際に持つ懸念専用ツール）の有無で分岐し、無ければ`final_output_field`名を直接指示する。これによりAGENTS.md §15.1（単一の場所で規則を管理）を満たしつつ、16箇所という広い適用範囲でも1関数を直せば文言が揃う。適用範囲については、「一部のノードだけに指示を入れると、指示を入れなかったノードで同じ欠陥（懸念の消失）が再現するだけ」という判断（AGENTS.md §15.2）から、`think`を持つ全ノードへ機械的に適用した（`seed_entities_from_goal`のみ、懸念概念が薄い最小限ノードとして意図的に除外）。実装中、`generate_user_utterance`の特殊モードへの挿入がBL-185の「差し戻し通知ブロックはtrailingの最後」という既存不変条件を破っていることをフルスイートで検出し、挿入位置を差し戻し通知ブロックの手前へ修正した——これは新しいルールを追加する際に既存の不変条件を機械的に確認する必要性を示す実例である。 |
+| 決定内容 | `_scratch_concerns_closure_instruction(final_output_field, escalation_tools="")`を「BL-115共有プロンプト定型文」セクションへ新設し、thinkツールを持つ16箇所全てのプロンプト末尾（ツール一覧の直後、Return ONLY JSONの直前）へ挿入する。新規ツール・新規フィールドは一切追加しない。 |
+| 影響 | `cela_main.py`（`_scratch_concerns_closure_instruction`新設、`call_task_planner`・`call_orchestrator`・`call_expert`・`call_detector`・`call_resource_arbiter`・`call_facilitator`・`call_integrator`・`call_reviewer`・`generate_user_utterance`・`call_goal_essence_analyst`・`call_task_plan_reviewer`の各プロンプト）、`tests/test_bl220_scratch_concerns_closure.py`（新規15件）。 |
+| 関連 BL | BL-220、BL-219（同型の消費経路欠落）、BL-140（scratch_concernsの初出）、BL-185（差し戻し通知ブロックの位置不変条件、実装中に回帰を検出・修正） |
+---
+
+### D-198: web_fetchのダウンロード容量上限を8MB→50MBへ引き上げ、巨大文書はgrepで部分読みさせる
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | ユーザーが「大容量でもとりあえずDLし、markitdownで変換。grepで必要個所の前後を読めるようにしたい」と要望。調査の結果、変換後の全文は既に`write_cache`が切り詰めなしで保存済みだったが、①ダウンロード段階の`_MAX_FETCH_BYTES`（8MB）超過で全体が拒否される、②`read_reference_file`に本文全体を検索する機能が無く`keyword`はSource URL行専用、の2点が実際のボトルネックだった。`_MAX_FETCH_BYTES`はメモリ安全境界でありAGENTS.md §7の「重要な定数」に該当するため、新上限をユーザーへ確認した。 |
+| **決定理由** | 上限を完全撤廃（無制限）にはしなかった——メモリ・変換時間の青天井なリスクを許容する変更は、ユーザーが「とりあえずDL」で意図した「実務上十分な大きさ」を超えて安全側の設計原則（DoS耐性）を犠牲にする。ユーザーに50MB/100MB/実質無制限の3択を提示し、50MBの選択を得た。50MBはダウンロード段階の上限に過ぎず、変換後の全文は既存通り`write_cache`で無制限に保存されるため、実質的な閲覧可能量はこの引き上げで制約されない。ただし上限を上げるだけでは、モデルが受け取れる分量（`_MAX_OUTPUT_CHARS`/`_MAX_READ_REFERENCE_CHARS`、いずれもトークン経済のための既存の切り詰め）とのギャップが広がるだけで実用にならないため、`read_reference_file`に`grep`（`grep -C`相当、マッチ行＋前後文脈のみ返す）を新設し、大容量文書でも必要箇所だけを低コストで読める経路を同時に用意した。ダウンロードの容量上限と、モデルが読む分量の上限は別の懸念（前者はサーバー側リソース、後者はトークン経済）であり、後者を先に解決しないまま前者だけ緩和すると「取得はできるが読めない」状態になる、という整理に基づく。 |
+| 決定内容 | ①`_MAX_FETCH_BYTES`を8MB→50MBへ引き上げ、`_REQUEST_TIMEOUT_SECONDS`を10秒→30秒へ延長（大容量DLがタイムアウトしないため）。②`read_reference_file`に`grep`パラメータ（`path`必須）を追加し、`_grep_with_context`でキャッシュ全文からマッチ行＋前後3行を返す（隣接窓は統合、30件超は先頭30件のみ＋注記）。 |
+| 影響 | `web_tools.py`（`_MAX_FETCH_BYTES`・`_REQUEST_TIMEOUT_SECONDS`・`_grep_with_context`新設・`read_reference_file_handler`）、`cela_main.py`（`READ_REFERENCE_FILE_TOOL`スキーマ）、`tests/test_bl184_web_tools.py`（新規8件）。 |
+| 関連 BL | BL-221、BL-208（`_MAX_FETCH_BYTES`の前回改訂）、BL-216（キャッシュ候補のpreview、grepと相補的な「開かずに選ぶ」経路） |
+---
+
+### D-199: 人間の監査UXは、本文への注釈埋め込みではなく、DBを直接読む別ビュー（CLIレポート）で提供する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `decided` |
+| 論点 | ユーザーが「成果物の数字・内容を5W1Hで検査できない、今はログをClaudeに解析させている」と課題提起し、「一文ずつmdの隠し文字で経緯注釈をつけまくるか」という案を自ら提示した。 |
+| **決定理由** | 隠し文字による本文注釈は却下した。理由は、CELAが過去に繰り返し踏んできた「文字列一致・位置ベースの注釈が本文編集で追従できず腐る」という脆さ（BL-074/076/081/202の一連のインシデント）と全く同じ構造を持つためである——Expertがwhiteboardを`edits`（old_text/new_text）で差分編集するたびに、埋め込んだ注釈も手動で追従させる必要があり、ズレれば注釈自体が嘘をつく。一方、監査に必要な情報（誰が・いつ・どのタスクで・何を・なぜ・出典）は、`verified_facts`（reason/citations/confidence）と`agreements`（reason_why/citations）に既に構造化保存済みであり、本文とは独立している。ここから機械的に（LLM呼び出しなしで）別ビューとして取り出せば、本文の編集頻度に一切影響されず、常に正確である。「リアルタイムにできるか」という追加質問には、`cela.db`が既にWALモード（`get_db_connection`）で動作しており、run実行中でも別プロセスが読み取り専用で安全に同時アクセスできることを回答した。これはBL-217の`--pending-human-input`が既に実証済みのパターンであり、新たな並行性設計は不要だった。「常時更新される画面」は、CELA側に常駐プロセス・Webダッシュボードを持たせるのではなく、シェル側の`watch`等に委ねる方針でユーザーと合意した——CELA本体の責務を「正確な単発スナップショットを返すこと」に留め、監視の周期制御は呼び出し側に任せる、という役割分担である。 |
+| 決定内容 | `_audit_report(conn, run_id, task_id="", phase_id="")`を新設し、`verified_facts`/`agreements`をtask_id優先・phase_idフォールバックで絞り込んで5W1H形式に整形する。CLIフラグ`--audit-report RUN_ID [--task-id T] [--phase-id P]`として公開し、BL-217と同じ「別プロセスがsqlite fileへ直接アクセスするだけ、LangGraphのstate/checkpointには触れない」設計に揃える。 |
+| 影響 | `cela_main.py`（`_audit_report`新設、CLIフラグ追加、読み取り専用CLI分岐のstdout utf-8化）、`tests/test_bl222_audit_report.py`（新規9件）。 |
+| 関連 BL | BL-222、BL-217（同型のCLI設計・WALモード活用の前例）、BL-074/076/081/202（本文注釈が却下された根拠となった脆さの実例群） |
+---
+
+### D-200: Expertへの`write_issue`直接付与は再検討せず、既存のdecision_extractor橋渡し機構（BL-154）自体の2つの欠落を修正する（BL-223）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-13 |
+| 状態 | `decided`（実装完了） |
+| 決定者 | t-momose（実ログの指摘、「Expertにwrite_issueを与えなかった穴では」という論点提起、修正方針の承認）、Claude Sonnet 5（調査・設計・実装）、独立レビュー（cline、Bug B修正案の欠陥を指摘） |
+| **決定理由** | `log/2026-08-13/1411`で、Expertが成果物内で明示的に宣言した先送り（SLA待ち時間の解釈）が構造化記録に一切残らないことが判明した。ユーザーから「Expertに`write_issue`を与えなかった設計判断自体の穴では」との指摘があったが、調査の結果、D-124/BL-154が既にこの経路を「Expertは`write_issue`を持たない代わりに、`decision_extractor_node`が事後解析でissue_log/plan_draftsへ橋渡しする」形で手当て済みであると判明した。今回の実害は設計の欠落ではなく、この既存ブリッジ自体の実装バグ（後述）であり、Expertへの`write_issue`直接付与は、D-124が明示した「BL-025のロール分離思想（Detectorの独立監査とExpertの自己申告の混同）に反する」という却下理由を覆すことになるため再検討しなかった。ブリッジのバグは2つ独立して存在した：①`wrote_agreement_this_turn`（ターン単位のブール）が、Expertが同ターンで別件のwrite_agreementを呼んだだけで無関係な抽出項目まで一括スキップしていた、②`defer_to_task_id`が空文字（申し送り先が特定できない）の場合、plan_drafts追記だけでなくissue_log起票まで丸ごとスキップしていた。設計段階で、②の当初修正案（defer_to_task_idの真偽だけでissue_log起票を切り出す）が、独立レビュー（同一セッション内の別AI、cline）から既存テスト`test_unresolvable_target_task_id_skips_issue_log_creation`を破壊すると指摘された。実コードを検証した結果、`_get_blocking_issues_for_transition`のSQL（`defer_to_task_id IS NULL OR ''`）がdefer_to_task_idの実在性を検証せず値の有無だけで遷移ゲートを免除するため、非空だが解決不能（LLMが実在しないtask_idを出力した）issueを起票すると永久に解決されない抜け穴になることを確認し、この既存のfail-closed設計は維持する3分岐へ修正した。 |
+| 決定内容 | ①`_LAST_WRITE_AGREEMENT_ITEMS`（成功したwrite_agreement呼び出しの`{entry_type, task_id}`一覧、`_LAST_WRITE_AGREEMENT_SUCCEEDED`と同型のquery_AI単位リセットパターン）を新設し、`LineageState`へ`expert_wrote_agreement_items`/`user_wrote_agreement_items`を追加。`decision_extractor_node`の判定を、ターン単位のブールから項目単位の`(entry_type, task_id)`一致判定へ置き換えた（topic文字列は直接呼び出しと独立抽出とで表記が一致する保証がないため使わない）。②`defer_to_task_id`の状態を「空文字（issue_logのみ起票、plan_draftsは対象タスク不明のためスキップ）」「解決可能（従来通り両方）」「非空・解決不能（無変更・fail-closed維持）」の3分岐に書き換えた。 |
+| 影響 | `cela_main.py`（`_LAST_WRITE_AGREEMENT_ITEMS`新設・getter、`LineageState`拡張、`expert_node`/`generate_user_utterance`の書き込み箇所、`decision_extractor_node`の判定・分岐）。新規テスト`tests/test_bl223_decision_extractor_deferred_bridge.py`（7件）。既存テスト`tests/test_r3_smoke.py::test_r3b_t5_decision_extractor_skips_agreement_write_when_write_agreement_succeeded`が項目単位判定への変更で回帰したため、実運用の状態伝播（expert_nodeが`expert_wrote_agreement`と`expert_wrote_agreement_items`を同時にstateへ書く）に合わせて修正。フルオフラインスイート1306 passed / 5 deselected（`test_bl195`の1件は本BLと無関係な既存失敗）。 |
+| 関連 BL | BL-223、[BL-154](back_log/issue_backlog.md#bl-154-decision_extractorのdirectivedeferred自動抽出をissue_logへも橋渡しする)、[BL-082](back_log/issue_backlog.md#bl-082-task_plannerの計画をホワイトボード化し先送り事項をタスク間で永続的に申し送りできるようにする)、[BL-096](back_log/issue_backlog.md#bl-096-監査系ノードの軽微な指摘observationsminorを追跡するissue管理dbの新設)、D-124（Expertへ`write_issue`を与えない役割分離判断、本Dで再確認・維持） |
+---
+
+### D-201: 実装状況の一覧を要件定義書の付録B.1から`requirements_gap_map.md`へ移し、判定語彙に「名前だけ実装（⚠️）」「死蔵（🗑️）」を新設する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-13 |
+| 状態 | `decided`（実施済み） |
+| 決定者 | t-momose（「全体がその場しのぎの設計のパッチ当てになっていないか確認して」という点検指示、乖離マップ優先の選択）、Claude Sonnet 5（調査・判定語彙の設計・文書化。一次照合はExplore agent 3体、⚠️/🗑️判定はClaudeが実コードで再確認） |
+| **決定理由** | BL-224の設計中に要件定義書を精読した結果、**実装状況の唯一の一覧である付録B.1がv26（2026-07-17）時点のスナップショットのまま陳腐化しており、「何が実装済みか」の判断材料として信用できない**ことが判明した。実際にF-3.1/3.2/3.8/3.9・F-5.1・F-6・F-7・F-8.3を「❌未実装」と表示し続ける一方、F-8.1を「✅実装済み」としていたが実体は名前だけの実装だった。**この誤表示は既に実害を出している**——AIが`agreements.depends_on`（要件§4.2が「DAG系譜」と明示的に定義した機構）を「たまたま未使用の列」と誤認し、BL-224の初版設計で「コメントを付けて放置」と書いた。同じ内容の表を要件定義書と別文書の2箇所に持てば必ず一方が陳腐化するため（AGENTS.md §15.1、付録B.1自身がその実例）、実装状況の正typeは1箇所に集約し、要件定義書は「何を作るべきか」のみを持つ形へ役割を分離した。あわせて、従来の3値（✅/🟡/❌）では今回の発見を表現できないことが判明したため2値を新設した——**⚠️「名前だけ実装」**（関数・テーブルは存在するが中身が要件を満たさず、読む人が実装済みと誤認する。3箇所実在）と**🗑️「死蔵」**（書かれるが誰も読まない。AGENTS.md §15.4）。この2カテゴリを可視化することが乖離マップの主目的である。 |
+| 決定内容 | `docs/design/requirements_gap_map.md`を新設し、F-1〜F-22の全38サブID＋DBスキーマ§4.1〜4.9を実コードのみを根拠に照合（全判定に`file:line`証拠を必須、「未実装」は使用した検索語を明記）。要件定義書の付録B.1は表を削除しマップへの参照へ置き換え、付録B.2/B.3にも陳腐化の警告を追記した。 |
+| 影響 | `docs/design/requirements_gap_map.md`（新規）、`docs/design/要件定義書_v35.md`（付録B.1を参照へ置換、B.2へ警告追記）。以降、実装状況の更新はマップ側へ行う。 |
+| 関連 BL | BL-224（この調査の発端）、BL-225（⚠️/🗑️箇所への注記）、[BL-219](back_log/issue_backlog.md)、D-200 |
+
+---
+
+### D-202: 未実装要件をすべてBL化せず、実害を説明できるものだけ起票する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-13 |
+| 状態 | `decided` |
+| 決定者 | Claude Sonnet 5（提案・適用） |
+| **決定理由** | 乖離マップの結果、機能要件38サブIDのうち❌未実装が12件あった。しかしこれらを機械的にBL化すると、バックログが「いつか実装するかもしれない要件」で膨れ上がり、**本当に手を入れるべき箇所が埋もれる**。実装されていないこと自体が「その要件は今のCELAの用途に不要だった」という情報でもある——実際、F-9.1（sqlite-vec）とF-7.3（ロールバック）はコード側に意図的な不採用の記録があり、要件側が追従していないだけだった。したがって「実害を具体的に説明できるもの」だけを起票し、説明できないものはマップ上に「未実装だが現時点で実害の説明が無い」と明記して据え置く方針とした。据え置いた要件（F-9/F-5.3の経験のDNA伝承、F-10.4/10.6/10.7・F-22の平行世界探索・市場センシング、F-21のステークホルダー主観）はいずれも要件定義§1.1がCELAの差別化要因として掲げているものであり、**軽視ではなく「実害の観測待ち」という保留**である。 |
+| 決定内容 | 起票したのはBL-225（⚠️/🗑️箇所への注記、実害＝BL-224初版設計の誤りが既に発生）とBL-226（申し送り9機構の一元化、実害＝BL-082/154/219/223の4世代にわたる同型再発）の2件。他はマップ§6.2へ優先度と保留理由を記載するに留めた。あわせて「意図的な不実装を要件定義書へ書き戻す」を低優先で起票候補に残した（次に読む人が「やり残し」と誤解して不要な作業を始めるのを防ぐため）。 |
+| 影響 | `docs/design/requirements_gap_map.md` §6.2、`docs/design/back_log/issue_backlog.md`（BL-225・BL-226）。 |
+| 関連 BL | BL-225、BL-226、BL-224 |
+
+---
+
 ## 未決定（pending）
 
 ---
