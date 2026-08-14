@@ -8000,7 +8000,7 @@ YouTubeの LDD/Lineage 研究（`docs/refs/`）が起源の「判断の系譜を
 - **②停止／復旧**: 非収束 `RuntimeError` ではなく `return content`（最後の出力）で強制終了。50 往復のトークン burn と出力消失を回避。大音声警告＋`_LAST_REPETITION_GUARD_TRIPPED`（label/iteration/run_id/冒頭120字）で可観測化。人間エスカレーションは非実施（オーケストレータ配線は別課題、将来候補として据え置き）。
 - **③対象ノード**: 共有ループ（`_query_AI_live`）内に実装。Detector 発端だが全ツールノード（Expert/User AI/Resource Arbiter/Integrator 等）を同型崩壊から保護（§15.1 単一ソース、Detector 専用パッチの再 Fragment 化を回避）。
 - **④実装タイミング**: ユーザー指示「BL-231に取り掛かる」により `in_progress` 化・実装開始。
-- **新規定数（§7 承認要）**: `_LOOP_GUARD_REPETITION_WINDOW = 3`。実装時は提案値を適用済み、ユーザー承認を待って確定。
+- **新規定数（§7 承認済み・2026-08-14）**: `_LOOP_GUARD_REPETITION_WINDOW = 3`。
 - **テスト**: `tests/test_bl231_loop_guard.py`（実 LLM なしのモックストリーミング駆動、§17.1 準拠）。
 
 ---
