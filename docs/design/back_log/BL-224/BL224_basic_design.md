@@ -362,6 +362,20 @@ SELECT DISTINCT ref, MIN(depth) AS depth FROM backward GROUP BY ref ORDER BY dep
    `⚠️[却下事項]` コンテキスト（既存・F-3.6 済）で常に表示**し、かつ `trace_lineage`／C1 が topic チェーンを
    走査する際に `Rejected` ステータスの合意を明示的に結果に含めることで「不可視」を防ぐ（新 relation_type は
    追加せず3種維持・§15.1）。
+   **フック位置（独立レビューN2・決定）**: (a) の `supersedes` エッジを張るフックは
+   **`_commit_agreement_from_tool` の `db_append_agreement` INSERT 直後**に置く（新 id を変数に
+   捕捉してから）。新 id X と同一 topic/entry_type の現行アクティブ合意 Y を探し、存在すれば
+   `_link_supersession(conn, run_id, old_agreement_id=Y, new_agreement_id=X, reason=rationale)`
+   を呼び `from_ref=agreement:<X>` → `to_ref=agreement:<Y>` を書く。ガードは
+   `status == 'Rejected'`（確定棄却のみ）＋「Y が実在する」の2条件。**これは W2（edit-wrapper の
+   `supersede_agreement`）とは別のトリガー**であり、W2 の supersedes レイヤーを内側に重ねて
+   ダブらせてはならない（W2 は「既存 Y を新 X に差し替える」編集経路、本フックは「棄却 X が現行 Y
+   に敗れた」と記録する新規経路）。(c) **`decision_extractor_node` も同一ヘルパを呼ぶ**——実コード確認
+   （12890/12996/13014）で、decision_extractor は Rejected 合意を `_commit_agreement_from_tool` を
+   経由せず直接 `db_append_agreement`／`db_supersede_agreement` へ書くため、ここにフックを置かないと
+   12923 等の経路で作られた Rejected が系譜から零れる。同じ `_link_supersession` 呼び出しを
+   decision_extractor の Rejected 分岐（Y 探索＋ガード＝status=='Rejected'）からも行うよう W3 および
+   C5 実装時に配線する（§15.4: 書き込み経路を増やすたび消費経路も確保）。
 3. **実装の分割（承認済み・BL-224＋BL-228 を合わせた3段階）**: 規模が大きいため3段階とし、BL-228 を
    第3段階へ統合する（ユーザー判断・2026-08-14）。
    - **Phase 1（BL-224 基盤）**: スキーマ（`relation_edges`＋インデックス）＋ W1/W2/W3（機械的骨格）＋
