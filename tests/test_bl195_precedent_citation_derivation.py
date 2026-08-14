@@ -80,8 +80,15 @@ def test_target_goal_names_real_city_and_separates_problem_from_solution():
 
     assert "長野県茅野市" in source_text
     assert "八ヶ嶺市" not in source_text, "匿名化都市名は実データ化により完全に置き換えられているはず"
-    # 「問題」側（路線バス廃止の事実）は背景として使ってよい
-    assert "定時定路線バス13路線が利用者減少・採算悪化を理由に廃止された" in source_text
+    # 「問題」側（路線バス廃止の事実）は背景として使ってよい。
+    # 語順（「利用者減少・採算悪化を理由に」が前文に置かれ、日付挿入がある）のため、意図を
+    # 保つ2つの必須断片で確認する（BL-224 とは無関係な事前のテスト文字列ドリフトを解消）。
+    assert "定時定路線バス13路線が廃止された" in source_text, (
+        "TARGET_GOALは「問題」側の事実（定時定路線バス13路線の廃止）を背景として含めること"
+    )
+    assert "利用者減少・採算悪化を理由に" in source_text, (
+        "廃止の理由（利用者減少・採算悪化）も背景として含めること"
+    )
     # 「解決」側（のらざあへの移行）はゴール文の背景説明に含めてはならない
     assert "のらざあ" not in source_text
     assert "AIオンデマンド交通" not in source_text or "オンデマンド交通「のらざあ」" not in source_text
