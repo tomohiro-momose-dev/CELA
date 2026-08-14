@@ -144,11 +144,17 @@ def test_generate_user_utterance_prompt_body_disambiguates_scratch_concerns_from
     assert "scratch_concerns" in src
 
 
-def test_max_tool_iter_raised_to_30():
+def test_max_tool_iter_raised_beyond_20():
     """[BL-155] task_plan_reviewerによる差し戻し後、task_plannerが差戻しタスクを1件ずつ
-    把握し直す過程でiter=20（旧上限）に迫る実績がドライランで観測されたため、20→30へ引き上げ。"""
+    把握し直す過程でiter=20（旧上限）に迫る実績がドライランで観測されたため、20から引き上げ。
+    その後もドライランの実績に応じて調整されている（30→50）ため、特定の数値ではなく
+    「元の20より緩和されていること」だけを固定する（BL-199のmax_web_search_calls
+    テストと同じ考え方）。"""
+    import re
     src = inspect.getsource(cela_main._query_AI_live)
-    assert "MAX_TOOL_ITER = 30" in src
+    m = re.search(r"MAX_TOOL_ITER = (\d+)", src)
+    assert m, "MAX_TOOL_ITERの代入が見つかりません"
+    assert int(m.group(1)) > 20
 
 
 def test_query_ai_live_stamps_mechanical_iteration_globally():
@@ -206,13 +212,16 @@ def test_all_nodes_wire_think_tool_and_reset(func_name):
 
 
 def test_call_detector_domain_review_pass_also_wires_think_tool():
-    """[BL-093] ドメイン妥当性レビュー（tools=None→[THINK_TOOL]）も全ノード対象化に含まれる。"""
+    """[BL-093] ドメイン妥当性レビュー（tools=None→[THINK_TOOL]）も全ノード対象化に含まれる。
+    [BL-204] tools=[...]の一覧はBL-198/199/204等で継続的にツールが追加されており、
+    固定の文字数窓では脆くなる。窓サイズではなく、labelの直後に現れるtools=[...]の
+    1行そのものにTHINK_TOOLが含まれるかで判定する。"""
     src = inspect.getsource(cela_main.call_detector)
     assert 'label="Detector (Domain Review)"' in src
-    # ドメイン妥当性レビューの呼び出しブロックにTHINK_TOOLが含まれていること
     domain_call_idx = src.index('label="Detector (Domain Review)"')
-    nearby = src[max(0, domain_call_idx - 400):domain_call_idx + 400]
-    assert "THINK_TOOL" in nearby
+    tools_line_start = src.index("tools=[", domain_call_idx)
+    tools_line_end = src.index("]", tools_line_start)
+    assert "THINK_TOOL" in src[tools_line_start:tools_line_end]
 
 
 def test_bl109_single_shot_judgment_nodes_reverted_to_tools_none():

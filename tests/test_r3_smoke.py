@@ -311,6 +311,11 @@ def test_r3b_t5_decision_extractor_skips_agreement_write_when_write_agreement_su
             {"task_id": "task_2_1", "owns_variables": ["vehicle_count"], "acceptance_criteria": []}
         ]}],
         "expert_wrote_agreement": True,  # ★今ターンwrite_agreementが成功済み
+        # [BL-223] ターン単位のブールだけでなく、実際に書き込まれた項目の(entry_type, task_id)も
+        # 必要（項目単位の重複判定へ変更したため）。canned_itemsと同じ(entry_type="Decision",
+        # task_id="task_2_1")を直接書き込み済みとして与え、「同じ項目の二重書き込み防止」という
+        # このテスト本来の意図を項目単位の判定でも再現する。
+        "expert_wrote_agreement_items": [{"entry_type": "Decision", "task_id": "task_2_1"}],
     }
     cela_main.decision_extractor_node(state)
 

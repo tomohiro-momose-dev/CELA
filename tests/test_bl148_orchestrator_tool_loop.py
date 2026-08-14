@@ -28,7 +28,11 @@ import cela_main  # noqa: E402
 
 def test_call_orchestrator_prompt_references_current_task_id():
     src = inspect.getsource(cela_main.call_orchestrator)
-    assert 'state.get("current_task_id"' in src or "state['current_task_id']" in src
+    # [BL-214] 生のstate読みから実効アクセサへ一元化した。BL-148の意図（Orchestratorのプロンプトが
+    # 現在タスクを構造化情報として参照すること）は変わらず、参照の仕方だけが変わっている。
+    # 初回タスク進行中は生のcurrent_task_idが空文字のままで、プロンプトに現在タスクが
+    # 一切現れなかった（BL-148が防ごうとした状態そのもの）。
+    assert "_effective_current_task_id_from(state)" in src
     assert "_build_task_scope_context" in src
 
 

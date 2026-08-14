@@ -1,6 +1,6 @@
 # プロジェクトステータス — CELA
 
-> **最終更新:** 2026-07-24
+> **最終更新:** 2026-08-13
 > **更新者:** Claude (実装セッション)
 > **更新頻度:** マイルストーン到達時、または週次（推奨）
 
@@ -18,13 +18,40 @@ Phase 1（R1）・Phase 2（R2）はともにDone。**R3a（自律的DB/ファ�
 
 ---
 
+**【2026-08-13 追記】要件定義⇔実装の乖離マップ作成と構造的負債監査を完了**
+
+ユーザー指示により「全体が場当たり的パッチになっていないか」を機械的に検証する2大成果物を作成：
+
+1. **`requirements_gap_map.md`** — 要件定義書（F-1〜F-22、DBスキーマ§4.1〜§4.9）と実コードの全件照合。5値判定（✅/🟡/❌/⚠️/🗑️）で実態を可視化。主な発見：
+   - **⚠️「名前だけ実装」3箇所**: `_build_hydrate_context`（5節構造なし）、`_find_prior_superseded`（topic文字列一致のみ）、`agreements.depends_on`（書き込みのみで消費なし）。これらが「実装済み」と誤認され設計ミスを生んでいた（BL-224初版設計の誤りの直接原因）
+   - **🗑️「死蔵テーブル/列」3箇所**: `agreements.depends_on`、`chat_history`、`current_goal`。§15.4「消費経路のない記録」の典型
+   - **F-8.4 時間減衰検索**: 構造的に未実装（ベクトル検索インフラなし）
+   - 付録B.1（実装状況表）を乖離マップへの参照に置き換え（二重管理の陳腐化を防止、§15.1適用）
+
+2. **`bl_history_audit.md`** — BL-001〜223の全史から構造的負債を機械的に抽出。主な結論（1ページ結論の抜粋）：
+   | # | 構造的負債 | 実測 | 再発したBL | 推奨 |
+   |---|---|---|---|---|
+   | 1 | **「後続へ申し送る」概念が9つの別実装に分散** | 9機構 × 3ノードへ個別配線 | BL-082 → BL-154 → BL-219 → BL-223（4回） | **注入経路の一元化。最優先** |
+   | 2 | **消費経路のない記録（§15.4）** | 今日3件追加で計8回 | BL-136/145/154/163/168 ＋ BL-219/220/223 | 「記録追加時に消費経路同時実装」の機械的強制手段なし |
+   | 3 | **プロンプト末尾の無制限な肥大** | `call_expert`内16回、全体30回の`+=` | BL-185不変条件をBL-220が壊しかけた | 追加順序依存構造の解消 |
+   | 4 | **単一ファイルへのパッチ集中** | 14,471行・164 BL、上位4関数が30以上 | — | 定点観測継続 |
+   | 5 | **名前が要件を騙る箇所（⚠️）** | 3箇所 | BL-224初版設計の誤りを生んだ | **注記を入れるだけで防げる。最も低コスト** |
+
+   **費用対効果最高の次の一手**: #5（⚠️/🗑️箇所への注記） → #1（申し送り経路一元化）の順。
+
+3. **`back_log/BL-224/BL224_basic_design.md`** — Decision Lineage（判断の系譜）実体化設計を完成。`relation_edges` 汎用エッジテーブルで3つのIDスペース（agreements/facts/entities）を横断し、再帰CTEでN段系譜を前方・後方に走査。4書き込み経路（W1〜W4：機械的骨格＋LLM付加価値）と4消費経路（C1〜C4：Hydrate時系列復元・監査レポート・アンカリング検出・前方伝播）を設計。未決事項3点（最大探索深度10/表示3段、単独Rejectedへのエッジ不張り、2段階実装）をユーザー判断待ちとして明記。
+
+**合わせて `issue_backlog.md` に BL-219〜226 の詳細セクション（8件）を追記し、`check_docs_consistency.py` を [OK] まで修正済み。**
+
+---
+
 ## 現在フェーズ
 
 | 項目 | 状態 |
 |------|------|
-| **アクティブ Phase** | Phase 5 / R5（思考プロセス監査／F-3.7／F-8.3 Freeze／GoalShiftEvent）— 実装完了（BL-063）、後続のBL-062/064〜070対応も完了・一部`open`。実LLM再ドライラン待ち |
+| **アクティブ Phase** | **乖離マップ・負債監査完了（2026-08-13）**。R5実装完了・実LLM再ドライラン未実施。次は BL-224（Decision Lineage/系譜グラフ）実装の可否判断、または実LLM再ドライラン実施 |
 | **Phase 状態** | R3a/R3b: 実装完了（オフラインスモークテスト50件Pass、実ドライランで検証、BL-039/040/038はいずれも`done`）。R4: 実装完了（オフラインスモークテスト計16件Pass、実LLM検証未実施）。R5: 実装完了（オフラインスモークテスト計100件Pass、BL-063`done`、BL-062は`partial`〈Detector限定〉、F-8.3 FreezeはD-045で一時休止、BL-064`done`、BL-065〜070は`open`）。実LLM再ドライラン未実施 |
-| **次マイルストーン** | 実LLM再ドライラン（R4のA/Bテスト＋R5新機能の実効性確認＋BL-062のDetector SUPERSEDE実発火確認、いずれも次アクション） → 指標C実測 → BL-065〜070（GoalShiftEvent消費経路・whiteboard編集履歴表示・Hydrate階層化・Reviewer/Arbiter/Integratorへの拡張検討等）着手判断 |
+| **次マイルストーン** | **ユーザー判断待ち**: (A) 実LLM再ドライラン実施（R4 A/Bテスト＋R5実効性確認＋BL-062 SUPERSEDE発火確認）→ 指標C実測 → BL-065〜070着手判断、または (B) BL-224（系譜グラフ）実装着手（乖離マップの⚠️/🗑️是正と負債監査の#1申し送り一元化を同時解決）。乖離マップ§5・負債監査§0結論参照 |
 
 ---
 
@@ -38,6 +65,7 @@ Phase 1（R1）・Phase 2（R2）はともにDone。**R3a（自律的DB/ファ�
 | Phase 3 (R3a/R3b) | **完了（実装済み、2026-07-22時点）** | F-3.8（`read_verified_fact`/`read_deliverable_file`ツール）・F-3.9（構造化ファクトストア、confirmed/provisional区別）・F-3.1/F-3.2（`write_agreement_tool`、権限マトリクス）を実装。cline実装をClaude Sonnet 5がレビューし、H1（ツール結果の二重JSONエンコード）・H2（Deliverableファイル保存ロジックの欠落）を発見・修正。`tests/test_r3_smoke.py`（50件）でオフライン検証済み。実ドライラン（`log/2026-07-21/2248`）で、BL-038（`write_agreement`後の二重書き込み）・BL-039（task_idドット/アンダースコア表記ゆれで全タスク遷移失敗、修正済み）・BL-040（`read_deliverable_file`の約68%not_found、修正済み。ファイル名を`_Vn`バージョニング＋`old/`退避に変更）・BL-041（一度確定した決定の再検討機構不在、暫定値デフォルト化のみ実装）を発見。BL-038は2026-07-22、R4実装後のドライランレビューでLangGraphの未宣言TypedDictキー消失が根本原因と判明し修正済み（D-038）。指標Cの定量実測は次回ドライランへ持ち越し。 |
 | Phase 4 (R4) | **実装完了（2026-07-22、実LLM検証は未実施）** | `whiteboard_drafts`テーブルへの差分パッチ化により、`integrator_node`の「最後に全成果物を一括結合するテキスト生成処理」をper-task Deliverableについては廃止（Integratorのフェーズ横断矛盾検知という役割自体は継続、発火タイミングが変わるのみ。最終統合文書自体は引き続きファイル保存）。差分マージはClaude Code自身のEditツール方式（`old_text`完全一致検索→`new_text`置換、`_apply_text_edits`）を採用。`WRITE_AGREEMENT_TOOL`に`edits`パラメータを追加し、Expert/Detector/User AIのプロンプトに現在タスクの最新ホワイトボードを注入、`read_deliverable_file`・ロールバック（F-7.3）も対応。ドライランの長時間化・トークン消費を理由にBL-041（facilitator/Arbiter再設計）より優先着手（ユーザー判断）。`tests/test_r4_smoke.py`（14件）新規、既存`test_r3_smoke.py`の3件を更新。**さらに実LLMドライラン（`log/2026-07-22/1407`）レビュー中にBL-038の実データ破損を発見・根本原因（LangGraphの未宣言TypedDictキー消失）を特定し修正（D-038）**: `LineageState`へのフィールド追加、decision_extractorフォールバックへのWHITEBOARD保護、実グラフ経由の回帰テスト2件を追加。オフラインスモークテスト計66件Pass。 |
 | Phase 5 (R5) | **実装完了（2026-07-24時点、実LLM検証は未実施）** | `cela_r5_design_v2.md`に基づきF-2.1拡張（Detectorへの思考プロセス監査）・F-3.7（`internal_thought_process`の限定記録）・F-8.3 Freeze・GoalShiftEventを実装（BL-063・D-044）。続けてユーザーの棚卸し依頼により、Agreement3軸区分等の死んだメタデータの削除・表示配線（BL-064、`done`）、R5永続化情報の消費経路欠如（BL-065）・whiteboard編集履歴非表示（BL-066）・未使用テーブル（BL-067）・Hydrate階層化構想（BL-068）・Expertの視座ズームアウト指示（BL-069）を発見・分類起票（いずれも`open`）。さらにF-8.3 FreezeとBL-062（Detectorの誤判定がApproved agreementを覆せず永続化する矛盾）のトレードオフをユーザーが再検討し、**Freezeを一時休止（D-045、本体は温存）、BL-062をDetector限定でSUPERSEDE配線を追加し解消**（Reviewer/Arbiter/Integratorへの拡張はBL-070として分離）。新規テスト（`test_r5_thought_log_freeze_goalshift.py`14件、`test_bl062_detector_supersede.py`4件）含めオフラインスモークテスト計100件Pass、`python -m py_compile`合格、`check_docs_consistency.py`合格。実LLM再ドライランでの効果確認（Detector SUPERSEDEの実発火、Freeze不使用の確認、GoalShiftEventの実発火）は次アクション。 |
+| **乖離マップ・負債監査・BL-224設計** | **完了（2026-08-13、実装未着手）** | `requirements_gap_map.md`（要件定義⇔実装の5値判定全件照合、⚠️名だけ実装3箇所・🗑️死蔵3箇所を発見、付録B.1をマップ参照へ置換）、`bl_history_audit.md`（BL-001〜223全史から構造的負債を機械抽出、9機構分散の申し送り・8回再発の消費経路欠落・30回のプロンプト肥大等を定量化、1ページ結論で優先順位提示）、`back_log/BL-224/BL224_basic_design.md`（Decision Lineage実体化設計、`relation_edges`汎用エッジテーブル＋再帰CTE、4書き込み/4消費経路、未決事項3点をユーザー判断待ちとして明記）。合わせてBL-219〜226詳細セクション追記、`check_docs_consistency.py` [OK]。**実装優先順位はユーザー判断待ち**（乖離マップ§5推奨順：⚠️注記→申し送り一元化、負債監査§0結論：同順） |
 
 詳細な完了定義: [phase_gates.md](phase_gates.md)
 
@@ -55,7 +83,8 @@ Phase 1（R1）・Phase 2（R2）はともにDone。**R3a（自律的DB/ファ�
 
 | ID | 論点 | 関連 |
 |----|------|------|
-| — | | [decision_log.md](decision_log.md) |
+| — | **BL-224実装 vs 実LLM再ドライラン、どちらを先行するか** | [requirements_gap_map.md §5](requirements_gap_map.md)・[bl_history_audit.md §0](bl_history_audit.md)・[BL-224設計](back_log/BL-224/BL224_basic_design.md)。Next Actions 35 も参照 |
+| — | **BL-224の未決事項3点（最大探索深度10/表示3段、単独Rejectedへのエッジ不張り、2段階実装）** | [BL-224設計・未決事項](back_log/BL-224/BL224_basic_design.md)（いずれもAGENTS.md §7により新規定数は明示承認が必要） |
 
 ---
 
@@ -97,6 +126,15 @@ Phase 1（R1）・Phase 2（R2）はともにDone。**R3a（自律的DB/ファ�
 26. [x] **ドキュメント/フォルダのR番号一本化（ユーザー指摘、2026-07-21）**: `phaseN/`という旧v23由来のフォルダ命名が現行のR番号（R1〜R5）と対応せず混乱の原因になっていた（例: 旧`phase3/`の中身が実際にはR5設計書だった）ため、`phase0/`→`r0_planning/`、`phase1/`→`r1_r2_r3b_core/`（内部ファイルも`cela_r1_r2_r3b_design_v7.md`等へリネーム）、`phase2/cela_phase2_design_R4.md`→`r4/cela_r4_design.md`、`phase2/cela_phase2_design_BL023_task_state.md`→`r1_r2_r3b_core/cela_r2_design_BL023_task_state.md`、`phase3/cela_phase3_design_R5_v2.md`→`r5/cela_r5_design_v2.md`にリネーム。`phase6plus/`（旧`phase6/`）はロードマップ自身が「Phase 6以降」という非R番号の呼称を使っているためそのまま維持。全相互リンクを`scripts/check_docs_consistency.py`で検証しPass
 27. [ ] **R3a詳細設計**: F-3.8（自律的DB/ファイル読み取りツール）・F-3.9（構造化ファクトストア）の詳細設計書を`r1_r2_r3b_core/cela_r1_r2_r3b_design_v7.md`への追記、または新規`r3a/`フォルダに作成し、`_build_task_scope_context`のフェーズ横断バグ（BL-035）をどう解消するかの実装方針を確定する
 
+28. [ ] **乖離マップ是正①（高・低コスト）: ⚠️/🗑️の3箇所に注記を入れる** — `_build_hydrate_context`（`cela_main.py:7436-7449`、F-8.1/8.2の5節構造未満）、`agreements.depends_on`（書き込みのみ・消費なし）、`chat_history`/`current_goal`表（未使用）の各コードへ「この名前は要件Fxxを示すが実装は満たしていない／この列・表は誰も読まない」と明示。実害: AIが`depends_on`を「未使用列」と誤認しBL-224初版設計を誤った。BL-224本体実装より**先に**入れるべき。詳細: [requirements_gap_map.md §6.2](requirements_gap_map.md)（高）・[bl_history_audit.md](bl_history_audit.md) #5
+29. [ ] **乖離マップ是正②（高）: F-8.4(2) 時系列復元読みの実装** — 「なぜ今この方向か」を後続AIがたどれるよう、topic文字列一致のみの`_find_prior_superseded`（`cela_main.py:7571-7584`）を系譜ベースの変遷連鎖へ置換。**BL-224（C1）で対応予定**。実害: BL-219の8,500人問題の再発防止に直結。詳細: [requirements_gap_map.md §6.2](requirements_gap_map.md)（高）
+30. [ ] **乖離マップ是正③（中）: F-2.6の機械的ゲートをDetector以外の3ロールへ展開** — `call_detector`の数値検算ゲート（`cela_main.py:12262-12272`付近）と同型のゲートをReviewer/Integrator/Arbiterへ。現在はDetectorのみが数値検算し他は承認できる（§15.2「部分的な保護は無いより危険」）。詳細: [requirements_gap_map.md §6.2](requirements_gap_map.md)（中）
+31. [ ] **乖離マップ是正④（中・低コスト）: モデル二層化の設定変更** — `model_*`の設定値を変え、監査役（Reviewer/Arbiter）を即答モデルから分離。現状は二重防衛線の「システム2」が名目上のものになっている（F-5.2/F-10.1/F-7.4）。設定値変更のみで要件に近づく。詳細: [requirements_gap_map.md §6.2](requirements_gap_map.md)（中）
+32. [ ] **乖離マップ是正⑤（中）: F-3.9③ provisional値の再検討トリガー** — 暫定値が制約変化後も暫定のまま参照され続ける問題。F-3.9が求めた再検討の切り口が働いていない。**BL-224のC4（前方伝播）で部分的に対応予定**。詳細: [requirements_gap_map.md §6.2](requirements_gap_map.md)（中）
+33. [ ] **乖離マップ是正⑥（低）: 意図的不実装を要件定義書へ書き戻す** — F-7.3（ロールバックは実装済みだが要件の一部は意図的見送り）・F-9.1（経験伝承の一部）へ「D-047により撤廃／意図的に不採用」を追記。次に読む人が「やり残し」と誤解して不要な作業を始めるのを防ぐ。詳細: [requirements_gap_map.md §6.2](requirements_gap_map.md)（低）
+34. [ ] **乖離マップ是正⑦（保留・監視）: F-9/F-5.3・F-10.4/10.6/10.7・F-22・F-21の実害観測** — 経験DNA伝承・平行世界探索・市場センシングは未実装だが現状run内代替で回っており実害未観測。次の実LLMドライラン監査でF-1.4（主観注入軸）の欠落等を注視し、具体例が出たら起票。詳細: [requirements_gap_map.md §6.2](requirements_gap_map.md)（保留）
+35. [ ] **BL-224実装 vs 実LLM再ドライラン、どちらを先行するか（ユーザー判断待ち）** — (A) 実LLM再ドライラン（R4 A/Bテスト＋R5実効性確認＋BL-062 SUPERSEDE発火確認）→指標C実測→BL-065〜070着手、または (B) BL-224実装着手（乖離マップ⚠️/🗑️是正①＋負債監査#1申し送り一元化を同時解決）。[乖離マップ§5](requirements_gap_map.md)・[負債監査§0](bl_history_audit.md)結論参照
+
 ---
 
 ## ドキュメント健全性
@@ -131,3 +169,4 @@ Phase 1（R1）・Phase 2（R2）はともにDone。**R3a（自律的DB/ファ�
 | 2026-07-23 | **R5実装完了**（BL-063、D-044）。`cela_r5_design_v2.md`に基づきF-2.1拡張（`_query_AI_live`のreasoning捕捉、Detectorへの思考プロセス監査ブロック）・F-3.7（`internal_thought_process`の限定記録）・F-8.3 Freeze（専用ツール、`user`ロール限定）・GoalShiftEvent（`goal_shift_events`テーブル、`detect_goal_shift`、`arbiter_node`配線）を実装。新規`tests/test_r5_thought_log_freeze_goalshift.py`（14件）含めオフラインスモークテスト計96件Pass、実LLMドライラン（`test_f26_detection.py`）4件Passも確認。 |
 | 2026-07-23〜24 | ユーザーの質問（Agreementの3軸区分の活用有無）を契機に、DBスキーマ・`state`全体の「書くが読まれない情報」を棚卸し。Agreement側3軸区分は実際の書き込み経路でハードコードされ形骸化していたと判明し完全削除、`agreements.turn`／`state["risk_flag"]`も削除、`evidence`／`decisions.reason_missing`は表示へ配線（BL-064、`done`）。R5永続化情報の消費経路欠如（BL-065）・whiteboard編集履歴非表示（BL-066）・未使用テーブル（BL-067）・Hydrate階層化構想放置（BL-068）・Expertの視座ズームアウト指示（BL-069）を発見し個別に分類起票（`open`）。続けて、F-8.3 Freeze（D-044）とBL-062のトレードオフをユーザーが再検討し、Freezeを一時休止（D-045、本体は温存）した上でBL-062をDetector限定のSUPERSEDE配線で解消（Reviewer/Arbiter/Integratorへの拡張はBL-070として分離）。新規`tests/test_bl062_detector_supersede.py`（4件）含めオフラインスモークテスト計100件Pass、`check_docs_consistency.py`合格。`STATUS.md`・`phase_gates.md`をR4/R5の実態に合わせて更新（Phase 5節新設、P3a-1/P3a-2/P3b-1を実装確認済みとして☑化）。 |
 | 2026-07-22 | **D-038: BL-038の根本原因を特定・修正**。実LLMドライラン（`log/2026-07-22/1407`）レビュー中、DBを直接クエリしてWHITEBOARDポインタがdecision_extractorのフォールバック経路によりプレーンテキストで上書きされ`Superseded`になっている実害を確認（[decision_lineage.md 論点44](decision_lineage.md)）。ユーザーの指示でオフライン検証を実施し、インストール済みLangGraph（v1.2.9）の最小再現コードにより「`StateGraph`のスキーマ（`LineageState` TypedDict）に宣言されていないキーはノード間で伝播せず消える」ことを実証。`expert_wrote_agreement`・`user_wrote_agreement`・`expert_last_whiteboard_edit`のTypedDict宣言漏れが真因と判明。`LineageState`へのフィールド追加、decision_extractorフォールバックへの`WHITEBOARD:`保護分岐の追加（二重防御）、`tests/test_r4_smoke.py`への実グラフ経由の回帰テスト2件追加を実施。オフラインスモークテスト計66件Pass。デバッグ用`[DEBUG]`printはユーザー指示により残置。実LLM再ドライランでの最終確認は未実施。 |
+| 2026-08-13 | **要件定義⇔実装の乖離マップ作成と構造的負債監査を完了**（ユーザー指示「全体が場当たり的パッチになっていないか」の機械的検証）。`requirements_gap_map.md`（F-1〜F-22/DBスキーマ§4.1〜§4.9の5値判定全件照合、⚠️名だけ実装3箇所・🗑️死蔵3箇所を発見、付録B.1をマップ参照へ置換・§15.1適用）、`bl_history_audit.md`（BL-001〜223全史から構造的負債を機械抽出、パッチ密度・欠陥クラス再発回数・再発連鎖を定量化、1ページ結論で優先順位提示：#5⚠️注記→#1申し送り一元化）、`back_log/BL-224/BL224_basic_design.md`（Decision Lineage実体化設計、`relation_edges`汎用エッジテーブル＋再帰CTE、4書き込み/4消費経路、未決事項3点をユーザー判断待ちとして明記）を作成。合わせてBL-219〜226詳細セクション（8件）を`issue_backlog.md`に追記、`check_docs_consistency.py` [OK]。**次アクションはユーザー判断待ち**: (A) 実LLM再ドライラン実施 → 指標C実測 → BL-065〜070着手、または (B) BL-224実装着手（乖離マップの⚠️/🗑️是正と負債監査#1申し送り一元化を同時解決）。乖離マップ§5・負債監査§0結論参照。 |

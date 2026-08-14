@@ -24,3 +24,18 @@
 BL-184設計では`httpx.get(url, params={"q": query}, timeout=10)`でGETリクエストを送る方式を採用する
 （POST対応の実装は不要と判断）。ただし実装時に実際のレスポンスを確認し、GETで結果が得られない
 場合はこのメモを更新した上でPOST対応を追加検討する。
+
+## 追記（2026-08-07）: 実運用でBot対策ブロックを実測、Braveへ切替
+
+`web_tools.py`実装後、実際に`html.duckduckgo.com/html/`へ数回（1回目は成功、2回目以降は
+数十秒間隔でも）アクセスしたところ、Bot対策の画像認証チャレンジページ（HTTP 202、本文に
+`anomaly-modal`／`"Unfortunately, bots use DuckDuckGo too."`を含む、`challenge-form`で
+"Select all squares containing a duck"を要求）が即座に返るようになり、5秒後の再試行でも
+解除されなかった。設計時に想定していた「レート制限・一時ブロックのリスク」は理論上の懸念に
+留まらず、数回の疎通確認だけで実際に発動する即時的な問題であることが実測で判明した。
+
+この結果を受け、`CELA_WEB_SEARCH_PROVIDER`の初期実装をDuckDuckGo（非公式スクレイピング）
+からBrave Search API（正式API、`docs/refs/brave_search/api_notes.md`参照）へ切り替えた
+（ユーザー判断、decision_lineage.md 論点142）。`DuckDuckGoSearchProvider`実装自体はコードとして
+残し（Provider抽象化により`CELA_WEB_SEARCH_PROVIDER=duckduckgo`でいつでも切替可能）、既定
+選択のみBraveへ変更する。

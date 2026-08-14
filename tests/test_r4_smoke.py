@@ -277,7 +277,10 @@ def test_decision_extractor_fallback_protects_whiteboard_pointer_from_plaintext_
     cela_main.decision_extractor_node(state)
 
     rows = [a for a in cela_main.get_agreements_from_db(conn, run_id) if a["topic"] == "水ノ守町 分析レポート"]
-    latest = max(rows, key=lambda a: a["id"])
+    # [BL-215] idは`AG-{ミリ秒}-{uuid断片}`となり、文字列の大小は挿入順を表さない
+    # （そもそも修正前もミリ秒衝突時は同値で最大が定まらなかった）。
+    # get_agreements_from_dbはrowid昇順＝真の挿入順を返すため、末尾が最新である。
+    latest = rows[-1]
     assert latest["decision_what"] == "WHITEBOARD:phase_1:task_1_1", (
         "decision_extractorのフォールバック経路がWHITEBOARDポインタをプレーンテキストで"
         "上書きしてしまった（実ドライランで観測した事故の再発）"
