@@ -386,7 +386,8 @@ SELECT DISTINCT ref, MIN(depth) AS depth FROM backward GROUP BY ref ORDER BY dep
 ## 検証
 
 - `python -m py_compile cela_main.py`
-- 再帰CTEはLLM不要のためDB直結ユニットテスト（線形4-5ノード＋分岐＋意図的サイクル1件＋
+- 再帰CTEスニペットは実装しない（M3・B7）。トラバーサルは `_traverse_lineage`（Python 反復・
+  visited set）であるため、DB直結ユニットテスト（線形4-5ノード＋分岐＋意図的サイクル1件＋
   深度上限到達）で正しさを検証
 - 系譜の実体テスト: あるtopicをCREATE→UPDATE→UPDATEと変遷させ、`_get_lineage_chain`が
   **3世代すべてを時系列順に**返すこと
