@@ -68,6 +68,8 @@ Phase 1（R1）・Phase 2（R2）はともにDone。**R3a（自律的DB/ファ�
 
 検証: `python -m py_compile cela_main.py` 合格。新規 `tests/test_bl228_chat_history_lineage.py`（9件）＋既存 `tests/test_bl224_relation_edges.py`（18件）＝27件通過。実 LLM ドライラン検証は BL-231 ガード導入後、全体検証の一環として実施予定。
 
+**【修正・同日】`init_db` が既存DB（旧 chat_history スキーマ＝task_id 列なし）でクラッシュしていたバグを修正。** 原因: executescript 内の `CREATE INDEX idx_chat_history_run_task ON chat_history(run_id, task_id)` が、task_id 列が存在しない既存DBで `no such column: task_id` を出していた。task_id はマイグレーションで後付けのため、当該インデックス作成を executescript から除外し、マイグレーション `_ensure_chat_history_lineage_columns`（列追加後）へ移動。新規DBでも同関数経由でインデックスが作成される。`tests/test_bl228_chat_history_lineage.py` に旧スキーマDBで `init_db` が成功する回帰テストを追加（10件通過）。
+
 ---
 
 ## 現在フェーズ
