@@ -196,8 +196,9 @@ W3 の `agreement:{dep_id}` エッジが空になる」という壊れた状態�
 `'[AG-1765000000000-a1b2c3]' -> depends_on: ['AG-1765...-a1b2c3']` へ修正する箇所は、W3 の
 `relation_edges` 書き込み配線と同じ変更としてレビュー・コミットする。
 
-**B8 バックフィル**（後日別作業）: 既存 `agreements.depends_on` 列（実 id の配列）から同上の
-`f"agreement:{dep_id}"` → `f"agreement:{self_id}"` エッジを生成する。マッピングは本 W3 と同一。
+**B8 バックフィル**（独立レビューN6 により **BL-230** として別起票）: 既存 `agreements.depends_on` 列
+（実 id の配列）から同上の `f"agreement:{dep_id}"` → `f"agreement:{self_id}"` エッジを生成する。
+マッピングは本 W3 と同一。Phase 1 実装後に BL-230 として着手（issue_backlog.md 優先対応一覧 P2）。
 
 ### W4（LLM記入・新規）: 値 → 値
 `confirmed_variables[]`の各要素に任意項目`derived_from: list[str]`
