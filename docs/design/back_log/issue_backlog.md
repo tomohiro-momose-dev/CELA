@@ -7916,6 +7916,14 @@ YouTubeの LDD/Lineage 研究（`docs/refs/`）が起源の「判断の系譜を
 
 1. N/M 既定値（N=10, M=30 提案、§7 承認要）。2. 要約委任の軽量/ローカル LLM の具体選定。3. 要約実行タイミング（append 毎／非同期バッチ／コンテキスト圧迫時）。4. detector 差戻の構造化粒度（`is_rollback` フラグのみ vs 専用 `rollback_events` テーブル）。5. BL-228 と BL-224 の実装順序（relation_edges 基盤が先か chat_history 活性化が先か）。
 
+**実装状況（2026-08-15 — Phase 3 実装中）:** 設計書 D-204 の 3 段階分割により、本 BL を「BL-224 Phase 3 ＝ 統合」として実装開始。ユーザー承認（「含める」）により detector_reviews 表＋W2 を含めて実装。
+- **W1（chat_history 活性化）**: `chat_history` 拡張（task_id/phase_id/summary_brief/summary_detail/is_rollback 列＋2インデックス）、全 append 点（user_input / decision_extractor / facilitator / generate_user_utterance）から `_write_chat_history_row` 単一ゲートで正本へ書く（`state["last_chat_history_id"]` で turn の id を後続へ運ぶ）。checkpoint の in-memory は輸送（§14.4）。
+- **ref プレフィックス拡張**: `_resolve_ref_table` / `_resolve_ref_line` に `turn:` / `issue:` / `whiteboard:` / `detector_review:` を追加、`_trace_lineage_handler` の許可リスト（`_LINEAGE_REF_PREFIXES`）と `TRACE_LINEAGE_TOOL` 説明を拡張。
+- **W2（detector 差戻の構造化）**: 専用表 `detector_reviews` 新設。`_bl228_record_detector_review` ヘルパで、minor/major 判定時に①detector_reviews 行挿入②該当 `chat_history` 行 `is_rollback=1`③`detector_review:<id>`→`turn:<id>` エッジを書く（§15.1 単一ゲート）。major＋assistant で whiteboard 注釈成功時は `turn:<id>`→`whiteboard:<phase>:<task>`、BL-096 自動起票時は `turn:<id>`→`issue:<topic>` の下流エッジも張る。
+- **C4（ターン内チューリン）**: `_render_lineage_audit(turn:<id>)` が当該タスクの `whiteboard_drafts` 版歴を時系列で描く `_render_turn_whiteboard_timeline` を追加。
+- **意図的据え置き（§15.4 audit-only）**: 単一閾値N要約（軽量/ローカルLLM委任）、N/M ティア定数は未実装。`summary_brief`/`summary_detail` 列は追加するが常に空（要約委任実装時にのみ埋まる）。これは「出口の無い放置」ではなく、audit-only であることを明示。
+- **テスト**: `tests/test_bl228_chat_history_lineage.py`（9件）で W1/ref拡張/trace_lineage(turn)/W2/C4 を網羅、§17.1 のリバート感受性も確認済み。
+
 ---
 
 ### BL-229: 計画段階の概算/Web探索値を `verified_facts` として登録（provisional 化）
