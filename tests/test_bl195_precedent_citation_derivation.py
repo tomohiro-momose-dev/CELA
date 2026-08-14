@@ -70,35 +70,37 @@ def test_call_detector_pass2_distinguishes_copy_check_from_independent_derivatio
 
 
 def test_target_goal_names_real_city_and_separates_problem_from_solution():
-    """[BL-195] TARGET_GOALはcli実行部にのみ存在しモジュールレベルの変数ではないため、
-    ソースファイル全体をテキストとして走査し、意図通りの切り分けができているか確認する。"""
+    """[BL-195] TARGET_GOALは外部md（cela_main.pyの--goal-file既定）から読まれるため、
+    ゴールファイルをテキストとして走査し、意図通りの切り分けができているか確認する。"""
     with open(
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cela_main.py"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "docs", "goal", "chino_city_autonomous_bus.md"),
         encoding="utf-8",
     ) as f:
-        source_text = f.read()
+        goal_text = f.read()
 
-    assert "長野県茅野市" in source_text
-    assert "八ヶ嶺市" not in source_text, "匿名化都市名は実データ化により完全に置き換えられているはず"
+    assert "長野県茅野市" in goal_text
+    assert "八ヶ嶺市" not in goal_text, "匿名化都市名は実データ化により完全に置き換えられているはず"
     # 「問題」側（路線バス廃止の事実）は背景として使ってよい。
     # 語順（「利用者減少・採算悪化を理由に」が前文に置かれ、日付挿入がある）のため、意図を
     # 保つ2つの必須断片で確認する（BL-224 とは無関係な事前のテスト文字列ドリフトを解消）。
-    assert "定時定路線バス13路線が廃止された" in source_text, (
+    assert "定時定路線バス13路線が廃止された" in goal_text, (
         "TARGET_GOALは「問題」側の事実（定時定路線バス13路線の廃止）を背景として含めること"
     )
-    assert "利用者減少・採算悪化を理由に" in source_text, (
+    assert "利用者減少・採算悪化を理由に" in goal_text, (
         "廃止の理由（利用者減少・採算悪化）も背景として含めること"
     )
     # 「解決」側（のらざあへの移行）はゴール文の背景説明に含めてはならない
-    assert "のらざあ" not in source_text
-    assert "AIオンデマンド交通" not in source_text or "オンデマンド交通「のらざあ」" not in source_text
+    assert "のらざあ" not in goal_text
+    assert "AIオンデマンド交通" not in goal_text or "オンデマンド交通「のらざあ」" not in goal_text
 
 
 def test_target_goal_includes_precedent_reference_section():
     with open(
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cela_main.py"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "docs", "goal", "chino_city_autonomous_bus.md"),
         encoding="utf-8",
     ) as f:
-        source_text = f.read()
-    assert "実例の参照について" in source_text
-    assert "実例の運行本数・車両台数・運賃・人員体制等の具体的な運用数値をそのまま本計画の数値として転記してはならない" in source_text
+        goal_text = f.read()
+    assert "実例の参照について" in goal_text
+    assert "実例の運行本数・車両台数・運賃・人員体制等の具体的な運用数値をそのまま本計画の数値として転記してはならない" in goal_text
