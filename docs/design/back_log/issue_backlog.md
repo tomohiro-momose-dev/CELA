@@ -7995,6 +7995,14 @@ YouTubeの LDD/Lineage 研究（`docs/refs/`）が起源の「判断の系譜を
 **未決事項:**
 1. 検知方式: 同一ノード出力の逐語的繰り返しをどう検知するか（直前 N 回の出力ハッシュ一致、あるいはツール呼び出し計画の同一性）。2. 停止／復旧: 検知時にどう振る舞うか（ノード打ち切り＋警告、または人間へエスカレーション）。3. 対象ノード: Detector のみか、User AI Stage 等も含むか。4. 実装は後日（本 BL の `in_progress` 化はユーザーの「後で実装」指示まで保留）。
 
+**実装済み（2026-08-14）— 未決事項の解決:**
+- **①検知方式**: `_query_AI_live` のツールループ内で、各 iteration の「正規化テキスト＋ツール呼び出し計画署名」の結合ハッシュ（`_bl231_combined_hash`）を直近 `WINDOW=3` 件のスライド窓で保持し、連続同一を機械検知（§15.3）。MIN_CHARS は採用せず（ループには tool_calls が必要＝plan 非空のため）。
+- **②停止／復旧**: 非収束 `RuntimeError` ではなく `return content`（最後の出力）で強制終了。50 往復のトークン burn と出力消失を回避。大音声警告＋`_LAST_REPETITION_GUARD_TRIPPED`（label/iteration/run_id/冒頭120字）で可観測化。人間エスカレーションは非実施（オーケストレータ配線は別課題、将来候補として据え置き）。
+- **③対象ノード**: 共有ループ（`_query_AI_live`）内に実装。Detector 発端だが全ツールノード（Expert/User AI/Resource Arbiter/Integrator 等）を同型崩壊から保護（§15.1 単一ソース、Detector 専用パッチの再 Fragment 化を回避）。
+- **④実装タイミング**: ユーザー指示「BL-231に取り掛かる」により `in_progress` 化・実装開始。
+- **新規定数（§7 承認要）**: `_LOOP_GUARD_REPETITION_WINDOW = 3`。実装時は提案値を適用済み、ユーザー承認を待って確定。
+- **テスト**: `tests/test_bl231_loop_guard.py`（実 LLM なしのモックストリーミング駆動、§17.1 準拠）。
+
 ---
 
 | 日付 | 内容 |
