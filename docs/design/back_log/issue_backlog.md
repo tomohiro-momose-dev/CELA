@@ -261,6 +261,7 @@
 | BL-227 | 中 | `cela_main.py`（`TOOL_CALL_RULE`定数新設・`_inject_japanese_output_directive`拡張・iter=2以降の`light_system_prompt`置換箇所に同一ルールを含める）、`tests/test_tool_call_rule_injection.py`（新規4件） | **ツール呼び出しの鉄則（TOOL_CALL_RULE）の全ノード注入（`done`）。** ユーザーが「思考のみで終わりその次にツールを呼び出す」挙動を指摘——ツールが必要なのに事前アナウンスだけで応答を終える（text-only stop）と、次回呼び出しで改めてツールを呼ぶ無駄なiterationが生じプロンプトキャッシュヒットが構造的に低下する。既存の`_inject_japanese_output_directive`（日本語出力指示の一斉注入）と同型の単一ソース注入を採用し、①`TOOL_CALL_RULE`定数（§15.1: 本文1箇所管理）を新設、②同関数を拡張して既存/新規systemへ追記（iter=1）、③iter=2以降の`light_system_prompt`置換にも同一ルールを含め軽量版でも維持。趣旨: ツールが必要なら同じレスポンス内で直接tool_callsを発行、text-onlyでよいのはユーザーへの最終回答時のみ。これによりツールループを通る全ノードへ自動適用。新規テスト4件、`py_compile`合格。実効性は次回実LLMドライランで確認。 | P2 |
 | BL-228 | 高 | `cela_main.py`（`chat_history` 活性化・`relation_edges` の `turn:`/`issue:`/`whiteboard:`/`detector_review:` 拡張・単一閾値N要約・ターン内チューリン描画・Hydrate/trace 統合） | **統一活動系譜（`open`・設計完了・実装未着手・Phase 3）。** 設計書: [BL228_basic_design.md](BL-228/BL228_basic_design.md)。死蔵 `chat_history`（定義のみ・INSERT/SELECT 0件）を正本として活性化し、`chat_history_window=4` で窓切り後も全文を系譜として残す。単一閾値N要約（≤N 生文 / >N は軽量・ローカルLLM委任・immutable の2密度 `summary_brief`/`summary_detail`）。detector 差戻を `is_rollback` フラグ＋`relation_edges` の `turn:` 外向きエッジで構造化（「弱い部分」の補強＝User AI/Expert の in-context 推論依存を解消）。ターン内チューリン描画・Hydrate の能動取得（C1/C2/C3）・5節は再発明しない。BL-224 の `relation_edges` を単一基盤として拡張（§15.1）。未決事項あり（①N/M 既定値＝N=10 承認済み・M は別途、②軽量LLM選定、③要約タイミング等）。実装順序は BL-224（Phase1-2）の後・**Phase 3**（D-204）。 | P2 |
 | BL-229 | 中 | `cela_main.py`（task_planner/task_plan_reviewer への facts 登録ポリシー・§15.1 共有プロンプトヘルパ） | **計画段階の概算/Web探索値を `verified_facts` へ provisional 登録（`open`・調査済み・設計未着手）。** 計画ノード（task_planner 8243 / task_plan_reviewer 12035）は**既に `WRITE_AGREEMENT_TOOL` を持つ**が計画由来の数値を `verified_facts` に登録する挙動が無い（欠落はプロンプト指示）。ユーザー指摘（2026-08-14）「フェーズタスク作成は web 探索も使い概算も行い、計画・タスク・受け入れ要件は後続へ大きな影響を及ぼす」に基づき、重要な概算/Web探索値を `confidence='provisional'` で登録。捕捉そのものは BL-224 の C3（upsert 境界）が担うため、本 BL は「誰が・いつ書くか」のポリシー＋§15.1 共有ヘルパが対象。未決事項あり（登録対象の絞り込み・ツール可用性合意・ヘルパ文言）。 | P2 |
+| BL-230 | 中 | `cela_main.py`（新規バックフィル関数＋`tests/test_bl230_relation_edges_backfill.py`） | **BL-224 系譜バックフィル: 既存 `agreements.depends_on` 列 → `relation_edges`（`open`・設計未着手）。** 独立レビュー（N6）の指摘を受け個別 BL として起票。BL-224 実装（Phase 1）で `relation_edges` は**新規に書かれるエッジのみ**を蓄積し、過去の run や Phase 1 以前の既存 `depends_on` 列（実 id の JSON 配列、`5496`）は自動では遡及されない。**既存 run を開くと `relation_edges` が 0 件**（実測: 現行 run でもエッジ生成前は 0 件）となり、過去の「誰が・どうして」が辿れない。マッピングは W3 と同一（`f"agreement:{dep_id}"` → `f"agreement:{self_id}"`、`from_ref=agreement:<Y>`→`to_ref=agreement:<X>`、`relation_type='depends_on'`）。本 BL は (1) 既存 `agreements` を `run_id` 単位で走査、(2) `depends_on` 配列から上記エッジを生成、(3) `_write_relation_edge`（既存 ref 実在検証ゲートを通す）で書き込む、バックフィル関数を追加。トランザクション境界は Phase 1 の `relation_edges` 書き込みと同一にする（§15.4: バックフィル結果も `trace_lineage` で消費可能でなければ意味がない）。テスト: 既存 `depends_on` を持つ fixture run に対しバックフィル後 `trace_lineage(agreement:<X>)` が Y を返すこと。 | P2 |
 
 ---
 
@@ -7925,6 +7926,31 @@ YouTubeの LDD/Lineage 研究（`docs/refs/`）が起源の「判断の系譜を
 **未決事項:**
 
 1. 登録対象の絞り込み（重要な概算・Web探索値のみ。全計画数値を facts 化するとノイズ増）。2. ツール可用性ポリシーのユーザー合意（task_planner/reviewer への write_agreement 付与は**既に済み**＝8243/12035; 不足しているのは「登録を指示するプロンプト」）。3. §15.1 共有ヘルパの文言と、両ノードへの注入方法。
+
+---
+
+### BL-230: BL-224 系譜バックフィル（既存 `agreements.depends_on` 列 → `relation_edges`）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計未着手） |
+| 優先度 | P2 |
+| テスト | 未作成（`tests/test_bl230_relation_edges_backfill.py` を予定） |
+| 関連 | BL-224（W3 のマッピングと同一・`relation_edges` の `depends_on` エッジ）、BL-228（Phase 3 活性化後も本バックフィルが過去 run を辿れるようにする）、AGENTS.md §15.4（書いた系譜は消費可能＝`trace_lineage` で辿れるでなければ意味がない）、§15.1（単一ソース: マッピングは W3 と共有） |
+| 設計書 | （未作成 — BL-224 の W3 節・B8 記述を参照。Phase 1 実装後に着手） |
+
+**内容:**
+
+独立レビュー（N6）の指摘を個別 BL として起票。BL-224 の Phase 1 実装は `relation_edges` へ**新規に書かれるエッジのみ**を蓄積し、過去の run や Phase 1 着手前の既存 `agreements.depends_on` 列（実 id の JSON 配列、`5496`）は自動で遡及されない。結果、既存 run を開くと `relation_edges` が 0 件（現行 run でもエッジ生成前は 0 件＝実測）となり、過去の「誰が・どうして」が辿れない。マッピングは W3 と同一:
+`f"agreement:{dep_id}"` → `f"agreement:{self_id}"`（`from_ref=agreement:<Y>` → `to_ref=agreement:<X>`、`relation_type='depends_on'`）。
+
+実装: (1) 既存 `agreements` を `run_id` 単位で走査、(2) 各行の `depends_on` 配列から上記エッジを生成、(3) `_write_relation_edge`（既存 ref 実在検証ゲートを通す）で書き込む、バックフィル関数を追加。トランザクション境界は Phase 1 の `relation_edges` 書き込みと同一にする。テスト: 既存 `depends_on` を持つ fixture run に対しバックフィル後 `trace_lineage(agreement:<X>)` が Y を返すこと。
+
+**動機（独立レビューN6）:** 系譜の価値は「過去の判断を辿れる」ことにあり、新規エッジのみでは過去 run が死蔵のまま。本バックフィルで歴史的 run も `trace_lineage` の消費経路に乗る。
+
+**未決事項:**
+
+1. バックフィルの実行トリガー（起動時自動 vs 明示コマンド `backfill_relation_edges`）。2. `depends_on` が指す id が既に `Superseded` の場合の扱い（そのままエッジを張るか棄却するか）。3. Phase 1 完了後の着手順序。
 
 ---
 
