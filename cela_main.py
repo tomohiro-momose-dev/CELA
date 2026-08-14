@@ -245,10 +245,10 @@ deepseek_v4_flash = "deepseek-v4-flash-0731"
 nemotron_3_super = "nemotron-3-super-120b-a12b:free"
 nemotron_3_ultra = "nemotron-3-ultra-550b-a55b:free"
 gpt_5_6_luna = "gpt-5.6-luna"
-ling_3_flash = "ling-3.0-flash:free"
+ling_3_flash = "ling-3.0-flash"
 laguna_S_2_1 ="laguna-s-2.1:free"
 mimo_2_5 = "mimo-v2.5"
-hy3 = "tencent/hy3"
+hy3 = "hy3"
 _gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
 _gemini_auditor_key = os.environ.get("GEMINI_API_KEY_AUDITOR", "")
 _deepseek_v4_flash_auditor_key = os.environ.get("DSEEK_V4_FLASH_AUDITOR_KEY", "")
@@ -301,7 +301,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = mimo_2_5
+model_user = hy3
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -311,43 +311,42 @@ model_user = mimo_2_5
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = mimo_2_5 # nemotron_3_ultra
+model_orchestrator = hy3 # nemotron_3_ultra
 
 client_expert = client_openrouter
-model_expert = nemotron_3_ultra
+model_expert = hy3 # nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = nemotron_3_ultra
+model_task_planner = hy3
 
 client_task_plan_reviewer = client_openrouter
-model_task_plan_reviewer = nemotron_3_ultra
+model_task_plan_reviewer = hy3
 
 client_detector_domain = client_openrouter
-model_detector_domain = mimo_2_5 # nemotron_3_ultra
-
+model_detector_domain = hy3
 client_detector_numeric = client_openrouter
-model_detector_numeric = mimo_2_5 # nemotron_3_ultra
+model_detector_numeric = hy3 # nemotron_3_ultra
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = mimo_2_5 # nemotron_3_ultra
+model_decision_extractor = hy3
 
 client_resource_arbiter = client_openrouter
-model_resource_arbiter = nemotron_3_ultra #nemotron_3_ultra
+model_resource_arbiter = hy3 #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = mimo_2_5 # nemotron_3_ultra  
+model_reflection = hy3  
 
 client_facilitator = client_openrouter
-model_facilitator = mimo_2_5 # nemotron_3_ultra 
+model_facilitator = hy3 
 
 client_integrator = client_openrouter
-model_integrator = nemotron_3_ultra #nemotron_3_ultra
+model_integrator = hy3 #nemotron_3_ultra
 
 client_reviewer_qa = client_openrouter
-model_reviewer_qa = nemotron_3_ultra #nemotron_3_ultra
+model_reviewer_qa = hy3 #nemotron_3_ultra
 
 client_goal_essence = client_openrouter
-model_goal_essence = nemotron_3_ultra #nemotron_3_ultra
+model_goal_essence = hy3 #nemotron_3_ultra
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -372,7 +371,7 @@ def get_max_tokens(label: str) -> int:
     for keyword, tokens in MAX_TOKENS_BY_ROLE.items():
         if keyword in label_lower:
             return tokens
-    return 131072  # デフォルト
+    return 100000  # デフォルト
 
 
 # ---------------------------------------------------------------------------
@@ -1017,6 +1016,12 @@ READ_REFERENCE_FILE_TOOL = {
             "[BL-216] Cache filenames are opaque hashes, not descriptive names -- when a keyword "
             "search returns multiple candidates, each one comes with a 'preview' (source URL + "
             "first ~300 chars of content) so you can pick the right one WITHOUT opening each file. "
+            "[BL-221] Cached pages can be large (fetch download cap raised to 50MB) and reading "
+            "the plain content without 'grep' truncates at ~10000 chars. Once you know the 'path' "
+            "(from a prior web_fetch or keyword search), pass 'grep' to search the FULL cached "
+            "text for a substring and get back only the matching lines plus surrounding context "
+            "(like `grep -C`) -- this is the right way to reach a specific section of a large "
+            "document instead of reading it from the top. "
             "Read-only; cannot access anything outside the cache directory. "
             "[BL-110] Optionally call `think` (with a `summary`) alongside this or any other tool call "
             "to record your reasoning -- it is no longer required, and other tool calls are no "
@@ -1027,6 +1032,15 @@ READ_REFERENCE_FILE_TOOL = {
             "properties": {
                 "path": {"type": "string", "description": "Exact cache filename if already known."},
                 "keyword": {"type": "string", "description": "Keyword to search for in cached pages' source URLs."},
+                "grep": {
+                    "type": "string",
+                    "description": (
+                        "[BL-221] Requires 'path'. Substring to search for within that cached "
+                        "file's full text (case-sensitive). Returns matching lines with "
+                        "surrounding context lines, not the whole file -- use this for large "
+                        "documents instead of reading from the top."
+                    ),
+                },
             },
         },
     },
@@ -4492,6 +4506,15 @@ _LAST_PYTHON_CALLS: list[dict] = []
 # stateへコピーする）。query_AI()呼び出しごとにリセットされる。
 _LAST_WRITE_AGREEMENT_SUCCEEDED: bool = False
 
+# [BL-223] 直前のquery_AI呼び出しのツールループ内で成功したwrite_agreement呼び出しの
+# {entry_type, task_id}を全件記録する。_LAST_WRITE_AGREEMENT_SUCCEEDEDは「1回でも
+# 成功したか」のブールのみのため、decision_extractor_node側でこれを「今ターンは
+# 全ての抽出結果をスキップしてよい」と解釈すると、Expertが同ターンで別件（例:成果物の
+# write_agreement）を呼んだだけで、全く無関係な抽出項目（例:別トピックのDirective/Deferred）
+# まで巻き添えでスキップされる（実ログ log/2026-08-13/1411 で確認）。項目単位で
+# 「同じ(entry_type, task_id)が既に直接書き込まれたか」を判定できるようにする。
+_LAST_WRITE_AGREEMENT_ITEMS: list[dict] = []
+
 # [BL-158] 直前のquery_AI呼び出しのツールループ内でwrite_issue(RESOLVE/DEFER)が
 # 1回でも成功したか（success=Trueで返ったか）を記録するフラグ。_LAST_WRITE_AGREEMENT_SUCCEEDED
 # と同型のパターン。detector_nodeがUser AIのターンを機械的に差し戻すかどうかの判定に使う
@@ -4543,6 +4566,14 @@ def get_last_write_agreement_succeeded() -> bool:
     decision_extractor_nodeの条件分岐で使用する。
     """
     return _LAST_WRITE_AGREEMENT_SUCCEEDED
+
+
+def get_last_write_agreement_items() -> list[dict]:
+    """【SLM要約】
+    [BL-223] 直前のquery_AI呼び出しのツールループ内で成功したwrite_agreement呼び出しの
+    {entry_type, task_id}の一覧を返す。decision_extractor_nodeが項目単位の重複判定に使用する。
+    """
+    return list(_LAST_WRITE_AGREEMENT_ITEMS)
 
 
 def get_last_write_issue_resolve_or_defer_succeeded() -> bool:
@@ -4629,9 +4660,10 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
     [BL-131/TOOL_DISPATCH state化] `state`は_query_AI_liveへそのまま透過する（レコード/リプレイの
     キャッシュキーには影響しない）。
     """
-    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION
+    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION
     _LAST_PYTHON_CALLS = []
     _LAST_WRITE_AGREEMENT_SUCCEEDED = False
+    _LAST_WRITE_AGREEMENT_ITEMS = []
     _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED = False
     _LAST_WHITEBOARD_EDIT = None
     _LAST_REASONING_TEXT = ""
@@ -4676,17 +4708,35 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
 
 _JAPANESE_OUTPUT_DIRECTIVE = "【重要】あなたは必ず日本語で出力してください。中国語・英語での出力は一切禁止します。"
 
+# [TOOL-CALL RULE] ツールを使うべき時に「事前アナウンスのみで応答を終える」挙動を防ぐための全ノード共通指示。
+# テキストのみで終わるとツールループが stop し、次回呼び出しで改めてツールを呼ぶことになり無駄な
+# iteration（＝プロンプトキャッシュヒットの構造的低下）を生む。本文はこの定数1箇所で管理し、
+# _query_AI_live 経由で全ノードの system メッセージへ一律注入する（AGENTS.md §15.1: ルールは単一ソース）。
+TOOL_CALL_RULE = (
+    "【ツール呼び出しの鉄則】\n"
+    "・ツールを使用する必要があると判断した場合は、必ず**同じレスポンス内で直接ツールを呼び出し"
+    "（tool_calls を発行）**してください。「〇〇を実行します」「〜を確認します」などの事前アナウンスや"
+    "進捗報告のテキストだけで応答を終えてはいけません。\n"
+    "・テキストのみで応答してよい（＝ツールを呼ばずに stop してよい）のは、**ユーザーに対する最終回答を"
+    "提示するときだけ**です。\n"
+    "・作業が残っている（計算・検証・取得・書き込み等が必要）なら、テキストで報告する前にそのツール呼び出しを"
+    "済ませてください。"
+)
+
 
 def _inject_japanese_output_directive(messages: list[dict]) -> list[dict]:
     """[CONSTRAINT] 中国語系モデル(DeepSeek)経由のため、まれに中国語（まれに英語）で出力される
     ことがある。既存のsystem messageがあれば追記し、なければ新規system messageとして先頭に挿入する
     （新規追加時に既存messages[0]もsystemだと連続role警告を誘発するため、あくまで「なければ追加」）。
+    [TOOL-CALL RULE] 同時にツール呼び出しの鉄則（TOOL_CALL_RULE）も追記し、全ノードへ一律適用する。
     """
     if messages and messages[0].get("role") == "system":
         patched_first = dict(messages[0])
-        patched_first["content"] = f"{patched_first['content']}\n\n{_JAPANESE_OUTPUT_DIRECTIVE}"
+        patched_first["content"] = (
+            f"{patched_first['content']}\n\n{TOOL_CALL_RULE}\n\n{_JAPANESE_OUTPUT_DIRECTIVE}"
+        )
         return [patched_first, *messages[1:]]
-    return [{"role": "system", "content": _JAPANESE_OUTPUT_DIRECTIVE}, *messages]
+    return [{"role": "system", "content": f"{TOOL_CALL_RULE}\n\n{_JAPANESE_OUTPUT_DIRECTIVE}"}, *messages]
 
 
 class _StreamToolCallFunction:
@@ -5118,8 +5168,15 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                                 # なので、_safe_json_parseで再パースせず直接判定できる。
                                 if tc.function.name == "write_agreement":
                                     if isinstance(result, dict) and result.get("success"):
-                                        global _LAST_WRITE_AGREEMENT_SUCCEEDED
+                                        global _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS
                                         _LAST_WRITE_AGREEMENT_SUCCEEDED = True
+                                        # [BL-223] 項目単位のdecision_extractor重複判定用に、
+                                        # _commit_agreement_from_toolと同じtask_idフォールバック
+                                        # 規則（args優先、無ければ呼び出し元の現在タスク）を踏襲する。
+                                        _LAST_WRITE_AGREEMENT_ITEMS.append({
+                                            "entry_type": args.get("entry_type", "Decision"),
+                                            "task_id": args.get("task_id") or _CURRENT_TASK_ID,
+                                        })
                                 elif tc.function.name == "revise_goal":
                                     # [BL-086] revise_goalはツールハンドラ内でLangGraph stateに
                                     # 触れられないため、成功時の新旧goalテキストをここで
@@ -5174,9 +5231,11 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                     # ドライランで観測、log/2026-07-20/1204）。Record/Replayのハッシュ計算（呼び出し時点の
                     # 引数`messages`）より後段での差し替えのため、フィクスチャキーには影響しない。
                     if light_system_prompt is not None and iteration == 1 and loop_messages[0].get("role") == "system":
+                        # [TOOL-CALL RULE] iter=2以降も鉄則を維持するため、軽量版へも同一ルールを含める
+                        # （iter=1の全文systemは_inject_japanese_output_directiveで既に含まれている）。
                         loop_messages[0] = {
                             "role": "system",
-                            "content": f"{light_system_prompt}\n\n{_JAPANESE_OUTPUT_DIRECTIVE}",
+                            "content": f"{light_system_prompt}\n\n{TOOL_CALL_RULE}\n\n{_JAPANESE_OUTPUT_DIRECTIVE}",
                         }
                     # [CONSTRAINT] BL-016/BL-056b: モデルは自分が残りあと何回ツールを呼べるか知らないため、
                     # 検算を続けられる余地が残っていると誤認したままMAX_TOOL_ITERを使い切り、
@@ -6147,6 +6206,30 @@ def _get_deferred_notes_text(conn: sqlite3.Connection, run_id: str, phase_id: st
     return f"【他タスクからの申し送り事項（先送り、要確認）】\n{section}\n"
 
 
+def _get_reviewer_comments_text(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str) -> str:
+    """[BL-219] 指定task_idの計画文書から「レビュワーからの指摘（要修正）」セクションの内容を
+    抽出し、プロンプト埋め込み用のテキストを返す。task_plan_reviewerのper_task_commentsは
+    従来ここへ書き込まれるだけで、task_plannerが差し戻し後にread_plan_draftで読み返す場合しか
+    消費されず、計画がconstraint_issue="none"で承認された場合は実行フェーズのExpert/Detector/
+    User AIに一切届かなかった（AGENTS.md §15.4: 消費経路のない記録）。_get_deferred_notesと
+    同じ自動注入経路に乗せることで、承認時に残された「差し戻すほどではないが要検証」という
+    指摘も、そのtask_idの実行時に確実に届くようにする。
+    """
+    if not task_id:
+        return ""
+    latest = get_latest_plan_draft(conn, run_id, phase_id, task_id)
+    if not latest:
+        return ""
+    content = latest["content"]
+    match = _PLAN_REVIEW_HEADING_RE.search(content)
+    if not match:
+        return ""
+    section = content[match.end():].strip()
+    if not section or section == _PLAN_REVIEW_PLACEHOLDER:
+        return ""
+    return f"【task_plan_reviewerからの指摘（計画レビュー時、要確認）】\n{section}\n"
+
+
 def _get_task_focus_companion_text(state: LineageState) -> str:
     """[BL-191] task_focus_companionが設定されていれば、Expert/Detector/User AI Stage1へ
     追加のコンテキストとして注入するブロックを返す。BL-025のスコープガードレールは維持する
@@ -6750,6 +6833,71 @@ def _build_human_input_answered_notice(conn: sqlite3.Connection, run_id: str) ->
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# [BL-222] 人間監査用の読み取り専用レポート。runの動作状態に関わらず、別ターミナルから
+# 何度でも呼べる（cela.dbはWALモードのため、書き込み中のrunと同時に読める）。
+# BL-217の--pending-human-inputと同じ「別プロセスからsqlite fileへ直接アクセスするだけ」
+# という設計を踏襲する（LangGraphのstate/checkpointには一切触れない）。
+# 「リアルタイム監視」は本コマンドを`watch`等でシェル側から定期実行することで実現する
+# （CELA側に常駐プロセス・Webダッシュボードは持たせない、というユーザーとの合意）。
+# ---------------------------------------------------------------------------
+
+def _audit_report(conn: sqlite3.Connection, run_id: str, task_id: str = "", phase_id: str = "") -> str:
+    """[BL-222] 「この数字・この内容の5W1Hを検査したい」という人間の監査ニーズに応える
+    読み取り専用レポート。verified_facts（値・理由・出典・信頼度・確定者・確定タスク）と
+    agreements（決定内容・理由・出典・提案者・状態）を、task_id/phase_id指定があれば
+    絞り込んで整形する。ログをClaude等に解析させる代わりに、既にDBへ構造化保存済みの
+    根拠情報をそのまま機械的に取り出すだけなので、LLM呼び出しは一切行わず常に正確。
+    """
+    facts = get_verified_facts_from_db(conn, run_id)
+    if task_id:
+        facts = [f for f in facts if f.get("source_task_id") == task_id]
+    elif phase_id:
+        facts = [f for f in facts if f.get("source_phase_id") == phase_id]
+    facts.sort(key=lambda f: f.get("confirmed_at") or 0)
+
+    agreements = get_agreements_from_db(conn, run_id)
+    if task_id:
+        agreements = [a for a in agreements if a.get("task_id") == task_id]
+    elif phase_id:
+        agreements = [a for a in agreements if a.get("phase_id") == phase_id]
+
+    scope_label = f"task_id={task_id}" if task_id else (f"phase_id={phase_id}" if phase_id else "run全体")
+    lines = [f"=== 監査レポート: run_id={run_id} ({scope_label}) ==="]
+
+    lines.append(f"\n--- 確定値・暫定値（verified_facts） {len(facts)}件 ---")
+    if not facts:
+        lines.append("(該当するverified_factsはありません)")
+    for f in facts:
+        confirmed_at = f.get("confirmed_at")
+        when = datetime.datetime.fromtimestamp(confirmed_at).strftime("%Y-%m-%d %H:%M:%S") if confirmed_at else "(不明)"
+        citations = f.get("citations") or "[]"
+        lines.append(
+            f"\n[{f.get('confidence', 'confirmed')}] {f['variable_name']} = {f['value']}{f.get('unit', '')}\n"
+            f"  誰が: {f.get('confirmed_by', '(不明)')} / いつ: {when} / "
+            f"どのタスクで: {f.get('source_task_id') or '(未指定)'}（phase={f.get('source_phase_id') or '(未指定)'}）\n"
+            f"  なぜ: {f.get('reason') or '(記載なし)'}\n"
+            f"  出典: {citations}"
+        )
+
+    lines.append(f"\n--- 関連する合意・決定事項（agreements） {len(agreements)}件 ---")
+    if not agreements:
+        lines.append("(該当するagreementsはありません)")
+    for a in agreements:
+        ts = a.get("timestamp")
+        when = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "(不明)"
+        decision_what = (a.get("decision_what") or "")[:200]
+        lines.append(
+            f"\n[{a.get('entry_type')}/{a.get('action_type')}/{a.get('status')}] topic={a.get('topic')}\n"
+            f"  誰が: {a.get('proposed_by', '(不明)')} / いつ: {when} / "
+            f"どのタスクで: {a.get('task_id') or '(未指定)'}（phase={a.get('phase_id') or '(未指定)'}）\n"
+            f"  何を: {decision_what}{'…' if len(a.get('decision_what') or '') > 200 else ''}\n"
+            f"  なぜ: {(a.get('reason_why') or '(記載なし)')[:300]}\n"
+            f"  出典: {a.get('citations') or '[]'}"
+        )
+    return "\n".join(lines)
+
+
 def get_verified_facts_from_db(conn: sqlite3.Connection, run_id: str,
                                 variable_names: list[str] | None = None,
                                 topic: str | None = None) -> list[dict]:
@@ -7190,6 +7338,12 @@ class LineageState(TypedDict):
     # 追加が漏れており、値が常にFalse/None扱いになる実運用バグの原因だった。
     expert_wrote_agreement: bool
     user_wrote_agreement: bool
+    # [BL-223] 上記2つは「1回でも成功したか」のブールのみで、decision_extractor_nodeが
+    # 項目単位の重複判定（同じ(entry_type, task_id)が既に直接書き込まれたか）を行うには
+    # 情報が粗すぎる。同じLangGraph TypedDict伝播の制約（上記コメント）により、これも
+    # 明示的にスキーマ宣言する必要がある。
+    expert_wrote_agreement_items: list[dict]
+    user_wrote_agreement_items: list[dict]
     # [BL-184] web_search/web_fetchのrun単位の累積呼び出し回数。TOOL_DISPATCHのハンドラが
     # 直接インクリメントする（_LAST_PYTHON_CALLS等と異なり、state自体が単一の真実源）。
     web_search_call_count: int
@@ -7680,6 +7834,8 @@ def _build_task_scope_context(state: LineageState, conn: sqlite3.Connection) -> 
 
     # [BL-082] 他タスクから本タスクへ申し送られた先送り事項（plan_drafts）。無ければ空文字。
     deferred_notes_text = _get_deferred_notes_text(conn, state["run_id"], current_phase_id, current_task_id)
+    # [BL-219] task_plan_reviewerが計画承認時に残した、このtask_id固有の指摘。無ければ空文字。
+    reviewer_comments_text = _get_reviewer_comments_text(conn, state["run_id"], current_phase_id, current_task_id)
 
     return {
         "current_task": current_task,
@@ -7688,6 +7844,7 @@ def _build_task_scope_context(state: LineageState, conn: sqlite3.Connection) -> 
         "remaining_criteria_text": remaining_criteria_text,
         "whiteboard_text": whiteboard_text,
         "deferred_notes_text": deferred_notes_text,
+        "reviewer_comments_text": reviewer_comments_text,
     }
 
 
@@ -7717,6 +7874,34 @@ _BL093_THINK_VALUE_PARAGRAPH = (
     "引き継がれます。まずtodoに確認すべき論点をリストアップしてください。他のツール呼び出しと\n"
     "同一の応答内でまとめて呼んでも、単独で呼んでも構いません。"
 )
+
+
+def _scratch_concerns_closure_instruction(final_output_field: str, escalation_tools: str = "") -> str:
+    """[BL-220] 最終出力を書く直前に、thinkのscratch_concernsで追跡している未解決の懸念を
+    確実に外部化させる指示。BL-219の調査で、task_plan_reviewerがthinkの中で「約8,500人/日は
+    derived number, need to check calculation（要検算）」と自ら懸念を示していたにもかかわらず、
+    それが構造化記録として一切残らず後続タスクから参照不能だった事例が見つかった
+    （scratch_concerns自体はBL-140で既にあるが、「最終出力の直前に実際に見直す」ことを
+    明示的に指示する箇所がプロンプト側になかったのが直接原因）。escalation_toolsが与えられて
+    いれば懸念専用ツールでの記録を優先させ、無ければ最終出力のfinal_output_fieldへ明記させる。
+    """
+    if escalation_tools:
+        action_clause = (
+            f"ターンを跨いで解決していない懸念があれば、{escalation_tools}で確実に記録して"
+            "から出力してください。"
+        )
+    else:
+        action_clause = (
+            "このロールには懸念をターン外へ持ち越す専用ツールがないため、未解決のまま出力"
+            f"しようとしている懸念は、最終出力の「{final_output_field}」へ必ず明記してください。"
+        )
+    return (
+        "\n【BL-220: 最終出力前にscratch_concernsを整理する（重要）】最終出力を書く直前に、"
+        "thinkのscratch_concernsで追跡している懸念のうち、statusが'open'のまま残っている"
+        "ものが無いか確認してください。todoと同様、着手した懸念を未整理のまま出力を終えない"
+        f"こと。{action_clause}"
+    )
+
 
 def _verification_throttle_warning(example: str = "") -> str:
     """【SLM要約】
@@ -7898,6 +8083,14 @@ It serves as the initial planning layer for breaking down complex objectives acr
        ゴール文自体が与えていない絶対値（例: 比率の分母となる総量そのもの）を、無理に
        一意の数値として確定させないでください。判断に迷う場合は「不明である」旨を
        description内に明記するに留め、根拠のない数値を作り出さないこと。
+       [BL-219] この根拠併記はacceptance_criteria/descriptionの自由記述テキストだけでは
+       不十分です。あなたが計算・仮定した派生値が、その値を実際に導出するタスクの
+       owns_variablesに対応する場合は、指示10のwrite_agreement呼び出しのconfirmed_variables
+       にも同じ値をconfidence="provisional"・citations type="expert_calculation"として
+       登録してください。テキストに埋め込むだけでは、後続タスクがread_verified_factで
+       検索しても見つからず、あなたの見込みが既に存在することに気づかないまま、
+       独立に導出したはずの結果が実は無自覚にこの見込みへ引き寄せられる
+       （アンカリング）リスクがあります。
     7. 【おなじ思考・計算・検証は各回2回まで、繰り返し確認しない（重要）】ツール呼び出しの回数には上限が
        あります。同じ内容（例:「acceptance_criteriaが3個以内か」「depends_onの整合性」）を
        python_replで繰り返し再確認しないでください。各検証項目は2回計算・確認できれば十分です。
@@ -7927,6 +8120,15 @@ It serves as the initial planning layer for breaking down complex objectives acr
        これにより、後続のExpertやUser AIが「なぜこの分解になっているのか」を
        read_deliverable_fileで遡って確認できるようになります（現状はJSON構造だけが伝わり、
        設計意図・却下した代替案は誰にも参照できず失われています）。
+       [BL-219] 同じこのwrite_agreement呼び出しのconfirmed_variables配列に、指示6で
+       言及した「派生値」（acceptance_criteria/descriptionの計算で使った暫定係数・
+       中間推定値）のうち、いずれかのタスクのowns_variablesに対応するものを列挙して
+       ください（対応するタスクが無い、純粋に計画分割のためだけの補助計算はここに
+       含めなくてよい）。confidenceは必ず"provisional"、citationsのtypeは
+       "expert_calculation"としてください（"confirmed"にはしないこと——これはあなたが
+       計画立案段階で置いた見込みであり、実際に導出するタスクが独立に確定させるべき
+       値です）。
+       {_scratch_concerns_closure_instruction('write_agreementのreason_why（topic="task_planner_phase_design"の呼び出し）')}
     11. [BL-101: read_plan_draftで「フェーズ・タスク表」ホワイトボードを確認する] 差し戻しを
        受けての再分解時は、冒頭の指摘欄で指示した通り、指摘のあったtask_idについて必ず
        read_plan_draft(task_id="...")を呼び、あなた自身が前回書いた記述とtask_plan_reviewerの
@@ -7936,7 +8138,8 @@ It serves as the initial planning layer for breaking down complex objectives acr
        学習知識から導き出した判断も、必ずしも正確であるとは限らず、最新の情勢（法令・相場・規制等）
        を反映しているとも限りません。ゴール文の前提（地理・距離・費用相場・法規制等）が現実的に
        成立するか自分の知識だけで判断がつかない場合は、記憶からの推測で済ませず、必ずweb_search
-       で信頼できる一次情報を確認・裏取りしてください。既にこのrun内で調べた可能性がある
+       で信頼できる一次情報を確認・裏取りしてください。
+       既にこのrun内で調べた可能性がある
        話題については、新規にweb_search/web_fetchを呼ぶ前にread_reference_file（keyword検索、
        呼び出し回数上限を消費しない）で既存のキャッシュを先に確認してください。web検索結果は
        鵜呑みにせず、一次ソース（公的統計・公式文書等）を優先し、二次的な要約より信頼性の高い
@@ -8140,6 +8343,7 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
         必ず【現在のタスク】欄のcurrent_task_idを基準にしてください。\n
         【重要】あなたが使えるツールはread_project_plan・read_deliverable_file・read_verified_fact・
         thinkです。{_THINK_TRAILER_SENTENCE}\n
+        {_scratch_concerns_closure_instruction("reason")}\n
         \n
         Return ONLY JSON: {{"expert": "（生成した専門家の肩書き）", "reason": "...", "focus_guidance": "（このタスク固有の着眼点・注意点、無ければ空文字）"}}'
         """
@@ -8404,6 +8608,10 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     承認した場合に限ります。\n
     暫定値は後続タスクで矛盾が判明した際に再検討される前提の値であり、暫定として記録すること自体は
     後退ではありません。\n
+    {_scratch_concerns_closure_instruction(
+        "write_agreementのreason_why、または成果物本文",
+        escalation_tools="escalate_premise_concern（前提と矛盾する懸念）またはflag_needs_human_input（AIには解決不能な懸念）",
+    )}
     """)
 
     # ここから先は実行中に変化する動的な内容。[BL-178] ユーザー指定順（視座は上から下、
@@ -8453,6 +8661,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     remaining_criteria_text = _scope_ctx["remaining_criteria_text"]
     whiteboard_text = _scope_ctx["whiteboard_text"]
     deferred_notes_text = _scope_ctx["deferred_notes_text"]
+    reviewer_comments_text = _scope_ctx["reviewer_comments_text"]
     _escalation_status_text = _get_escalation_status_text_for_expert(_conn, state["run_id"])
     # 履歴からは消えた「前回の自分のNG発言」をStateから復元して突きつける
     previous_output = state.get("expert_output", "(取得不可)")
@@ -8515,6 +8724,9 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
 
     if deferred_notes_text:
         system_prompt_trailing += f"\n📌 【BL-082: 他タスクからの申し送り事項（先送り）】\n{deferred_notes_text}\n"
+
+    if reviewer_comments_text:
+        system_prompt_trailing += f"\n📌 【BL-219: task_plan_reviewerからの指摘（計画承認時）】\n{reviewer_comments_text}\n"
 
     # [BL-191] joint_focusで併記対象に指定された過去タスクがあれば追加コンテキストとして注入
     # （current_task_json等の「現在のタスク」定義自体は変更しない、BL-025のスコープガードレール
@@ -8711,6 +8923,10 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "⚠️ 【厳守事項】決定事項DBはシステム側で自動管理されます。あなたの回答内でDBのブロックを"
         "自分で書いたり、勝手に「決定事項」と宣言したりしないでください。あなたはあくまでUserに"
         "『提案・報告』を行う立場です。\n"
+        + _scratch_concerns_closure_instruction(
+            "write_agreementのreason_why、または成果物本文",
+            escalation_tools="escalate_premise_concern（前提と矛盾する懸念）またはflag_needs_human_input（AIには解決不能な懸念）",
+        ) + "\n"
         f"\n[R4] {whiteboard_text}\n"
     )
     if state.get("drift_flag") or state.get("constraint_issue") in ["major"]:
@@ -8793,7 +9009,11 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
     # [BL-082] 他タスクから本タスクへの申し送り事項。「既に先送り済みの論点はmajorにしない」
     # という以下の緩和ロジックが、直近2ターンの会話窓だけに依存せず判断できるようにする。
     _deferred_notes = _get_deferred_notes_text(get_active_conn(), state["run_id"], _current_phase_id, _current_task_id)
+    # [BL-219] task_plan_reviewerが計画承認時に残した、このtask_id固有の指摘。
+    _reviewer_comments = _get_reviewer_comments_text(get_active_conn(), state["run_id"], _current_phase_id, _current_task_id)
     deferred_notes_block = f"{_deferred_notes}\n" if _deferred_notes else ""
+    if _reviewer_comments:
+        deferred_notes_block += f"{_reviewer_comments}\n"
 
     # BL-033: Expertが実際に実行したpython_replの記録をDetectorに提示する。
     # Expertの「検算完了」という自己申告（tool_calls=0でも書けてしまう）を鵜呑みにせず、
@@ -9136,7 +9356,8 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
             if target_role == "user" and state.get("pending_task_redirect") else ""
         )
         + f"【今回評価するターンのやり取り】\n{history_text}\n\n"
-        f'Return ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用(無ければ空文字)", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
+        + _scratch_concerns_closure_instruction("observations", escalation_tools="write_issue") +
+        f'\nReturn ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用(無ければ空文字)", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
@@ -9328,6 +9549,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
 
         f"【今回評価するターンのやり取り】\n"
         f"{history_text}\n"
+        f"{_scratch_concerns_closure_instruction('observations', escalation_tools='write_issue')}\n"
         f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由", "criteria_status": [true/false, ...], "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用（無ければ空文字）", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
@@ -9789,6 +10011,7 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goa
     確定事項と矛盾するリスクがあります。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
     write_agreement・thinkです。{_THINK_TRAILER_SENTENCE}
+    {_scratch_concerns_closure_instruction("rationale")}
 
     【ゴール変容の検知（★R5 GoalShiftEvent）】
     提示する再配分案が、当初の絶対制約（このリソースのtotal_cap自体）を
@@ -10095,6 +10318,7 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
 
     【重要】あなたが使えるツールはthink・escalate_premise_concern・write_agreement・
     read_reference_file・read_entityです。
+    {_scratch_concerns_closure_instruction("これから生成する対話メッセージ本文", escalation_tools="escalate_premise_concern")}
 
     ■ プロジェクトの目標(Goal): {goal}
     {goal_essence_text}
@@ -10186,6 +10410,7 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     扱いません（このパスにread_verified_factはありません）。
     【重要】あなたが使えるツールはthink・escalate_premise_concern・write_agreement・
     read_reference_file・read_entityです。
+    {_scratch_concerns_closure_instruction("これから生成する対話メッセージ本文", escalation_tools="escalate_premise_concern")}
 
     ■ プロジェクトの目標(Goal): {goal}
     {goal_essence_text}
@@ -10239,6 +10464,7 @@ def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "", st
     チェックしてから矛盾判定を行ってください】。\n
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
     write_agreement・thinkです。{_THINK_TRAILER_SENTENCE}
+    {_scratch_concerns_closure_instruction("details")}
 
     ■ 絶対目標: {goal}
     {goal_essence_text}
@@ -10341,6 +10567,7 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
     単独の値（予算上限等）はread_verified_factを使ってください。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
     write_agreement・read_entity・thinkです。{_THINK_TRAILER_SENTENCE}
+    {_scratch_concerns_closure_instruction("feedback")}
 
     ■ 達成すべき【絶対目標(Goal)】:
     {goal}
@@ -10446,6 +10673,8 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             "📌 【BL-082: 他タスクからの申し送り事項（先送り）】\n" + _scope_ctx["deferred_notes_text"] + "\n"
             if _scope_ctx["deferred_notes_text"] else ""
         )
+        if _scope_ctx["reviewer_comments_text"]:
+            deferred_notes_block += "📌 【BL-219: task_plan_reviewerからの指摘（計画承認時）】\n" + _scope_ctx["reviewer_comments_text"] + "\n"
         recent_history = state["chat_history"][-2:]
         stage_history_text = "\n".join(
             f"{'[あなた（発注者）の直前の発言]' if m['role'] == 'user' else '[Agent AIの直前の発言]'}\n{m['content']}"
@@ -10488,6 +10717,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"【今回レビューする直近のやり取り】\n{stage_history_text}\n\n"
             f"【重要】あなたが使えるツールはread_verified_fact・read_deliverable_file・python_repl・"
             f"read_entity・thinkです。{_THINK_TRAILER_SENTENCE}\n"
+            f"{_scratch_concerns_closure_instruction('domain_concerns')}\n"
             f'Return ONLY JSON: {{"domain_concerns": "ドメイン妥当性上の懸念（無ければ空文字）", '
             f'"scope_compliant": true/false, "review_comment": "レビューの要点（次段へ引き継ぐ短い要約）"}}'
         )
@@ -10533,6 +10763,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"【重要】あなたが使えるツールはread_issues・write_issue・escalate_premise_concern・"
             f"resolve_premise_concern・revise_goal・freeze_agreement・thinkです。"
             f"{_THINK_TRAILER_SENTENCE}\n"
+            f"{_scratch_concerns_closure_instruction('remaining_concerns', escalation_tools='write_issue（またはescalate_premise_concern）')}\n"
             f'Return ONLY JSON: {{"issues_handled": true/false, "remaining_concerns": '
             f'"未解決のまま残る懸念（無ければ空文字、次段へ引き継ぐ）"}}'
         )
@@ -10607,6 +10838,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"見る目的では使わないでください（一覧は名前のみで属性を含みません）。\n\n"
             f"【今回レビューする直近のやり取り】\n{stage_history_text}\n\n"
             f"【重要】あなたが使えるツールはwrite_agreement・read_entity・thinkです。{_THINK_TRAILER_SENTENCE}\n"
+            f"{_scratch_concerns_closure_instruction('approval_reason')}\n"
             f'Return ONLY JSON: {{"approval_status": "Approved/Approved_with_Conditions/Rejected/Pending", '
             f'"approval_reason": "承認・却下・保留の理由"}}'
         )
@@ -10737,6 +10969,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         stage4_system_prompt += (
             f"\n【重要】あなたが使えるツールはthink・schedule_task_focus（[BL-191]過去タスクの"
             f"手戻りが必要な場合のみ）・read_entityです。{_THINK_TRAILER_SENTENCE}\n"
+            f"{_scratch_concerns_closure_instruction('これから生成する次タスク指示メッセージ本文')}\n"
         )
         _reset_think_scratchpad()
         stage4_messages = [{"role": "system", "content": stage4_system_prompt}]
@@ -11004,6 +11237,8 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         [R4] {_scope_ctx["whiteboard_text"]}\n
 
         {"📌 【BL-082: 他タスクからの申し送り事項（先送り）】" + chr(10) + _scope_ctx["deferred_notes_text"] if _scope_ctx["deferred_notes_text"] else ""}
+
+        {"📌 【BL-219: task_plan_reviewerからの指摘（計画承認時）】" + chr(10) + _scope_ctx["reviewer_comments_text"] if _scope_ctx["reviewer_comments_text"] else ""}
     """)
 
     # [BL-086] Expert/自分自身が提起した未解決エスカレーションがあれば、今回の発言で
@@ -11090,6 +11325,12 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             その指摘への対応を最優先してください。差し戻しを無視して拙速にプロジェクト完了を\n
             宣言することは禁止です。\n
         """
+
+    # [BL-220] 差し戻し通知ブロック（BL-185により必ず最後に配置される）より前に追加する。
+    # BL-185の不変条件（差し戻し通知がtrailing全体の最後）を壊さないため。
+    system_prompt_trailing += _scratch_concerns_closure_instruction(
+        "これから生成するchat応答本文", escalation_tools="write_issue（またはescalate_premise_concern）"
+    )
 
     # [BL-185] 差し戻し通知（drift_flag/constraint_issue="major"）は、system_prompt_trailingの
     # 最後（＝messages配列全体でも最後）に配置する。BL-178でcall_expertに導入したのと同じ
@@ -11257,6 +11498,8 @@ def generate_user_utterance_node(state: LineageState) -> LineageState:
     user_input = generate_user_utterance(state, config)
     # [R3b §3.5.1] 今ターンでwrite_agreementが1回でも成功したかをstateに保存
     state["user_wrote_agreement"] = get_last_write_agreement_succeeded()
+    # [BL-223] 項目単位の重複判定用に、成功したwrite_agreement呼び出しの内訳もstateへ保存
+    state["user_wrote_agreement_items"] = get_last_write_agreement_items()
     # [BL-158] 今ターンでwrite_issue(RESOLVE/DEFER)が1回でも成功したかをstateに保存
     state["user_wrote_issue_resolution"] = get_last_write_issue_resolve_or_defer_succeeded()
     # [R5 F-2.1] User AIのreasoningを、次のDetectorが思考プロセス監査に使えるようstateへ保存する。
@@ -11395,6 +11638,7 @@ def call_goal_essence_analyst(goal: str, state: dict | None = None) -> dict:
     既にgoal_essenceテーブルに保存され全ノードへ常時注入されるため、これは必須ではありません。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
     write_agreement・thinkです。{_THINK_TRAILER_SENTENCE}
+    {_scratch_concerns_closure_instruction("feasibility_notes")}
 
     Return ONLY JSON: {{"true_essence": "（本質の言語化、2〜4文程度）",
     "feasibility_notes": "（大まかな実現可能性の見立て、無理筋に見える組み合わせがあれば
@@ -11764,6 +12008,7 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
     diff_plan_draft_versions・write_agreement・web_search・web_fetch・read_reference_file・
     read_entity・thinkです。{_THINK_TRAILER_SENTENCE}
+    {_scratch_concerns_closure_instruction("observations")}
 
     ■ 絶対目標: {goal}
     {goal_essence_text}
@@ -11955,6 +12200,8 @@ Updates system state with the expert's output, decisions, and conversational his
     state["expert_last_reasoning"] = get_last_reasoning_text()
     # [R3b §3.5.1] 今ターンでwrite_agreementが1回でも成功したかをstateに保存
     state["expert_wrote_agreement"] = get_last_write_agreement_succeeded()
+    # [BL-223] 項目単位の重複判定用に、成功したwrite_agreement呼び出しの内訳もstateへ保存
+    state["expert_wrote_agreement_items"] = get_last_write_agreement_items()
     # [DEBUG][BL-038調査用/2026-07-22] expert_node内でセットした直後の値を確認する一時計装。
     print(f"[DEBUG] expert_node: get_last_write_agreement_succeeded()={state['expert_wrote_agreement']!r}")
     # [R4] 今ターンでwhiteboard_draftsに新バージョンが書き込まれた場合、次ターンのロールバック
@@ -12570,17 +12817,26 @@ def decision_extractor_node(state: LineageState) -> LineageState:
     extracted_items, transition = call_decision_extractor(state["chat_history"], existing_topics, target_role, owns_variables, valid_task_ids)
     print(f"\n------ 完了 ------")
 
-    # [R3b §3.5.1] 今ターンでwrite_agreementが1回でも成功したかをstateから取得
+    # [R3b §3.5.1] 今ターンでwrite_agreementが1回でも成功したかをstateから取得（デバッグ表示用に残す）
     wrote_agreement_this_turn = (
         state.get("expert_wrote_agreement", False) if target_role == "expert"
         else state.get("user_wrote_agreement", False)
+    )
+    # [BL-223] ターン単位のブールではなく、実際に直接書き込まれた項目の(entry_type, task_id)一覧を
+    # 取得する。従来はwrote_agreement_this_turnがTrueなだけで抽出結果を全件スキップしていたため、
+    # Expertが同ターンで別件のwrite_agreementを呼んだだけで、全く無関係な抽出項目（別トピックの
+    # Directive/Deferred等）まで巻き添えでスキップされていた（実ログ log/2026-08-13/1411）。
+    _written_this_turn_items = (
+        state.get("expert_wrote_agreement_items", []) if target_role == "expert"
+        else state.get("user_wrote_agreement_items", [])
     )
     # [DEBUG][BL-038調査用/2026-07-22] wrote_agreement_this_turnがなぜFalse評価されるか切り分けるための一時計装。
     print(
         f"[DEBUG] decision_extractor target_role={target_role!r} "
         f"expert_wrote_agreement={state.get('expert_wrote_agreement')!r} "
         f"user_wrote_agreement={state.get('user_wrote_agreement')!r} "
-        f"-> wrote_agreement_this_turn={wrote_agreement_this_turn!r}"
+        f"-> wrote_agreement_this_turn={wrote_agreement_this_turn!r} "
+        f"written_this_turn_items={_written_this_turn_items!r}"
     )
 
     for item in extracted_items:
@@ -12600,6 +12856,13 @@ def decision_extractor_node(state: LineageState) -> LineageState:
         phase_id = item.get("phase_id") or current_phase.get("phase_id", "unknown")
         task_id = item.get("task_id") or _effective_current_task_id_from(state)
         depends_on = item.get("depends_on", [])
+        # [BL-223] topic文字列は直接呼び出しとdecision_extractorの独立抽出とで表記が一致する
+        # 保証がない（§13の教訓）ため、重複判定には使わない。(entry_type, task_id)の組であれば、
+        # 同じタスク内で同じ種別のレコードが同ターンに直接書き込まれたかを機械的に判定できる。
+        _is_duplicate_of_direct_write = any(
+            w.get("entry_type") == entry_type and w.get("task_id") == task_id
+            for w in _written_this_turn_items
+        )
         resource_claims = item.get("resource_claims", {})
 
         # BL-023 2.6節: owns_variablesに含まれる変数のみをverified_factsへ確定保存する
@@ -12618,13 +12881,14 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                     )
                     print(f"  🔒 [verified_facts] '{var_name}' = {var_value} を暫定値(provisional)として保存しました（source: {task_id}）。")
 
-        # ★R3b §3.5.1: write_agreementが呼ばれたターンはdecision_extractor_nodeによる
-        # Agreement書き込み（db_append_agreement/db_supersede_agreement）をスキップする。
-        # write_agreementが既にagreementsとverified_factsの両方を更新しているため、
-        # 二重書き込みを防止する。verified_factsへの保存（上記のowned_variable_values→
-        # upsert_verified_fact）はwrite_agreementのconfirmed_variables指定漏れの保険
-        # として、write_agreement呼び出し有無に関わらず毎ターン無条件実行する。
-        if not wrote_agreement_this_turn:
+        # ★R3b §3.5.1 / [BL-223]: 同ターンに直接write_agreementで書き込まれたのと同じ
+        # (entry_type, task_id)の抽出項目のみ、decision_extractor_nodeによるAgreement書き込み
+        # （db_append_agreement/db_supersede_agreement）をスキップする。write_agreementが既に
+        # agreementsとverified_factsの両方を更新しているため、その項目についてのみ二重書き込みを
+        # 防止する（他の無関係な抽出項目まで巻き添えでスキップしない）。verified_factsへの保存
+        # （上記のowned_variable_values→upsert_verified_fact）はwrite_agreement呼び出し有無に
+        # 関わらず毎ターン無条件実行する。
+        if not _is_duplicate_of_direct_write:
             # ===== 成果物のファイル書き出し処理 (バックアップ処理付き) =====
             content = "" # 初期化
             if entry_type == "Deliverable" and action_type == "CREATE":
@@ -12735,46 +12999,73 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                 # 追記する。_build_agreements_contextはDirectiveを無条件除外するため、この文書経由の
                 # 申し送りが後続タスクに実際に届く唯一の経路。target_task_idが解決できない場合は
                 # 警告ログのみでスキップ（フェイルクローズ）。
-                # ★依存関係の注意: この分岐は`if not wrote_agreement_this_turn:`（上記）の内側にある。
-                # write_agreementツールは現状status="Deferred"を受け付けないため実害はないが、将来
-                # ツール側にDeferredが追加された場合、この分岐がスキップされうる点に留意すること。
-                if entry_type == "Directive" and status == "Deferred" and defer_to_task_id:
-                    target_phase_id = task_id_to_phase_id.get(defer_to_task_id)
-                    if target_phase_id:
-                        _plan_note_appended = _append_deferred_note_to_plan(
-                            _conn, _run_id, target_phase_id, defer_to_task_id,
-                            note_text=raw_content or rationale, source_task_id=task_id,
-                            task_for_skeleton=task_id_to_task.get(defer_to_task_id),
-                        )
-                        if _plan_note_appended:
-                            print(f"  📌 [Deferred] '{topic}' を{defer_to_task_id}の計画文書へ申し送りました。")
-                        else:
-                            print(f"  ⚠️ [Deferred] '{topic}' の{defer_to_task_id}計画文書への申し送りに失敗しました（対象文書または見出しが見つかりません）。")
-                        # [BL-154] plan_draftsへの申し送りと同時に、issue_log側にもseverity='minor'/
-                        # status='open'で起票し、defer_to_task_idを初回作成時点から設定する。これにより
-                        # Expert自身が発言で宣言した先送り（write_issueツールへの直接アクセスを持たない）
-                        # も、BL-125の遷移ゲート・BL-144の滞留追跡・BL-145のissue駆動タスク明示化から
-                        # 見える対象になる。target_roleによるゲーティングはしない（Expert/User双方の
-                        # 抽出ブランチが同じ先送り検出指示を持つため、一律に適用する）。
+                # ★依存関係の注意: この分岐は`if not _is_duplicate_of_direct_write:`（上記）の内側に
+                # ある。write_agreementツールは現状status="Deferred"を受け付けないため実害はないが、
+                # 将来ツール側にDeferredが追加された場合、この分岐がスキップされうる点に留意すること。
+                #
+                # [BL-223] defer_to_task_idの状態を3通りに区別する:
+                # (1) 空文字: 申し送り先が特定できなかった → issue_logへは必ず起票する（下記）。
+                #     defer_to_task_id=""は_get_blocking_issues_for_transitionのSQL
+                #     （defer_to_task_id IS NULL OR ''）を免除しないため、通常の未解決issueとして
+                #     正しくブロック対象になる。従来はここも丸ごとスキップされ、Expert自身が
+                #     「後続タスクで確定する」とだけ宣言し具体的なtask_idに触れなかった先送りが
+                #     BL-125/144/145のいずれからも一切見えなくなっていた（実ログ log/2026-08-13/1411）。
+                # (2) 非空・解決可能: 従来通りplan_drafts追記＋issue_log起票の両方を行う（無変更）。
+                # (3) 非空・解決不能（LLMが実在しないtask_idを出力）: 何もしない（無変更、意図的な
+                #     fail-closed）。_get_blocking_issues_for_transitionのSQLはdefer_to_task_idの
+                #     実在性を検証せず値の有無だけで遷移ゲートを免除するため、ここでissueを起票すると
+                #     実在しない受け皿へ永久に先送りされた形になり、誰にも解決されない抜け穴になる
+                #     （tests/test_bl154_decision_extractor_issue_log_bridge.py::
+                #     test_unresolvable_target_task_id_skips_issue_log_creationで保証）。
+                if entry_type == "Directive" and status == "Deferred":
+                    if not defer_to_task_id:
                         _write_issue_impl(
                             {
                                 "action_type": "CREATE", "topic": topic, "severity": "minor",
                                 "description": raw_content or rationale,
                                 "phase_id": phase_id, "task_id": task_id,
-                                "defer_to_task_id": defer_to_task_id,
+                                "defer_to_task_id": "",
                             },
                             _conn, _run_id, "decision_extractor_auto", phase_id, task_id,
                         )
-                        print(f"  🗂️ [BL-154] '{topic}' をissue_logにも自動記録しました（defer_to_task_id={defer_to_task_id}）。")
+                        print(f"  🗂️ [BL-223] '{topic}' の申し送り先task_idが特定できなかったため、issue_logのみへ自動記録しました（計画文書への追記は対象タスクが不明なためスキップ）。")
                     else:
-                        print(f"  ⚠️ [Deferred] 申し送り先task_id '{defer_to_task_id}' が解決できず、計画文書への追記をスキップしました。")
+                        target_phase_id = task_id_to_phase_id.get(defer_to_task_id)
+                        if target_phase_id:
+                            _plan_note_appended = _append_deferred_note_to_plan(
+                                _conn, _run_id, target_phase_id, defer_to_task_id,
+                                note_text=raw_content or rationale, source_task_id=task_id,
+                                task_for_skeleton=task_id_to_task.get(defer_to_task_id),
+                            )
+                            if _plan_note_appended:
+                                print(f"  📌 [Deferred] '{topic}' を{defer_to_task_id}の計画文書へ申し送りました。")
+                            else:
+                                print(f"  ⚠️ [Deferred] '{topic}' の{defer_to_task_id}計画文書への申し送りに失敗しました（対象文書または見出しが見つかりません）。")
+                            # [BL-154] plan_draftsへの申し送りと同時に、issue_log側にもseverity='minor'/
+                            # status='open'で起票し、defer_to_task_idを初回作成時点から設定する。これにより
+                            # Expert自身が発言で宣言した先送り（write_issueツールへの直接アクセスを持たない）
+                            # も、BL-125の遷移ゲート・BL-144の滞留追跡・BL-145のissue駆動タスク明示化から
+                            # 見える対象になる。target_roleによるゲーティングはしない（Expert/User双方の
+                            # 抽出ブランチが同じ先送り検出指示を持つため、一律に適用する）。
+                            _write_issue_impl(
+                                {
+                                    "action_type": "CREATE", "topic": topic, "severity": "minor",
+                                    "description": raw_content or rationale,
+                                    "phase_id": phase_id, "task_id": task_id,
+                                    "defer_to_task_id": defer_to_task_id,
+                                },
+                                _conn, _run_id, "decision_extractor_auto", phase_id, task_id,
+                            )
+                            print(f"  🗂️ [BL-154] '{topic}' をissue_logにも自動記録しました（defer_to_task_id={defer_to_task_id}）。")
+                        else:
+                            print(f"  ⚠️ [Deferred] 申し送り先task_id '{defer_to_task_id}' が解決できず、計画文書・issue_logともに記録をスキップしました。")
 
             print(f"\n  📝 [Extract] {agreement['action_type']} - {agreement['entry_type']}: {agreement['topic']}")
             print(f"     ├ Status: {agreement['status']} | By: {agreement['proposed_by']}")
             print(f"     ├ Meta  : Phase={agreement['phase_id']}")
             print(f"     ├ Reason: {agreement['reason_why']}")
         else:
-            print(f"  ⏭️ [decision_extractor] write_agreementが呼ばれたため、ExtractからAgreement書き込みをスキップしました（topic: {topic}）")
+            print(f"  ⏭️ [decision_extractor] 直接write_agreementで書き込まれた項目（entry_type={entry_type}, task_id={task_id}）と重複するため、ExtractからAgreement書き込みをスキップしました（topic: {topic}）")
 
     # [BL-139] transition.advances_to_task_idはcall_decision_extractorの単一LLM呼び出しの
     # 大きなJSON出力内の一項目に過ぎず、実運用でUserが「次タスクtask_2_1への着手指示」を
@@ -14042,7 +14333,22 @@ if __name__ == "__main__":
     _cli_parser.add_argument("--unit", default="", help="--answer-human-inputで書き込む確定値の単位。")
     _cli_parser.add_argument("--source", default="", help="--answer-human-inputの出典（誰に確認したか等）。")
     _cli_parser.add_argument("--comment", default="", help="--answer-human-inputの自由記載コメント（issue解決時の申し送りとして記録）。")
+    # [BL-222] 人間監査用レポート。runの動作状態に関わらずいつでも別ターミナルから実行できる
+    # （--pending-human-inputと同じ設計）。継続的に眺めたい場合はシェル側でwatch等を使う。
+    _cli_parser.add_argument(
+        "--audit-report", metavar="RUN_ID", default=None,
+        help="指定run_idのverified_facts/agreementsを、値・理由・出典・確定者・確定タスクとともに表示して終了する。",
+    )
+    _cli_parser.add_argument("--task-id", default="", help="--audit-reportの絞り込み対象task_id（省略時はphase-idか全件）。")
+    _cli_parser.add_argument("--phase-id", default="", help="--audit-reportの絞り込み対象phase_id（task-id指定時は無視）。")
     _cli_args = _cli_parser.parse_args()
+
+    # [BL-222] 読み取り専用CLIコマンド（--list-checkpoints/--pending-human-input/
+    # --audit-report等）は、DB内の任意の文字列（web由来のcitations等）をそのままprintする。
+    # Windowsのデフォルトコンソールエンコーディング（cp932）では表現できない文字
+    # （例: ≈）でUnicodeEncodeErrorが発生していたため、utf-8へ強制する。
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     if _cli_args.list_checkpoints:
         # [BL-174] 純粋な閲覧用コマンドのため、ai_vs_ai_loop本体もMultiLoggerによる
@@ -14082,70 +14388,78 @@ if __name__ == "__main__":
             sys.exit(1)
         sys.exit(0)
 
+    if _cli_args.audit_report:
+        _conn = get_db_connection()
+        init_db(_conn)
+        print(_audit_report(_conn, _cli_args.audit_report, task_id=_cli_args.task_id, phase_id=_cli_args.phase_id))
+        _conn.close()
+        sys.exit(0)
+
     # カスタムロガーを標準出力に設定（importのみでは発火させない。BL-027）
     sys.stdout = MultiLogger()
 
     TARGET_GOAL = (f"""
-# 課題：長野県茅野市における自動運転バス導入計画の策定
+        # 課題：長野県茅野市における自動運転バス導入計画の策定
 
-以下の背景・地理データ・制約条件に基づき、長野県茅野市における「自動運転バス導入計画書」を作成してください。
+        以下の背景・地理データ・制約条件に基づき、長野県茅野市における「自動運転バス導入計画書」を作成してください。
 
----
+        ---
 
-## 1. 背景と地域データ（公的統計準拠）
+        ## 1. 背景と地域データ（公的統計準拠）
 
-### (1) 社会・交通背景
-- 人口・世帯: 総人口 56,400人（令和2年国勢調査、2020年10月1日時点）。高齢化率30.7%（65歳以上 約17,300人）。
-- 参考として、令和5年1月時点の推計人口は55,657人まで減少しており、人口減少と高齢化が同時に進行している。
-- 私立から2018年に公立化した理工系大学（公立諏訪東京理科大学）の学生 約1,368人（学部・大学院合計、2025年5月時点）。
-- 既存交通の状況: 令和4年（2022年）10月1日、市内の定時定路線バス13路線が利用者減少・採算悪化を理由に廃止された。
-- 現在、市内に定時定路線での路線バス運行は存在しない。
-- 移動弱者の急増: 近年、高齢ドライバーの運転免許返納件数が急増。通院や日常の買い物が困難な「移動難民」の増加が深刻な社会問題となっている。
-- デジタルリテラシー: 65歳以上のスマートフォン所有率は約65%に達するが、アプリによる配車予約操作を問題なく行える高齢者は全体の15%程度にとどまり、7割以上の高齢者が電話予約等に頼らざるを得ない。
+        ### (1) 社会・交通背景
+        - 人口・世帯: 総人口 56,400人（令和2年国勢調査、2020年10月1日時点）。高齢化率約30%程度。
+        - 参考として、令和5年1月時点の推計人口は55,657人まで減少しており、人口減少と高齢化が同時に進行している。
+        - 既存交通の状況:車社会であり、成人の移動の基本は自動車である。
+          つまり、マイカー利用により多くの成人はバスは利用せず、利用者減少・採算悪化を理由に令和4年（2022年）10月1日、市内の定時定路線バス13路線が廃止された。
+    　　　運転が可能な高齢者は移動手段があるが、一方で社会情勢の変化により高齢ドライバーの運転免許返納件数が増加傾向にある。
+   　　　 ひとたび自動車の運転が困難となり、かつ、家族等の支援も難しい場合は移動手段が急激に限られ、生活の維持が困難になる。
+        - デジタルリテラシー: 65歳以上のスマートフォン所有率は増加傾向だが、アプリによる配車予約操作を問題なく行える高齢者の割合は少なく、多くの高齢者は電話予約等に頼らざるを得ない。
+       
+        ### (2) 地理・インフラ環境（中心駅からのアクセス）
+        - 総面積: 約266.41 km²
+        - 地形・気候・標高:
+        - 【市街地平坦部】：JR中央本線 茅野駅を中心とした諏訪盆地南部の半径約 5km 圏内。平坦〜緩勾配（平均時速 40km/h 想定）。
+        - 【山間登坂・高原部】：駅（中心部）から10km〜20km 圏内に標高 1,000m〜1,500m 級の集落・別荘地が散在（代表例：蓼科高原、標高1,150〜1,800m、駅から自動車で約30〜35分。平均時速 25km/h 想定）
+        -  冬季は標高の高さと放射冷却による冷え込みが激しく、市街地、山間部を問わず路面凍結の危険がある。
+        -  市街地は比較的積雪は少ない（10cm程度なら一般市民は普通に走行）が、山間部は積雪量が多い場合があり、冬季は除雪・凍結防止のための道路管理が必要。
+        - 主要拠点と中心駅（茅野駅）からのアクセス:
+        1. 【駅】JR中央本線 茅野駅（標高789m）
+        2. 【行政】茅野市役所（標高801m、日本の市役所の中で最も標高が高い）：駅東口から徒歩約8分（約600m）
+        3. 【基幹病院】組合立諏訪中央病院（高齢者の目的地首位）：駅から自動車で約10分（路線バスで約15分、徒歩約34分）
+        4. 【文教】公立諏訪東京理科大学キャンパス（学生約1,368人）：市内に立地
+        5. 【山間集落】東部山間集落群（駅より東〜北東へ 約10km〜14km / 標高1,000〜1,100m）
+        6. 【高原別荘地・集落】蓼科高原（駅から自動車で約30〜35分 / 標高1,150〜1,800m）
+        7. 【買い物】スーパー・商業施設は複数点在している(オギノ、ツルヤ、ビック、エーコープ等)
+        
+        ---
 
-### (2) 地理・インフラ環境（中心駅からのアクセス）
-- 総面積: 約266.41 km²
-- 地形・標高:
-  - 【市街地平坦部】：JR中央本線 茅野駅（標高789m）を中心とした諏訪盆地南部の半径 5km 圏内。平坦〜緩勾配（平均時速 40km/h 想定）。
-  - 【山間登坂・高原部】：駅（中心部）から 5km を超えると急勾配に入り、10km〜20km 圏内に標高 1,000m〜1,500m 級の集落・別荘地が散在（代表例：蓼科高原、標高1,150〜1,800m、駅から自動車で約30〜35分。平均時速 25km/h 想定。冬季は積雪・路面凍結）。
-- 主要拠点と中心駅（茅野駅）からのアクセス:
-  1. 【交通結節点】JR中央本線 茅野駅（標高789m）
-  2. 【行政】茅野市役所（標高801m、日本の市役所の中で最も標高が高い）：駅東口から徒歩約8分（約600m）
-  3. 【基幹病院】組合立諏訪中央病院（高齢者の目的地首位）：駅から自動車で約10分（路線バスで約15分、徒歩約34分）
-  4. 【文教】公立諏訪東京理科大学キャンパス（学生約1,368人、朝夕の通学集中）：市内に立地
-  5. 【山間集落】東部山間集落群（駅より東〜北東へ 約10km〜14km / 標高1,000〜1,100m）
-  6. 【高原別荘地・集落】蓼科高原（駅から自動車で約30〜35分 / 標高1,150〜1,800m）
+        ## 2. 絶対制約条件（ハード制約）
 
----
+        1. 【財務制約】
+        - 初期構築・車両導入費（CapEx）の公的補助総額は「上限 1億円以内」。
+        - 年間の市からの赤字補填補助金（OpEx）は「年間 4,000万円以内」を絶対厳守（1円でも超える計画は議会で否決される）。
+        - 利用者運賃は1乗車数百円程度の住民負担に配慮した設定とし、運賃収入を試算すること。
+        2. 【サービスレベル（SLA）】
+        - ピーク帯（午前8:00〜11:00の通院・買い物、朝の通学）の需要を破綻なく捌くこと。
+        - 予約から乗車までの最大待ち時間は、市街地（5km圏内）で20分以内、山間部（5km超）で30分以内とする。
+        - 電話予約等の非アプリ予約受入体制および人件費を計上すること。
+        - 運行時間帯: 7:30〜19:30（12時間運行）。
+        
 
-## 2. 絶対制約条件（ハード制約）
+        ---
 
-1. 【財務制約】
-   - 初期構築・車両導入費（CapEx）の公的補助総額は「上限 1億円以内」。
-   - 年間の市からの赤字補填補助金（OpEx）は「年間 4,000万円以内」を絶対厳守（1円でも超える計画は議会で否決される）。
-   - 利用者運賃は1乗車数百円程度の住民負担に配慮した設定とし、運賃収入を試算すること。
-2. 【サービスレベル（SLA）】
-   - ピーク帯（午前8:00〜11:00の通院・買い物、朝の通学）の需要を破綻なく捌くこと。
-   - 予約から乗車までの最大待ち時間は、市街地（5km圏内）で20分以内、山間部（5km超）で30分以内とする。
-   - 電話予約等の非アプリ予約受入体制および人件費を計上すること。
-3. 【法規制・労働・気象】
-   - 運行時間帯: 7:30〜19:30（12時間運行）。
-   - 労働基準法（交代制勤務・法定休憩・時間外労働規制）および遠隔監視オペレーター・乗務員配置基準の厳格な順守。
-   - 冬季（12月〜3月）の標高1,000m超エリアにおける積雪・凍結時の安全運行基準（運休条件等）の明記。
+        ## 2.5 実例の参照について
 
----
+        本市には既存の代替交通サービスの実例が存在する可能性がある。web_searchでそうした実例を発見すること自体は制約されない。
+        ただし、実例の運行本数・車両台数・運賃・人員体制等の具体的な運用数値をそのまま本計画の数値として転記してはならない。
+        実例は「このような設計が現実的に成立し得るか」という妥当性の参考にのみ使用し、本計画の数値は必ず上記1・2で与えられた本課題固有の制約（予算・需要データ・距離・SLA）から独自に算出すること。
 
-## 2.5 実例の参照について
+        ---
 
-本市には既存の代替交通サービスの実例が存在する可能性がある。web_searchでそうした実例を発見すること自体は制約されない。
-ただし、実例の運行本数・車両台数・運賃・人員体制等の具体的な運用数値をそのまま本計画の数値として転記してはならない。
-実例は「このような設計が現実的に成立し得るか」という妥当性の参考にのみ使用し、本計画の数値は必ず上記1・2で与えられた本課題固有の制約（予算・需要データ・距離・SLA）から独自に算出すること。
+        ## 3. 指示
 
----
-
-## 3. 指示
-
-上記の背景および制約条件をすべて踏まえ、長野県茅野市における「自動運転バス導入計画書」を作成してください。"
+        上記の背景および制約条件をすべて踏まえ、長野県茅野市における「自動運転バス導入計画書」を作成してください。"
     """)
 
     config : Appconfig = {

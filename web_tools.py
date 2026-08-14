@@ -36,8 +36,15 @@ from markitdown import MarkItDown, MarkItDownException, StreamInfo
 # ---------------------------------------------------------------------------
 
 WEB_CACHE_DIR = "web_cache"
-_REQUEST_TIMEOUT_SECONDS = 10.0
-_MAX_FETCH_BYTES = 8 * 1024 * 1024  # 8MB [BL-208] 政府・自治体PDFが2MBに頻繁に抵触したためユーザー承認のもと緩和
+# [BL-221] 50MB到達を見込んだダウンロードが10秒のタイムアウトに収まらない実例（低速な
+# 自治体サーバー等）を避けるため、サイズ上限の引き上げに合わせて延長する。
+_REQUEST_TIMEOUT_SECONDS = 30.0
+# [BL-221] 8MB→50MBへユーザー承認のもと引き上げ。ダウンロード自体はもはや容量では拒否せず、
+# markitdown変換後の全文はwrite_cacheでweb_cache/へそのまま保存される（切り詰めなし）。
+# モデルへの初回返却（_MAX_OUTPUT_CHARS）とread_reference_fileの素読み（_MAX_READ_REFERENCE_CHARS）
+# は引き続きトークン消費を抑えるため切り詰めるが、read_reference_fileのgrepパラメータ
+# （BL-221で新設）でキャッシュ全文から必要箇所を前後の文脈付きで検索できる。
+_MAX_FETCH_BYTES = 50 * 1024 * 1024  # 50MB
 _MAX_OUTPUT_CHARS = 15000
 _MAX_READ_REFERENCE_CHARS = 10000
 _DDG_MIN_REQUEST_INTERVAL_SECONDS = 1.0
@@ -434,6 +441,52 @@ def _cache_preview(path: Path) -> str:
     return f"{source_line}\n{snippet}" if source_line else snippet
 
 
+_GREP_CONTEXT_LINES = 3
+_GREP_MAX_MATCH_BLOCKS = 30
+
+
+def _grep_with_context(content: str, pattern: str, context_lines: int = _GREP_CONTEXT_LINES) -> str | None:
+    """[BL-221] `content`を行単位でパターン検索し、各マッチ行の前後`context_lines`行を
+    添えて`grep -C`相当の形式で返す。BL-221でダウンロード容量上限を8MB→50MBへ引き上げた
+    ため、read_reference_fileの素読み（_MAX_READ_REFERENCE_CHARSで切り詰め）だけでは
+    巨大なキャッシュ済み文書の必要箇所に到達できなくなる。全文はキャッシュに切り詰めなしで
+    保存済み（write_cache）なので、ここではそのファイルを直接読み、マッチ箇所の周辺だけを
+    返すことでトークン消費を抑えたまま任意の位置にアクセスできるようにする。
+    大文字小文字を区別する単純な部分一致（read_reference_fileのkeyword検索と同じ方式）。
+    マッチが無ければNoneを返す（呼び出し側でnot_foundメッセージを組み立てる）。
+    """
+    lines = content.split("\n")
+    match_indices = [i for i, line in enumerate(lines) if pattern in line]
+    if not match_indices:
+        return None
+
+    truncated = len(match_indices) > _GREP_MAX_MATCH_BLOCKS
+    match_indices = match_indices[:_GREP_MAX_MATCH_BLOCKS]
+
+    # [grep -C相当] 隣接・重複するコンテキスト窓は1つのブロックへ統合する
+    # （マッチが密集している場合に同じ行を何度も出力しないため）。
+    windows: list[tuple[int, int]] = []
+    for idx in match_indices:
+        start = max(0, idx - context_lines)
+        end = min(len(lines) - 1, idx + context_lines)
+        if windows and start <= windows[-1][1] + 1:
+            windows[-1] = (windows[-1][0], max(windows[-1][1], end))
+        else:
+            windows.append((start, end))
+
+    blocks = []
+    for start, end in windows:
+        block_lines = [f"{i + 1}: {lines[i]}" for i in range(start, end + 1)]
+        blocks.append("\n".join(block_lines))
+    result = "\n--\n".join(blocks)
+    if truncated:
+        result += (
+            f"\n--\n[{len(match_indices)}件のマッチのうち先頭{_GREP_MAX_MATCH_BLOCKS}件のみ表示。"
+            "より具体的なgrepパターンで絞り込んでください]"
+        )
+    return result
+
+
 # ---------------------------------------------------------------------------
 # ツールハンドラ本体
 # ---------------------------------------------------------------------------
@@ -520,6 +573,10 @@ def read_reference_file_handler(args: dict, state: dict) -> dict | str:
     base_dir = Path(WEB_CACHE_DIR).resolve()
     path = args.get("path") or ""
     keyword = args.get("keyword") or ""
+    grep = args.get("grep") or ""
+
+    if grep and not path:
+        return {"status": "error", "message": "grepはpathと組み合わせて指定してください（対象ファイルを先に特定する必要があります）。"}
 
     if path:
         try:
@@ -529,7 +586,15 @@ def read_reference_file_handler(args: dict, state: dict) -> dict | str:
             return {"status": "error", "message": "web_cache外へのアクセスは禁止されています。"}
         if not resolved.exists() or not resolved.is_file():
             return {"status": "not_found", "message": f"ファイルが見つかりません: {path}"}
-        return resolved.read_text(encoding="utf-8")[:_MAX_READ_REFERENCE_CHARS]
+        content = resolved.read_text(encoding="utf-8")
+        if grep:
+            # [BL-221] キャッシュは切り詰めなしの全文（write_cache）なので、_MAX_READ_REFERENCE_CHARS
+            # による素読みの切り詰めを経由せず、全文に対してgrepする。
+            grepped = _grep_with_context(strip_cache_header(content), grep)
+            if grepped is None:
+                return {"status": "not_found", "message": f"'{grep}'に該当する行が見つかりませんでした。"}
+            return grepped
+        return content[:_MAX_READ_REFERENCE_CHARS]
 
     if keyword:
         if not base_dir.exists():

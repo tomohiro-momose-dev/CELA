@@ -1,4 +1,4 @@
-# BL-228 基本設計: 統一活動系譜（Unified Activity Lineage）— `chat_history` スパイン活性化 ＋ N/M 役割非対称要約 ＋ ターン内チューリン描画 ＋ Hydrate/trace の「本来の姿」統合
+# BL-228 基本設計: 統一活動系譜（Unified Activity Lineage）— `chat_history` スパイン活性化 ＋ 単一閾値N要約（2密度） ＋ ターン内チューリン描画 ＋ Hydrate/trace の「本来の姿」統合
 
 > **作成**: 2026-08-14（ユーザーとの対話中に設計。参考資料 `docs/refs/` の LDD/Lineage 研究が直接的な起源）
 > **状態**: 設計完了・実装未着手（`open`）
@@ -38,12 +38,23 @@
 ### 本設計のゴール
 
 1. **死蔵 `chat_history` を活性化** — 全 append 点から DB へ書き、窓切り後も全文が残り系譜として辿れる。
-2. **N/M 役割非対称要約** — 軽量/ローカル LLM へ委任し、トークン圧迫を抑えつつ「調子（どう一緒に考えていたか）」を保持。
+2. **単一閾値N要約（2密度）** — 軽量/ローカル LLM へ委任。≤Nラウンドは生文、>Nは要約。要約は「系譜一覧用1行（`summary_brief`）」と「会話ログ展開用（`summary_detail`）」の2密度。役割非対称は廃止（F-8.1 の人間vsAI前提がCELAには当てはまらず、BL-108 で窓方式は不安定と判定済み）。
 3. **ターン内チューリン描画** — あるターンを起点に、detector の差戻を含む artifact 変化（agreement/entity/issue/whiteboard diff）を時系列で出す。
 4. **Hydrate(C1) と trace(C5) を「本来の姿」に** — あるターン（AI の問い）を起点に過去文脈を能動取得。
 5. **「弱い部分」の構造化** — detector 差戻を `is_rollback` フラグ＋`relation_edges` の `turn:` 外向きエッジとして系譜化し、進行が in-context 推論のみに依存する状態を解消。
 
 ---
+
+### 先行BL調査：非対称圧縮の系譜（役割非対称を廃止する根拠）
+
+ユーザーの指示「すべてAIでノードも多いから役割非対称圧縮の意味がない」を、過去のBLで裏付けた:
+
+- **F-8.1 非対称メモリ圧縮**（要件定義書_v35 `:322`/`:789`、および `CHAT_HISTORY_WINDOW=4`）: この「非対称」の起源。**「User（人間）の入力こそ大事だから圧縮するな、他は圧縮」** という人間vsAIの前提に立っていた。`requirements_gap_map.md:256` はこれが未実装（⚠️）と判定済み。CELA は全ノードがAIなのでこの前提が崩れ、役割非対称は無意味になる。
+- **BL-108**（issue_backlog `:3490`）: 「直近N iterは生・それより古いのは要約」という**窓方式を明示的に廃止**（「要約を廃止し単純な累積方式へ全面置換」）。境界の切り替え自体が毎iter不安定を生んでいたため。**教訓: 要約は書いたら不変（immutable）にし、毎ターン再派生させてはならない。**
+- **D-070**（decision_log `:1042`）: ノード内スクラッチパッドの「decision_list/要約圧縮」を廃し全文上書き型へ。要約圧縮を退ける別の実例。
+- **`CELA_architecture_review_2026-08-03.md:110`**: 「直近N件agreements生・それ以前要約」を `context_summarizer_node` で生成する提案。N窓の発想は繰り返し現れるが、要約は**専任の軽量LLM委任**で行うという点で本BLの方針と一致。
+
+**結論**: 役割非対称（expertのみ圧縮）は廃止。単一閾値N（≤Nラウンドは生文、>Nは要約）に単純化。要約は**書き込み時に1回だけ生成（immutable）**し、再派生しない（BL-108の教訓）。
 
 ## スキーマ
 
@@ -53,7 +64,10 @@
 -- [BL-228] 既存の死蔵 chat_history を活性化し、統一活動系譜のスパインとする。
 -- 既存定義(id, turn, role, content, timestamp, run_id)に下記を追加。
 -- turn = round_count（「raund」）。task_id/phase_id で artifact と結合。
--- summary_expert/summary_full は N/M 役割非対称ティア要約（軽量/ローカルLLM委任）の格納先。
+-- summary_brief/summary_detail は単一閾値N要約（軽量/ローカルLLM委任）の格納先。2密度:
+--   summary_brief  = 系譜一覧（値の連鎖リスト）に出す1行要約
+--   summary_detail = 会話ログ展開時に出す要約（より高密度）
+-- ≤Nラウンドは content(生文) をそのまま出し、>Nラウンドは要約を出す（§単一閾値N要約ポリシー）。
 -- is_rollback は detector 差戻の構造化（「弱い部分」の補強）。
 CREATE TABLE IF NOT EXISTS chat_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,8 +77,8 @@ CREATE TABLE IF NOT EXISTS chat_history (
     phase_id TEXT DEFAULT '',
     role TEXT,                    -- user / expert / detector / facilitator / ...
     content TEXT,                -- 生文（raw）
-    summary_expert TEXT DEFAULT '',  -- 軽量/ローカルLLM要約（N/M ②で expert に使う）
-    summary_full TEXT DEFAULT '',    -- さらに圧縮（N/M ③ >M ターン用）
+    summary_brief TEXT DEFAULT '',   -- 系譜一覧用1行要約（軽量/ローカルLLM委任・immutable）
+    summary_detail TEXT DEFAULT '',  -- 会話ログ展開用要約（より高密度、同委任・immutable）
     is_rollback INTEGER DEFAULT 0,  -- detector 差戻フラグ（1=差戻を含むターン）
     timestamp REAL
 );
@@ -91,6 +105,31 @@ BL-224 の `relation_edges`（`agreement:`/`fact:`/`entity:` の3プレフィッ
 - `issue:<topic>` → `turn:<id>`
   — 「この issue が挙がった/消費されたターン」
 - （BL-224 既存）`agreement:`/`fact:`/`entity:` 同士の `depends_on`/`supersedes`/`derived_from`
+
+### detector_reviews テーブル（新規・ユーザー承認済み）
+
+Detector の評決（rollback/major/minor）を構造化して永続化する。**agreements には混ぜず専用表**（セマンティクス汚染を避ける。agreements は「合意」、detector_reviews は「ゲートの評決」で別種）。従来は `state["detector_observations_log"]`（in-memory）にのみ存在し DB に Persist されていなかった（§15.4 の死蔵/揮発）。`relation_edges` の `detector_review:<id>` で chat_history の該当 turn と結ぶ（W2）。
+
+```sql
+-- [BL-228] Detector 評決の構造化永続（§15.4: 従来は in-memory のみで死蔵/揮発）。
+-- agreements には混ぜず専用表（セマンティクス汚染回避）。relation_edges の
+-- `detector_review:<id>` で chat_history の該当 turn と結ぶ。
+CREATE TABLE IF NOT EXISTS detector_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    turn_id INTEGER,                 -- chat_history.id（該当する発言/差戻しターン）
+    task_id TEXT DEFAULT '',
+    phase_id TEXT DEFAULT '',
+    risk TEXT DEFAULT '',            -- low/none/...
+    constraint_issue TEXT DEFAULT '',-- none/minor/major
+    comment TEXT DEFAULT '',         -- Detector の評決コメント（長文）
+    criteria_status_json TEXT DEFAULT '', -- [true,true,false] 等
+    target_excerpt TEXT DEFAULT '',
+    observations TEXT DEFAULT '',
+    created_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_detector_reviews_run_turn ON detector_reviews(run_id, turn_id);
+```
 
 ### 補足ソース（新設せず既存を活用）
 
@@ -136,9 +175,15 @@ Detector が rollback/major/minor を返して再ループする際:
 
 ## 消費経路（出口・AGENTS.md §15.4）
 
-### C1: Hydrate — あるターン（AI の問い）を起点に過去文脈を能動再構成
+### C1: Hydrate（on-demand 走査）— ある値/artifact を起点に系譜を能動再構成
 
-当該ターンの raw/summary（N/M 役割非対称ティア）＋ そのターンで変化した artifact（agreement/entity/issue/whiteboard diff）を描画。**5節（What/Why/Current/Open/Next）は再発明せず、CELA 既存のフェーズタスク/issue 等へ委ねる**（ユーザー指示）。Hydrate には「系譜 ＋ ターン内チューリン」だけを載せる。
+**消費層の正体は「毎ターンの自動注入」ではない**（既存のプロンプト注入＝直近数ターン生ログ＋decision/issue が既に担っているため、再注入は冗長）。AI が「この10%はどこから？」と疑問を持った時に**ツールとして能動呼び出し**するのが本番の消費経路。
+
+- 走査キーは**変数/artifact 名（キーワード）**（例: `高齢者外出率`、`凍結`）。距離ではなく名前で系譜を掘る。
+- 各ヒット = `(task_id, round, 値, by, way, citation, summary_brief, detector_review?)` のイベント列を時系列表示。
+- 値を書き換えたターンには、それを強いた `detector_review` への `relation_edges` エッジを張り、rollback 文脈を確実に取得（「次の2ターンを無条件表示」の代わり）。
+- **on-demand deep-dive は距離に関わらず全生文**を出す（参考資料の lineage-expand / pin例外）。N要約は audit レポート等の軽量表示にのみ適用。
+- **5節（What/Why/Current/Open/Next）は再発明せず**、CELA 既存のフェーズタスク/issue 等へ委ねる（ユーザー指示）。
 
 ### C2: `_audit_report --ref turn:<id>`（BL-224 の C2 を `turn:` へ拡張）
 
@@ -154,17 +199,27 @@ Detector が rollback/major/minor を返して再ループする際:
 
 ---
 
-## N/M 役割非対称ティア（要約ポリシー）
+### C5（追加）: ゴール条件陳腐化の検知 — Reflector / Facilitator の活用
 
-ユーザー確定の定義（距離 d = 現在ターン − 対象ターン）:
+系譜から「ゴール条件として登録された値（例: 凍結エリア＝標高1000m以上）が、のちのタスクで別の基準（気温ベース）へすり替わり陳腐化している」ことが可視化される。このシグナルは **Reflector / Facilitator ノードも消費**し、ゴール条件そのものの妥当性を見直す経路へ流すべき（BL-126 のプロアクティブ目標問い直しと接続）。
 
-| 帯 | 範囲 | 出力 |
-|----|------|------|
-| ① | d ≤ N（直近） | 全役割 → **生文**（content） |
-| ② | N < d ≤ M | **expert 役割のみ → summary_expert（圧縮）**。他の役割は生文 |
-| ③ | d > M | 全役割 → **summary_full**（両方圧縮） |
+## 単一閾値N要約ポリシー（2密度・immutable）
 
-**ピン例外（参考資料の pin メカニズム流用）**: binding/decision/verbatim 相当の部分は役割に関わらず Zone B 以上に昇格（索引に落とさない）。つまり expert の**探索的推論のみ**を②で圧縮し、expert の** binding 決定は残す**——「expert を早く圧縮したい」と「binding 決定は落とすな」の両立。
+役割非対称圧縮は廃止（F-8.1 の人間vsAI前提がCELAには当てはまらない。先行BL調査参照）。
+単一の閾値 N のみ:
+
+| 帯 | 範囲（距離 d = 現在ラウンド − 対象ラウンド） | 出力 |
+|----|----------------------------------------------|------|
+| ① | d ≤ N（直近） | **生文**（content）をそのまま |
+| ② | d > N | **要約**を出す（下記2密度） |
+
+**2密度の要約**（どちらも軽量/ローカルLLM委任、append 時に1回生成して不変）:
+- `summary_brief`: 系譜一覧（値の連鎖リスト）に出す**1行要約**。各イベントの `task_id / round / 値 / by / way / citation` と併せて1行で示す。
+- `summary_detail`: あるターンの会話ログを**展開**した時に出す要約。brief より高密度（そのターンで何が議論されたかの要点）。
+
+**immutable の原則（BL-108 の教訓）**: 要約は append 時に1回だけ生成し、以降は再派生しない。境界 d=N の切り替えで毎ターン要約を作り直すと不安定になる（BL-108）。既存の `content`（生文）は常に DB に残り、要約未完了時は生文で fallback 表示（§13.2）。
+
+**N の値**: ユーザー指示で N=3 程度（run 全体30ターン上限に対して十分小）。audit レポート等で古いノードを圧縮表示するための閾値。on-demand deep-dive は距離に関わらず全生文（C1）。
 
 ---
 
@@ -205,7 +260,7 @@ Detector が rollback/major/minor を返して再ループする際:
 2. **要約委任の軽量/ローカル LLM の具体選定**（コスト・オフライン要件）。
 3. **要約実行タイミング**（append 毎？ 非同期バッチ？ コンテキスト圧迫時？）。
 4. **detector 差戻の構造化粒度**（`is_rollback` フラグのみ vs 専用 `rollback_events` テーブル）。
-5. **BL-228 と BL-224 の実装順序**（relation_edges 基盤が先か、chat_history 活性化が先か）。
+5. **BL-228 と BL-224 の実装順序【解決済み】**: BL-224 を **Phase 1-2 で先行**、BL-228 を **Phase 3 で後続**（2026-08-14 ユーザー判断）。関係: `relation_edges` を単一基盤として BL-228 が拡張（ref プレフィックス追加）するため、基盤側（BL-224）を先に確立するのが構造的に正しい。BL-224 設計書の「未決事項3」に3段階計画を記載。
 
 ---
 

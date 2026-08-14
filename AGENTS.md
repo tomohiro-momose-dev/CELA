@@ -414,13 +414,25 @@ written to agree with it (BL-091/176/179/180, D-177).
 
 Corollary: do not re-introduce an LLM into a mechanical last line of defence.
 
-### 15.4 A record that nothing consumes is not a mechanism
+### 15.4 入り口を考えたら必ず出口（消費経路）も考えろ — a record with no consumer is not a mechanism
 
-Repeatedly in this project a bookkeeping mechanism was implemented (raise an issue, append a note,
-set a flag) without a guaranteed consumer, and quietly did nothing. **When you add a record, design
-and implement its consumption path in the same change** — either a push (something is forced to read
-it) or a demonstrable pull (a specific code path that always reads it). Otherwise state explicitly
-that it is audit-only. See BL-136/145/154/163/168 for the series where this was learned.
+本プロジェクトでは繰り返し、「記録を作るだけで、それを読む出口（消費経路）を忘れた」ために、
+仕組みが何もしないまま終わることが起きた（BL-136/145/154/163/168 の連鎖）。
+
+**鉄則: 入口（書き込み口）を考えるときは、必ず出口（消費経路・出靴）も同時に考える。**
+レコードや機構を追加するときは、同じ変更の中でその消費経路を設計・実装せよ——プッシュ
+（強制的に読ませる）か、具体的なコード経路が常に読むプル（demonstrable pull）のかたちで。
+それができない場合は、「監査のみ（audit-only）」であることを明示せよ。
+
+**フォールバックの経路を確認せよ**: フォールバック（None / 空文字 / スキップ / デフォルト値への
+巻き戻し等）を設ける際は、そのフォールバックが**どの経路で・なぜ発生するか**を特定せよ。
+例：タスクプラン段階（頭のタスクプランナー）では `task_id` が付かない。このフォールバックによって、
+入口や出口が塞がれないか（= 記録が欠損して後続ノードが「出所不明」になる等）を確認せよ。
+これは §13（LLM 出力の空文字等の扱い）とも連動する。
+
+**エッジケースは設計で潰せ**: 正常系・準正常系（quasi-normal：境界値や部分的な入力など、一見
+正常だが推敲を要するケース）・異常系の3区分でテストを想定し、実装前の設計段階でエッジケースを
+潰しておくこと。詳細は §17（テスト規律）も参照。
 
 ### 15.5 Prefer an invariant that cannot drift over a threshold that can
 

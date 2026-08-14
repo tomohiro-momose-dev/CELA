@@ -259,6 +259,8 @@
 | BL-225 | 高 | `cela_main.py`（コメント追記のみ、ロジック変更なし） | **「名前は要件どおり、中身は別物」の3箇所へ注記を入れる（`open`）。** [requirements_gap_map.md](../requirements_gap_map.md) §5.5で特定。①`_build_hydrate_context`（`7436-7449`）はF-8.2「Hydrate Refresh 5節」を示す名前だが実体は`decisions`直近N件の箇条書きで5節構造ゼロ、F-8.1の非対称圧縮も無い。②`agreements.internal_thought_process`（`5497`）はF-3.7の思考過程記録を示すが`status='Rejected'`のときだけ書かれ**誰も読まない**（`8957-8963`でDetector提示から意図的に除外、`9049`のプロンプトは同名ラベルだが実データは`state["expert_last_reasoning"]`という別系統）。③`agreements.depends_on`（`5496`）は要件§4.2が「DAG系譜」と定義しているが書込時の実在チェックのみで一度も辿られない。**この誤認は既に実害を出している**——AIが③を「たまたま未使用の列」と誤判断し、BL-224の初版設計で「コメントを付けて放置」と書いた（要件が系譜の中核と定義していたにもかかわらず）。ロジックを変えずコメントを数行足すだけで、次に読むAI・人間の同じ誤認を防げる。**BL-224本体の実装より先に入れるべき最小コスト対策。** あわせて`2395-2397`のFreezeツールに関する陳腐化コメント（「D-045で一時休止、tools配線を外した」と書かれているが実際には`10754`/`11382`/`11393`で現在も配線され呼び出し可能）も是正する。 | P1 |
 | BL-226 | 高 | `cela_main.py`（`_build_escalation_pin_text`等9機構の注入経路、`call_expert`/`call_detector`/`generate_user_utterance`の3ノード） | **「後続へ申し送る」概念が9つの別実装に分散している問題の一元化（`open`、設計未着手）。** [bl_history_audit.md](../bl_history_audit.md) §0/§3で特定。issue_log系6機構（`_build_escalation_pin_text` `3992` / `_build_deferred_issue_pin_text` `4015` / `_build_open_issue_pin_text` `4070` / `_build_escalation_resume_notice` `4116` / `_get_forced_escalated_issues_text` `6389` / `_build_human_input_answered_notice` `6788`）とplan_drafts系3機構（`_append_deferred_note_to_plan` `6081` / `_get_deferred_notes_text` `6164` / `_get_reviewer_comments_text` `6189`）が、それぞれ別テーブル・別条件・別表示形式を持ち、**各々を3ノードへ個別に配線する必要がある**。この構造が原因で同型の配線漏れが4世代にわたり再発した——BL-082（Userブランチだけ配線漏れ）→ BL-154（issue_logへの橋渡し不在）→ BL-219（承認時に届かない、しかも10個目の機構を追加しただけ）→ BL-223（BL-154の橋渡しが発火せず）。AGENTS.md §15.2「部分的な保護は無いよりも危険」の構造そのもの。**4世代にわたり「1機構ずつ足す／直す」を繰り返しており、「なぜ9つに分散しているのか」を問う段階に一度も入っていない。** 現時点で最大の構造的負債と判断する。方針は未定（単一の注入レジストリへ集約する案、配線を機械的に強制する案などが考えられるが、9機構それぞれの発火条件が異なるため設計が必要）。 | P1 |
 | BL-227 | 中 | `cela_main.py`（`TOOL_CALL_RULE`定数新設・`_inject_japanese_output_directive`拡張・iter=2以降の`light_system_prompt`置換箇所に同一ルールを含める）、`tests/test_tool_call_rule_injection.py`（新規4件） | **ツール呼び出しの鉄則（TOOL_CALL_RULE）の全ノード注入（`done`）。** ユーザーが「思考のみで終わりその次にツールを呼び出す」挙動を指摘——ツールが必要なのに事前アナウンスだけで応答を終える（text-only stop）と、次回呼び出しで改めてツールを呼ぶ無駄なiterationが生じプロンプトキャッシュヒットが構造的に低下する。既存の`_inject_japanese_output_directive`（日本語出力指示の一斉注入）と同型の単一ソース注入を採用し、①`TOOL_CALL_RULE`定数（§15.1: 本文1箇所管理）を新設、②同関数を拡張して既存/新規systemへ追記（iter=1）、③iter=2以降の`light_system_prompt`置換にも同一ルールを含め軽量版でも維持。趣旨: ツールが必要なら同じレスポンス内で直接tool_callsを発行、text-onlyでよいのはユーザーへの最終回答時のみ。これによりツールループを通る全ノードへ自動適用。新規テスト4件、`py_compile`合格。実効性は次回実LLMドライランで確認。 | P2 |
+| BL-228 | 高 | `cela_main.py`（`chat_history` 活性化・`relation_edges` の `turn:`/`issue:`/`whiteboard:`/`detector_review:` 拡張・単一閾値N要約・ターン内チューリン描画・Hydrate/trace 統合） | **統一活動系譜（`open`・設計完了・実装未着手・Phase 3）。** 設計書: [BL228_basic_design.md](BL-228/BL228_basic_design.md)。死蔵 `chat_history`（定義のみ・INSERT/SELECT 0件）を正本として活性化し、`chat_history_window=4` で窓切り後も全文を系譜として残す。単一閾値N要約（≤N 生文 / >N は軽量・ローカルLLM委任・immutable の2密度 `summary_brief`/`summary_detail`）。detector 差戻を `is_rollback` フラグ＋`relation_edges` の `turn:` 外向きエッジで構造化（「弱い部分」の補強＝User AI/Expert の in-context 推論依存を解消）。ターン内チューリン描画・Hydrate の能動取得（C1/C2/C3）・5節は再発明しない。BL-224 の `relation_edges` を単一基盤として拡張（§15.1）。未決事項あり（①N/M 既定値＝N=10 承認済み・M は別途、②軽量LLM選定、③要約タイミング等）。実装順序は BL-224（Phase1-2）の後・**Phase 3**（D-204）。 | P2 |
+| BL-229 | 中 | `cela_main.py`（task_planner/task_plan_reviewer への facts 登録ポリシー・§15.1 共有プロンプトヘルパ） | **計画段階の概算/Web探索値を `verified_facts` へ provisional 登録（`open`・調査済み・設計未着手）。** 計画ノード（task_planner 8243 / task_plan_reviewer 12035）は**既に `WRITE_AGREEMENT_TOOL` を持つ**が計画由来の数値を `verified_facts` に登録する挙動が無い（欠落はプロンプト指示）。ユーザー指摘（2026-08-14）「フェーズタスク作成は web 探索も使い概算も行い、計画・タスク・受け入れ要件は後続へ大きな影響を及ぼす」に基づき、重要な概算/Web探索値を `confidence='provisional'` で登録。捕捉そのものは BL-224 の C3（upsert 境界）が担うため、本 BL は「誰が・いつ書くか」のポリシー＋§15.1 共有ヘルパが対象。未決事項あり（登録対象の絞り込み・ツール可用性合意・ヘルパ文言）。 | P2 |
 
 ---
 
@@ -7881,6 +7883,48 @@ BL-219/220/223が同日に「書き込み口はあるが消費経路が欠落す
 ユーザーがエージェントの挙動として「思考のみで終わり、その次にツールを呼び出す」というパターンを指摘。これはツールが必要なのに「〇〇を実行します」「〜を確認します」といった事前アナウンスや進捗報告のテキストだけで応答を終える（text-only stop）ことで発生し、ツールループがstopして次回呼び出しで改めてツールを呼ぶ無駄なiterationを生み、プロンプトキャッシュヒットを構造的に低下させる。これを防ぐ全ノード共通の鉄則を、既存の`_inject_japanese_output_directive`（中国語系モデル向け日本語出力指示の全ノード一斉注入）と同型の単一ソース注入方式で実装した。
 
 **実装完了（`done`）**: ①`TOOL_CALL_RULE`定数を新設（ルール本文を1箇所で管理しAGENTS.md §15.1に準拠）。②`_inject_japanese_output_directive`を拡張し、既存/新規のsystemメッセージへ鉄則を追記（iter=1の全文プロンプト）。③iter=2以降の`light_system_prompt`置換箇所にも同一ルールを含め、軽量版へ切り替えても鉄則が維持されるようした。ルールの趣旨——ツールが必要なら**同じレスポンス内で直接tool_callsを発行**し、テキストのみで応答してよいのは**ユーザーへの最終回答を提示するときだけ**——により、Expert/Detector/Reviewer/User AI/Integrator/Arbiter/Facilitator/planner等、ツールループを通る全ノードに自動適用される。新規テスト4件（`tests/test_tool_call_rule_injection.py`）、`python -m py_compile`合格。実効性（announce-then-stopの減少・キャッシュヒット率の改善）は次回実LLMドライランで確認。
+
+---
+
+### BL-228: 統一活動系譜 — `chat_history` スパイン活性化 ＋ 単一閾値N要約（2密度） ＋ ターン内チューリン描画 ＋ Hydrate/trace の「本来の姿」統合
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計完了・実装未着手） |
+| 優先度 | P2 |
+| テスト | 未作成（`tests/test_bl228_unified_activity_lineage.py` 予定） |
+| 関連 | BL-224（relation_edges 基盤を再利用・拡張）、AGENTS.md §15.4（死蔵記録→機構化）、§14.4（checkpoint は輸送・DB は SoT）、§7（N/M 新規定数は承認要） |
+| 設計書 | [BL-228/BL228_basic_design.md](BL-228/BL228_basic_design.md) |
+
+**内容:**
+
+YouTubeの LDD/Lineage 研究（`docs/refs/`）が起源の「判断の系譜を残し本当に必要な文脈をつなぐ」という CELA の原点を、`chat_history` をスパイン（系譜の背骨）として完成させる。実コード確認により `chat_history` DB テーブル（5539）は定義のみで INSERT/SELECT 0件の死蔵（§15.4）であり、実会話は `chat_history_window=4`（14473）で窓切りされた in-memory `state["chat_history"]`（7241）にのみ存在する——数ターン後は「どう一緒に考えていたか（調子）」が失われる。本 BL はこれを活性化し、各 append 点（11553/12231/13371/13607 等）から DB へ全文を書き、turn=`round_count`（7243「raund」）・task_id・phase_id を付与する。要約は単一閾値N要約（≤Nラウンドは生文、>Nは要約。要約は系譜一覧用1行 `summary_brief` と会話展開用 `summary_detail` の2密度。役割非対称は廃止——F-8.1 の人間vsAI前提がCELAには当てはまらず、BL-108 で窓方式は不安定と判定済み）で軽量/ローカル LLM へ委任し生文と併存。消費層は過去の設計で「本来の Hydrate」と呼んだ姿そのもの——あるターン（AI の問い）を起点に過去文脈を能動取得（C1 Hydrate / C3 `trace_lineage` の `turn:` 受付 / C2 `_audit_report --ref turn:`）、および detector 差戻を含む artifact 変化を時系列で描くターン内チューリン（C4）。**最も重要な付加価値は「弱い部分」の構造化**: detector の差戻（rollback）を `is_rollback` フラグ＋`relation_edges` の `turn:` 外向きエッジ（`agreement:`/`whiteboard:`/`issue:` へ）として系譜化し、User AI/Expert による in-context 推論への依存を解消する。5節（What/Why/Current/Open/Next）は再発明せず、Current/Open/Next は既存のフェーズタスク・issue 等へ委ねる（ユーザー指示）。BL-224 の `relation_edges` を基盤とし、ref プレフィックスを `turn:`/`issue:`/`whiteboard:` まで拡張。checkpoint は輸送のみ、DB を SoT（§14.4）。
+
+**未決事項:**
+
+1. N/M 既定値（N=10, M=30 提案、§7 承認要）。2. 要約委任の軽量/ローカル LLM の具体選定。3. 要約実行タイミング（append 毎／非同期バッチ／コンテキスト圧迫時）。4. detector 差戻の構造化粒度（`is_rollback` フラグのみ vs 専用 `rollback_events` テーブル）。5. BL-228 と BL-224 の実装順序（relation_edges 基盤が先か chat_history 活性化が先か）。
+
+---
+
+### BL-229: 計画段階の概算/Web探索値を `verified_facts` として登録（provisional 化）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（調査済み・設計未着手） |
+| 優先度 | P2 |
+| テスト | 未作成 |
+| 関連 | BL-224（C3 の upsert 境界方式が本 BL の facts を自動カバー）、BL-219（8,500人問題＝概算が根拠なく伝播）、AGENTS.md §15.1（共有プロンプトヘルパ）、§15.2（書き込み経路の列挙）、§15.4（消費経路の確保） |
+| 設計書 | （未作成 — BL-224 の C3 節と本エントリを参照。実装は BL-224 の C3 境界フックの後） |
+
+**内容:**
+
+`task_planner`（8243）・`task_plan_reviewer`（12035）は**既に `WRITE_AGREEMENT_TOOL` を持つ**が、計画段階で生まれる概算値・Web探索値を `verified_facts` に登録していない。フェーズタスク・受け入れ要件は後続作業に大きな影響を及ぼすため、それらの重要な数値（概算規模・Web探索で得た前提値等）を `confidence='provisional'` で登録すべき。登録されれば BL-219 型の「概算が根拠なく伝播」を系譜（BL-224 の C3 境界捕捉＋`_traverse_lineage`）で可視化できる。本 BL は**挙動変更**が主眼: 計画ノードに「重要な数値は facts として登録せよ」を指示し、§15.1 の共有プロンプトヘルパ1本から両ノードへ流す。捕捉そのものは BL-224 の C3（upsert 境界）が担うため、本 BL は「誰が・いつ書くか」のポリシーとツール可用性合意が対象。
+
+**動機（ユーザー指摘・2026-08-14）:** 「フェーズタスク作成は web 探索も使え、概算も行う。作った計画やタスクの内容、受け入れ要件は後続の作業に大きな影響を及ぼす」→ 計画由来の数値も系譜の可視対象にすべき。A2 解決の際、この挙動変更は BL-224 スコープ外（§15.2 経路増・ユーザー合意要）として分離された。
+
+**未決事項:**
+
+1. 登録対象の絞り込み（重要な概算・Web探索値のみ。全計画数値を facts 化するとノイズ増）。2. ツール可用性ポリシーのユーザー合意（task_planner/reviewer への write_agreement 付与は**既に済み**＝8243/12035; 不足しているのは「登録を指示するプロンプト」）。3. §15.1 共有ヘルパの文言と、両ノードへの注入方法。
 
 ---
 

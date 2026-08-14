@@ -2843,6 +2843,34 @@
 
 ---
 
+### D-203: A2（C3）の解決を「upsert境界への移動」とし、計画概算のfacts登録は別BL（BL-229）へ分離
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-14 |
+| 状態 | `decided` |
+| 決定者 | t-momose（「タスクプランナーやレビュワーにwrite_agreementを持たせる」という提案、および「計画・タスクは後続に大きな影響」という洞察）、Claude（実コード検証・設計反映） |
+| **決定理由** | 独立レビューA2が指摘したC3の2欠陥（①`owns_variables`は`list[str]`でconfidenceフィールドなし＝スキーマ混同、②`task_plan_reviewer_node`は開始前1回のみ発火しその時点でfacts未書き込み＝タイミング誤り）は実コードで確認して正しい。ユーザーは「計画段階の概算・Web探索値をfacts登録すべき（後続への影響大）」と指摘したが、実コード検証の結果**task_planner(8243)・task_plan_reviewer(12035)は既に`WRITE_AGREEMENT_TOOL`を持つ**ため「write_agreementを持たせる」措置自体は不要。`verified_facts`を書かないのは**挙動（登録を指示するプロンプト）の欠落**であった。C3を`task_plan_reviewer_node`に置く設計は構造的に不可能なので、**C3を`upsert_verified_fact`(6719)の境界へ移動**（ノード非依存・`verified_facts.confidence`を読む）ことでA2を解決。同時に、ユーザーの「計画概算をfacts登録せよ」という挙動変更はBL-224スコープ外（§15.2経路増・§15.1共有ヘルパ介入・ユーザー合意要）と判断し、別BL（BL-229）へ分離した。境界方式のC3は将来planner/reviewerがfactsを書いても同じ`upsert_verified_fact`を通るため自動カバーする。 |
+| 決定内容 | ①BL-224のC3を`task_plan_reviewer_node`ベースから`upsert_verified_fact`境界ベースへ書き直し（A2解決・スキーマ/タイミング誤り解消）。②計画段階の概算/Web探索値のfacts登録をBL-229として新規起票（設計未着手・BL-224のC3実装後に実施）。 |
+| 影響 | `docs/design/back_log/BL-224/BL224_basic_design.md`（C3節書き直し・A2所見「解決済み」化・変更対象ファイル更新）、`docs/design/back_log/issue_backlog.md`（BL-229新規起票）。 |
+| 関連 BL | BL-224（C3の所在）、BL-229（計画概算登録・別起票）、BL-219（8,500人問題＝本件の動機）、AGENTS.md §15.1（単一ソース・C3境界化の根拠）、§15.2（経路列挙・別BL分離の根拠） |
+
+---
+
+### D-204: BL-224 未決事項4件の承認（N=10・単独Rejected含括・3段階実装・BL-228分離維持）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-14 |
+| 状態 | `decided` |
+| 決定者 | t-momose（4件の未決事項回答）、Claude（設計書・BL-228 への反映） |
+| **決定理由** | 未決事項①最大探索深度: ユーザーが **N=10 で様子見**を承認（AGENTS.md §7 の重要定数変更として明示承認済み）。②単独 Rejected: 「含めないと rejected されず放置、または暗黙的に承認されたように見える」というユーザーの指摘どおり、系譜から落とさず可視に保つ。③実装分割: 2段階案を承認のうえ、**BL-228 を含めた3段階**へ拡張（BL-224 基盤→BL-224 消費深化→BL-228 統合）。④BL-228 分離: chat_history スパインを別 BL とする方針を維持。 |
+| 決定内容 | ①最大探索深度 **N=10**（C1 Hydrate 表示は1エントリ3段）。実ドライランで要調整なら再承認。②単独棄却提案も系譜参加: 同一 topic の現行アクティブ合意 Y があれば `supersedes` エッジ `agreement:<棄却X>→agreement:<Y>` を張り、無い場合は `status='Rejected'`＋`⚠️[却下事項]` コンテキスト表示＋`trace_lineage`/C1 の topic 走査で `Rejected` を明示含枚（新 relation_type は追加せず3種維持・§15.1）。③BL-224＋BL-228 を合わせた **3段階実装**: Phase1=BL-224 基盤（スキーマ＋W1/W2/W3＋C2＋C5/trace_lineage）、Phase2=BL-224 消費深化（C1/C3/C4/W4）、Phase3=BL-228 統合（chat_history 活性化＋`turn:`/`issue:`/`whiteboard:`/`detector_review:` 拡張＋trace_lineage の `turn:` 受付）。④BL-228 は別 BL として維持、実装順序は BL-224 を Phase1-2 で先行・BL-228 を Phase3 で後続。 |
+| 影響 | `docs/design/back_log/BL-224/BL224_basic_design.md`（未決事項→全件解決済み・3段階計画化・単独Rejected機構追記）、`docs/design/back_log/BL-228/BL228_basic_design.md`（未決事項5 実装順序解決済み化）。 |
+| 関連 BL | BL-224（本件の主題）、BL-228（Phase3・relation_edges 共有基盤）、BL-229（計画概算登録・D-203 で分離済み）、AGENTS.md §7（N=10 は承認済み重要定数）、§15.1（単一ソース・relation_type3種維持の根拠）、§15.4（C5 なきは §15.4 抵触のため Phase1 必須） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）

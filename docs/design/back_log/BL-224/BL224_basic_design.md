@@ -135,27 +135,64 @@ CREATE INDEX IF NOT EXISTS idx_relation_edges_run_to ON relation_edges(run_id, t
 系譜の骨格が途切れないようにする。
 
 ### W1（機械的・骨格）: 決定 → 値
-`_commit_agreement_from_tool`の`confirmed_variables`ループ（`cela_main.py:3444-3458`）で
+`_write_agreement_impl`（実際は `_commit_agreement_from_tool` の内部、`confirmed_variables` ループ）で
 `upsert_verified_fact`が成功するたびに、`agreement:<新しいagreement id>` → `fact:<variable_name>`
 の`derived_from`エッジを**無条件・自動で**書く。「この値はどの決定が生んだか」＝5W1Hの
 「誰が・なぜ」を値から引けるようにする骨格であり、LLMの記入に一切依存しない。
-`write_entity_attribute`側も同様に`agreement:` → `entity:<id>:<attr>`を書く。
+`write_entity_attribute`側も同様に`agreement:` → `entity:<id>:<attr>`を書く。ただし entity 側は
+agreement id 引数を持たない（`upsert_entity_attribute` シグネチャ確認済み、M2）ため、親を
+`task_id → phase_id → 計画センチネル`の順に探して結ぶブリッジ方式をとる（詳細は A1 解決策4・M2 を参照）。
 
 ### W2（機械的・骨格）: 新版 → 旧版（負の理由）
-`db_supersede_agreement`は5箇所（`cela_main.py:3139, 3284, 3288, 5904, 12903`）から呼ばれるが、
-呼び出し時点では置換先の新agreement idが未採番の箇所があるため、関数内の単一フックは取れない。
+`db_supersede_agreement`は以下の呼び出し箇所から呼ばれる（行番号はドリフトするため関数名で引く、§16.2/独立レビューM5）:
+- `write_agreement` の edits 経路 3箇所（UPDATE/SUPERSEDE ブランチ）— 置換先の新 id は同スコープで `_new_record_id("AG")` により確定するため、`_link_supersession(old, new, reason)` を直後に呼べる。
+- `_resolve_directive_for_task` 内 1箇所 — 直後に新 id あり。
+- `decision_extractor` の再抽出フォールバック 1箇所（`db_supersede_agreement(a["id"])` の直後に 12965 付近で新 id が生成される）。
+
+呼び出し時点で置換先の新 id が未採番な箇所があるため、関数内の単一フックは取れない。
 新規ヘルパー`_link_supersession(conn, run_id, old_agreement_id, new_agreement_id, reason)`を設け、
-新idが確定した直後に各箇所から明示的に呼ぶ。`reason`にはBL-050が既に`reason_why`へ要求している
+新 id が確定した直後に各箇所から明示的に呼ぶ。`reason`にはBL-050が既に`reason_why`へ要求している
 「前の値から何故・どう変わったのか」をそのまま転記する（LLMに新たな説明義務を課さない）。
-**5箇所すべてを個別に確認すること**（§15.2）——ゴール改定に伴う一括Superseded化など1:1の新旧対応が
-無い箇所は呼ばない判断でよいが、その理由をコードコメントに残す。
+**全呼び出し箇所を個別に確認すること**（§15.2）。ただし **`decision_extractor` の再抽出フォールバック（12923 付近）は supersession エッジの対象外とする**——ここは `write_agreement` が使われなかった場合の安全網であり、生成される新 agreement は「同一 topic の再抽出」であって「旧版 `a["id"]` の意図的な差し替え」ではない。ここでエッジを張ると「再抽出」が「系譜上の差し替え」と誤表示され、chain が誤導される（独立レビューM1の勧告を採用）。1:1 の新旧対応が無い箇所（ゴール改定に伴う一括 Superseded 化等）も同様に呼ばない判断とし、その理由をコードコメントに残す。
 
 ### W3（LLM記入・既存引数の復活）: 判断 → 判断
 `write_agreement`の既存引数`depends_on`（既にツールスキーマにあり、`cela_main.py:2295-2306`で
-「system promptの決定事項DBに表示されている`[42]`のような番号を入れよ」とLLMへ指示済み、
-書き込み時の存在検証も実装済み）を、**`agreements`列への保存に加えて`relation_edges`へも
-`depends_on`エッジとして流し込む**。これにより死蔵していた列が初めて消費される。
-`agreements.depends_on`列自体は後方互換のため残す（既存行のデータを失わない）。
+定義済み、書き込み時の存在検証も実装済み＝`3367-3375`）を、**`agreements`列への保存に加えて
+`relation_edges`へも`depends_on`エッジとして流し込む**。これにより死蔵していた列が初めて消費される。
+
+**マッピング（A4 解決策・独立レビューA4）**:
+`depends_on` に LLM が書く値は**実際の agreement id そのもの**である。根拠:
+- system prompt は各合意を `[AG-1765000000000-a1b2c3]` のように表示する（`cela_main.py:7578`
+  `lines.append(f"[{agreement_id}] ...")`、`agreement_id = a.get("id")`）。
+- id の実体は `_new_record_id("AG")` が `f"AG-{int(time.time()*1000)}-{uuid4().hex[:6]}"` を返す
+  （`2210`）。
+- 検証 `3367-3375` は `SELECT 1 FROM agreements WHERE id=? AND run_id=?` に `dep_id` を直接渡す
+  ——つまり「`[AG-xxxx]` に表示された文字列をそのまま書け」が正解であり、検証もそれを期待する。
+
+したがって **W3 の ref 変換は「`agreement:` プレフィックスを付けるだけ」** で翻訳表は不要:
+`edge_ref = f"agreement:{dep_id}"`（dep_id は `3367-3375` を通過済みの実 id）。
+
+**エッジの方向**（スキーマ定義「`to_ref` は `from_ref` を前提として成立する」に従う）:
+新規合意 X が `depends_on=[Y]` を持つなら、Y が前提・X が依拠先なので
+`from_ref=f"agreement:{Y}"`, `to_ref=f"agreement:{X}"`, `relation_type='depends_on'` の1本を書く。
+これは A3 指定の C1「前提」行（後方 `depends_on` 走査で `from_ref` を得る）と整合する。
+
+**検証の再利用**（§15.1 単一ソース・§15.4 非対称回避）:
+新しい検証は書かず、`3367-3375` をそのまま「エッジ書き込みのゲート」として使う。`depends_on`
+リストはこの検証を通過した実 id だけが残るので、W3 は検証済みリストから直接エッジを書く。
+さらに `_write_relation_edge`（単一ゲート、A1 解決策1）が書き込み時に両 ref の実在を `EXISTS` で
+再検証するため、二重に守られる。`agreements.depends_on` 列自体は後方互換で残す（既存行のデータ
+を失わない）。
+
+**スキーマ説明の修正（コード修正・§8 未着手）**: `cela_main.py:2295-2306` の `depends_on` 説明は
+現在 *"use the bracketed number shown before each entry there, e.g. '[42]', ... -> depends_on: ['42']"*
+と書かれているが、これは**実態（`AG-xxxx`）と食い違う古い記述**で、LLM が指示通り `'42'` を書くと
+`3367-3375` 検証で弾かれる（§15.4 壊れた ref の懸念そのもの）。BL-224 実装時（またはそれより前の
+別 PR）に `'[42]' -> depends_on: ['42']` を `'[AG-1765000000000-a1b2c3]' -> depends_on: ['AG-1765...-a1b2c3']`
+へ修正すること。これが A4 のブロッカー（壊れた ref）を塞ぐ本質的修正である。
+
+**B8 バックフィル**（後日別作業）: 既存 `agreements.depends_on` 列（実 id の配列）から同上の
+`f"agreement:{dep_id}"` → `f"agreement:{self_id}"` エッジを生成する。マッピングは本 W3 と同一。
 
 ### W4（LLM記入・新規）: 値 → 値
 `confirmed_variables[]`の各要素に任意項目`derived_from: list[str]`
@@ -172,15 +209,33 @@ BL-219の「8,500人がどの仮定から出たか」を構造化する経路。
 
 現状`_build_agreements_context`は各agreementの直後に`_find_prior_superseded`で**直近1件だけ**の
 旧版を差分表示している（topic文字列一致、BL-084のドリフト問題に脆い）。これを
-`_get_lineage_chain(conn, run_id, "agreement:<id>", max_depth)`によるエッジベースの
-**変遷の全連鎖**に置き換える。F-8.4(2)が要求する「その論点がどう変遷して現在の結論に至ったか」を
-時系列順のストーリーとして提示する。表示例:
+`_get_lineage_chain(conn, run_id, "agreement:<id>", max_depth)`（内部は `_traverse_lineage` の
+`relation_type='supersedes'` ラッパー）によるエッジベースの**変遷の全連鎖**に置き換える。さらに
+**「前提」行は別トラバーサル**で描く（A3 解決）。F-8.4(2)が要求する「その論点がどう変遷して現在の
+結論に至ったか」と「何を前提としているか」を、時系列ストーリーとして提示する。表示例:
 
 ```
 [AG-xxx] ✅[確定合意] 車両台数: 3台（理由: ...）
    └─ 系譜: 5台（棄却: 予算超過、task_4_1の試算で1.4倍）→ 4台（棄却: ピーク輸送力不足）→ 3台（現行）
    └─ 前提: [AG-yyy] 予算上限1,000万円 / fact:budget_cap
 ```
+
+**A3（depends_on 後方エッジの設計・ブロッキング解消）**: 旧設計の `_get_lineage_chain` は
+`relation_type='supersedes'` のみを返し、「前提」行のデータソースが無かった。これを解消する:
+- **クエリ**: `_traverse_lineage(conn, run_id, start_ref=f"agreement:{id}", direction="backward",
+  max_depth=max_depth, relation_types=['depends_on'])` で、この合意が `to_ref` となっている
+  `depends_on` エッジの `from_ref`（＝前提となる agreement / fact / entity）を取得する。
+  from_ref の種別に応じて解決表示: `agreement:<id>`→decision_what/reason_why、
+  `fact:<name>`→value/reason/citations、`entity:<id>:<attr>`→value（§15.3: 実表から解決、存在しない
+  ref は `EXISTS` でスキップ）。
+- **描画分岐**: `_build_agreements_context` は各 agreement につき (1) supersedes 連鎖（既存・
+  `_get_lineage_chain`）、(2) depends_on 前提（本追加・`_traverse_lineage(relation_types=['depends_on'])`）
+  の2回呼び、前者を「系譜」行、後者を「前提」行として描く。`max_depth` は両者共通（トークン上限）。
+- **単一ソース**: 前提は `relation_edges` からのみ読む（`agreements.depends_on` 列は W3 で relation_edges へ
+  流し込まれるため、C1 は列を直接読まない）。W3 実装前の既存データは B8（backfill）で relation_edges へ
+  投入され、そこで初めて「前提」行に出る（§15.1 単一ソース・§15.4 消費経路の前提）。
+- **direction の扱い**: 前方（`depends_on` でこの合意を前提とする下流）は C1 表示には不要だが、
+  C2（`_audit_report --ref`）の双方向系譜表示で再利用する（同じ `_traverse_lineage` を `direction="both"` で）。
 
 これがユーザーの言う「後続のAIが『なぜ今この方向で議論しているのか』で迷わない」ための本体である。
 トークン量が増えるため、**表示は`max_depth`と1エントリあたりの行数で上限を設ける**（既存の
@@ -195,14 +250,31 @@ agreement/fact/entity属性について前方・後方の系譜を5W1Hフォー�
 何がこれに依存しているか」。読み取り専用・LLM呼び出しなし・WALモードで実行中でも安全という
 BL-222の型をそのまま使う。
 
-### C3: アンカリング検出 — `task_plan_reviewer_node`（BL-219の消費経路を再利用）
+### C3: アンカリング検出 — upsert 境界（ノード非依存・A2 解決）
 
-`task_plan_reviewer_node`（`cela_main.py:12052`）で、レビュー対象タスクの`owns_variables`のうち
-`confidence='provisional'`なものについて後方系譜をたどり、遡った先も`expert_calculation`だけを
-根拠とする暫定値だった場合、**BL-219で配線済みの`per_task_comments` → `_get_reviewer_comments_text`
-→ `_build_task_scope_context` → Expert/User AIプロンプト**という既存経路へ流す。新しい注入
-ヘルパーは作らない（BL-219が作った線に、根拠を「その場の気づき」から「たどれるグラフ」へ
-差し替えるだけ）。
+**A2（ブロッキング）により書き直し**: 旧C3は `task_plan_reviewer_node` で `owns_variables` の
+`confidence` を読んでいたが、(1) `owns_variables` は `list[str]`（変数名のみ、7181行）で confidence
+フィールドは存在しない（スキーマ混同）、(2) `task_plan_reviewer_node`（12073付近）は実行開始前に1回
+しか発火せず、その時点で `verified_facts` は未書き込み（タイミング誤り）。よって C3 を
+**事実の正統な書き込み境界 `upsert_verified_fact`（6719）へ移動**する。
+
+- **境界方式（ノード非依存）**: `upsert_verified_fact` は Expert(3451)・decision_extractor(12874/6790)・
+  human-input(5744)・および**将来の task_planner/task_plan_reviewer**（両者とも既に `WRITE_AGREEMENT_TOOL`
+  を持つ: 8243/12035）のすべての fact が通る単一入口。ここで捕捉すれば、どのノードが書いても
+  provisional 値を拾える（§15.1 単一ソース・§15.3 機械的検証）。
+- **捕捉条件**: `confidence='provisional'` で書かれた fact（スキーマ既定値、5682）。`owns_variables`
+  ではなく **`verified_facts` の `confidence` 列**を読む（スキーマ混同解消）。
+- **消費（段階1・軽量）**: その fact を `verified_facts_json`（毎ターン `_build_task_scope_context` で
+  注入済み）へ「`[暫定]`」マーカ付きで表示するよう、表示ヘルパを1箇所修正するだけ。下流タスクが
+  変数を読む際に自動で見える（新規注入経路不要、§15.4 既存消費経路再利用）。
+- **消費（段階2・上流トラバーサル）**: `derived_from` エッジ確定**後**（W1/W4 コミット後）に
+  `_traverse_lineage`（M3）で上流を辿り、根拠が `expert_calculation` のみで確定根拠の無い場合、
+  BL-219 の `per_task_comments` → `_get_reviewer_comments_text` → `_build_task_scope_context` 経路で
+  `source_task_id` へ「要検証: 根拠=推算のみ」を付与。新ヘルパーは作らない。
+- **計画段階の概算登録は別BL**: 「task_planner/reviewer に重要な概算・Web探索値を
+  `confidence='provisional'` で登録せよ」という挙動変更は **BL-224 のスコープ外**（§15.2 経路増・
+  §15.1 共有ヘルパ介入・ユーザー合意要）。別 BL（計画概算の facts 登録）として起票し、クロスリンクする。
+  本 C3 の境界方式はその別BLが実装されても自動でカバーする（同じ `upsert_verified_fact` を通るため）。
 
 ### C4: 変更の前方伝播 — 上流が変わったら下流に印を付ける
 
@@ -234,13 +306,19 @@ WITH RECURSIVE backward(ref, depth) AS (
 SELECT DISTINCT ref, MIN(depth) AS depth FROM backward GROUP BY ref ORDER BY depth;
 ```
 
-- 本コードベース初の再帰CTE（`WITH RECURSIVE`はコードベースに前例ゼロ、確認済み）。
-- **サイクル対策**: SQLiteの再帰CTEにはサイクル検知が無い。`from_ref`/`to_ref`に任意文字列が
-  入りうる以上、経路を文字列連結して`LIKE`で判定する方式は採らない。Python側で訪問済みrefの
-  `set`を持ち1階層ずつ`conn.execute`する反復方式か、SQLiteのJSON関数で経路をJSON配列として
-  持ち`json_each`で判定する方式のいずれかとする（実装時に可読性で選択してよい）。
-- `_get_lineage_chain`（C1用、時系列順に整形）は`_get_backward_dependencies`の結果を
-  `relation_type='supersedes'`に絞り`created_at`昇順に並べる薄いラッパーとする。
+- **トラバーサル実装（M3・B7確定）**: 上記再帰CTE スニペットは**実装しない**。理由: 本コードベースに
+  前例ゼロ、かつ SQLite の再帰CTE にはサイクル検知が無く任意文字列 ref で経路を壊す恐れがある。
+  代わりに **Python 反復トラバーサル（`visited` set によるサイクル安全）を単一実装**とし、
+  ヘルパ `_traverse_lineage(conn, run_id, start_ref, direction, max_depth, relation_types=None)`
+  として C5（trace_lineage ツール）・C1（Hydrate 表示）・C4（前方伝播）の3消費経路すべてが
+  これを呼ぶ（§15.1 単一ソース）。上記 CTE はアルゴリズムの意図を示す参考スニペットに留める。
+- `_get_backward_dependencies` / `_get_forward_dependents` / `_get_lineage_chain` はいずれも
+  `_traverse_lineage` の薄いラッパーとする（`_get_lineage_chain` は `relation_type='supersedes'` に
+  絞り `created_at` 昇順に並べる）。
+- **run_id スコープ（M4）**: `relation_edges` は全クエリで `run_id` でパーティションされる。本 BL の
+  系譜は **同一 run_id 内**に限定（クロス run 系譜は将来課題、`decision_log.md` へ記録）。ref は
+  run 内ユニークな id（`agreements.id` / `verified_facts.variable_name` / `entity_attributes(entity_id,attr_name)`）を
+  指す前提。`_traverse_lineage` も `run_id` を固定で絞る。
 
 ---
 
@@ -250,14 +328,14 @@ SELECT DISTINCT ref, MIN(depth) AS depth FROM backward GROUP BY ref ORDER BY dep
   - スキーマブロック（~5480-5670）へ`relation_edges`＋インデックス
   - `_write_relation_edge` / `_get_backward_dependencies` / `_get_forward_dependents` /
     `_get_lineage_chain` / `_link_supersession` 新設
-  - `_commit_agreement_from_tool`（~3444-3458、W1・W3・W4の配線）
-  - `write_entity_attribute`ハンドラ（~1821、W1・W4）
-  - `db_supersede_agreement`呼び出し5箇所（~3139, 3284, 3288, 5904, 12903）へ`_link_supersession`（W2、§15.2で個別確認）
-  - `upsert_verified_fact`（~6699）・`upsert_entity_attribute`（~7066）へ前方伝播フック（C4）
+  - `_write_agreement_impl`（実際は `_commit_agreement_from_tool` 内部、`confirmed_variables` ループ、W1・W3・W4の配線）
+  - `write_entity_attribute`ハンドラ（W1・W4）
+  - `db_supersede_agreement`呼び出し — `write_agreement`(edits 3箇所)・`_resolve_directive_for_task`(1箇所) へ`_link_supersession`（W2、§15.2で個別確認；decision_extractor フォールバックは除外・M1）
+  - `upsert_verified_fact`・`upsert_entity_attribute`へ前方伝播フック（C4；entity は内部で task_id/phase_id ブリッジ・M2）
   - `_build_agreements_context`（~7451-7570）の`_find_prior_superseded`呼び出しを
     `_get_lineage_chain`へ置き換え（C1）
   - `_audit_report`（~6825）＋CLI引数へ`--ref`（C2）
-  - `task_plan_reviewer_node`（~12052）へ後方系譜チェック（C3）
+  - `upsert_verified_fact`（6719）へ provisional 捕捉フック（C3・境界方式・A2解決；task_plan_reviewer_node は変更なし）
   - `WRITE_AGREEMENT_TOOL`の`confirmed_variables`スキーマへ`derived_from`、および`depends_on`の
     説明文へ「ここに書いた依存は系譜として後続のAIがたどれる」旨を追記（~2295-2306）
   - task_planner/Expertのプロンプト（~8068、~8467）へ`derived_from`記入を促す一文を
@@ -272,17 +350,36 @@ SELECT DISTINCT ref, MIN(depth) AS depth FROM backward GROUP BY ref ORDER BY dep
 
 ---
 
-## 未決事項（ユーザー判断）
+## 未決事項（ユーザー判断・全件解決済み → decision_log D-204）
 
-1. **最大探索深度**: 10を提案（新規の重要定数のためAGENTS.md §7により明示承認が必要）。
-   あわせてC1のHydrate表示で1エントリあたり何段まで見せるか（3段程度を提案）。
-2. **置換を伴わない単独のRejected**: 本設計の`supersedes`エッジは「旧案が新案に置き換えられた」
-   1:1の対応がある場合を対象とする。代案が無いまま却下されただけの提案は、既に
-   `status='Rejected'`＋`reason_why`として保存され`⚠️[却下事項]`でコンテキストにも出ている
-   （F-3.6は満たされている）ためエッジは張らない設計とした。これで足りるか確認したい。
-3. **実装の分割**: スキーマ＋書き込み4経路＋消費4経路と規模が大きい。「スキーマ＋W1/W2/W3
-   （機械的骨格）＋C2（監査レポート）」を先に入れて実ドライランで系譜が実際に繋がることを
-   確認してから、C1（Hydrate表示、トークン量への影響が最大）・C3・C4・W4を追加する2段階を推奨。
+1. **最大探索深度**: **N=10 で承認（AGENTS.md §7 明示承認・2026-08-14）**。様子見とし、実ドライランで
+   トークン量／可読性のバランスを見て調整する。C1 の Hydrate 表示は1エントリにつき**3段**まで表示。
+2. **単独の Rejected も系譜に含める（ユーザー判断・2026-08-14）**: 含めないと「rejected されず放置」
+   または「暗黙的に承認されたように見える」ため、**単独棄却提案も系譜グラフに参加させる**。
+   機構: (a) 棄却時に同一 topic の現行アクティブ合意 Y があれば `supersedes` エッジ
+   `from_ref=agreement:<棄却X>` → `to_ref=agreement:<Y>` を張る（「X は Y に敗れた」＝系譜上の差し替えと
+   同型）；(b) 現行合意が無い純粋単独棄却は to_ref を持てないためエッジは張らず、**`status='Rejected'`＋
+   `⚠️[却下事項]` コンテキスト（既存・F-3.6 済）で常に表示**し、かつ `trace_lineage`／C1 が topic チェーンを
+   走査する際に `Rejected` ステータスの合意を明示的に結果に含めることで「不可視」を防ぐ（新 relation_type は
+   追加せず3種維持・§15.1）。
+3. **実装の分割（承認済み・BL-224＋BL-228 を合わせた3段階）**: 規模が大きいため3段階とし、BL-228 を
+   第3段階へ統合する（ユーザー判断・2026-08-14）。
+   - **Phase 1（BL-224 基盤）**: スキーマ（`relation_edges`＋インデックス）＋ W1/W2/W3（機械的骨格）＋
+     C2（`_audit_report --ref`）＋ **C5（`trace_lineage` ツール）**。実ドライランで系譜が AI からも人間からも
+     たどれることを確認。**C5 が無いと書いたエッジが AI から辿れず §15.4 に抵触**するため第1段階に必須。
+   - **Phase 2（BL-224 消費の深化）**: C1（Hydrate 系譜表示・トークン量影響最大で後回し）・C3（upsert 境界
+     アンカリング）・C4（前方伝播ステイルネス）・W4（fact の `derived_from`）。
+   - **Phase 3（BL-228 統合）**: `chat_history` 活性化（死蔵→正本）＋ ref プレフィックス拡張
+     （`turn:`/`issue:`/`whiteboard:`/`detector_review:`）＋ `trace_lineage` の `turn:` 受付＋ C1/C4 の
+     再利用。BL-224 の `relation_edges` を単一基盤として共有（§15.1）。
+   ※W2 のエッジ対象は独立レビューM1により **write_agreement(edits 3箇所) ＋ `_resolve_directive_for_task`(1箇所) の計4箇所**に絞り、
+   decision_extractor フォールバック(12923) は除外。トラバーサルは M3 により `_traverse_lineage`（Python 反復・visited set）に単一化。
+4. **`chat_history` スパイン＋Hydrate 統合は別 BL へ分割**: ユーザー判断により、本 BL-224 は
+   **決定・値・事物の系譜（agreement/fact/entity の `relation_edges`）** に専念し、`chat_history`
+   の DB 活性化・N/M 役割非対称要約・ターン内チューリン描画・「本来の Hydrate/trace」統合は
+   **[BL-228](../BL-228/BL228_basic_design.md)** へ分離した。BL-228 は本 BL の `relation_edges`
+   を基盤とし、ref プレフィックスを `turn:`/`issue:`/`whiteboard:` まで拡張する。両者は `run_id`
+   スコープで同一グラフに参加する設計（§15.1 単一ソース: `relation_edges` は1箇所の実装）。
 
 ---
 
@@ -309,8 +406,8 @@ SELECT DISTINCT ref, MIN(depth) AS depth FROM backward GROUP BY ref ORDER BY dep
 別モデル（claude opus）が作成した本設計書を、hy3 が実コード（`cela_main.py`）に対して各主張を
 逐一照合してレビューした。骨格（汎用エッジテーブル・3 ref プレフィックス・3 関係種別・§15.4 の
 「死蔵 depends_on を復活」という動機）は正しいが、実装に着手すると詰まる／誤動作する抜けと論理
-バグが複数あった。以下、A1 は議論により解決済み（設計書へ反映）、A2〜A5・B5〜B8 は**未解決課題**
-として残す（実装前に設計で解決または方針確定すること）。
+バグが複数あった。以下、A1 は議論により解決済み（設計書へ反映）、**A2〜A5・B5〜B7 は設計で解決済み**
+（各節へ反映）、**B8（backfill）のみ実装着手時に別途検討する遅延課題**として残る。
 
 ### 検証済みで正しかった点（実コード確認）
 
@@ -353,6 +450,11 @@ SELECT DISTINCT ref, MIN(depth) AS depth FROM backward GROUP BY ref ORDER BY dep
    グローバル制約等は task_id 空・phase_id のみであり、ここで落とすと「出所不明」が再発する
    （過去ランの実害）。両方空ならセンチネルでタグ付けし追跡可能性を保持（エッジは結ばないが
    事実は失われない）。
+   **タイミング（M2 確定）**: ブリッジは `upsert_entity_attribute` が実際の書き込み（INSERT/ON CONFLICT UPDATE）を
+   `conn.commit()` する直前に、関数**内部**で実行する（§15.3: 呼び出し元に関わらず構造的に迂回不可）。
+   この時点で `source_task_id` / `source_phase_id` は既に確定しているため、その値で agreement を探す。
+   見つからなかった場合のみセンチネルタグ（例 `"plan:sentinel"`）を `created_by`/理由に付与し、エッジは
+   結ばない（孤立 entity 属性として `read_entity` 等からは検索にひっかかる）。
 
 **孤立 fact の検索性（確認済み）**: `verified_facts` は `relation_edges` とは別の
 ソース・オブ・トゥルース。エッジは追加であり置換ではないため、agreement に紐づかない fact も
@@ -362,26 +464,39 @@ SELECT DISTINCT ref, MIN(depth) AS depth FROM backward GROUP BY ref ORDER BY dep
 
 ### 未解決課題（実装前に設計で解決または方針確定すること）
 
-- **A2: C3 のスキーマ混同＋タイミング誤り（ブロッキング）**
-  `owns_variables` は `list[str]`（変数名のみ、7181行）であり `confidence` フィールドは存在しない。
-  設計書の「owns_variables のうち `confidence='provisional'`」は存在しないフィールドを見ている。
-  さらに `task_plan_reviewer_node`（実際は 12072）は**実行開始前に1回だけ**発火する計画レビュー
-  ゲートであり、その時点では `verified_facts` は未書き込み。provisional な fact の「上流をたどる」
-  は何も見つからない。意図（expert_calculation のみの暫定値を捕捉）は **upsert 時（W1/C4 付近）**
-  にすべき。C3 は設計として書き直しが必要。
+- **A2: C3 のスキーマ混同＋タイミング誤り — 【解決済み・設計書 C3 節を書き直し】**
+  `owns_variables` は `list[str]`（変数名のみ、7181行）であり `confidence` フィールドは存在しない
+  （スキーマ混同、確定）。さらに `task_plan_reviewer_node`（12073付近）は**実行開始前に1回だけ**発火し、
+  その時点では `verified_facts` は未書き込み（タイミング誤り、確定）。よって C3 を
+  **`upsert_verified_fact`（6719）の境界へ移動**し、(1) `owns_variables` ではなく `verified_facts.confidence`
+  を読む、(2) ノード非依存（Expert/decision_extractor/human-input/将来のplanner・reviewer すべてが通る
+  単一入口）とした。捕捉は `confidence='provisional'` の表示強調（段階1）＋任意の上流トラバーサル
+  （段階2、BL-219 経路再利用）。**計画段階の概算を facts として登録する挙動変更は別 BL に分離**
+  （本 BL スコープ外、§15.2/§15.1/ユーザー合意要）。
 
-- **A3: C1「前提（depends_on）」行のデータソース欠如（ブロッキング）**
-  表示例には「系譜（supersedes）」と「前提（depends_on）」の両方が描かれているが、
-  `_get_lineage_chain` は `relation_type='supersedes'` のみを返す。depends_on の後方エッジ
-  （＝「前提」行）を取得・描画するクエリと分岐が指定されていない。C1 は supersedes 連鎖だけでなく
-  depends_on 後方エッジも描くよう設計すること。
+- **A3: C1「前提（depends_on）」行のデータソース欠如 — 【解決済み・C1節へ設計追記】**
+  表示例には「系譜（supersedes）」と「前提（depends_on）」の両方が描かれていたが、旧 `_get_lineage_chain`
+  は `relation_type='supersedes'` のみを返し「前提」行のデータソースが無かった（ブロッキング、確定）。
+  これを解消: C1 は各 agreement につき (1) `_get_lineage_chain`（supersedes 連鎖＝「系譜」行）、
+  (2) `_traverse_lineage(relation_types=['depends_on'], direction="backward")`（＝「前提」行）の2回呼び、
+  depends_on 後方エッジを from_ref の種別（agreement/fact/entity）で解決表示する。前提は `relation_edges`
+  からのみ読み（agreements.depends_on 列は W3 で流し込み）、B8 backfill で既存データも対象。同一の
+  `_traverse_lineage`（M3 単一実装）を `relation_types` で絞るだけで済む。
 
-- **A4: W3 の depends_on→`agreement:<id>` マッピング未定義（ブロッキング）**
-  スキーマ（実際は 2295-2306）は `depends_on: ['42']`（system prompt の括弧番号）を期待し、検証
-  （3367-3375）はその値を `agreements.id` と直接照合する。これを `agreement:<id>` エッジ ref にどう
-  マッピングするか、および既存検証を**再利用**するか置換するかが未指定（§15.4 非対称・壊れた ref の
-  懸念）。格納される `depends_on` の実際のフォーマットと `agreement:<real_id>` 形式の整合を、W3
-  実装前にピン留めすること。
+- **A4: W3 の depends_on→`agreement:<id>` マッピング【解決済み】**
+  **真因**: スキーマ説明（`cela_main.py:2295-2306`）が「`[42]` のような括弧番号」と指示しているが、
+  これは実態と食い違う古い記述。`_new_record_id("AG")`（`2210`）は `AG-{ミリ秒}-{uuid}` を返し、
+  system prompt はそれをそのまま `[AG-xxxx]` 表示する（`7578`）。検証 `3367-3375` も `id=?` に
+  `dep_id` を直接渡すため、LLM が表示通り `AG-xxxx` を書けば通る。つまり depends_on に書く値は
+  **実 id そのもの**であり、W3 の ref 変換は `f"agreement:{dep_id}"` の単純プレフィックスで済む
+  （翻訳表不要）。
+  **決定**: (1) マッピングは `agreement:{dep_id}` プレフィックス、方向は `from_ref=前提(Y)`→
+  `to_ref=依拠先(X)`・`relation_type='depends_on'`（スキーマ定義に準拠、A3 の C1「前提」行と整合）；
+  (2) 検証は `3367-3375` をそのままゲートとして**再利用**（新規検証は書かず、§15.1 単一ソース）し、
+  `_write_relation_edge` の `EXISTS` 再検証が二重の守りとなる； (3) `2295-2306` の説明を
+  `'[42]' -> ['42']` から `'[AG-xxxx]' -> ['AG-xxxx']` へ修正し、壊れた ref の懸念（§15.4）を
+  根本から塞ぐ（コード修正、§8 未着手）。詳細は「### W3（LLM記入・既存引数の復活）」節へ反映済み。
+  B8 バックフィルも同一マッピングを使用。
 
 - **A5 / C5: `trace_lineage` ツール（AI オンデマンド消費経路）の欠如（ブロッキング・最重要）**
   現状の消費経路は C1（自動・agreement のみ・深度限定・オンデマンド不可）・C2（`_audit_report` は
@@ -403,35 +518,54 @@ SELECT DISTINCT ref, MIN(depth) AS depth FROM backward GROUP BY ref ORDER BY dep
   **相互に食い合う**（片方がもう片方を「既マーク済み」と誤認）。別の冪等プレフィックス
   （例 `⚠️[BL-224: 上流変更で要再確認]`）を定義すること。
 
-- **B6: W2 の「5箇所に `_link_supersession`」は BL-226 が警告する散在パターン（§15.2）**
-  5箇所のうち 3箇所（3139/3284/3288）は同一関数内。5924 は直後に新 id あり。しかし
-  **12923（Integrator パス）では新 id がスコープ内に存在しない**（後で別経路で作られる）。
-  「5箇所一律に呼ぶ」だけでは 12923 の新 id をどう捕まえるかが未解決。単一ラッパー
-  `supersede_agreement(old_id, new_id, reason)`（flip＋edge 書き込みを一括）か、最低でも
-  write_agreement 内の3箇所を集中させることを推奨。
+- **B6: W2 の `_link_supersession` 散在（§15.2）— 【部分修正・独立レビューM1で事実誤認を訂正】**
+  独立レビューが実コードで再照合した結果、私（hy3）の「12923（Integrator パス）では新 id が
+  スコープ内に存在しない」は**事実誤認**であった。`db_supersede_agreement(a["id"])` の直後に
+  同じ UPDATE ブロック内（12965 付近）で `_new_record_id("AG")` により新 id が生成され
+  `db_append_agreement` で保存される。したがって新 id は捕捉可能。
+  **ただし設計上の結論は「12923 パスは supersession エッジの対象外」とする**（独立レビューM1の勧告を採用）。
+  理由: ここは `write_agreement` 未使用時の再抽出フォールバックであり、作られる新 agreement は
+  「同一 topic の再抽出」＝ lineage 上の「差し替え」ではない。ここでエッジを張ると chain が誤導される。
+  よって W2 のエッジ対象は **`write_agreement` の edits 3箇所 ＋ `_resolve_directive_for_task` 1箇所**
+  の計4箇所とし、12923 は明示的に除外（その旨をコードコメントへ残す）。BL-226 の散在警告への対応は
+  単一ラッパー `supersede_agreement(old_id, new_id, reason)`（flip＋edge 書き込み一括）を採用し、
+  `write_agreement` 内の3箇所をそのラッパーに集中させる。
 
-- **B7: 再帰CTE のサイクル対策が「未決」のまま**
-  2案を挙げて実装者に委ねている。再帰CTE の前例ゼロ＋自身がサイクル懸念を挙げている以上、
-  **訪問済み set を持つ Python 反復方式**を明示的に選定すること（実装者の裁量に残さない）。
+- **B7: 再帰CTE のサイクル対策 — 【解決済み・M3で確定】**
+  再帰CTE は**採用しない**と決定（本コードベース前例ゼロ＋サイクル検知欠如）。替わりに
+  **訪問済み set を持つ Python 反復トラバーサル `_traverse_lineage` を単一実装**とし、C5/C1/C4 が
+  すべてこれを呼ぶ（詳細は「再帰CTE設計」節を参照）。実装者の裁量には残さない。
 
 - **B8: 既存 `depends_on` 行の移行（backfill）が無い**
   BL-224 前の agreements は既に `depends_on` を保持しているが、それらのエッジは `relation_edges` に
   入らない。進行中／過去 run の系譜が不完全になる。一回性の backfill スクリプトを検討すること。
 
-- **C（ドキュメント精度）: 行番号が系統的に ~+20 ズレ**
-  `db_supersede_agreement` 呼び出し 5904→5924・12903→12923、`upsert_verified_fact` 6699→6719、
-  `upsert_entity_attribute` 7066→7086、`_audit_report` 6825→6845、
-  `task_plan_reviewer_node` 12052→12072。また C4 の根拠 `verified_facts_json` が 7759-7760 とあるが
-  その行は Detector コンテキストの return（`_build_task_scope_context` は 7763 開始）であり誤引用。
-  W1 の場所も `_commit_agreement_from_tool` 3444-3458 → 実際は `_write_agreement_impl`。
-  **関数名で引く**ことを推奨。
+- **C（ドキュメント精度）: 行番号ドリフト — 【解決済み・M5で反映】**
+  実測で以下を確定：`db_supersede_agreement` 呼び出しは write_agreement(edits 3箇所)・
+  `_resolve_directive_for_task`(1箇所)・decision_extractor フォールバック(12923) の計5箇所；
+  `upsert_verified_fact` は 6719、`upsert_entity_attribute` は 7086、`_audit_report` は 6845、
+  `task_plan_reviewer_node` は 12072。本文の W1/W2 は関数名参照へ書き換え済み（行番号のシステム的
+  ズレを避けるため §16.2 に従う）。C4 の根拠 `verified_facts_json` の行は Detector コンテキスト
+  return であり誤引用だったが、C4 は既存表示経路（`reason` 列）を再利用する方針でその箇所に依存しない。
 
 ### 総評
 
 アーキテクチャの方向性は正しく、要件定義§4.2 の「DAG系譜」を死蔵から復活させる動機も適切。
 A1 の解決策（戻り値変更＋ループ内エッジ＋`_write_relation_edge` 単一検証ゲート＋entity は
-task_id/phase_id ブリッジ）を骨格として採用する。実装着手前に A2・A3・A4・A5/C5 を設計で解決し、
-B5・B6 を方針として確定させること。実装は「スキーマ＋W1/W2/W3（骨格）＋C2（CLI）＋**C5（trace_lineage）**」
+task_id/phase_id ブリッジ）を骨格として採用する。独自レビュー（hy3）の課題はすべて解決済み:
+**A2**（C3 を upsert 境界へ移動＋計画概算 facts 登録は別 BL-229 へ分離）・**A3**（depends_on 後方
+エッジを C1「前提」行として設計）・**A4**（W3 マッピング＝`agreement:{dep_id}` 単純プレフィックス＋
+`3367-3375` 検証の再利用＋`2295-2306` 説明の実 id 化で壊れた ref を根本解決）・**A5/C5**
+（`trace_lineage` ツール新設）・**B5**（別冪等プレフィックス `⚠️[BL-224: 上流変更で要再確認]`）。
+**独立レビュー（M1–M5）も全文を実コードで再照合の上反映済み**:
+- M1 → B6 の事実誤認を訂正しつつ、12923 フォールバックをエッジ除外と確定（W2 は計4箇所）。
+- M2 → entity ブリッジの「タイミング」を `upsert_entity_attribute` 内部・commit 直前に確定。
+- M3 → トラバーサルを `_traverse_lineage`（Python 反復・visited set）単一実装に確定（再帰CTE は不採用）。
+- M4 → `run_id` スコープを設計書へ明記（系譜は同一 run_id 内、クロス run は将来課題）。
+- M5 → 本文の行番号参照を関数名参照へ書き換え（ドリフト回避、§16.2）。
+
+実装は「スキーマ＋W1/W2/W3（骨格）＋C2（CLI）＋**C5（trace_lineage）**」
 を先に入れ、実ドライランで系譜が AI からも人間からもたどれることを確認してから、C1（Hydrate 表示）・
-C3・C4・W4 を追加する2段階を推奨（A5/C5 が無いと書いたエッジが AI から辿れず §15.4 に抵触するため、
-C5 を第1段階に含めるよう未決事項3を修正）。
+C3・C4・W4 を追加する2段階を推奨（C5 が無いと書いたエッジが AI から辿れず §15.4 に抵触するため第1段階に含める）。
+独立レビュー・独自レビュー双方の課題は設計で解決済み。残るのは (1) 未決事項1（最大探索深度定数・
+§7 ユーザー承認）、(2) B8（backfill・実装着手時に別途検討の遅延課題）。いずれもブロッカーではない。

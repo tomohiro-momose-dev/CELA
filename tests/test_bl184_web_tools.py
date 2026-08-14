@@ -692,3 +692,74 @@ def test_read_reference_file_not_found(monkeypatch, tmp_path):
     state = {"run_id": "run-1"}
     result = web_tools.read_reference_file_handler({"keyword": "存在しない"}, state)
     assert result["status"] == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# [BL-221] read_reference_file の grep パラメータ / _MAX_FETCH_BYTES 引き上げ
+# ---------------------------------------------------------------------------
+
+def test_bl221_max_fetch_bytes_raised_to_50mb():
+    """[BL-221] 8MB→50MBへユーザー承認のもと引き上げたことの固定化。"""
+    assert web_tools._MAX_FETCH_BYTES == 50 * 1024 * 1024
+
+
+def test_grep_with_context_returns_none_when_no_match():
+    assert web_tools._grep_with_context("line1\nline2\nline3", "存在しない文字列") is None
+
+
+def test_grep_with_context_includes_surrounding_lines():
+    content = "\n".join(f"line{i}" for i in range(1, 21))
+    result = web_tools._grep_with_context(content, "line10", context_lines=2)
+    assert "line8" in result
+    assert "line9" in result
+    assert "line10" in result
+    assert "line11" in result
+    assert "line12" in result
+    assert "line7" not in result
+    assert "line13" not in result
+
+
+def test_grep_with_context_merges_overlapping_windows():
+    """マッチ同士が近接している場合、コンテキスト窓が重複せず1つのブロックへ
+    統合されること（同じ行が二重に出力されない）。"""
+    lines = [f"line{i}" for i in range(1, 21)]
+    lines[4] = "target"  # line5 -> target (index 4)
+    lines[6] = "target"  # line7 -> target (index 6), context_lines=2なので窓が重なる
+    content = "\n".join(lines)
+    result = web_tools._grep_with_context(content, "target", context_lines=2)
+    assert result.count("--") == 0  # 隣接する2マッチが1ブロックへ統合され、区切りが出ない
+    assert result.count("target") == 2
+
+
+def test_grep_with_context_caps_match_blocks_and_notes_truncation():
+    content = "\n".join(f"target{i} spacer spacer spacer spacer" for i in range(1, 50))
+    result = web_tools._grep_with_context(content, "target", context_lines=0)
+    assert "先頭30件のみ表示" in result
+
+
+def test_read_reference_file_grep_requires_path():
+    result = web_tools.read_reference_file_handler({"grep": "foo"}, {"run_id": "run-1"})
+    assert result["status"] == "error"
+    assert "grep" in result["message"]  # 汎用の「pathまたはkeywordを指定」エラーと区別できること
+
+
+def test_read_reference_file_grep_returns_context_not_whole_file(monkeypatch, tmp_path):
+    """[BL-221] pathとgrepを組み合わせると、_MAX_READ_REFERENCE_CHARSによる切り詰めを
+    経由せず全文からマッチ箇所の前後だけを返すこと。"""
+    monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))
+    cache_path = web_tools.cache_file_path("https://example.com/big")
+    body = ("filler line\n" * 5000) + "★目的の記述★\n" + ("filler line\n" * 5000)
+    web_tools.write_cache(cache_path, "https://example.com/big", body)
+    state = {"run_id": "run-1"}
+    result = web_tools.read_reference_file_handler({"path": cache_path.name, "grep": "★目的の記述★"}, state)
+    assert "★目的の記述★" in result
+    assert len(result) < len(body)
+
+
+def test_read_reference_file_grep_not_found_in_existing_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))
+    cache_path = web_tools.cache_file_path("https://example.com/big")
+    web_tools.write_cache(cache_path, "https://example.com/big", "ここには目的の文字列がありません")
+    state = {"run_id": "run-1"}
+    result = web_tools.read_reference_file_handler({"path": cache_path.name, "grep": "存在しないパターン"}, state)
+    assert result["status"] == "not_found"
