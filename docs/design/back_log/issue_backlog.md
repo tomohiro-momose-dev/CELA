@@ -7825,7 +7825,7 @@ BL-219の調査で、task_plan_reviewerが`think`の中で「約8,500人/日は`
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（Phase 1・Phase 2 実装済み・オフラインDBテスト済み。実ドライラン全体検証は BL-231 ループにより中断中） |
+| 状態 | `in_progress`（Phase 1・Phase 2 実装済み・オフラインDBテスト済み。Phase 3＝BL-228 統合を 2026-08-15 より実装中。実ドライラン全体検証は BL-231 ループガード導入後に再開予定） |
 | 優先度 | P2 |
 | テスト | `tests/test_bl224_relation_edges.py`（Phase 1: W1/W2/W3/N2/C2/C5）、`tests/test_bl224_phase2_lineage_consumption.py`（Phase 2: W4/C1/C3/C4） |
 | 関連 | BL-219/220/223（同日の同型欠陥3連続）、要件定義§4.2（`depends_on`＝DAG系譜）、F-8.4(2)（時系列復元読み）、F-3.6/F-8.2（正負の理由）、F-3.9（構造化ファクトストア）、D-196（立案時のみの対策を恒久化）、BL-168（staleness markerイディオム） |
