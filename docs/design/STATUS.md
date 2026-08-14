@@ -51,7 +51,22 @@ Phase 1（R1）・Phase 2（R2）はともにDone。**R3a（自律的DB/ファ�
 
 対応: `_query_AI_live` のツールループ内に共有ガードを実装（§15.1 単一ソース・§15.3 機械的検証）。各 iteration の「正規化テキスト＋ツール呼び出し計画署名」の結合ハッシュを直近 `WINDOW` 件のスライド窓で保持し、連続同一を検知。発動時は `RuntimeError` を投げず `return content`（最後の出力）で強制終了し、50 往復のトークン burn と出力消失を回避。大音声警告＋`_LAST_REPETITION_GUARD_TRIPPED`（label/iteration/run_id/冒頭120字）で可観測化。Detector 発端だが全ツールノード（Expert/User AI/Resource Arbiter/Integrator 等）を同型崩壊から保護。
 
-新規定数 `_LOOP_GUARD_REPETITION_WINDOW = 3` は AGENTS.md §7 によりユーザー承認済み（2026-08-14）。回帰テスト `tests/test_bl231_loop_guard.py`（実 LLM なしのモックストリーミング駆動、§17.1 準拠）3 件作成・通過。関連オフラインテスト 39 件も通過。設計書: [BL-231/BL231_basic_design.md](back_log/BL-231/BL231_basic_design.md)。BL-231 は `in_progress`（実装・テスト完了、定数承認済み。残作業は実LLM再ドライランでの効果確認）。
+新規定数 `_LOOP_GUARD_REPETITION_WINDOW = 3` は AGENTS.md §7 によりユーザー承認済み（2026-08-14）。回帰テスト `tests/test_bl231_loop_guard.py`（実 LLM なしのモックストリーミング駆動、§17.1 準拠）3 件作成・通過。関連オフラインテスト 39 件も通過。設計書: [BL-231/BL231_basic_design.md](back_log/BL-231/BL231_basic_design.md)。BL-231 は `done`（実装・テスト完了、定数承認済み）。
+
+---
+
+**【2026-08-15 追記】BL-224 Phase 3（＝BL-228 統合）を実装着手**
+
+ユーザー指示「BL-224 phase3を進めよう」（2026-08-14→実施 2026-08-15）。設計書の未決事項3（3段階分割、D-204 承認済み）により、Phase 3 を **BL-228 統合**として定義: `chat_history` スパイン活性化（死蔵→正本）＋ ref プレフィックス拡張（`turn:`/`issue:`/`whiteboard:`/`detector_review:`）＋ `trace_lineage` の `turn:<id>` 受付＋ detector_reviews 表＋W2（detector 差戻の構造化）＋C4（ターン内チューリン描画）。
+
+実装済み（2026-08-15）:
+- W1: `chat_history` 拡張列（task_id/phase_id/summary_brief/summary_detail/is_rollback）＋インデックス、全 append 点から `_write_chat_history_row` 単一ゲートで正本へ書く（`state["last_chat_history_id"]` で turn id を後続へ運ぶ）。既存DB向けマイグレーション `_ensure_chat_history_lineage_columns` を `init_db` に組み込み。
+- ref 拡張: `_resolve_ref_table`/`_resolve_ref_line`/`_trace_lineage_handler`/`TRACE_LINEAGE_TOOL` に 4 プレフィックスを追加。
+- W2: 専用表 `detector_reviews` 新設。`_bl228_record_detector_review` ヘルパで minor/major 判定時に①detector_reviews 行挿入②`chat_history.is_rollback=1`③`detector_review:<id>`→`turn:<id>` エッジを書く。major＋assistant で whiteboard 注釈成功時は `turn:<id>`→`whiteboard:<phase>:<task>`、BL-096 自動起票時は `turn:<id>`→`issue:<topic>` の下流エッジも張る。
+- C4: `_render_lineage_audit(turn:<id>)` が当該タスクの `whiteboard_drafts` 版歴を時系列描画（`_render_turn_whiteboard_timeline`）。
+- 据え置き（§15.4 audit-only）: 単一閾値N要約（軽量/ローカルLLM委任）と N/M ティア定数は未実装。`summary_brief`/`summary_detail` 列は常に空（要約委任実装時にのみ埋まる）。新規§7定数は不要（N/M は要約実装時にのみ必要）。
+
+検証: `python -m py_compile cela_main.py` 合格。新規 `tests/test_bl228_chat_history_lineage.py`（9件）＋既存 `tests/test_bl224_relation_edges.py`（18件）＝27件通過。実 LLM ドライラン検証は BL-231 ガード導入後、全体検証の一環として実施予定。
 
 ---
 
