@@ -45,6 +45,16 @@ Phase 1（R1）・Phase 2（R2）はともにDone。**R3a（自律的DB/ファ�
 
 ---
 
+**【2026-08-14 追記】BL-231（生成崩壊ループ・検知停止ガード）を実装**
+
+2026-08-14 の実ドライラン（run_id `1786699546-9ac0105d`）で、Detector ノードが同一テキストを逐語 40 回繰り返す生成崩壊（repetition degeneracy）により無限ループに陥った。根本原因は `_query_AI_live` のツールループが「モデルが同一出力を繰り返す」ことを検知せず、`MAX_TOOL_ITER=50` まで burn するか非収束 `RuntimeError` で出力ごと失われる点。この崩壊は BL-224 Phase 1/2 の実装（オフラインDBテスト合格）とは無関係と実証済み（ループ内ツールは全て既存、BL-224 新設の `trace_lineage` は 0 回）。BL-224 Phase 1/2 は実装済み。
+
+対応: `_query_AI_live` のツールループ内に共有ガードを実装（§15.1 単一ソース・§15.3 機械的検証）。各 iteration の「正規化テキスト＋ツール呼び出し計画署名」の結合ハッシュを直近 `WINDOW` 件のスライド窓で保持し、連続同一を検知。発動時は `RuntimeError` を投げず `return content`（最後の出力）で強制終了し、50 往復のトークン burn と出力消失を回避。大音声警告＋`_LAST_REPETITION_GUARD_TRIPPED`（label/iteration/run_id/冒頭120字）で可観測化。Detector 発端だが全ツールノード（Expert/User AI/Resource Arbiter/Integrator 等）を同型崩壊から保護。
+
+新規定数 `_LOOP_GUARD_REPETITION_WINDOW = 3` は AGENTS.md §7 によりユーザー承認済み（2026-08-14）。回帰テスト `tests/test_bl231_loop_guard.py`（実 LLM なしのモックストリーミング駆動、§17.1 準拠）3 件作成・通過。関連オフラインテスト 39 件も通過。設計書: [BL-231/BL231_basic_design.md](back_log/BL-231/BL231_basic_design.md)。BL-231 は `in_progress`（実装・テスト完了、定数承認済み。残作業は実LLM再ドライランでの効果確認）。
+
+---
+
 ## 現在フェーズ
 
 | 項目 | 状態 |
