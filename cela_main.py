@@ -4745,8 +4745,9 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
     [BL-131/TOOL_DISPATCH state化] `state`は_query_AI_liveへそのまま透過する（レコード/リプレイの
     キャッシュキーには影響しない）。
     """
-    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION
+    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION, _LAST_REPETITION_GUARD_TRIPPED
     _LAST_PYTHON_CALLS = []
+    _LAST_REPETITION_GUARD_TRIPPED = None  # [BL-231]
     _LAST_WRITE_AGREEMENT_SUCCEEDED = False
     _LAST_WRITE_AGREEMENT_ITEMS = []
     _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED = False
@@ -4861,6 +4862,40 @@ class _StreamMessage:
         return d
 
 
+# [BL-231] 生成崩壊検知の連続同一出力閾値（AGENTS.md §7 重要定数: 提案値3、ユーザー承認要）。
+# 連続して同一結合ハッシュ（正規化テキスト＋ツール計画）がこの回数出たら崩壊とみなし、ツールループを強制終了する。
+_LOOP_GUARD_REPETITION_WINDOW = 3
+
+
+def _bl231_norm_text(text: str) -> str:
+    # [BL-231] ホワイトスペースを正規化し、不可視文字の微小な揺らぎに強くする。
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
+def _bl231_plan_sig(tool_calls) -> str:
+    # [BL-231] ツール呼び出し計画の署名: (name, 正規化args) のソート済リストを JSON 化。
+    if not tool_calls:
+        return ""
+    items = []
+    for tc in tool_calls:
+        fn = getattr(tc, "function", None)
+        name = getattr(fn, "name", "") or ""
+        raw_args = getattr(fn, "arguments", "") or "{}"
+        try:
+            args = json.loads(raw_args)
+        except Exception:
+            args = {"_raw": raw_args}
+        items.append((name, json.dumps(args, sort_keys=True, ensure_ascii=False)))
+    items.sort()
+    return json.dumps(items, ensure_ascii=False)
+
+
+def _bl231_combined_hash(msg) -> str:
+    # [BL-231] 同一出力（テキスト＋ツール計画）の逐語的繰り返しを検知する結合ハッシュ。
+    combined = _bl231_norm_text(getattr(msg, "content", "")) + "␟" + _bl231_plan_sig(getattr(msg, "tool_calls", None))
+    return hashlib.md5(combined.encode("utf-8")).hexdigest()
+
+
 def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str = "Unknown Node", tools: list[dict] | None = None,
                     light_system_prompt: str | None = None, state: dict | None = None) -> str:
     """【SLM要約】
@@ -4871,6 +4906,8 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
     頼らず、write_agreement等が`state["phases"]`等を直接参照できるようにするため）。
     `state`を渡さない呼び出し元（tools不要のノード等）は`None`のままでよい。
     """
+    global _LAST_REPETITION_GUARD_TRIPPED  # [BL-231] 生成崩壊ガード発動フラグ（query_AI呼び出しごとにリセット）
+    _LAST_REPETITION_GUARD_TRIPPED = None
     messages = _inject_japanese_output_directive(messages)
 
     # role連続チェック（デバッグ用、本番でも警告ログとして残す価値あり）
@@ -4934,6 +4971,7 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
     # 実害が拡大したことで発覚）。tools無し単発呼び出し経路はcross-iteration状態を持たないため
     # 影響なく、この初期化は変更しない。
     loop_messages: list[dict] = list(messages)
+    _recent_combined_hashes: list[str] = []  # [BL-231] 直近iterationの結合ハッシュ（APIエラーリトライをまたいで保持）
     tool_calls_used = 0
     python_calls_log: list[dict] = []  # BL-033: 実行したpython_replのcode/resultを蓄積
     reasoning_parts_all: list[str] = []  # [R5 F-2.1] 全iterationのreasoningを蓄積
@@ -5181,6 +5219,24 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                         for _, entry in sorted(tool_call_accum.items())
                     ] if tool_call_accum else None
                     msg = _StreamMessage("".join(content_parts) or None, tool_calls_list)
+
+                    # [BL-231] 生成崩壊検知: 同一出力（正規化テキスト＋ツール呼び出し計画）が連続
+                    # WINDOW 回現れたら、MAX_TOOL_ITER(=50)までburnせずツールループを強制終了する
+                    # （§15.3 機械的検証・非収束RuntimeErrorによる出力消失の回避）。
+                    _recent_combined_hashes.append(_bl231_combined_hash(msg))
+                    if len(_recent_combined_hashes) > _LOOP_GUARD_REPETITION_WINDOW:
+                        _recent_combined_hashes.pop(0)
+                    if len(_recent_combined_hashes) >= _LOOP_GUARD_REPETITION_WINDOW and \
+                            len(set(_recent_combined_hashes[-_LOOP_GUARD_REPETITION_WINDOW:])) == 1:
+                        print(f"🛑 [{label}] BL-231ループガード発動: 生成崩壊（同一出力を{_LOOP_GUARD_REPETITION_WINDOW}回連続検知、iter={iteration}）。ツールループを強制終了します。")
+                        _LAST_REPETITION_GUARD_TRIPPED = {
+                            "label": label,
+                            "iteration": iteration,
+                            "run_id": _CURRENT_RUN_ID,
+                            "last_output_head": (_bl231_norm_text(msg.content) or "")[:120],
+                        }
+                        content = msg.content or "(BL-231ループガード: 生成崩壊を検知して強制終了しましたが、有効な出力がありませんでした)"
+                        return content
 
                     if not getattr(msg, "tool_calls", None):
                         print(f"✅ [{label}] ツールループ終了（iter={iteration}, tool_calls使用={tool_calls_used}回）")
