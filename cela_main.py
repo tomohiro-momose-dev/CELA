@@ -2297,11 +2297,13 @@ WRITE_AGREEMENT_TOOL = {
                     "items": {"type": "string"},
                     "description": (
                         "Optional. IDs of EXISTING entries in the 【決定事項DB】(agreements DB) shown in your "
-                        "system prompt that this entry builds on — use the bracketed number shown before each "
-                        "entry there, e.g. '[42] ...' -> depends_on: ['42']. Do NOT put task_id values here "
-                        "(e.g. 'task_1_1') — that is a different concept (the task plan's own depends_on) and "
-                        "will be rejected since no such agreements-DB row exists. Omit this field entirely if "
-                        "you have no specific prior agreements-DB entry to cite."
+                        "system prompt that this entry builds on — use the bracketed ID shown before each "
+                        "entry there, e.g. '[AG-1765000000000-a1b2c3] ...' -> depends_on: ['AG-1765000000000-a1b2c3']. "
+                        "[BL-224] These are the real agreement IDs (not short numbers); they are validated to "
+                        "exist and become lineage (depends_on) edges in relation_edges that later AI traces. "
+                        "Do NOT put task_id values here (e.g. 'task_1_1') — that is a different concept (the "
+                        "task plan's own depends_on) and will be rejected since no such agreements-DB row "
+                        "exists. Omit this field entirely if you have no specific prior agreements-DB entry to cite."
                     ),
                 },
                 "resource_claims": {
@@ -2413,7 +2415,7 @@ FREEZE_AGREEMENT_TOOL = {
             "properties": {
                 "agreement_id": {
                     "type": "string",
-                    "description": "The bracketed ID shown before the agreement in your system prompt, e.g. '[42] ...' -> '42'.",
+                    "description": "The bracketed ID shown before the agreement in your system prompt, e.g. '[AG-1765000000000-a1b2c3]' -> 'AG-1765000000000-a1b2c3'.",
                 },
                 "reason": {"type": "string", "description": "Why this decision must be permanently pinned."},
             },
@@ -3103,6 +3105,9 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
     """
     action_type = args.get("action_type", "CREATE")
     entry_type = args.get("entry_type", "Decision")
+    # [BL-224] W2: この処理でSuperseded化する旧agreement id（あれば）。INSERT後に
+    # new→old の supersedes エッジを張るために捕捉する（W2、§15.2で経路を列挙）。
+    superseded_old_id: str | None = None
     topic = args.get("topic", "")
     raw_content = args.get("decision_what", "")
     # [BL-161] 従来はargsにphase_idが無ければ空文字のまま（フォールバックなし）だった。
@@ -3137,6 +3142,7 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
                 print(f"  🧊🚫 [Freeze] topic '{target['topic']}'（agreement_id={target['id']}）はFreeze済みのためSUPERSEDEを拒否しました。")
                 return f"topic '{target['topic']}' はFreeze済みのため変更できません（agreement_id={target['id']}）", None
             db_supersede_agreement(target["id"], conn, run_id)
+            superseded_old_id = target["id"]  # [BL-224] W2 旧版捕捉
         # [BL-080] 以前はここで`return None`しており、旧レコードのstatus変更のみで処理が終わっていた。
         # ExpertがDeliverableの全文置換のためSUPERSEDE+decision_what（全文）を送っても、その内容は
         # 完全に破棄され、ホワイトボードには一切反映されないまま「成功」を返す実質何もしない
@@ -3282,10 +3288,12 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
         if entry_type == "Deliverable":
             if target is not None:
                 db_supersede_agreement(target["id"], conn, run_id)
+                superseded_old_id = target["id"]  # [BL-224] W2 旧版捕捉
         else:
             for a in reversed(get_agreements_from_db(conn, run_id)):
                 if a["topic"] == target_topic and a.get("status") != "Superseded":
                     db_supersede_agreement(a["id"], conn, run_id)
+                    superseded_old_id = a["id"]  # [BL-224] W2 旧版捕捉
                     break
 
     # [R5 F-3.7] トークンコスト抑制のため全件記録はせず、status='Rejected'の場合のみ
@@ -3295,12 +3303,13 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
     # "user_input"/"document", "detail": "URLや説明文"}のリスト）。プロンプト誘導のみで強制はしない
     # （Detector等での機械的ゲートは設けない）ため、未指定なら空配列のまま。
     citations_val = json.dumps(args.get("citations", []) or [], ensure_ascii=False)
+    new_ag_id = _new_record_id("AG")  # [BL-224] W1/W2/W3/N2 で系譜エッジを張るために捕捉
     conn.execute(
         "INSERT INTO agreements (id, action_type, status, topic, decision_what, reason_why, proposed_by, "
         "entry_type, phase_id, task_id, depends_on, resource_claims, timestamp, "
         "evidence, is_frozen, internal_thought_process, citations, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            _new_record_id("AG"), action_type, args.get("status", "Proposed"),
+            new_ag_id, action_type, args.get("status", "Proposed"),
             topic, content, args.get("reason_why", ""),
             caller_role, entry_type,
             phase_id, tid,
@@ -3308,6 +3317,30 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
             args.get("evidence", ""), 0, _agreement_thought, citations_val, run_id
         )
     )
+    # [BL-224] 系譜エッジ（W1/W2/W3/N2 の機械的骨格・§15.3）。LLM の記入とは無関係に、
+    # 新 agreement の発生に伴う線をここで一括で張る（後段の confirmed_variables ループが
+    # W1 の agreement→fact を _LAST_NEW_AGREEMENT_ID 経由で張る）。
+    global _LAST_NEW_AGREEMENT_ID
+    _LAST_NEW_AGREEMENT_ID = new_ag_id
+    edge_reason = args.get("reason_why", "")
+    if superseded_old_id:
+        # [BL-224] W2: 旧版 → 新版の supersedes エッジ（この turn で何が差し替わったか）。
+        _link_supersession(conn, run_id, superseded_old_id, new_ag_id, edge_reason, caller_role,
+                           source_task_id=tid, source_phase_id=phase_id)
+    if isinstance(args.get("depends_on"), list):
+        # [BL-224] W3: depends_on（既に 3367-3375 検証済みの実 id）→ relation_edges の
+        # depends_on エッジ（死蔵していた列の復活・A4 マッピング）。from=前提Y → to=新X。
+        for dep_id in args["depends_on"]:
+            _write_relation_edge(conn, run_id, f"agreement:{dep_id}", f"agreement:{new_ag_id}",
+                                 "depends_on", edge_reason, caller_role,
+                                 source_task_id=tid, source_phase_id=phase_id)
+    if args.get("status") == "Rejected":
+        # [BL-224] N2: 単独 Rejected の supersedes エッジ。棄却X が同一 topic の現行アクティブ
+        # 合意 Y に「敗れた」と記録する（共有ヘルパ _link_rejected_supersession）。Y が無い純粋
+        # 単独棄却はエッジを張らず、status='Rejected' ＋⚠️[却下事項] コンテキスト表示で可視
+        # （trace_lineage/C1 は Rejected を明示含む）。
+        _link_rejected_supersession(conn, run_id, new_ag_id, topic, caller_role,
+                                    source_task_id=tid, source_phase_id=phase_id)
     print(f"  📝 [write_agreement] {caller_role}が{entry_type}（{action_type}, status={args.get('status', 'Proposed')}）を記録しました: topic={topic}")
     # [BL-073] Deliverableが承認された場合、対応するtask_idのDirectiveをApprovedへ解決する。
     if entry_type == "Deliverable" and args.get("status") in RESOLVING_DELIVERABLE_STATUSES:
@@ -3442,6 +3475,11 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
         }
 
     # 6. confirmed_variablesをverified_factsへ反映
+    # [BL-224] W1（機械的・骨格）: 値が確定するたびに agreement→fact の derived_from エッジを
+    # 無条件で張る。「この値はどの決定が生んだか（5W1H の誰が・なぜ）」を値から引けるようにする
+    # 骨格であり、LLM の記入に一切依存しない（§15.3）。agreement id は _commit_agreement_from_tool
+    # が _LAST_NEW_AGREEMENT_ID に捕捉した新 id を使う。
+    new_ag_id = _LAST_NEW_AGREEMENT_ID
     for cv in args.get("confirmed_variables", []) or []:
         var_name = cv.get("variable_name")
         if not var_name:
@@ -3456,6 +3494,12 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
             citations=cv.get("citations") or [args.get("topic", "")],
             confidence=cv.get("confidence", "provisional"),
         )
+        if new_ag_id:
+            _write_relation_edge(
+                conn, run_id, f"agreement:{new_ag_id}", f"fact:{var_name}",
+                "derived_from", args.get("reason_why", ""), caller_role,
+                source_task_id=task_id, source_phase_id=args.get("phase_id", ""),
+            )
 
     # [BL-127] protected_warningが設定されている場合、DB上のagreement行自体は正常に
     # コミットされたが、ホワイトボード本体への実反映は保護によりスキップされている。
@@ -4487,6 +4531,8 @@ TOOL_DISPATCH = {
     "write_entity_attribute": lambda args, state=None: _write_entity_attribute_handler(args, state),
     "read_entity": lambda args, state=None: _read_entity_handler(args, state),
     "verify_entity_geo": lambda args, state=None: _verify_entity_geo_handler(args, state),
+    # [BL-224] C5: 判断の系譜を AI が能動取得する読み取り専用ツール（全ノード利用可）。
+    "trace_lineage": lambda args, state=None: _trace_lineage_handler(args, state),
     # [BL-198] 地理データ実測ツール。web_search/web_fetchと同型に、stateをstate/config兼用で渡す。
     "gsi_geocode": lambda args, state=None: geo_tools.gsi_geocode_handler(args, state or {}, _tool_config(state)),
     "gsi_get_elevation": lambda args, state=None: geo_tools.gsi_get_elevation_handler(args, state or {}, _tool_config(state)),
@@ -4550,6 +4596,11 @@ _LAST_ESSENCE_PROPOSAL: dict | None = None
 # その{question_text, blocking_reason}を記録する（_LAST_GOAL_REVISIONと同じパターン）。
 # expert_nodeが戻り値経由でstate["expert_consultation_mode"]/["expert_pending_question"]へ反映する。
 _LAST_ASK_USER_QUESTION: dict | None = None
+
+# [BL-224] 直前の _commit_agreement_from_tool が INSERT した新 agreement id。
+# _write_agreement_impl の confirmed_variables ループ（W1: agreement→fact の derived_from エッジ）
+# がここを読む（_LAST_WHITEBOARD_EDIT と同じブリッジパターン、§15.3 機械的骨格）。
+_LAST_NEW_AGREEMENT_ID: str | None = None
 
 
 def get_last_python_calls() -> list[dict]:
@@ -5687,6 +5738,30 @@ def init_db(conn: sqlite3.Connection) -> None:
         PRIMARY KEY (run_id, entity_id, attr_name)
     );
     CREATE INDEX IF NOT EXISTS idx_entity_attributes_run ON entity_attributes(run_id, entity_id);
+
+    -- [BL-224] 判断・値・事物を横断する系譜（Lineage）グラフの辺。
+    -- 要件定義書§4.2がagreements.depends_onを「DAG系譜」と定義しながら、その実装が
+    -- 書き込み時の存在検証（3367-3375）にしか使われず一切消費されていなかった（§15.4）ため、
+    -- 本テーブルへ流し込んで実際にたどれる線として復活させる。
+    -- agreements(id) / verified_facts(variable_name) / entity_attributes(entity_id, attr_name)は
+    -- それぞれ別のIDスペースを持つため、型プレフィックス付きの参照文字列（ref）で統一する。
+    -- 関係種別は3種のみ（§15.1 単一ソース）: depends_on（§4.2のDAG系譜。to_ref は from_ref を前提
+    -- として成立）/ supersedes（F-3.6・F-8.2の正負の理由。from_ref=旧・棄却 → to_ref=新・採用。
+    -- 単独Rejectedは同一topic現行合意Yがあれば from=棄却X → to=Y、無ければ status 表示で可視）/ derived_from（F-3.9）。
+    CREATE TABLE IF NOT EXISTS relation_edges (
+        id TEXT PRIMARY KEY,               -- "REL-xxx"（_new_record_id、BL-215の一元採番を使用）
+        run_id TEXT NOT NULL,
+        from_ref TEXT NOT NULL,            -- 上流（前提・旧版・入力）
+        to_ref TEXT NOT NULL,              -- 下流（結論・新版・導出結果）
+        relation_type TEXT NOT NULL,       -- depends_on | supersedes | derived_from
+        reason TEXT NOT NULL DEFAULT '',   -- この線が引かれた理由（supersedesでは「なぜ旧案を棄却し新案を採ったか」）
+        created_by TEXT NOT NULL,          -- caller_role（confirmed_by/proposed_byと同じ規約）
+        created_at REAL NOT NULL,
+        source_task_id TEXT DEFAULT '',
+        source_phase_id TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_relation_edges_run_from ON relation_edges(run_id, from_ref);
+    CREATE INDEX IF NOT EXISTS idx_relation_edges_run_to ON relation_edges(run_id, to_ref);
     """)
     _ensure_agreements_task_id_column(conn)
     _ensure_agreements_citations_column(conn)
@@ -5883,6 +5958,315 @@ def db_supersede_agreement(agreement_id: str, conn: sqlite3.Connection, run_id: 
     print(f"  ♻️ [DB] agreementsをSuperseded化: id={agreement_id}")
 
 
+# =====================================================================
+# [BL-224] 判断の系譜（Decision Lineage）— relation_edges ヘルパ群
+# =====================================================================
+# ref 参照方式: agreement:<id> / fact:<variable_name> / entity:<entity_id>:<attr_name>
+# 3つは別 ID スペースのため、汎用エッジテーブル relation_edges では型プレフィックス付き文字列で統一する。
+# 関係種別は3種のみ（§15.1 単一ソース）: depends_on / supersedes / derived_from。
+# すべて run_id スコープ（M4: 同一 run 内の系譜に限定、クロス run は将来課題）。
+
+
+def _resolve_ref_table(query: str, run_id: str, ref: str) -> bool:
+    """[BL-224] ref 文字列が示す実表の行が存在するかを機械的に検証する（§15.3）。
+
+    プレフィックス不明の場合は False を返し、走査・書き込みを拒否する（§13.3 正本を確認）。
+    これは「受理されるが意味を持たない」ref を作らないための唯一のゲートで、
+    agreements.depends_on が陥った死蔵（§15.4）を新テーブル内で再現しないための防波堤でもある。
+    """
+    if ref.startswith("agreement:"):
+        aid = ref[len("agreement:"):]
+        row = query("SELECT 1 FROM agreements WHERE id=? AND run_id=?", (aid, run_id)).fetchone()
+        return row is not None
+    if ref.startswith("fact:"):
+        name = ref[len("fact:"):]
+        row = query("SELECT 1 FROM verified_facts WHERE variable_name=? AND run_id=?", (name, run_id)).fetchone()
+        return row is not None
+    if ref.startswith("entity:"):
+        rest = ref[len("entity:"):]
+        parts = rest.split(":", 1)
+        if len(parts) != 2:
+            return False
+        eid, attr = parts[0], parts[1]
+        row = query(
+            "SELECT 1 FROM entity_attributes WHERE entity_id=? AND attr_name=? AND run_id=?",
+            (eid, attr, run_id),
+        ).fetchone()
+        return row is not None
+    return False
+
+
+def _write_relation_edge(
+    conn: sqlite3.Connection,
+    run_id: str,
+    from_ref: str,
+    to_ref: str,
+    relation_type: str,
+    reason: str,
+    created_by: str,
+    source_task_id: str = "",
+    source_phase_id: str = "",
+) -> bool:
+    """[BL-224] relation_edges への唯一の書き込み口（§15.1 単一ゲート）。
+
+    書き込み前に from_ref / to_ref の実在を検証する（_resolve_ref_table）。どちらかが実表に無ければ
+    エッジを書かず False を返す（fail-loud・§13.2）。新規作成の id は _new_record_id（BL-215 一元採番）。
+    """
+    if not _resolve_ref_table(conn.execute, run_id, from_ref) or not _resolve_ref_table(conn.execute, run_id, to_ref):
+        print(f"  ⚠️ [_write_relation_edge][BL-224] ref 実在検証に失敗、エッジを書きません: "
+              f"from={from_ref} to={to_ref} type={relation_type}")
+        return False
+    edge_id = _new_record_id("REL")
+    conn.execute(
+        "INSERT INTO relation_edges "
+        "(id, run_id, from_ref, to_ref, relation_type, reason, created_by, created_at, source_task_id, source_phase_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (edge_id, run_id, from_ref, to_ref, relation_type, reason, created_by, time.time(),
+         source_task_id, source_phase_id),
+    )
+    return True
+
+
+def _traverse_lineage(
+    conn: sqlite3.Connection,
+    run_id: str,
+    start_ref: str,
+    direction: str,
+    max_depth: int,
+    relation_types: list[str] | None = None,
+) -> list[dict]:
+    """[BL-224] relation_edges を反復走査する（M3・B7: 再帰CTE は採用しない）。
+
+    direction='backward' は「start_ref が何に立脚しているか」（to_ref=start_ref の from_ref を遡る）、
+    'forward' は「start_ref から何が導出されたか」（from_ref=start_ref の to_ref を辿る）。'both' は両方向。
+    visited set でサイクル安全（SQLite 再帰CTE にはサイクル検知が無く、任意文字列 ref で経路を壊すため）。
+    戻り値は {ref, direction, depth, reason, relation_type, created_at} の dict 列。
+    """
+    if max_depth <= 0:
+        return []
+    found: list[dict] = []
+    visited: set[str] = set()
+    stack: list[tuple[str, str, int]] = []  # (ref, direction, depth)
+    if direction in ("backward", "both"):
+        stack.append((start_ref, "backward", 1))
+    if direction in ("forward", "both"):
+        stack.append((start_ref, "forward", 1))
+    type_clause = ""
+    type_params: list[str] = []
+    if relation_types:
+        placeholders = ",".join("?" * len(relation_types))
+        type_clause = f" AND relation_type IN ({placeholders})"
+        type_params = list(relation_types)
+    while stack:
+        ref, d, depth = stack.pop()
+        if (ref, d) in visited:
+            continue
+        visited.add((ref, d))
+        if d == "backward":
+            rows = conn.execute(
+                f"SELECT from_ref, relation_type, reason, created_at FROM relation_edges "
+                f"WHERE run_id=? AND to_ref=?{type_clause}",
+                [run_id, ref] + type_params,
+            ).fetchall()
+            for from_ref, rtype, reason, created_at in rows:
+                if depth <= max_depth:
+                    found.append({
+                        "ref": from_ref, "direction": "backward", "depth": depth,
+                        "relation_type": rtype, "reason": reason, "created_at": created_at,
+                    })
+                if depth < max_depth:
+                    stack.append((from_ref, "backward", depth + 1))
+        else:
+            rows = conn.execute(
+                f"SELECT to_ref, relation_type, reason, created_at FROM relation_edges "
+                f"WHERE run_id=? AND from_ref=?{type_clause}",
+                [run_id, ref] + type_params,
+            ).fetchall()
+            for to_ref, rtype, reason, created_at in rows:
+                if depth <= max_depth:
+                    found.append({
+                        "ref": to_ref, "direction": "forward", "depth": depth,
+                        "relation_type": rtype, "reason": reason, "created_at": created_at,
+                    })
+                if depth < max_depth:
+                    stack.append((to_ref, "forward", depth + 1))
+    return found
+
+
+def _get_backward_dependencies(conn, run_id, start_ref, max_depth=10, relation_types=None):
+    """[BL-224] start_ref の上流（前提・旧版）を返す。_traverse_lineage の薄いラッパー。"""
+    return _traverse_lineage(conn, run_id, start_ref, "backward", max_depth, relation_types)
+
+
+def _get_forward_dependents(conn, run_id, start_ref, max_depth=10, relation_types=None):
+    """[BL-224] start_ref の下流（導出結果・新版）を返す。_traverse_lineage の薄いラッパー。"""
+    return _traverse_lineage(conn, run_id, start_ref, "forward", max_depth, relation_types)
+
+
+def _get_lineage_chain(conn, run_id, start_ref, max_depth=3):
+    """[BL-224] C1（Hydrate 系譜表示）用: supersedes 連鎖を時系列順のコンセプト列として返す。
+
+    _traverse_lineage を relation_type='supersedes' に絞った薄いラッパー（M3 の定義どおり）。
+    created_at 昇順に並べ、同一コンセプトの変遷を古→新で返す。
+    """
+    chain = _traverse_lineage(conn, run_id, start_ref, "both", max_depth, ["supersedes"])
+    chain.sort(key=lambda r: r["created_at"])
+    return chain
+
+
+def _link_supersession(
+    conn: sqlite3.Connection,
+    run_id: str,
+    old_agreement_id: str,
+    new_agreement_id: str,
+    reason: str,
+    created_by: str,
+    source_task_id: str = "",
+    source_phase_id: str = "",
+) -> bool:
+    """[BL-224] W2: 新版 agreement が旧版を差し替えた supersedes エッジを張る。
+
+    from_ref=agreement:<old>（旧・棄却）→ to_ref=agreement:<new>（新・採用）。reason には「なぜ旧案を
+    棄却し新案を採ったか」を渡す（BL-050 が reason_why へ要求済みの文言をそのまま転記、LLM に新たな
+    説明義務は課さない）。単独 Rejected フック（N2）からも呼ぶ。
+    """
+    return _write_relation_edge(
+        conn, run_id,
+        from_ref=f"agreement:{old_agreement_id}",
+        to_ref=f"agreement:{new_agreement_id}",
+        relation_type="supersedes",
+        reason=reason,
+        created_by=created_by,
+        source_task_id=source_task_id,
+        source_phase_id=source_phase_id,
+    )
+
+
+def _link_rejected_supersession(
+    conn: sqlite3.Connection,
+    run_id: str,
+    rejected_id: str,
+    topic: str,
+    created_by: str,
+    source_task_id: str = "",
+    source_phase_id: str = "",
+) -> bool:
+    """[BL-224] N2: 単独 Rejected の supersedes エッジ（書き込み経路によらず同一挙動・§15.1 単一ソース）。
+
+    棄却された agreement X が同一 topic の現行アクティブ合意 Y に「敗れた」と記録する
+    （from=agreement:<X> → to=agreement:<Y>）。Y が無い純粋単独棄却の場合は False を返し、エッジを
+    張らない（status='Rejected' ＋ ⚠️[却下事項] コンテキスト表示で可視・C5 は Rejected を明示含む）。
+    write_agreement（_commit_agreement_from_tool）と decision_extractor の両方から呼ぶ。
+    """
+    active_y = next(
+        (a for a in reversed(get_agreements_from_db(conn, run_id))
+         if a["topic"] == topic and a.get("status") != "Superseded"
+         and a.get("status") != "Rejected" and a["id"] != rejected_id),
+        None,
+    )
+    if active_y is None:
+        return False
+    return _link_supersession(
+        conn, run_id, rejected_id, active_y["id"], "", created_by,
+        source_task_id=source_task_id, source_phase_id=source_phase_id,
+    )
+
+
+# =====================================================================
+# [BL-224] C5: trace_lineage ツール（AI が系譜を能動取得する消費経路）
+# =====================================================================
+# 「書き込み口はあるが消費経路が欠けている」（§15.4）のが BL-224 の出発点だったため、
+# W1-W4 で張ったエッジを AI が辿れるようにする専用ツール。読み取り専用・LLM 呼び出しなし（C2 と同型）。
+TRACE_LINEAGE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "trace_lineage",
+        "description": (
+            "[BL-224] 判断の系譜（lineage）を能動取得する読み取り専用ツール。ある agreement（合意）/ "
+            "fact（変数・値）/ entity 属性 が、どの前提・旧版に立脚し（backward）、何を導出・差し替えたか"
+            "（forward）を、relation_edges のエッジを辿って一覧で返す。'この値はどこから？''この決定は何に"
+            "基づいている？''他はなぜ却下された？' という疑問を持った時に使う。ref には system prompt で"
+            "'[AG-xxx]' のように表示される実際の agreement id、または fact:変数名、entity:entity_id:attr_name "
+            "を指定する。このツール自体は LLM を呼ばず、DB に構造化保存済みの根拠だけを機械的に返す。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": "取得対象の ref。agreement:<id> / fact:<variable_name> / entity:<entity_id>:<attr_name>。",
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["both", "backward", "forward"],
+                    "description": "'backward': この ref が何に立脚しているか（上流・前提・旧版）。'forward': この ref から何が導出・差し替えられたか（下流）。'both'（既定）: 両方向。",
+                },
+                "max_depth": {
+                    "type": "integer",
+                    "description": "探索する系譜の最大深度（既定 10）。",
+                },
+            },
+            "required": ["ref"],
+        },
+    },
+}
+
+
+def _trace_lineage_handler(args: dict, state: dict | None = None) -> dict:
+    """[BL-224] C5: trace_lineage ツールの実体。
+
+    run_id スコープ（M4）で検索し、N3 の応答仕様に従う:
+    - ref が未知プレフィックスの場合は走査せず即時返却。
+    - ref が現在の run 内に解決不能（実表に無い/他 run の ref）の場合は空リスト＋ヒント（fail-loud）。
+    - ref が解決できるがエッジが0件なら lineage=[] と件数を返す。
+    """
+    conn = get_active_conn()
+    run_id = _CURRENT_RUN_ID
+    ref = (args.get("ref") or "").strip()
+    direction = (args.get("direction") or "both").strip()
+    if direction not in ("backward", "forward", "both"):
+        direction = "both"
+    try:
+        max_depth = int(args.get("max_depth") or 10)
+    except (TypeError, ValueError):
+        max_depth = 10
+    if max_depth <= 0:
+        max_depth = 10
+    if not ref:
+        return {"status": "error",
+                "message": "ref は必須です（agreement:<id> / fact:<name> / entity:<entity_id>:<attr_name>）。"}
+    # [N3] 未知プレフィックスは走査せず即時返却（§15.3 機械的検証は _traverse_lineage 入口で）。
+    if not ref.startswith(("agreement:", "fact:", "entity:")):
+        return {
+            "status": "ok",
+            "result": "未知の ref プレフィックスです。agreement:/fact:/entity: のいずれかで指定してください。",
+            "lineage": [],
+        }
+    # [N3] 対象 ref が現在の run に実在しない（他 run の ref / 存在しない）場合は空リスト＋ヒント。
+    if not _resolve_ref_table(conn.execute, run_id, ref):
+        return {
+            "status": "ok",
+            "result": (f"現在の run 内に該当 ref はありません（検索スコープ run_id={run_id}）。"
+                       f"trace_lineage は取得対象 run の run_id スコープで検索します。"),
+            "lineage": [],
+        }
+    found = _traverse_lineage(conn, run_id, ref, direction, max_depth)
+    resolved = [
+        {
+            "ref": e["ref"], "direction": e["direction"], "depth": e["depth"],
+            "relation_type": e["relation_type"], "reason": e["reason"],
+            "detail": _resolve_ref_line(conn, run_id, e["ref"]),
+        }
+        for e in found
+    ]
+    return {
+        "status": "ok",
+        "target": _resolve_ref_line(conn, run_id, ref),
+        "lineage": resolved,
+        "result": f"系譜を {len(resolved)} 件取得しました（direction={direction}）。",
+    }
+
+
 # [BL-073] Deliverableが承認された際、対応するtask_idのDirective（Userの指示）がstatus='Proposed'の
 # ままDBに永久固定される問題への対処。従来はDirective自体を後から遷移させる経路が一切なく、
 # reflection_nodeの「未解決」抽出（agreements.status=="Proposed"の全件、entry_type不問）に
@@ -5931,6 +6315,10 @@ def _resolve_directive_for_task(conn: sqlite3.Connection, run_id: str, task_id: 
                 "task_id": task_id, "depends_on": [], "resource_claims": {},
             }
             db_append_agreement(resolved, conn, run_id)
+            # [BL-224] W2（4箇所目）: 旧 Directive → 新 Approved の supersedes エッジ。
+            # 「指示が履行済みへ差し替わった」ことを系譜に残し、後続が理由を辿れるようにする。
+            _link_supersession(conn, run_id, a["id"], resolved["id"], resolved["reason_why"],
+                               resolved_by, source_task_id=task_id, source_phase_id=phase_id)
             print(f"  ✅ [Directive Resolved] '{a['topic']}' をApprovedへ遷移しました（{task_id}の成果物承認に伴う自動解決、BL-073）。")
             break
 
@@ -6842,12 +7230,18 @@ def _build_human_input_answered_notice(conn: sqlite3.Connection, run_id: str) ->
 # （CELA側に常駐プロセス・Webダッシュボードは持たせない、というユーザーとの合意）。
 # ---------------------------------------------------------------------------
 
-def _audit_report(conn: sqlite3.Connection, run_id: str, task_id: str = "", phase_id: str = "") -> str:
+def _audit_report(conn: sqlite3.Connection, run_id: str, task_id: str = "", phase_id: str = "",
+                  ref: str = "") -> str:
     """[BL-222] 「この数字・この内容の5W1Hを検査したい」という人間の監査ニーズに応える
     読み取り専用レポート。verified_facts（値・理由・出典・信頼度・確定者・確定タスク）と
     agreements（決定内容・理由・出典・提案者・状態）を、task_id/phase_id指定があれば
     絞り込んで整形する。ログをClaude等に解析させる代わりに、既にDBへ構造化保存済みの
     根拠情報をそのまま機械的に取り出すだけなので、LLM呼び出しは一切行わず常に正確。
+
+    [BL-224] C2: `ref`（agreement:<id>/fact:<name>/entity:<eid>:<attr>）が指定された場合は、
+    通常の5W1H一覧に加えて、その ref の「上流（前提・旧版）／下流（導出・新版）の系譜」を
+    _traverse_lineage で辿って追記する（読み取り専用・LLM 呼び出しなし・WAL 実行中でも安全という
+    BL-222 の型をそのまま使う）。
     """
     facts = get_verified_facts_from_db(conn, run_id)
     if task_id:
@@ -6895,6 +7289,69 @@ def _audit_report(conn: sqlite3.Connection, run_id: str, task_id: str = "", phas
             f"  なぜ: {(a.get('reason_why') or '(記載なし)')[:300]}\n"
             f"  出典: {a.get('citations') or '[]'}"
         )
+    if ref:
+        lines.append("\n" + _render_lineage_audit(conn, run_id, ref))
+    return "\n".join(lines)
+
+
+def _resolve_ref_line(conn: sqlite3.Connection, run_id: str, ref: str) -> str:
+    """[BL-224] C2/C5 共通: ref が指す実表の行を解決し、種別に応じた一行説明を返す。
+    実表に見つからない/未知プレフィックスなら「(解決不能)」を返す（fail-loud・§13.2）。
+    """
+    title = ref
+    if ref.startswith("agreement:"):
+        aid = ref[len("agreement:"):]
+        row = conn.execute(
+            "SELECT topic, entry_type, status, decision_what FROM agreements WHERE id=? AND run_id=?",
+            (aid, run_id)).fetchone()
+        if row is None:
+            return f"{ref}: (解決不能: この run 内に該当 agreement がありません)"
+        return (f"[agreement] topic={row['topic']} ({row['entry_type']}/{row['status']}) "
+                f"何を={(row['decision_what'] or '')[:120]}")
+    if ref.startswith("fact:"):
+        name = ref[len("fact:"):]
+        row = conn.execute(
+            "SELECT value, unit, confidence, reason FROM verified_facts WHERE variable_name=? AND run_id=?",
+            (name, run_id)).fetchone()
+        if row is None:
+            return f"{ref}: (解決不能: この run 内に該当 fact がありません)"
+        return f"[fact] {name} = {row['value']}{row['unit'] or ''} ({row['confidence']}) なぜ={row['reason'] or '(記載なし)'}"
+    if ref.startswith("entity:"):
+        rest = ref[len("entity:"):]
+        parts = rest.split(":", 1)
+        if len(parts) == 2:
+            row = conn.execute(
+                "SELECT value, unit, confidence FROM entity_attributes "
+                "WHERE entity_id=? AND attr_name=? AND run_id=?",
+                (parts[0], parts[1], run_id)).fetchone()
+            if row is not None:
+                return f"[entity] {parts[0]}:{parts[1]} = {row['value']}{row['unit'] or ''} ({row['confidence']})"
+        return f"{ref}: (解決不能: この run 内に該当 entity 属性がありません)"
+    return f"{ref}: (未知の ref プレフィックスです。agreement:/fact:/entity: のいずれかを使用)"
+
+
+
+def _render_lineage_audit(conn: sqlite3.Connection, run_id: str, ref: str) -> str:
+    """[BL-224] C2: `_audit_report --ref` の系譜節。指定 ref の上流・下流を 5W1H で描く。"""
+    lines = [f"--- 系譜（lineage）: {ref} ---", _resolve_ref_line(conn, run_id, ref)]
+    backward = _get_backward_dependencies(conn, run_id, ref)
+    forward = _get_forward_dependents(conn, run_id, ref)
+    lines.append(f"\n[上流・前提/旧版（backward）]{len(backward)}件")
+    if not backward:
+        lines.append("(上流はありません)")
+    for b in backward:
+        lines.append(f"  [{b['direction']}@{b['depth']}] {b['ref']} ({b['relation_type']}) "
+                     f"→ {_resolve_ref_line(conn, run_id, b['ref'])}")
+        if b.get("reason"):
+            lines.append(f"      なぜ: {b['reason'][:200]}")
+    lines.append(f"\n[下流・導出/新版（forward）]{len(forward)}件")
+    if not forward:
+        lines.append("(下流はありません)")
+    for fw in forward:
+        lines.append(f"  [{fw['direction']}@{fw['depth']}] {fw['ref']} ({fw['relation_type']}) "
+                     f"→ {_resolve_ref_line(conn, run_id, fw['ref'])}")
+        if fw.get("reason"):
+            lines.append(f"      なぜ: {fw['reason'][:200]}")
     return "\n".join(lines)
 
 
@@ -8240,7 +8697,7 @@ It serves as the initial planning layer for breaking down complex objectives acr
     _reset_think_scratchpad()  # [BL-093]
     phases, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_task_planner, model=model_task_planner, label="Task Planner",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_PLAN_DRAFT_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, THINK_TOOL], fallback=fallback_phase,
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_PLAN_DRAFT_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], fallback=fallback_phase,
         state=state,
     )
     if parse_failed:
@@ -9555,7 +10012,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_detector_numeric, model=model_detector_numeric, label="Detector",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, THINK_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
         state=state,
     )
     if parse_failed:
@@ -10041,7 +10498,7 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goa
     _CURRENT_CALLER_ROLE = "arbiter"
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    res = query_AI([{"role": "user", "content": prompt}], client=client_resource_arbiter, model=model_resource_arbiter, label="Resource Arbiter", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL], state=state)
+    res = query_AI([{"role": "user", "content": prompt}], client=client_resource_arbiter, model=model_resource_arbiter, label="Resource Arbiter", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
     _arbiter_fallback = {}
     parsed = _safe_json_parse(res, fallback=_arbiter_fallback)
     if parsed is _arbiter_fallback:
@@ -10483,7 +10940,7 @@ def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "", st
     _CURRENT_CALLER_ROLE = "integrator"
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    res = query_AI([{"role": "user", "content": prompt}], client=client_integrator, model=model_integrator, label="Integrator", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL], state=state)
+    res = query_AI([{"role": "user", "content": prompt}], client=client_integrator, model=model_integrator, label="Integrator", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
     _integrator_fallback = {"contradictions": False, "affected_phases": [], "details": ""}
     parsed = _safe_json_parse(res, fallback=_integrator_fallback)
     if parsed is _integrator_fallback:
@@ -10589,7 +11046,7 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_reviewer_qa, model=model_reviewer_qa, label="Reviewer QA",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, READ_ENTITY_TOOL, THINK_TOOL], fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"},
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"},
         state=state,
     )
     if parse_failed:
@@ -10724,7 +11181,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         _reset_think_scratchpad()
         review_parsed, review_parse_failed = _query_and_parse_with_retry(
             review_prompt, client=client_user, model=model_user, label="User AI (Stage1: レビュー)",
-            tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, PYTHON_REPL_TOOL, READ_ENTITY_TOOL, THINK_TOOL],
+            tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, PYTHON_REPL_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],
             fallback={"domain_concerns": "", "scope_compliant": True, "review_comment": ""},
             state=state,
         )
@@ -10854,7 +11311,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             _reset_think_scratchpad()
             approval_parsed, approval_parse_failed = _query_and_parse_with_retry(
                 approval_prompt_base + _approval_mismatch_notice, client=client_user, model=model_user,
-                label="User AI (Stage3: 統合承認判断)", tools=[WRITE_AGREEMENT_TOOL, READ_ENTITY_TOOL, THINK_TOOL],
+                label="User AI (Stage3: 統合承認判断)", tools=[WRITE_AGREEMENT_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],
                 fallback={"approval_status": "Pending", "approval_reason": ""}, state=state,
             )
             _absorb_stage_trackers()
@@ -11399,7 +11856,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")  # [BL-096] write_issueのphase_id用
     _CURRENT_GOAL_TEXT = user_goal  # [BL-086] revise_goalの編集対象
     _reset_think_scratchpad()  # [BL-093]
-    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, THINK_TOOL], state=state)
+    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
 
     if content is None or content.strip() == "" or content == "(APIから空の応答が返されました)":
         for retry in range(3):
@@ -11410,7 +11867,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")
             _CURRENT_GOAL_TEXT = user_goal
             _reset_think_scratchpad()  # [BL-093]
-            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, THINK_TOOL], state=state)
+            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
             if content and content.strip() and content != "(APIから空の応答が返されました)":
                 break
         else:
@@ -11653,7 +12110,7 @@ def call_goal_essence_analyst(goal: str, state: dict | None = None) -> dict:
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_goal_essence, model=model_goal_essence, label="Goal Essence Analyst",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL],
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],
         fallback={"true_essence": goal, "feasibility_notes": "(JSONパース失敗のため見立てなし)"},
         state=state,
     )
@@ -12032,7 +12489,7 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_task_plan_reviewer, model=model_task_plan_reviewer, label="Task Plan Reviewer",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, THINK_TOOL],
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],
         fallback={"risk": "low", "constraint_issue": "none", "comment": "(JSONパース失敗のためnone扱い)",
                   "observations": "", "per_task_comments": []},
         state=state,
@@ -12970,6 +13427,11 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                     "depends_on": depends_on, "resource_claims": resource_claims
                 }
                 db_append_agreement(agreement, _conn, _run_id)
+                # [BL-224] N2: decision_extractor 経由の単独 Rejected も系譜へ参加させる
+                # （_commit_agreement_from_tool を経由しないため、ここで明示的に呼ぶ・§15.1 単一ヘルパ）。
+                if status == "Rejected":
+                    _link_rejected_supersession(_conn, _run_id, agreement["id"], target_topic,
+                                                proposed_by, task_id, phase_id)
                 decision_log = make_decision(
                     who="decision_extractor",
                     what=f"合意更新[{status}]: {target_topic}",
@@ -12988,6 +13450,11 @@ def decision_extractor_node(state: LineageState) -> LineageState:
                     "depends_on": depends_on, "resource_claims": resource_claims
                 }
                 db_append_agreement(agreement, _conn, _run_id)
+                # [BL-224] N2: decision_extractor 経由の単独 Rejected も系譜へ参加させる
+                # （_commit_agreement_from_tool を経由しないため、ここで明示的に呼ぶ・§15.1 単一ヘルパ）。
+                if status == "Rejected":
+                    _link_rejected_supersession(_conn, _run_id, agreement["id"], topic,
+                                                proposed_by, task_id, phase_id)
                 decision_log = make_decision(
                     who="decision_extractor",
                     what=f"新規抽出[{status}]: {topic}",
@@ -14341,6 +14808,8 @@ if __name__ == "__main__":
     )
     _cli_parser.add_argument("--task-id", default="", help="--audit-reportの絞り込み対象task_id（省略時はphase-idか全件）。")
     _cli_parser.add_argument("--phase-id", default="", help="--audit-reportの絞り込み対象phase_id（task-id指定時は無視）。")
+    _cli_parser.add_argument("--ref", default="",
+                             help="[BL-224] --audit-reportに対して、このref（agreement:<id>/fact:<name>/entity:<eid>:<attr>）の上流・下流の系譜（lineage）を5W1Hで追記表示する。")
     _cli_args = _cli_parser.parse_args()
 
     # [BL-222] 読み取り専用CLIコマンド（--list-checkpoints/--pending-human-input/
@@ -14391,7 +14860,8 @@ if __name__ == "__main__":
     if _cli_args.audit_report:
         _conn = get_db_connection()
         init_db(_conn)
-        print(_audit_report(_conn, _cli_args.audit_report, task_id=_cli_args.task_id, phase_id=_cli_args.phase_id))
+        print(_audit_report(_conn, _cli_args.audit_report, task_id=_cli_args.task_id,
+                            phase_id=_cli_args.phase_id, ref=_cli_args.ref))
         _conn.close()
         sys.exit(0)
 
