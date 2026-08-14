@@ -7902,9 +7902,9 @@ BL-219/220/223が同日に「書き込み口はあるが消費経路が欠落す
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（設計完了・実装未着手） |
+| 状態 | `in_progress`（設計完了・Phase 3 実装中・2026-08-15） |
 | 優先度 | P2 |
-| テスト | 未作成（`tests/test_bl228_unified_activity_lineage.py` 予定） |
+| テスト | `tests/test_bl228_chat_history_lineage.py`（新規9件: W1活性化・ref拡張・trace_lineage(turn)・W2構造化・C4版歴描画） |
 | 関連 | BL-224（relation_edges 基盤を再利用・拡張）、AGENTS.md §15.4（死蔵記録→機構化）、§14.4（checkpoint は輸送・DB は SoT）、§7（N/M 新規定数は承認要） |
 | 設計書 | [BL-228/BL228_basic_design.md](BL-228/BL228_basic_design.md) |
 
