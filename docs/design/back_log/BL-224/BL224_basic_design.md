@@ -530,6 +530,15 @@ SELECT DISTINCT ref, MIN(depth) AS depth FROM backward GROUP BY ref ORDER BY dep
   value/reason、entity なら value）。読み取り専用・LLM 呼び出しなし（C2 と同型）・全ノードから呼べる。
   ref 記法はツール schema ＋ 共有ヘルパー1本（§15.1）で全ノードへ注入。サイクル安全は A7 の
   Python 反復＋訪問済み set を用いる。
+  **不明・他 run ref の応答仕様（独立レビューN3・決定）**: trace_lineage は**呼び出し元 run の
+  run_id スコープで検索**する（M4・§15.1 単一スコープ）。(a) ref が `relation_edges` に1件も
+  存在しない、または他 run の ref であった場合は、**空リスト `[]` を返し**、ヒント
+  `「現在の run 内に該当 ref はありません（検索スコープ run_id=...）。trace_lineage は取得対象 run
+  の run_id スコープで検索します」` を `result` に含める（fail-loud・§13.2: 空リストは「該当なし」
+  と明示し、存在しない ref を LLM が勝手に補完して「暗黙的に承認済み」と誤認するのを防ぐ）；(b) ref
+  のプレフィックス自体が未知（`agreement:`/`fact:`/`entity:` 以外）の場合は `result` に
+  `「未知の ref プレフィックスです。agreement:/fact:/entity: のいずれかで指定してください」` を
+  返す（検証は `_traverse_lineage` 入口で行い、未知プレフィックスは走査せず即時返却・§15.3 機械的検証）。
 
 - **B5: C4 が BL-168 のプレフィックスを「そのまま再利用」は誤り**
   BL-168 のマーカーは「⚠️[BL-168: **ゴール改定後未確認**]」（2839）でトリガーは「ゴール改定」。
