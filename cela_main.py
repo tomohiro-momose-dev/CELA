@@ -2353,6 +2353,20 @@ WRITE_AGREEMENT_TOOL = {
                                 },
                             },
                         },
+                        "derived_from": {
+                            "type": "array",
+                            "description": (
+                                "[BL-224 W4] Optional. For values derived from other confirmed facts or "
+                                "entity attributes, list the refs this value was derived_from, e.g. "
+                                "['fact:budget_cap', 'entity:chino_city:population']. These become "
+                                "derived_from lineage edges (fact:<this_var> -> ref) that later AI traces "
+                                "to answer 'why this number, from what assumption'. Invalid refs (no such "
+                                "fact/entity row exists) are silently skipped — the fact itself is still "
+                                "saved — so do not let a typo block your write_agreement call. Omit if "
+                                "this value stands alone (e.g. an absolute goal constraint)."
+                            ),
+                            "items": {"type": "string"},
+                        },
                         "required": ["variable_name", "value"]
                     }
                 },
@@ -3480,6 +3494,7 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
     # 骨格であり、LLM の記入に一切依存しない（§15.3）。agreement id は _commit_agreement_from_tool
     # が _LAST_NEW_AGREEMENT_ID に捕捉した新 id を使う。
     new_ag_id = _LAST_NEW_AGREEMENT_ID
+    _derived_from_warnings: list[str] = []  # [BL-224 W4] 無効な derived_from ref を蓄積
     for cv in args.get("confirmed_variables", []) or []:
         var_name = cv.get("variable_name")
         if not var_name:
@@ -3500,11 +3515,30 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
                 "derived_from", args.get("reason_why", ""), caller_role,
                 source_task_id=task_id, source_phase_id=args.get("phase_id", ""),
             )
+        # [BL-224 W4] cv が derived_from を供給していれば fact:<var_name> → ref の derived_from
+        # エッジを張る（値→値の系譜）。無効な ref（実表に行が無い）は事実保存は失敗させず
+        # エッジのみスキップし warning へ蓄積（§15.4 / protected_warning と同型）。
+        for dref in (cv.get("derived_from") or []):
+            if not isinstance(dref, str) or not (dref.startswith("fact:") or dref.startswith("entity:")):
+                _derived_from_warnings.append(str(dref))
+                continue
+            if not _write_relation_edge(
+                conn, run_id, f"fact:{var_name}", dref,
+                "derived_from", args.get("reason_why", "") or args.get("topic", ""), caller_role,
+                source_task_id=task_id, source_phase_id=args.get("phase_id", ""),
+            ):
+                _derived_from_warnings.append(dref)
 
     # [BL-127] protected_warningが設定されている場合、DB上のagreement行自体は正常に
     # コミットされたが、ホワイトボード本体への実反映は保護によりスキップされている。
     # successはTrueのまま維持し（呼び出し自体は失敗していないため）、warningフィールドで
     # 呼び出し元（Expert/User AI）に明示し、次のターンで再試行を促す。
+    if _derived_from_warnings:
+        _df_warn = "derived_from の一部が無効なためスキップされました: " + ", ".join(_derived_from_warnings)
+        if protected_warning:
+            return {"success": True, "message": "DB update successful",
+                    "warning": f"{protected_warning} ／ {_df_warn}"}
+        return {"success": True, "message": "DB update successful", "warning": _df_warn}
     if protected_warning:
         return {"success": True, "message": "DB update successful", "warning": protected_warning}
     return {"success": True, "message": "DB update successful"}
@@ -7135,9 +7169,68 @@ def upsert_verified_fact(conn: sqlite3.Connection, run_id: str, variable_name: s
          confirmed_by, time.time(), reason, citations_json, confidence)
     )
     if _existing is not None:
-        print(f"  🔄 [verified_facts] {variable_name}を上書きしました: {_existing['value']}({_existing['confidence']}) → {value}({confidence})、by={confirmed_by}")
+        _old_val = _existing["value"]
+        _old_conf = _existing["confidence"]
+        print(f"  🔄 [verified_facts] {variable_name}を上書きしました: {_old_val}({_old_conf}) → {value}({confidence})、by={confirmed_by}")
+        # [BL-224 C4] 値が実際に変化した場合のみ、下流（この値に依存する事実・合意）へ
+        # 陳腐化マーカーを伝播する（BL-168 イディオム再利用、新列は作らない）。
+        if str(_old_val) != str(value):
+            _mark_forward_dependents_stale(conn, run_id, f"fact:{variable_name}", variable_name, confirmed_by)
     else:
         print(f"  🔒 [verified_facts] {variable_name}={value}{unit}（{confidence}）をby={confirmed_by}で保存しました。")
+
+
+# ---------------------------------------------------------------------------
+# [BL-224 C4] 上流値変更時の前方伝播（staleness marker）。BL-168 のイディオムを再利用し、
+# 新しい is_stale 列は作らない（§15.4: 既存の表示経路が可視化を兼ねる）。
+# ---------------------------------------------------------------------------
+
+def _append_stale_marker(conn, table, reason_col, id_col, id_val, marker, run_id,
+                         extra_where=None, extra_val=None) -> None:
+    """[BL-224 C4] id で特定した行の reason_col へ冪等マーカーを追記（既に含まれていれば無視）。"""
+    sql = f"SELECT {reason_col} FROM {table} WHERE run_id=? AND {id_col}=?"
+    params = [run_id, id_val]
+    if extra_where is not None:
+        sql += f" AND {extra_where}=?"
+        params.append(extra_val)
+    row = conn.execute(sql, params).fetchone()
+    if row is None:
+        return
+    cur = row[0] or ""
+    if marker in cur:
+        return
+    upd = f"UPDATE {table} SET {reason_col}=? WHERE run_id=? AND {id_col}=?"
+    uparams = [marker + cur, run_id, id_val]
+    if extra_where is not None:
+        upd += f" AND {extra_where}=?"
+        uparams.append(extra_val)
+    conn.execute(upd, uparams)
+
+
+def _mark_forward_dependents_stale(conn, run_id, changed_ref, changed_label, changed_by) -> None:
+    """[BL-224 C4] changed_ref の値が実際に変化した際、その下流（derived_from で依存する事実・
+    合意・属性）の reason/reason_why へ冪等マーカーを追記する。visited set でサイクル安全。
+    BL-168 と同型のイディオムにより、新列を作らず既存表示経路（read_verified_fact / _audit_report /
+    verified_facts_json / 各プロンプト）が可視化を兼ねる（§15.4）。
+
+    [方向] derived_from エッジは from_ref=従属側 → to_ref=ソース側（W1/W4 とも同型）。よって
+    ソース X の下流従属側（X に依存するもの）を探すには to_ref=X を満たす from_ref を辿る＝
+    _traverse_lineage の 'backward'（_get_backward_dependencies）を用いる。"""
+    _STALE = f"⚠️[BL-224: 上流変更で要再確認] (from {changed_label}) "
+    deps = _get_backward_dependencies(conn, run_id, changed_ref)
+    for d in deps:
+        ref = d["ref"]
+        if ref.startswith("fact:"):
+            var = ref[len("fact:"):]
+            _append_stale_marker(conn, "verified_facts", "reason", "variable_name", var, _STALE, run_id)
+        elif ref.startswith("agreement:"):
+            aid = ref[len("agreement:"):]
+            _append_stale_marker(conn, "agreements", "reason_why", "id", aid, _STALE, run_id)
+        elif ref.startswith("entity:"):
+            parts = ref[len("entity:"):].split(":", 1)
+            if len(parts) == 2:
+                _append_stale_marker(conn, "entity_attributes", "reason", "entity_id", parts[0],
+                                     _STALE, run_id, extra_where="attr_name", extra_val=parts[1])
 
 
 # ---------------------------------------------------------------------------
@@ -7548,10 +7641,11 @@ def upsert_entity_attribute(conn: sqlite3.Connection, run_id: str, entity_id: st
     """[BL-204] 属性を保存し、「新規属性名だったか」を返す（Trueなら新規作成）。
     返り値を使って、呼び出し元が既存属性名一覧をレスポンスへ添える
     （属性名の表記ゆれによる重複作成を抑止する。設計書§2.4、Clineレビュー指摘・軽3）。"""
-    existing = conn.execute(
-        "SELECT attr_name FROM entity_attributes WHERE run_id=? AND entity_id=? AND attr_name=?",
+    existing_row = conn.execute(
+        "SELECT attr_name, value FROM entity_attributes WHERE run_id=? AND entity_id=? AND attr_name=?",
         (run_id, entity_id, attr_name),
     ).fetchone()
+    existing = existing_row[0] if existing_row else None
     conn.execute(
         "INSERT INTO entity_attributes (run_id, entity_id, attr_name, value, unit, confidence, "
         "citations, reason, source_task_id, source_phase_id, confirmed_by, confirmed_at) "
@@ -7565,6 +7659,10 @@ def upsert_entity_attribute(conn: sqlite3.Connection, run_id: str, entity_id: st
          json.dumps(citations or [], ensure_ascii=False), reason,
          source_task_id, source_phase_id, confirmed_by, time.time()),
     )
+    # [BL-224 C4] 値が実際に変化した場合のみ、commit 前に下流へ陳腐化マーカーを伝播。
+    if existing_row is not None and str(existing_row[1]) != str(value):
+        _mark_forward_dependents_stale(conn, run_id, f"entity:{entity_id}:{attr_name}",
+                                       f"{entity_id}:{attr_name}", confirmed_by)
     conn.commit()
     return existing is None
 
@@ -7925,7 +8023,9 @@ def _build_hydrate_context(decisions: list[Decision], config: Appconfig) -> str:
         lines.append(f"- [{d['who']}] {d['what']}（理由: {why_short}）{missing_flag}")
     return "\n".join(lines)
 
-def _build_agreements_context(agreements: list[Agreement]) -> str:
+def _build_agreements_context(agreements: list[Agreement],
+                            conn: sqlite3.Connection | None = None,
+                            run_id: str = "") -> str:
     """【SLM要約】
     Formatting of relevant agreements (Decisions/Deliverables) into a readable, contextual string for LLM consumption.
 Filters out superseded or directive items and applies status-based formatting/labeling.
@@ -8034,13 +8134,17 @@ Filters out superseded or directive items and applies status-based formatting/la
             citations_suffix = ""
         lines.append(f"[{agreement_id}] {icon}{type_label} {clean_topic}: {content_preview}{reason_suffix}{evidence_suffix}{citations_suffix}")
 
-        # [BL-050] 直近1件のSuperseded版（同一topic・同一entry_type）を差分として1行追記。
-        # 全履歴を出すとトークンコストが膨らむため、直前版のみに絞る。
-        prior = _find_prior_superseded(agreements, raw_topic, entry_type)
-        if prior is not None:
-            old_what = (prior.get("decision_what") or "")[:80]
-            old_why = (prior.get("reason_why") or "")[:80]
-            lines.append(f"　└ (前版 Superseded): {old_what} — 当時の理由: {old_why}")
+        # [BL-224 C1] 系譜（lineage）の時系列復元読み。conn があれば edge ベースの変遷連鎖
+        # ＋ depends_on 前提を描き、無ければ _find_prior_superseded による1ホップ表示へフォールバック。
+        lineage_lines = _render_agreement_lineage(conn, run_id, agreement_id, raw_topic, entry_type)
+        if lineage_lines is None:
+            prior = _find_prior_superseded(agreements, raw_topic, entry_type)
+            if prior is not None:
+                old_what = (prior.get("decision_what") or "")[:80]
+                old_why = (prior.get("reason_why") or "")[:80]
+                lines.append(f"　└ (前版 Superseded): {old_what} — 当時の理由: {old_why}")
+        else:
+            lines.extend(lineage_lines)
 
     return "\n".join(lines)
 
@@ -8059,6 +8163,135 @@ def _find_prior_superseded(agreements: list[Agreement], topic: str, entry_type: 
     if not candidates:
         return None
     return max(candidates, key=lambda a: a.get("timestamp") or 0)
+
+
+def _render_agreement_lineage(conn, run_id, agreement_id, raw_topic, entry_type) -> list[str] | None:
+    """[BL-224 C1] 系譜（lineage）の時系列復元読み（F-8.4(2)実装）。
+    conn が無い場合は None を返し、呼び出し元が _find_prior_superseded による1ホップ表示へ
+    フォールバックする。conn ありの場合: ① supersedes 連鎖（_get_lineage_chain: created_at 昇順＝
+    時系列順）で変遷ストーリーを描く、② depends_on エッジで「前提」を列挙する。"""
+    if conn is None or not run_id:
+        return None
+    ref = f"agreement:{agreement_id}"
+    extra: list[str] = []
+
+    # ① 変遷連鎖（旧→新、時系列昇順）。_get_lineage_chain は supersedes のみ・created_at 昇順で返す。
+    chain = _get_lineage_chain(conn, run_id, ref, max_depth=3)
+    if chain:
+        parts = []
+        for c in chain:
+            c_id = c["ref"].split(":", 1)[1] if c["ref"].startswith("agreement:") else None
+            if not c_id:
+                continue
+            row = conn.execute(
+                "SELECT decision_what, reason_why, status FROM agreements WHERE run_id=? AND id=?",
+                (run_id, c_id),
+            ).fetchone()
+            if not row:
+                continue
+            what = (row[0] or "")[:60]
+            why = (row[1] or "")[:60]
+            parts.append(f"{what}（理由: {why}）" if why else what)
+        if parts:
+            extra.append("　└─ 系譜（変遷）: " + " → ".join(parts))
+
+    # ② 前提（depends_on）。現行合意が依存する上流合意・事実・属性を列挙。
+    deps = _traverse_lineage(conn, run_id, ref, "backward", 3, relation_types=["depends_on"])
+    dep_strs = []
+    for d in deps:
+        dr = d["ref"]
+        if dr.startswith("fact:"):
+            var = dr[len("fact:"):]
+            frow = conn.execute(
+                "SELECT value, unit FROM verified_facts WHERE run_id=? AND variable_name=?",
+                (run_id, var),
+            ).fetchone()
+            dep_strs.append(f"fact:{var}={frow[0]}{frow[1] or ''}" if frow else f"fact:{var}=?")
+        elif dr.startswith("agreement:"):
+            aid = dr[len("agreement:"):]
+            arow = conn.execute(
+                "SELECT decision_what FROM agreements WHERE run_id=? AND id=?", (run_id, aid)
+            ).fetchone()
+            dep_strs.append(f"[{aid}] {arow[0][:40] if arow else '?'}")
+        elif dr.startswith("entity:"):
+            ep = dr[len("entity:"):].split(":", 1)
+            if len(ep) == 2:
+                dep_strs.append(f"{ep[0]}:{ep[1]}")
+    if dep_strs:
+        extra.append("　└─ 前提: " + " / ".join(dep_strs))
+
+    return extra
+
+
+def _check_provisional_anchoring(conn, run_id, var_name) -> str | None:
+    """[BL-224 C3] owns_variables 内の provisional 変数について後方系譜（derived_from）をたどり、
+    遡った先も expert_calculation のみを根拠とする provisional 値（＝暫定の上に暫定が積み上がっている）
+    なら、アンカリング懸念として指摘文を返す。確定済み（confirmed）なら None、系譜に弱い祖先が
+    無ければ None。"""
+    _row = conn.execute(
+        "SELECT confidence, citations FROM verified_facts WHERE run_id=? AND variable_name=?",
+        (run_id, var_name),
+    ).fetchone()
+    if _row is None or _row[0] != "provisional":
+        return None  # 存在しない、または confirmed（アンカー済み）なら指摘しない
+
+    # derived_from エッジは from_ref=従属側 → to_ref=ソース側（W1/W4 同型）。よって対象変数の
+    # 祖先（依存元）を辿るには from_ref=対象 を満たす to_ref を返す 'forward' を用いる
+    # （depends_on の from=前提 → to=従属 とは逆方向であることに注意）。
+    ancestors = _traverse_lineage(conn, run_id, f"fact:{var_name}", "forward", 3,
+                                  relation_types=["derived_from"])
+    weak_ancestors: list[str] = []
+    for a in ancestors:
+        ar = a.get("ref", "")
+        if not ar.startswith("fact:"):
+            continue
+        av = ar[len("fact:"):]
+        if av == var_name:
+            continue
+        arow = conn.execute(
+            "SELECT confidence, citations FROM verified_facts WHERE run_id=? AND variable_name=?",
+            (run_id, av),
+        ).fetchone()
+        if arow is None:
+            continue
+        # provisional かつ 根拠が expert_calculation のみ（その他出典なし）なら弱い
+        cites = arow[1]
+        try:
+            cite_list = json.loads(cites) if cites else []
+        except (json.JSONDecodeError, TypeError):
+            cite_list = []
+        if not isinstance(cite_list, list):
+            cite_list = []
+        only_expert_calc = bool(cite_list) and all(
+            (c.get("type") if isinstance(c, dict) else "") == "expert_calculation" for c in cite_list
+        )
+        if arow[0] == "provisional" and only_expert_calc:
+            weak_ancestors.append(av)
+    if weak_ancestors:
+        return (
+            f"変数「{var_name}」は暫定値であり、さらにその根拠を遡ると"
+            f"「{', '.join(weak_ancestors[:3])}」も暫定値（出典: 専門家算定のみ）に依存しています。"
+            f"暫定の上に暫定が積み上がっているため、実測・外部データ等でアンカー（確定）するか、"
+            f"依存元の確定を優先してください。"
+        )
+    return None
+
+
+def _run_provisional_anchoring_check(conn, run_id, phases) -> list[tuple[str, str]]:
+    """[BL-224 C3] 各タスクの owns_variables（provisional）について後方系譜アンカリングを検査し、
+    暫定の上に暫定が積み上がっている変数を (task_id, 指摘文) のリストで返す。呼び出し元
+    （task_plan_reviewer_node）が各指摘を計画文書へ書き込む（§15.4: 出口も同時に設計）。"""
+    findings: list[tuple[str, str]] = []
+    for _phase in (phases or []):
+        for _task in (_phase.get("tasks") or []):
+            _task_id = _task.get("task_id", "")
+            if not _task_id:
+                continue
+            for _var in (_task.get("owns_variables") or []):
+                _anchor_comment = _check_provisional_anchoring(conn, run_id, _var)
+                if _anchor_comment:
+                    findings.append((_task_id, _anchor_comment))
+    return findings
 
 
 def _aggregate_global_constraints(agreements: list[Agreement]) -> list["GlobalConstraint"]:
@@ -8100,8 +8333,9 @@ def _build_hydrate_context_from_db(conn: sqlite3.Connection, run_id: str, config
 def _build_agreements_context_from_db(conn: sqlite3.Connection, run_id: str) -> str:
     """【SLM要約】
     SQLiteからagreementsを取得し、旧list版と同一のロジック（Rejectedも却下事項として含める既存挙動維持）でコンテキスト文字列化する。
+    [BL-224 C1] conn/run_id を渡して系譜（lineage）表示を有効化する。
     """
-    return _build_agreements_context(get_agreements_from_db(conn, run_id))
+    return _build_agreements_context(get_agreements_from_db(conn, run_id), conn, run_id)
 
 
 def _get_current_task(state: LineageState) -> dict:
@@ -12565,6 +12799,19 @@ def task_plan_reviewer_node(state: LineageState) -> LineageState:
             else:
                 print(f"  ⚠️ [task_plan_reviewer] task_id={task_id}へのレビュー指摘追記に失敗しました（対象文書または見出しが見つかりません）。")
         feedback_parts.append(f"[{task_id}] {comment}")
+
+    # [BL-224 C3] 各タスクの owns_variables（provisional）について後方系譜アンカリングを検査し、
+    # 暫定の上に暫定が積み上がっているものを指摘として計画文書へ書き込む（§15.4: 出口も同時に設計）。
+    for _tid, _cmt in _run_provisional_anchoring_check(_conn, state["run_id"], state["phases"]):
+        _task_phase = _find_phase_id_for_task(state["phases"], _tid)
+        _task_for = _find_task_by_id(state["phases"], _tid)
+        _appended = _append_reviewer_comment_to_plan(
+            _conn, state["run_id"], _task_phase, _tid, _cmt, _task_for
+        )
+        feedback_parts.append(f"[{_tid}] {_cmt}")
+        if _appended:
+            print(f"  📝 [BL-224 C3] アンカリング懸念をtask_id={_tid}の計画文書へ追記しました。")
+
     combined_feedback = "\n".join(feedback_parts)
 
     retry_count = state.get("plan_reviewer_retry_count", 0)

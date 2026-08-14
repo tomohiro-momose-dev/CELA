@@ -262,6 +262,7 @@
 | BL-228 | 高 | `cela_main.py`（`chat_history` 活性化・`relation_edges` の `turn:`/`issue:`/`whiteboard:`/`detector_review:` 拡張・単一閾値N要約・ターン内チューリン描画・Hydrate/trace 統合） | **統一活動系譜（`open`・設計完了・実装未着手・Phase 3）。** 設計書: [BL228_basic_design.md](BL-228/BL228_basic_design.md)。死蔵 `chat_history`（定義のみ・INSERT/SELECT 0件）を正本として活性化し、`chat_history_window=4` で窓切り後も全文を系譜として残す。単一閾値N要約（≤N 生文 / >N は軽量・ローカルLLM委任・immutable の2密度 `summary_brief`/`summary_detail`）。detector 差戻を `is_rollback` フラグ＋`relation_edges` の `turn:` 外向きエッジで構造化（「弱い部分」の補強＝User AI/Expert の in-context 推論依存を解消）。ターン内チューリン描画・Hydrate の能動取得（C1/C2/C3）・5節は再発明しない。BL-224 の `relation_edges` を単一基盤として拡張（§15.1）。未決事項あり（①N/M 既定値＝N=10 承認済み・M は別途、②軽量LLM選定、③要約タイミング等）。実装順序は BL-224（Phase1-2）の後・**Phase 3**（D-204）。 | P2 |
 | BL-229 | 中 | `cela_main.py`（task_planner/task_plan_reviewer への facts 登録ポリシー・§15.1 共有プロンプトヘルパ） | **計画段階の概算/Web探索値を `verified_facts` へ provisional 登録（`open`・調査済み・設計未着手）。** 計画ノード（task_planner 8243 / task_plan_reviewer 12035）は**既に `WRITE_AGREEMENT_TOOL` を持つ**が計画由来の数値を `verified_facts` に登録する挙動が無い（欠落はプロンプト指示）。ユーザー指摘（2026-08-14）「フェーズタスク作成は web 探索も使い概算も行い、計画・タスク・受け入れ要件は後続へ大きな影響を及ぼす」に基づき、重要な概算/Web探索値を `confidence='provisional'` で登録。捕捉そのものは BL-224 の C3（upsert 境界）が担うため、本 BL は「誰が・いつ書くか」のポリシー＋§15.1 共有ヘルパが対象。未決事項あり（登録対象の絞り込み・ツール可用性合意・ヘルパ文言）。 | P2 |
 | BL-230 | 中 | `cela_main.py`（新規バックフィル関数＋`tests/test_bl230_relation_edges_backfill.py`） | **BL-224 系譜バックフィル: 既存 `agreements.depends_on` 列 → `relation_edges`（`open`・設計未着手）。** 独立レビュー（N6）の指摘を受け個別 BL として起票。BL-224 実装（Phase 1）で `relation_edges` は**新規に書かれるエッジのみ**を蓄積し、過去の run や Phase 1 以前の既存 `depends_on` 列（実 id の JSON 配列、`5496`）は自動では遡及されない。**既存 run を開くと `relation_edges` が 0 件**（実測: 現行 run でもエッジ生成前は 0 件）となり、過去の「誰が・どうして」が辿れない。マッピングは W3 と同一（`f"agreement:{dep_id}"` → `f"agreement:{self_id}"`、`from_ref=agreement:<Y>`→`to_ref=agreement:<X>`、`relation_type='depends_on'`）。本 BL は (1) 既存 `agreements` を `run_id` 単位で走査、(2) `depends_on` 配列から上記エッジを生成、(3) `_write_relation_edge`（既存 ref 実在検証ゲートを通す）で書き込む、バックフィル関数を追加。トランザクション境界は Phase 1 の `relation_edges` 書き込みと同一にする（§15.4: バックフィル結果も `trace_lineage` で消費可能でなければ意味がない）。テスト: 既存 `depends_on` を持つ fixture run に対しバックフィル後 `trace_lineage(agreement:<X>)` が Y を返すこと。 | P2 |
+| BL-231 | 高 | `cela_main.py`（Detector ノード・オーケストレータ反復上限） | **Detector ノードの生成崩壊ループ（`open`・実測済み・実装は後日）。** 実ドライラン（run_id `1786699546-9ac0105d`、log `log/2026-08-14/1945`）で Detector が同一推論ブロックを**逐語的に 40 回**繰り返し収束せず（`"Let me do these calls."` ×40、実ツール実行は 1 セットのみ、`trace_lineage` ×0）。ループガード／最大反復回数の上限が無く、モデルの生成崩壊（repetition degeneracy）を検知・切断できないことが疑われる根本原因（未確定）。BL-224 との無関係は実証済み（§14／§16.2）。ユーザー指示「BL表記、ループガードなど検知、停止できる技術があるのなら後で実装」に基づき、**検知・停止ガードの実装は後日（deferred）**。未決: 検知方式・停止/復旧挙動・対象ノード範囲。 | P1 |
 
 ---
 
@@ -7824,9 +7825,9 @@ BL-219の調査で、task_plan_reviewerが`think`の中で「約8,500人/日は`
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（設計完了・実装未着手） |
+| 状態 | `open`（Phase 1・Phase 2 実装済み・オフラインDBテスト済み。実ドライラン全体検証は BL-231 ループにより中断中） |
 | 優先度 | P2 |
-| テスト | 未作成（実装着手時に作成予定） |
+| テスト | `tests/test_bl224_relation_edges.py`（Phase 1: W1/W2/W3/N2/C2/C5）、`tests/test_bl224_phase2_lineage_consumption.py`（Phase 2: W4/C1/C3/C4） |
 | 関連 | BL-219/220/223（同日の同型欠陥3連続）、要件定義§4.2（`depends_on`＝DAG系譜）、F-8.4(2)（時系列復元読み）、F-3.6/F-8.2（正負の理由）、F-3.9（構造化ファクトストア）、D-196（立案時のみの対策を恒久化）、BL-168（staleness markerイディオム） |
 | 設計書 | [BL-224/BL224_basic_design.md](BL-224/BL224_basic_design.md) |
 
@@ -7837,6 +7838,14 @@ BL-219/220/223が同日に「書き込み口はあるが消費経路が欠落す
 設計内容: `agreements`(id)/`verified_facts`(variable_name)/`entity_attributes`(entity_id,attr_name)という3つの別IDスペースを型プレフィックス付き参照（`agreement:`/`fact:`/`entity:<id>:<attr>`）で横断する汎用エッジテーブル`relation_edges`を新設し、関係種別は`depends_on`（§4.2のDAG系譜）・`supersedes`（F-3.6/F-8.2の正負の理由）・`derived_from`（F-3.9/BL-219の8,500人問題）の3種のみ。**LLMの記入に依存しない機械的な骨格**（決定→値、新版→旧版）を先に張り、LLMが足す線を付加価値とする（§15.3）。消費側はHydrateコンテキストの時系列復元読み（F-8.4(2)実装）・`_audit_report --ref`・task_plan_reviewerのアンカリング検出・上流変更の前方伝播（BL-168のstaleness markerイディオムを再利用、新列は作らない）の4経路。`task:`参照型は実表の行として検証できず`agreements.depends_on`と同じ「受理されるが意味を持たない」状態を新テーブル内で再現するため不採用。
 
 **未決事項（ユーザー判断）**: ①最大探索深度の定数承認（10を提案、AGENTS.md §7）、②単独Rejected（置換を伴わない却下）へのエッジ張り方針、③実装の2段階分割（スキーマ＋機械的骨格＋監査レポート→Hydrate表示等のトークン影響大の経路）。
+
+**実装状況（2026-08-14）:** 未決③は「BL-231 起票後、Phase 2 実装」というユーザー指示（「BL表記後phase2実装」）により解決し、Phase 2（W4/C1/C3/C4）を実装・オフラインDBテスト合格（12件）。
+- W4: `WRITE_AGREEMENT_TOOL` の `confirmed_variables[].derived_from`（任意）を追加し、値→値の `derived_from` エッジを `_write_agreement_impl` の confirmed_variables ループで機械的に張る。無効 ref はエッジのみスキップし `warning` で返す（§13.2 fail-loud・`protected_warning` と同型）。
+- C4: `upsert_verified_fact` / `upsert_entity_attribute` で値が実際に変化した場合のみ、`_mark_forward_dependents_stale` が派生元 ref の下流従属側（`to_ref=変更元`、すなわち `_traverse_lineage` の backward）へ `reason`/`reason_why` に BL-168 同型の冪等マーカー `⚠️[BL-224: 上流変更で要再確認]` を追記。新列は作らない（§15.4）。
+- C1: `_build_agreements_context` に `conn`/`run_id` 引数を追加し、`_render_agreement_lineage` で①`supersedes` 連鎖（`_get_lineage_chain`、時系列順）の変遷ストーリー②`depends_on` 前提の2行を Hydrate へ表示。conn なし経路（`_build_agreements_context(agreements)`）は従来の `_find_prior_superseded` 1ホップへフォールバック。
+- C3: `_check_provisional_anchoring`（provisional かつ expert_calculation のみを根拠とする祖先へ `derived_from` を forward 走査）を `_run_provisional_anchoring_check` が全タスクの `owns_variables` へ適用し、`task_plan_reviewer_node` が BL-219 配線済みの `per_task_comments` → 計画文書への注記経路へ流す（§15.4 出口も同時に設計）。
+- 方向規約の相違を実装中に確認: `depends_on` は from=前提→to=従属、`derived_from` は from=従属側→to=ソース側と**逆方向**。C1 の前提列挙は backward、C3 の祖先探索は forward、C4 の下流従属側は backward を使い分ける。
+- 未決①の定数は設計書提案のとおり使用（C1 変遷表示は depth 3、走査ヘルパの既定 max 10）。正式な §7 承認は残置し、実ドライラン検証（BL-231 ループ解消後）を待つ。
 
 **実装着手前に、要件定義⇔実装の乖離マップ（`requirements_gap_map.md`）とBL全史の洗い直し（`bl_history_audit.md`）を先行させる方針をユーザーが選択した。**
 
@@ -7951,6 +7960,40 @@ YouTubeの LDD/Lineage 研究（`docs/refs/`）が起源の「判断の系譜を
 **未決事項:**
 
 1. バックフィルの実行トリガー（起動時自動 vs 明示コマンド `backfill_relation_edges`）。2. `depends_on` が指す id が既に `Superseded` の場合の扱い（そのままエッジを張るか棄却するか）。3. Phase 1 完了後の着手順序。
+
+---
+
+### BL-231: Detector ノードの生成崩壊ループ（繰り返し検知・停止ガード不足）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（実測済み・調査済み・修正未着手／実装は後日） |
+| 優先度 | P1 |
+| テスト | 未作成（後日実装時に作成予定） |
+| 関連 | BL-224（無関係と実証済み・除外根拠記載）、BL-014（非収束クラッシュ）、BL-016（探索的タスクでツールループ非収束）、BL-017（差し戻しループ沼脱出機構）、AGENTS.md §15.4（消費経路の確保）、§17（テスト規律） |
+| 設計書 | （未作成 — 後日実装時に作成予定） |
+
+**内容:**
+
+2026-08-14 の実ドライラン（run_id `1786699546-9ac0105d`、ログ `log/2026-08-14/1945/log_no_prompt.md`）で、Detector ノードが「User 発言（task_1_1 承認＋task_1_2 指示）を監査する」推論ブロックを**逐語的に 40 回**繰り返し、グラフが収束せず無限ループに陥った（ユーザーが「40回も繰り返している」「本当に思考がループ」と停止を指示）。
+
+**証拠（実ログ grep、§14 に基づく実証）:**
+- `"Let me do these calls."` が **40 回**（1文字も違わず）。ユーザーが指摘した「40回」の正体。
+- 実際のツール実行は **1 セットのみ**: `read_issues 実行`×1, `read_verified_fact 実行`×3, `python_repl 実行`×1, **`trace_lineage 実行`×0**。
+- すなわち 40 回の繰り返しは実ツール再実行ではなく、モデルが同一テキストを生成し続けた **生成崩壊（repetition degeneracy）**。各区間の末尾は `print(4 * 2_500_000 == 10_000_000)` の python_repl コードで終わり、直後に再び `Let me do these calls.` が始まる。ファイル末尾も同ブロックで終わり、ユーザー停止まで収束せず。
+
+**BL-224 との無関係を確定（§14 / §16.2）:**
+- ループ内ツールは全て既存（read_issues / read_verified_fact / python_repl）で、BL-224 新設の `trace_lineage` は 0 回。
+- BL-224 差分（cela_main.py 正味80行＝系譜スケルトン＋ツール追加）は Detector ロジックおよびオーケストレータ遷移に一切触れていない。
+- ログに BL-224 起因の例外・リトライ・トレースバックは一切無し（唯一のエラーは `decision_what` 欠落という通常のモデルミス）。
+- よって本ループは BL-224 Phase 1 の欠陥ではなく、別件として起票。BL-224 の実ドライラン検証（W1/W2/C2）はループ発生前に DB へ書き込まれた状態で確認済み、影響を受けない。
+
+**疑われる根本原因（仮説・未確定）:** task_1_1→task_2_1 審査遷移において Detector ノードに **ループガード／最大反復回数の上限が無い** ため、モデルの生成崩壊を検知・切断できず同一出力を延々と記録し続めた。オーケストレータ／モデル層の事前からある課題。BL-014（非収束クラッシュ）・BL-016（探索的タスクでツールループ非収束）・BL-017（差し戻しループ沼脱出）と同型の「収束しない繰り返し」クラスだが、本 BL は「Detector 監査ノード特化の生成崩壊＋検知ガード不在」としてそれらと重複なく起票。
+
+**動機（ユーザー指示・2026-08-14）:** 「BL表記、ループガードなど検知、停止できる技術があるのなら後で実装」「BL表記後phase2実装」。順序: (a) 本ループを BL 起票、(b) ループガード等の検知・停止実装は**後日（deferred）**、(c) その後 BL-224 Phase 2 を実装。
+
+**未決事項:**
+1. 検知方式: 同一ノード出力の逐語的繰り返しをどう検知するか（直前 N 回の出力ハッシュ一致、あるいはツール呼び出し計画の同一性）。2. 停止／復旧: 検知時にどう振る舞うか（ノード打ち切り＋警告、または人間へエスカレーション）。3. 対象ノード: Detector のみか、User AI Stage 等も含むか。4. 実装は後日（本 BL の `in_progress` 化はユーザーの「後で実装」指示まで保留）。
 
 ---
 
