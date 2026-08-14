@@ -14874,8 +14874,10 @@ if __name__ == "__main__":
 
     # [BL-224-dryrun] ゴール文を外部mdから読む（検証・最小シナリオ切替を容易にする）。
     # --goal-file で任意のゴールを指定可。省略時は既定ファイルを使用。
+    # __main__ はプロジェクトルート(cela_main.py と同階層)に位置するため、dirname は1段。
+    # （tests/ 配下のファイルは2段必要だが、ここはスクリプト直下）
     _goal_file = _cli_args.goal_file or os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        os.path.dirname(os.path.abspath(__file__)),
         "docs", "goal", "chino_city_autonomous_bus.md",
     )
     if not os.path.exists(_goal_file):
