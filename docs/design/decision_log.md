@@ -2871,6 +2871,20 @@
 
 ---
 
+### D-205: BL-224 設計書への独立レビュー所見（N1−N6）の反映・6点の設計判断
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-14 |
+| 状態 | `decided` |
+| 決定者 | t-momose（レビュー提示＋N2・N4 の設計判断指示）、Claude（N1/N3/N5/N6 の反映＋実コード照合） |
+| **決定理由** | 別モデル（cline）による独立レビューが「実装可能・ブロッカーなし」と結論しつつ、6つの軽微な点（N1−N6）を挙げた。AGENTS.md §16.2 に従い各所見を実コードで照合してから設計書へ反映。うち設計判断を要した2点は以下のとおり。N2（単独 Rejected の supersedes フック位置）: 実コード確認で **`decision_extractor_node` は Rejected 合意を `_commit_agreement_from_tool` を経由せず直接 `db_append_agreement`/`db_supersede_agreement` へ書く**（12890/12996/13014）ため、フックを `_commit_agreement_from_tool` の INSERT 直後に置くだけでは decision_extractor 経路の Rejected が零れる。よってフック位置は「`_commit_agreement_from_tool` INSERT 直後」としつつ、**`decision_extractor` の Rejected 分岐からも同一 `_link_supersession` を呼ぶ**よう配線する（W2 edit-wrapper とは別トリガー・ダブルレイヤー禁止）。N4（Phase 1 PR 順序）: スキーマ説明修正（`'42'`→`'AG-xxxx'`、2295-2306）は W3 の `relation_edges` 書き込み配線と**同一 PR/commit** に含める。別 PR に分けると一時的に「LLM が `'42'` を書き→検証 3367-3375 で弾かれ→W3 エッジが空」という、本 BL が直そうとしている §15.4 欠陥を自ら再現するため。 |
+| 決定内容 | N1: 検証節の「再帰CTE」表記を「`_traverse_lineage`（Python 反復）」へ修正（M3/B7 方針と整合）。N2: 単独 Rejected の `supersedes` フック位置を `_commit_agreement_from_tool` INSERT 直後とし、ガード=`status=='Rejected'`＋現行アクティブ Y 実在、`_link_supersession(new_id=X, old_id=Y, reason=rationale)` を再利用、かつ decision_extractor 経路も同一ヘルパを呼ぶ（設計書 未決事項2 へ追記）。N3: `trace_lineage` の不明/他 run ref 応答仕様を追加（空リスト＋ヒント／未知プレフィックスは即時返却・§13.2/§15.3）。N4: スキーマ説明修正を W3 と同一変更セットへ（別 PR 禁止）。N5: C3 の `upsert_verified_fact` 内トランザクション境界を Phase 2 着手時に明示決定（二重コミット/競合を避ける）と留意追記。N6: B8 バックフィルを **BL-230** として別起票（既存 `agreements.depends_on` 列→`relation_edges`、マッピングは W3 と同一、過去 run も `trace_lineage` で辿れるように）。 |
+| 影響 | `docs/design/back_log/BL-224/BL224_basic_design.md`（検証節 N1、未決事項2 N2、W3 節 N4、C5 節 N3、C3 節 N5、B8→BL-230 参照）、`docs/design/back_log/issue_backlog.md`（優先対応一覧＋Backlog 一覧に BL-230 追加）、本ファイル D-205 新規。 |
+| 関連 BL | BL-224（本件）、BL-228（Phase3）、BL-230（N6 バックフィル）、AGENTS.md §13.2（空リスト fail-loud）、§15.3（機械的検証・未知プレフィックス即時返却）、§15.4（W3 スキーマ修正別 PR 分けは欠陥再現）、§16.2（レビュー所見は実コード照合後に反映） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
