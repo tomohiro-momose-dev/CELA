@@ -268,3 +268,18 @@ def test_ref_extension_present_in_source():
     assert "turn:" in src_trace and "detector_review:" in src_trace
     # W2 ヘルパの存在
     assert "_bl228_record_detector_review" in inspect.getsource(cela_main._bl228_record_detector_review)
+
+
+def test_trace_lineage_usage_paragraph_wired_into_expert_and_user_prompts():
+    """[BL-228] trace_lineageは「配線済みだがいつ呼ぶか指示が無く未発火」だった
+    （1314ログでは0回呼び出し、AGENTS.md §15.4 入口はあるが出口＝消費経路が無い状態）。
+    ツール自体・_TRACE_LINEAGE_USAGE_PARAGRAPHの定義に加え、Expert/User AI各Stageの
+    プロンプト生成関数のソースに実際に注入されていることまで確認する（存在証明のみでは
+    「定義したが誰も呼ばない」再発を検知できないため）。
+    """
+    assert hasattr(cela_main, "_TRACE_LINEAGE_USAGE_PARAGRAPH")
+    src_expert = inspect.getsource(cela_main.call_expert)
+    assert "trace_lineage" in src_expert
+    assert "TRACE_LINEAGE_TOOL" in src_expert
+    src_user = inspect.getsource(cela_main.generate_user_utterance)
+    assert "_TRACE_LINEAGE_USAGE_PARAGRAPH" in src_user

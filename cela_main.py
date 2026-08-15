@@ -301,7 +301,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = nemotron_3_ultra
+model_user = laguna_S_2_1
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -311,42 +311,42 @@ model_user = nemotron_3_ultra
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = hy3 # nemotron_3_ultra
+model_orchestrator = laguna_S_2_1 # nemotron_3_ultra
 
 client_expert = client_openrouter
-model_expert = hy3 # nemotron_3_ultra
+model_expert = laguna_S_2_1 # nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = hy3
+model_task_planner = laguna_S_2_1
 
 client_task_plan_reviewer = client_openrouter
-model_task_plan_reviewer = hy3
+model_task_plan_reviewer = laguna_S_2_1
 
 client_detector_domain = client_openrouter
-model_detector_domain = hy3
+model_detector_domain = laguna_S_2_1
 client_detector_numeric = client_openrouter
-model_detector_numeric = hy3 # nemotron_3_ultra
+model_detector_numeric = laguna_S_2_1 # nemotron_3_ultra
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = hy3
+model_decision_extractor = laguna_S_2_1
 
 client_resource_arbiter = client_openrouter
-model_resource_arbiter = hy3 #nemotron_3_ultra
+model_resource_arbiter = laguna_S_2_1 #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = hy3  
+model_reflection = laguna_S_2_1  
 
 client_facilitator = client_openrouter
-model_facilitator = hy3 
+model_facilitator = laguna_S_2_1 
 
 client_integrator = client_openrouter
-model_integrator = hy3 #nemotron_3_ultra
+model_integrator = laguna_S_2_1 #nemotron_3_ultra
 
 client_reviewer_qa = client_openrouter
-model_reviewer_qa = hy3 #nemotron_3_ultra
+model_reviewer_qa = laguna_S_2_1 #nemotron_3_ultra
 
 client_goal_essence = client_openrouter
-model_goal_essence = hy3 #nemotron_3_ultra
+model_goal_essence = laguna_S_2_1 #nemotron_3_ultra
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -9183,6 +9183,21 @@ _BL093_THINK_VALUE_PARAGRAPH = (
     "同一の応答内でまとめて呼んでも、単独で呼んでも構いません。"
 )
 
+# [BL-228] trace_lineageの使用指示。BL-224で定義したツール自体は各ノードのtools=[]に配線済み
+# だったが、「いつ呼ぶか」をプロンプト側で名指ししていなかったため実運用で未発火だった
+# （AGENTS.md §15.4: 入口はあるが出口＝消費経路が無い状態）。BL093同様の理由でツール一覧文
+# 自体は各呼び出し元へインラインのままにし、この後続段落のみ共有化する。挿入位置は既存の
+# 「あなたが使えるツールは...」文の直後（ツール説明群と同じ位置）に固定する。
+_TRACE_LINEAGE_USAGE_PARAGRAPH = (
+    "[BL-224/BL-228] 過去のターンの発言、ある合意（agreement）・確定値（fact）・事物の属性\n"
+    "（entity）が「なぜ今この内容なのか」「何を前提に導出されたか」「他の案はなぜ却下されたか」\n"
+    "に疑問を持った場合は、trace_lineageツールで根拠を遡って確認してください。ref には、system\n"
+    "prompt上に[AG-xxx]のように表示される実際のagreement id、fact:<変数名>、\n"
+    "entity:<entity_id>:<attr_name>、turn:<chat_history.id（発言そのものの系譜）>、\n"
+    "issue:<topic>、whiteboard:<phase_id>:<task_id>、detector_review:<id> のいずれかを指定できます。\n"
+    "このツールはLLMを呼ばず、DBに構造化保存済みの根拠のみを機械的に返す読み取り専用ツールです。"
+)
+
 
 def _scratch_concerns_closure_instruction(final_output_field: str, escalation_tools: str = "") -> str:
     """[BL-220] 最終出力を書く直前に、thinkのscratch_concernsで追跡している未解決の懸念を
@@ -10150,7 +10165,8 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
         "read_project_plan・write_agreement・escalate_premise_concern・ask_user_question・"
         "web_search・web_fetch・read_reference_file・read_goal_reference・register_entity・write_entity_attribute・read_entity・gsi_geocode・"
-        "gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・thinkです。\n"
+        "gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・thinkです。\n"
+        + _TRACE_LINEAGE_USAGE_PARAGRAPH + "\n"
         "[BL-204: 課題に登場する事物の事実はレジストリで管理する] 固有の名前を持つ実世界の"
         "対象（施設・場所・組織・路線・サービス等）についての事実は、read_entityで確認し"
         "write_entity_attributeで記録してください。レジストリが真実の源であり、成果物本文は"
@@ -10261,7 +10277,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     _CURRENT_TASK_ID = _effective_current_task_id_from(state)
     _reset_think_scratchpad()  # [BL-093]
     return query_AI(messages, client=client_expert, model=model_expert, label=f"Expert:{expert_name}",
-                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, REGISTER_ENTITY_TOOL, WRITE_ENTITY_ATTRIBUTE_TOOL, READ_ENTITY_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)
+                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, REGISTER_ENTITY_TOOL, WRITE_ENTITY_ATTRIBUTE_TOOL, READ_ENTITY_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)  # [BL-228] Expertは唯一trace_lineageが未配線だった
 
 
 #def call_detector(goal: str, user_input: str, expert_output: str, decisions: list[Decision], current_phase: dict) -> dict:
@@ -10625,7 +10641,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"【重要】あなたが使えるツールはread_verified_fact・read_deliverable_file・"
         f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・"
         f"web_search・web_fetch・read_reference_file・read_goal_reference・read_entity・verify_entity_geo・gsi_geocode・"
-        f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・thinkです。"
+        f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
         f"{_get_frozen_agreements_text(get_active_conn(), state['run_id'])}"
         f"【BL-086: 🔒Freeze済み項目の扱い】上記に🔒が付いている項目があれば、それは人間の発注者が"
@@ -10670,7 +10686,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
     _reset_think_scratchpad()  # [BL-093]
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
         domain_prompt, client=client_detector_domain, model=model_detector_domain, label="Detector (Domain Review)",
-        tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, THINK_TOOL],
+        tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線
         fallback={"constraint_issue": "none", "comment": "", "target_excerpt": "", "observations": ""},
         state=state,
     )
@@ -10810,7 +10826,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
         f"【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
         f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・"
         f"web_search・web_fetch・read_reference_file・read_goal_reference・read_entity・verify_entity_geo・gsi_geocode・"
-        f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・thinkです。"
+        f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
 
         f"System Goal: {goal}\n"
@@ -11318,7 +11334,8 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goa
     同期してから再配分案を検討してください】。確認せずに独自の前提で再配分すると、既存の
     確定事項と矛盾するリスクがあります。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
-    write_agreement・thinkです。{_THINK_TRAILER_SENTENCE}
+    write_agreement・trace_lineage・thinkです。{_THINK_TRAILER_SENTENCE}
+    {_TRACE_LINEAGE_USAGE_PARAGRAPH}
     {_scratch_concerns_closure_instruction("rationale")}
 
     【ゴール変容の検知（★R5 GoalShiftEvent）】
@@ -11771,7 +11788,8 @@ def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "", st
     read_verified_factで確認し、複数タスクにまたがる数値の前提が実際に一致しているかを
     チェックしてから矛盾判定を行ってください】。\n
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
-    write_agreement・thinkです。{_THINK_TRAILER_SENTENCE}
+    write_agreement・trace_lineage・thinkです。{_THINK_TRAILER_SENTENCE}
+    {_TRACE_LINEAGE_USAGE_PARAGRAPH}
     {_scratch_concerns_closure_instruction("details")}
 
     ■ 絶対目標: {goal}
@@ -12024,7 +12042,8 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"対象を持たない単独の値はread_verified_factを使ってください。\n\n"
             f"【今回レビューする直近のやり取り】\n{stage_history_text}\n\n"
             f"【重要】あなたが使えるツールはread_verified_fact・read_deliverable_file・python_repl・"
-            f"read_entity・thinkです。{_THINK_TRAILER_SENTENCE}\n"
+            f"read_entity・trace_lineage・thinkです。{_THINK_TRAILER_SENTENCE}\n"
+            f"{_TRACE_LINEAGE_USAGE_PARAGRAPH}\n"
             f"{_scratch_concerns_closure_instruction('domain_concerns')}\n"
             f'Return ONLY JSON: {{"domain_concerns": "ドメイン妥当性上の懸念（無ければ空文字）", '
             f'"scope_compliant": true/false, "review_comment": "レビューの要点（次段へ引き継ぐ短い要約）"}}'
@@ -12145,7 +12164,9 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"[BL-205] read_entityは名前を持つ事物専用です。entity未指定で「とりあえず一覧」を"
             f"見る目的では使わないでください（一覧は名前のみで属性を含みません）。\n\n"
             f"【今回レビューする直近のやり取り】\n{stage_history_text}\n\n"
-            f"【重要】あなたが使えるツールはwrite_agreement・read_entity・thinkです。{_THINK_TRAILER_SENTENCE}\n"
+            f"【重要】あなたが使えるツールはwrite_agreement・read_entity・trace_lineage・thinkです。"
+            f"{_THINK_TRAILER_SENTENCE}\n"
+            f"{_TRACE_LINEAGE_USAGE_PARAGRAPH}\n"
             f"{_scratch_concerns_closure_instruction('approval_reason')}\n"
             f'Return ONLY JSON: {{"approval_status": "Approved/Approved_with_Conditions/Rejected/Pending", '
             f'"approval_reason": "承認・却下・保留の理由"}}'
@@ -12620,8 +12641,9 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         "「一覧確認」目的で多用しないでください。\n"
         "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
         "write_agreement・escalate_premise_concern・resolve_premise_concern・revise_goal・"
-        "freeze_agreement・write_issue・read_issues・read_entity・thinkです。"
+        "freeze_agreement・write_issue・read_issues・read_entity・trace_lineage・thinkです。"
         + _THINK_TRAILER_SENTENCE + "\n"
+        + _TRACE_LINEAGE_USAGE_PARAGRAPH + "\n"
     )
 
     previous_user_input = state.get("user_input", "(取得不可)")
