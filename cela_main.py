@@ -301,7 +301,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = laguna_S_2_1
+model_user = gpt_5_6_luna
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -311,42 +311,42 @@ model_user = laguna_S_2_1
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = laguna_S_2_1 # nemotron_3_ultra
+model_orchestrator = gpt_5_6_luna # nemotron_3_ultra
 
 client_expert = client_openrouter
-model_expert = laguna_S_2_1 # nemotron_3_ultra
+model_expert = gpt_5_6_luna # nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = laguna_S_2_1
+model_task_planner = gpt_5_6_luna
 
 client_task_plan_reviewer = client_openrouter
-model_task_plan_reviewer = laguna_S_2_1
+model_task_plan_reviewer = gpt_5_6_luna
 
 client_detector_domain = client_openrouter
-model_detector_domain = laguna_S_2_1
+model_detector_domain = gpt_5_6_luna
 client_detector_numeric = client_openrouter
-model_detector_numeric = laguna_S_2_1 # nemotron_3_ultra
+model_detector_numeric = gpt_5_6_luna # nemotron_3_ultra
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = laguna_S_2_1
+model_decision_extractor = gpt_5_6_luna
 
 client_resource_arbiter = client_openrouter
-model_resource_arbiter = laguna_S_2_1 #nemotron_3_ultra
+model_resource_arbiter = gpt_5_6_luna #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = laguna_S_2_1
+model_reflection = gpt_5_6_luna
 
 client_facilitator = client_openrouter
-model_facilitator = laguna_S_2_1 
+model_facilitator = gpt_5_6_luna
 
 client_integrator = client_openrouter
-model_integrator = laguna_S_2_1 #nemotron_3_ultra
+model_integrator = gpt_5_6_luna #nemotron_3_ultra
 
 client_reviewer_qa = client_openrouter
-model_reviewer_qa = laguna_S_2_1 #nemotron_3_ultra
+model_reviewer_qa = gpt_5_6_luna #nemotron_3_ultra
 
 client_goal_essence = client_openrouter
-model_goal_essence = laguna_S_2_1 #nemotron_3_ultra
+model_goal_essence = gpt_5_6_luna #nemotron_3_ultra
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -9150,21 +9150,29 @@ def _build_task_scope_context(state: LineageState, conn: sqlite3.Connection) -> 
             "1箇所だけ直すと、残った箇所が次のラウンドで再び矛盾として差し戻されます。"
         )
         # [BL-228 1314ログ調査後の発火条件] chat_history_window/expert_history_windowにより、
-        # 改版を重ねるうちに過去の差戻し理由の推移は数ターンで視界から消える
-        # （whiteboard版歴にはagreements pinのような自動プッシュが存在しない）。task_4_2が
+        # 改版を重ねるうちに過去の差戻し理由の推移は数ターンで視界から消える。task_4_2が
         # V15→V24（10版）に渡って同一の根本課題（実利用可能性の実証欠如）を言い回しを変えて
         # 再提出し続けた実例（log/2026-08-15/1314）を踏まえ、改版が一定回数を超えたら
-        # 明示的にtrace_lineageで版歴を確認させる。
+        # 立ち止まらせる。
+        # [BL-238 2026-08-15/2149ログ調査後の訂正] 当初はここでtrace_lineage(ref='whiteboard:...')
+        # の呼び出しを指示していたが、relation_edgesにwhiteboard: refを指すエッジを書き込む
+        # コード経路が一切存在せず（_write_relation_edgeの全呼び出し箇所を確認）、
+        # trace_lineageは常にlineage=[]を返す実行不能な指示だったと判明（実ドライランで発覚）。
+        # ユーザーとの議論の結果、①この「同じ根本課題の繰り返し」検知は既にissue_log.
+        # occurrence_countの機械的エスカレーション（chat_history_windowに依存せず常時
+        # プロンプトへ注入されるpin）が担っており、版歴を読む専用ツールは不要、②version番号
+        # 自体は既存データの副産物として無料で得られる、と整理し、版歴を読ませる指示を削除して
+        # 「バージョン数それ自体がスタックのサイン」という気づきをescalate_premise_concern/
+        # write_issueへ直接つなげる形に縮小した（新規ツールは追加しない）。
         if whiteboard["version"] >= 3:
             whiteboard_text += (
                 "\n【🔎 このタスクの改版は既に3回目以降です（Ver."
-                f"{whiteboard['version']}）】このまま記憶だけを頼りに次の修正案を書く前に、"
-                f"trace_lineage(ref='whiteboard:{current_phase_id}:{current_task_id}')"
-                "で全版の変遷を取得してください。過去に何を試し、何が理由で繰り返し差し戻された"
-                "かを把握しないまま改版を重ねると、同じ根本課題を言い回しだけ変えて"
-                "再提出し続ける空回りに陥ります（実際にこのパターンで10版を要した事例が"
-                "あります）。差戻しの根本課題（例：実測・実証データそのものが存在しない等）が"
-                "設計の書き方では解決できない場合は、write_issueまたは"
+                f"{whiteboard['version']}）】改版が重なっていること自体が、同じ根本課題を"
+                "言い回しだけ変えて再提出し続ける空回りに陥っているサインかもしれません"
+                "（実際にこのパターンで10版を要した事例があります）。次の修正案を書く前に、"
+                "今回の差戻し理由が本当に「設計の書き方」の問題か、それとも「実測・実証データ"
+                "そのものが存在しない」等、書き方の工夫では解決できない前提の問題かを一度"
+                "疑ってください。後者だと判断した場合は、さらに改版を重ねる前にwrite_issueまたは"
                 "escalate_premise_concernで前提の見直しを検討してください。"
             )
     else:

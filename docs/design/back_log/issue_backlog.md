@@ -264,6 +264,8 @@
 | BL-230 | 中 | `cela_main.py`（新規バックフィル関数＋`tests/test_bl230_relation_edges_backfill.py`） | **BL-224 系譜バックフィル: 既存 `agreements.depends_on` 列 → `relation_edges`（`open`・設計未着手）。** 独立レビュー（N6）の指摘を受け個別 BL として起票。BL-224 実装（Phase 1）で `relation_edges` は**新規に書かれるエッジのみ**を蓄積し、過去の run や Phase 1 以前の既存 `depends_on` 列（実 id の JSON 配列、`5496`）は自動では遡及されない。**既存 run を開くと `relation_edges` が 0 件**（実測: 現行 run でもエッジ生成前は 0 件）となり、過去の「誰が・どうして」が辿れない。マッピングは W3 と同一（`f"agreement:{dep_id}"` → `f"agreement:{self_id}"`、`from_ref=agreement:<Y>`→`to_ref=agreement:<X>`、`relation_type='depends_on'`）。本 BL は (1) 既存 `agreements` を `run_id` 単位で走査、(2) `depends_on` 配列から上記エッジを生成、(3) `_write_relation_edge`（既存 ref 実在検証ゲートを通す）で書き込む、バックフィル関数を追加。トランザクション境界は Phase 1 の `relation_edges` 書き込みと同一にする（§15.4: バックフィル結果も `trace_lineage` で消費可能でなければ意味がない）。テスト: 既存 `depends_on` を持つ fixture run に対しバックフィル後 `trace_lineage(agreement:<X>)` が Y を返すこと。 | P2 |
 | BL-231 | 高 | `cela_main.py`（Detector ノード・オーケストレータ反復上限） | **Detector ノードの生成崩壊ループ（`open`・実測済み・実装は後日）。** 実ドライラン（run_id `1786699546-9ac0105d`、log `log/2026-08-14/1945`）で Detector が同一推論ブロックを**逐語的に 40 回**繰り返し収束せず（`"Let me do these calls."` ×40、実ツール実行は 1 セットのみ、`trace_lineage` ×0）。ループガード／最大反復回数の上限が無く、モデルの生成崩壊（repetition degeneracy）を検知・切断できないことが疑われる根本原因（未確定）。BL-224 との無関係は実証済み（§14／§16.2）。ユーザー指示「BL表記、ループガードなど検知、停止できる技術があるのなら後で実装」に基づき、**検知・停止ガードの実装は後日（deferred）**。未決: 検知方式・停止/復旧挙動・対象ノード範囲。 | P1 |
 | BL-237 | 高 | `cela_main.py`（`THINK_TOOL`・`_BL093_THINK_VALUE_PARAGRAPH`） | **`done`。** log/2026-08-15/1735・1954（Task Plan Reviewer）で単一iteration内の生成崩壊（同一結論の延々再導出）が2回発生、BL-231のiterをまたいだループガードは届かないと判明。thinkを毎iteration必須化（プロンプトレベル、機械的強制は伴わない）。当初検討した「think呼び出し時は生reasoningを構造化summaryへ差し替える」案は、web検索結果・下書き等の実質的内容が失われる副作用がありユーザー指摘で撤回、生reasoningの引き継ぎは常に無条件のまま維持（D-206）。単一iteration内暴走そのものへの対処は別途`MAX_TOKENS_BY_ROLE`の頭打ちで検討（未着手）。 | P1 |
+| BL-238 | 中 | `cela_main.py`（`_build_task_scope_context`のホワイトボード改版フック） | **`done`。** log/2026-08-15/2149のドライラン中、ユーザーが「trace_lineageの発火を初確認したが系譜が0件」と報告。調査の結果、`relation_edges`にwhiteboard: refを指すエッジを書き込むコード経路が一切存在せず（`_write_relation_edge`の全呼び出し箇所を確認）、trace_lineage(ref='whiteboard:...')は構造的に常にlineage=[]を返す実行不能な指示だったと判明（BL-228の改版フックがこの呼び出しを指示していた）。ユーザーとの議論の結果、①この検知は既に`issue_log.occurrence_count`の機械的エスカレーションが担っており版歴を読む専用ツールは不要、②diff_plan_draft_versions相当の新規ツールも、Detectorが毎回独立に全体を再監査する設計のため不要、と判断し、trace_lineage呼び出し指示を削除。バージョン番号自体（既存データの副産物、追加コスト無し）は「空回りのサイン」として残し、escalate_premise_concern/write_issueへ直接つなげる形に縮小（D-208）。 | P2 |
+| BL-239 | 低 | `cela_main.py`（`call_reflection`） | **`open`（記録のみ、実装は見送り）。** BL-238の議論中、ユーザーが「しいて言えばreflectorが停滞を追えるかもしれない」と指摘。`call_reflection`のプロンプトには現状ホワイトボードのバージョン番号が一切渡っておらず、「特定タスクが多数版まで来ている」という安価な停滞シグナルを見ていないことを確認した。対象ノード・役割がBL-238（Expert/User AI向け自己修正シグナル）とは異なるため別issueとして分離。着手する場合は`call_reflection`のプロンプト構築時にホワイトボード版数を渡し、停滞判定の追加材料とする設計になる見込み。 | P3 |
 
 ---
 
@@ -8047,6 +8049,46 @@ YouTubeの LDD/Lineage 研究（`docs/refs/`）が起源の「判断の系譜を
 
 ---
 
+### BL-238: ホワイトボード改版フックが実行不能なtrace_lineage呼び出しを指示していた（relation_edgesにwhiteboard: refのエッジが存在しない）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| テスト | `tests/test_bl228_chat_history_lineage.py::test_whiteboard_revision_fires_stuck_pattern_trigger_from_third_version`（既存テストを新挙動へ更新・リネーム） |
+| 関連 | BL-228（trace_lineage/whiteboard改版フックの導入元）、BL-224（relation_edges基盤）、AGENTS.md §15.4（入口はあるが出口が無い状態の逆パターン：出口の無い入口を作ってしまっていた）、§14（実ドライランでの検証） |
+
+**内容:**
+
+2026-08-15のドライラン（log/2026-08-15/2149）中、ユーザーが「trace_lineageの発火を初確認したが系譜が0件だった」と報告。調査の結果、`relation_edges`テーブルへの書き込み口`_write_relation_edge`の全呼び出し箇所（agreement↔agreement/agreement→fact/detector_review→turn の3種のみ）を確認したところ、**`whiteboard:` refを指すエッジを書き込むコード経路が一切存在しない**ことが判明した。`_trace_lineage_handler`は`ref`の種別に関わらず一律`_traverse_lineage`（relation_edgesのBFS走査）を呼ぶため、`trace_lineage(ref='whiteboard:...')`は構造的に常に`lineage: []`を返す。さらに`_resolve_ref_line`のwhiteboard分岐も`ORDER BY version DESC LIMIT 1`で最新版のみ120字に切り詰めて返すため、過去バージョンの内容・変更理由を読む手段はどこにも存在しない。
+
+このBL-228改版フック（`_build_task_scope_context`、version≥3で発火）は、まさにこのtrace_lineage呼び出しを「過去に何を試したか把握するため」の手段として指示しており、実行不能な指示だったことになる。
+
+**ユーザーとの議論・設計判断:**
+- task_planner側の計画表（plan_drafts）には`diff_plan_draft_versions`（直近2版のdiff、BL-092）という専用ツールがあるが、これはwhiteboard_drafts側には存在しない。当初、同型の`diff_whiteboard_versions`ツールを新設する案を検討した。
+- ユーザーの指摘により再検討: ①「同じ根本課題が繰り返し差し戻される」の検知は、`issue_log.occurrence_count`が2以上で機械的にmajor/escalated化する既存の仕組み（chat_history_windowに依存せず常時プロンプトへ注入されるpin）が既に担っている。②diff_plan_draft_versionsが解決したBL-092の問題（レビュワーが「直されたか、消されただけか」を見分けられない）は、Detectorが差し戻しのたびにホワイトボード全体を独立に再監査する設計のため、whiteboard側には同型の失敗パターンが構造的に存在しない。③新規ツールを追加する必要性は無いと判断。
+- 対応として、trace_lineage呼び出しの指示を削除し、「バージョン数≧3であること自体が空回りのサイン」という気づきを、既存データ（追加コスト無し）のまま直接escalate_premise_concern/write_issueへつなげる形に縮小した。
+
+**実装:** `_build_task_scope_context`のwhiteboard改版フック文言を書き換え（trace_lineage呼び出し指示を削除、バージョン数シグナル＋escalation誘導のみ残す）。既存テストを新挙動に合わせて更新。
+
+---
+
+### BL-239: Reflectionにホワイトボードのバージョン数を渡し、停滞判定の材料に加える（未着手）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（記録のみ、実装は見送り） |
+| 優先度 | P3 |
+| 関連 | BL-238（本件の議論から派生）、BL-005/BL-017（reflection/facilitatorの停滞判定設計） |
+
+**内容:**
+
+BL-238の議論中、ユーザーが「しいて言えばreflectorが停滞を追えるかもしれない」と指摘。確認したところ、`call_reflection`のプロンプトには現状ホワイトボードのバージョン番号が一切渡っていない（grep 0件）。Reflectionの"stagnant"判定は、未解決Decision・エスカレーション済みissue・直近10ターンの会話のみを材料にしており、「特定タスクのホワイトボードが多数版まで来ている」という安価で分かりやすい停滞シグナルを見ていない。
+
+BL-238で削除したExpert/User AI向けの改版フック（自己修正用シグナル）とは対象ノード・役割が異なる（Reflectionはマクロな議論全体の停滞をユーザーへ報告する役目）ため、別issueとして分離した。ドライラン継続中のため今回は実装を見送り、記録のみ。着手する場合は、`call_reflection`のプロンプト構築時に現在タスクのホワイトボード版数を渡し、閾値超過を停滞判定の追加材料とする設計になる見込み。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -8244,3 +8286,4 @@ YouTubeの LDD/Lineage 研究（`docs/refs/`）が起源の「判断の系譜を
 | 2026-08-13 | BL-223を起票・実装完了（`done`）。ユーザーが`log/2026-08-13/1411`（`run_id=1786597142-55baeabc`）を監査し、Expertの成果物内での明示的な先送り宣言（SLA待ち時間の解釈）が構造化記録に一切残らないことを発見。BL-154/D-124が構築した「Expert自己申告の先送りをissue_log/plan_draftsへ橋渡しする」機構自体が、①`wrote_agreement_this_turn`のターン単位粗さ、②`defer_to_task_id`空文字時のissue_log起票丸ごとスキップ、の2つの独立した理由で発火しなかったことが根本原因と判明。ユーザーから「Expertにwrite_issueを与えなかった穴では」との指摘があったが、D-124は既にこの経路を手当て済みと確認し、Expertへの権限拡大（ロール分離原則の後退）ではなく既存橋渡し機構自体の修正を選んだ。設計段階で同一セッション内の独立レビュー（cline）から、当初のBug B修正案が既存テスト`test_unresolvable_target_task_id_skips_issue_log_creation`を破壊するとの指摘を受け、`_get_blocking_issues_for_transition`のSQLがdefer_to_task_idの実在性を検証しないことを確認したうえで、fail-closed動作を維持する3分岐設計へ修正。項目単位`(entry_type, task_id)`重複判定への置き換えと、defer_to_task_id空文字時のissue_log限定起票を実装。新規テスト7件、A・B-1・B-4の個別リバート確認済み（B-4はレビュー指摘のシナリオを再現）。実装中に既存テスト`test_r3b_t5_decision_extractor_skips_agreement_write_when_write_agreement_succeeded`が項目単位判定への変更で回帰することを発見し、実運用の状態伝播に合わせて修正。フルオフラインスイート1306 passed / 5 deselected（`test_bl195`の1件は無関係な既存失敗）。 |
 | 2026-08-15 | BL-237を起票・実装完了（`done`）。log/2026-08-15/1735・1954（同一run_id、Task Plan Reviewerノード）でreasoningチャンネルが単一iteration内で同一結論を延々と再導出する生成崩壊が2回発生。BL-231のiterをまたいだループガードは、iterが一度も完了しないこの種の暴走には原理的に届かないと判明。原因調査で、temperature統一・frequency/presence_penalty=0.3が既に有効な状態で再発したことから「temperatureが主因」という当初仮説を反証、`_query_AI_live`がthink呼び出しの有無に関わらず生reasoning全文を無条件に次iterationへ引き継いでいたこと（迷い・撤回を含む生の言い回しがそのまま伝播）が土壌になっていたと特定。ユーザー指摘により、BL-108→BL-110で撤廃されたthink機械的強制（往復コスト過大）とは異なり、既存のTOOL_CALL_RULE（同一応答内でのツールまとめ呼び出し）に乗せる形なら追加往復を生まないと判断し、thinkのプロンプトレベル必須化＋think呼び出し時のみ生reasoning引き継ぎを構造化summaryへ差し替える設計で実装。THINK_TOOLの説明文・`_BL093_THINK_VALUE_PARAGRAPH`（8ノード共有）・`_query_AI_live`の3箇所を変更。新規テスト4件、既存テスト1件を新挙動に更新、リバート確認済み、フルオフラインスイート1371 passed / 1 deselected。効果は実ドライラン未検証、MAX_TOKENS_BY_ROLEの頭打ちは保険として提案済み・未着手。 |
 | 2026-08-15 | BL-237に追記。当初実装した「thinkを呼んだiterationは生reasoningの代わりに構造化summaryのみを引き継ぐ」swap案について、ユーザーから「web検索で調べたこと・詳細検討した内容・最終出力の下書き・構造化出力の下書きが失われる可能性がある」と指摘。think必須化と組み合わさるとsummaryの1-3文には収まらない実質的内容まで失われる副作用があると判断し撤回。生reasoningの引き継ぎは常に無条件のまま維持し、thinkは純粋加算（毎iteration必須の構造化decided/whyチェックポイント）に留める設計へ修正（D-206に追記）。THINK_TOOLのdescription・`_BL093_THINK_VALUE_PARAGRAPH`・`_query_AI_live`（`_think_called_this_iter`関連コードを削除）・テスト2ファイルを更新。フルオフラインスイート1372 passed / 1 deselected。単一iteration内暴走そのものへの対処はMAX_TOKENS_BY_ROLEの頭打ちに一本化する方針だが未着手。 |
+| 2026-08-15 | BL-238を起票・実装完了（`done`）。ドライラン中（log/2026-08-15/2149）にユーザーが「trace_lineageが0件だった」と報告。relation_edgesにwhiteboard: refのエッジを書くコード経路が存在せず、BL-228のホワイトボード改版フックが実行不能なtrace_lineage呼び出しを指示していたと判明。diff_plan_draft_versions相当の新規ツールも検討したが、①issue_log.occurrence_countの機械的エスカレーションが同じ役目を既に担う、②Detectorが毎回独立再監査する設計のためdiff_plan_draft_versions由来の問題（BL-092）が構造的に存在しない、と判断し新規ツールなしで解決。trace_lineage呼び出し指示を削除し、バージョン数シグナルのみescalate_premise_concern/write_issueへ直結（D-208）。あわせてBL-239（Reflectionへのバージョン数受け渡し、ユーザー提起）を`open`のまま新規起票、実装は見送り。既存テスト1件を新挙動へ更新、フルオフラインスイート1372 passed / 1 deselected。 |

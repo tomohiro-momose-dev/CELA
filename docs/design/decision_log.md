@@ -2913,6 +2913,20 @@
 
 ---
 
+### D-208: BL-238 — ホワイトボード改版フックから実行不能なtrace_lineage呼び出しを削除し、新規ツールは追加しない
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-15 |
+| 状態 | `decided` |
+| 決定者 | t-momose（ドライラン中の実地報告「系譜が0件」、新規ツール不要という判断の指摘）、Claude（原因調査・実装） |
+| **決定理由** | ドライラン（log/2026-08-15/2149）で`trace_lineage(ref='whiteboard:...')`が常に`lineage: []`を返すことが実地で確認された。調査の結果、`relation_edges`に`whiteboard:` refを指すエッジを書き込むコード経路が一切存在せず、BL-228の改版フックが構造的に実行不能な指示をしていたと判明した。修正案として`diff_plan_draft_versions`（BL-092、plan_drafts専用）と同型の`diff_whiteboard_versions`ツール新設を検討したが、ユーザーの指摘により、①「同じ根本課題が繰り返される」検知は既に`issue_log.occurrence_count`の機械的エスカレーション（chat_history_windowに依存しない常時pin）が担っており重複する、②BL-092が解決した問題（差分を見ないと直されたか消されただけか分からない）はDetectorが差し戻しのたびに独立に全体を再監査する設計のためwhiteboard側には構造的に存在しない、と判明し、新規ツールは不要と判断した。 |
+| 決定内容 | `_build_task_scope_context`のwhiteboard改版フック（version≥3で発火）から、実行不能な`trace_lineage(ref='whiteboard:...')`呼び出し指示を削除する。新規ツール（`diff_whiteboard_versions`等）は追加しない。バージョン数≧3というシグナル自体（既存データの副産物、追加コスト無し）は残し、「改版が重なっていること自体が空回りのサイン」という気づきから、直接escalate_premise_concern/write_issueへつなげる指示に縮小する。派生して、`call_reflection`にホワイトボード版数の可視性が無いという別の指摘（ユーザー）はBL-239として分離・記録し、実装は見送る（対象ノード・役割が異なるため）。 |
+| 影響 | `cela_main.py`（`_build_task_scope_context`のwhiteboard改版フック文言）、`tests/test_bl228_chat_history_lineage.py`（該当テストを新挙動へ更新・リネーム）、`docs/design/back_log/issue_backlog.md`（BL-238 `done`・BL-239 `open`新規起票）。 |
+| 関連 BL | BL-238（本件）、BL-239（派生・別issue）、BL-228（trace_lineage/改版フックの導入元）、BL-224（relation_edges基盤）、BL-092（diff_plan_draft_versionsの元ネタ、今回は不要と判断した比較対象）、AGENTS.md §15.4（出口の無い入口を作ってしまっていたケース）、§16.5（大きな実装に進む前に、そもそも必要かを問う） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）

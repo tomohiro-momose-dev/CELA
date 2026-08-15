@@ -309,20 +309,25 @@ def _build_expert_task_scope_state(run_id: str, task_id="task_1_1", phase_id="ph
     }
 
 
-def test_whiteboard_revision_fires_trace_lineage_trigger_from_third_version(db_conn):
-    """[BL-228 1314ログ調査後の発火条件] task_4_2がV15→V24（10版）に渡って同一の根本課題を
-    言い回しを変えて再提出し続けた実例（log/2026-08-15/1314）を踏まえ、改版が3版目以降に
-    なったら、次の修正前にtrace_lineage(whiteboard:...)で版歴を確認するよう明示的に促すこと。
-    1〜2版目では発火せず、3版目以降でのみ発火する（閾値の境界を確認）。"""
+def test_whiteboard_revision_fires_stuck_pattern_trigger_from_third_version(db_conn):
+    """[BL-228 1314ログ調査後の発火条件、BL-238で訂正] task_4_2がV15→V24（10版）に渡って
+    同一の根本課題を言い回しを変えて再提出し続けた実例（log/2026-08-15/1314）を踏まえ、
+    改版が3版目以降になったら、空回りのサインとして立ち止まらせる。
+    [BL-238] 当初はここでtrace_lineage(whiteboard:...)呼び出しを指示していたが、
+    relation_edgesにwhiteboard: refを指すエッジを書くコード経路が存在せず常にlineage=[]に
+    なる実行不能な指示だったと2149ログ調査で判明したため削除した（issue_log.occurrence_count
+    による機械的エスカレーションが同じ役目を既に担っており、版歴を読む専用ツールは不要と
+    判断）。1〜2版目では発火せず、3版目以降でのみ発火する（閾値の境界を確認）。"""
     conn, run_id = db_conn
     _seed_whiteboard(conn, run_id, version=1, content="v1")
     _seed_whiteboard(conn, run_id, version=2, content="v2")
 
     state = _build_expert_task_scope_state(run_id)
     ctx = cela_main._build_task_scope_context(state, conn)
-    assert "trace_lineage" not in ctx["whiteboard_text"], "2版目まではまだ発火しないはず"
+    assert "改版は既に3回目以降です" not in ctx["whiteboard_text"], "2版目まではまだ発火しないはず"
 
     _seed_whiteboard(conn, run_id, version=3, content="v3")
     ctx = cela_main._build_task_scope_context(state, conn)
-    assert "trace_lineage" in ctx["whiteboard_text"]
-    assert "whiteboard:phase_1:task_1_1" in ctx["whiteboard_text"]
+    assert "改版は既に3回目以降です" in ctx["whiteboard_text"]
+    assert "trace_lineage" not in ctx["whiteboard_text"], "実行不能なtrace_lineage呼び出し指示は削除済みのはず"
+    assert "escalate_premise_concern" in ctx["whiteboard_text"]
