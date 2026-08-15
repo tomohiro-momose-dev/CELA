@@ -301,7 +301,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = hy3
+model_user = nemotron_3_ultra
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -1643,9 +1643,15 @@ THINK_TOOL = {
                 "todo": {
                     "type": "array",
                     "description": (
-                        "The FULL current todo list (not a diff). Include this only when it "
-                        "changes (new item added, or an item's status flips); omitting it means "
-                        "it is unchanged since your last call."
+                        "[BL-232] ONLY the todo items you are adding or changing -- NOT the full "
+                        "list. Items are merged by their `item` text: an `item` matching one "
+                        "already tracked has its status updated in place; a new `item` is "
+                        "appended. Anything you do not send is kept exactly as it was, so you "
+                        "never need to restate the whole list. To drop an item you no longer "
+                        "intend to do, send it with status='closed' -- simply omitting it does "
+                        "NOT remove it. When updating an existing item, copy its `item` text "
+                        "EXACTLY as it appears in `current_todo` in this tool's return value; "
+                        "a reworded item is treated as a new, separate entry."
                     ),
                     "items": {
                         "type": "object",
@@ -1659,9 +1665,12 @@ THINK_TOOL = {
                 "scratch_concerns": {
                     "type": "array",
                     "description": (
-                        "[BL-140] The FULL current list of concerns you are tracking WITHIN this "
-                        "single tool-call loop only (not a diff). Same omit-if-unchanged rule as "
-                        "todo. This is NOT the persistent issue_log and is NOT visible to future "
+                        "[BL-140] Concerns you are tracking WITHIN this single tool-call loop "
+                        "only. [BL-232] Send ONLY the concerns you are adding or changing -- not "
+                        "the full list; they are merged by `item` text under exactly the same "
+                        "rules as `todo` above (matching text updates in place, new text is "
+                        "appended, anything omitted is kept, status='closed' is the only way to "
+                        "retire one). This is NOT the persistent issue_log and is NOT visible to future "
                         "turns or other roles -- it is discarded the moment this tool-call loop "
                         "ends. If a concern should survive beyond this step (so it can be tracked, "
                         "resolved, or handed off across turns), call the separate `write_issue` "
@@ -1711,9 +1720,68 @@ def _reset_think_scratchpad() -> None:
     _THINK_NOTES = []
 
 
+# [BL-232] think の todo / scratch_concerns が取りうる status。スキーマ上は enum だが、
+# LLM は enum を破りうる（§13）ため受信時にも機械的に検証する。
+_THINK_ITEM_STATUSES = ("open", "closed")
+
+
+def _merge_think_items(existing: list, incoming, field_name: str) -> list:
+    """[BL-232] think の todo / scratch_concerns を「itemをキーとした項目単位マージ」で更新する。
+
+    [CONSTRAINT] 従来は `_THINK_TODO = args["todo"]` の全置換で、1項目の状態が変わるだけでも
+    モデルがリスト全体を毎回書き直す必要があった。log/2026-08-15/1027の実測では think の
+    args側だけで94,500文字（think総量221,068文字の43%）を占め、さらに「前回書いた項目が
+    次回も同じ文面で再現されるか」がモデル依存で不定だった——項目が黙って落ちると、
+    追跡していたtodo・懸念がサイレントに消える。itemをキーにマージし、送られてこなかった
+    項目は前回の状態のまま残す。
+
+    [SAFETY] 項目を「削除」する経路は用意しない。取り下げたい項目は status="closed" で
+    明示的に閉じさせる（§15.4: 入口を作るなら出口も明示する。黙って消えると、BL-220の
+    「最終出力前にopenな懸念を外部化させる」指示がその項目を拾えなくなる）。
+
+    [CONSTRAINT] マージキーは item 文字列の完全一致（前後空白のみ除去）。表記がぶれると
+    別項目として重複追加される。これを避けるため、スキーマ側で「既存項目を更新するときは
+    戻り値のcurrent_todoに出ている item をそのまま複写せよ」と指示している——毎iterの
+    戻り値エコー（構造化状態を文脈末尾へ再配置する仕組み）が、その複写元として機能する。
+    [REJECTED] 曖昧一致（difflib等）でのマージ。別物の項目を誤って同一視して片方の状態を
+    上書きする危険があり、サイレントな取りこぼしという本来避けたい失敗と同じ種類のため。
+    """
+    if not isinstance(incoming, list):
+        print(f"  ⚠️ [BL-232] thinkの{field_name}がリストではないため、この更新を無視します"
+              f"（受信型={type(incoming).__name__}）。前回の状態を維持します。")
+        return existing
+    merged = [dict(row) for row in existing]
+    index = {row.get("item", ""): i for i, row in enumerate(merged)}
+    for raw in incoming:
+        if not isinstance(raw, dict):
+            print(f"  ⚠️ [BL-232] thinkの{field_name}にdictでない要素があるため無視します: {raw!r}")
+            continue
+        # [SAFETY] §13.1: `.get(k, default)` はキーが存在すれば空文字をそのまま通す。
+        # item が空だとマージキーにできない（全ての空item項目が1つに潰れる）ため弾く。
+        item = (raw.get("item") or "").strip()
+        if not item:
+            print(f"  ⚠️ [BL-232] thinkの{field_name}にitemが空の要素があるため無視します"
+                  f"（マージキーにできないため）: {raw!r}")
+            continue
+        status = (raw.get("status") or "").strip()
+        if status not in _THINK_ITEM_STATUSES:
+            # [SAFETY] 不正なstatusはclosedではなくopenへ倒す。未解決のまま追跡が続く方が、
+            # 解決済みとして視界から消えるより安全（BL-220のclosure指示が拾い続ける）。
+            print(f"  ⚠️ [BL-232] thinkの{field_name}のitem={item!r}のstatusが不正"
+                  f"（{raw.get('status')!r}）のため'open'として扱います（未解決側へ倒す安全側）。")
+            status = "open"
+        if item in index:
+            merged[index[item]]["status"] = status
+        else:
+            index[item] = len(merged)
+            merged.append({"item": item, "status": status})
+    return merged
+
+
 def _think_handler(args: dict) -> dict:
-    """[BL-093] thinkツールの実体。reasoningは追記専用ログに、todo/scratch_concernsは変更時のみ
-    全体を差し替え、notesは追記専用リストに保持する。iter番号はモデルの自己申告に頼らず
+    """[BL-093] thinkツールの実体。reasoningは追記専用ログに、
+    [BL-232] todo/scratch_concernsはitemをキーとした項目単位マージで更新し、notesは追記専用リストに保持する。
+    iter番号はモデルの自己申告に頼らず
     _CURRENT_TOOL_LOOP_ITERATION（_query_AI_liveが機械的に更新）から取る。永続化はせず、
     ツールループ終了と同時に消える。`summary`の非空チェック（think+summary必須の機械的強制）は
     ここではなく_query_AI_live側で行う（ここは単に受け取った値を保存するだけ）。
@@ -1733,10 +1801,12 @@ def _think_handler(args: dict) -> dict:
         "rejected_why": args.get("rejected_why", ""),
     }
     _THINK_REASONING_LOG.append(entry)
+    # [BL-232] 全置換からitem単位マージへ。送られてこなかった項目は前回状態のまま残る。
     if "todo" in args:
-        _THINK_TODO = args["todo"]
+        _THINK_TODO = _merge_think_items(_THINK_TODO, args["todo"], "todo")
     if "scratch_concerns" in args:
-        _THINK_SCRATCH_CONCERNS = args["scratch_concerns"]
+        _THINK_SCRATCH_CONCERNS = _merge_think_items(
+            _THINK_SCRATCH_CONCERNS, args["scratch_concerns"], "scratch_concerns")
     note = args.get("notes", "")
     if note:
         _THINK_NOTES.append(note)
@@ -4044,8 +4114,44 @@ def _get_escalated_issues(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# [BL-233][AGENTS.md §7 承認済み 2026-08-15] 同一task_idへ先送りされた未解決issueがこの件数に
+# 達したら、その「受け皿」はもはや実在する対応計画ではなく先送りの捨て場とみなす。
+_DEFERRAL_PILEUP_THRESHOLD = 5
+
+
+def _get_overloaded_defer_targets(conn: sqlite3.Connection, run_id: str) -> set[str]:
+    """[BL-233] 先送りが積み上がりすぎたtask_idの集合を返す（＝受け皿として破綻している先）。
+
+    [CONSTRAINT] BL-194は「defer_to_task_idが立っていれば受け皿がある」とみなして停滞判定
+    （BL-144）から除外する。これは1〜2件の正当なtriageを想定した設計であり、同じ受け皿へ
+    無制限に積めることは想定していなかった。log/2026-08-15/1027では escalated 16件のうち
+    15件がDEFER済みで、うち13件が未着手のtask_4_3ただ1つへ集中した結果、
+    stagnant判定・BL-145の計画再構成・Facilitator・ゴールエスカレーションが**1回も発火せず**、
+    「解が存在しない」という同じ懸念が言い回しを変えて何度も再発し続けた。
+
+    [SAFETY] 閾値超過は「受け皿の実在性が破綻した」ことの機械的な証拠として扱い、
+    その先へのDEFERを無効化してactionableへ戻す（§15.3: モデルの自己申告ではなく
+    件数という機械的事実で判定する）。issueのstatus自体は書き換えない——DEFERを取り消すのでは
+    なく、「先送り済みだから督促しない」という**除外だけ**を止める。
+    """
+    rows = conn.execute(
+        "SELECT defer_to_task_id, COUNT(*) c FROM issue_log "
+        "WHERE run_id=? AND status IN ('open','escalated') AND defer_to_task_id != '' "
+        "GROUP BY defer_to_task_id HAVING c >= ?",
+        (run_id, _DEFERRAL_PILEUP_THRESHOLD),
+    ).fetchall()
+    targets = {r[0] for r in rows}
+    if targets:
+        detail = ", ".join(f"{r[0]}({r[1]}件)" for r in rows)
+        print(f"  🚨 [BL-233] 先送りの集中を検知しました: {detail}。閾値"
+              f"{_DEFERRAL_PILEUP_THRESHOLD}件以上のため、これらの受け皿へのDEFERを"
+              f"「対応予定あり」として扱うのを停止し、停滞判定の対象へ戻します。")
+    return targets
+
+
 def _is_issue_effectively_deferred(conn: sqlite3.Connection, run_id: str, issue: dict,
-                                    current_task_id: str = "") -> bool:
+                                    current_task_id: str = "",
+                                    overloaded_targets: set[str] | None = None) -> bool:
     """[BL-194] 「この issue には、今このタスク以外の実効的な受け皿がある」と機械的に言えるか。
 
     [CONSTRAINT] BL-136のDEFERはstatusを変えずdefer_to_task_idだけを立てる設計のため、
@@ -4074,6 +4180,12 @@ def _is_issue_effectively_deferred(conn: sqlite3.Connection, run_id: str, issue:
         return False
     # [BL-167] 受け皿タスクが既に完了済みなら、その受け皿は失効している（永久迷子の防止）。
     if _is_task_completed(conn, run_id, target):
+        return False
+    # [BL-233] 同じ受け皿へ先送りが積み上がりすぎている場合、その受け皿は対応計画ではなく
+    # 捨て場である。呼び出し元がまとめて算出済みなら再クエリしない（1件ずつ呼ばれるため）。
+    if overloaded_targets is None:
+        overloaded_targets = _get_overloaded_defer_targets(conn, run_id)
+    if target in overloaded_targets:
         return False
     return True
 
@@ -4106,9 +4218,14 @@ def _get_actionable_escalated_issues(conn: sqlite3.Connection, run_id: str,
     ACK抑制を行わない——ACK有効中の懸念は別途_build_acknowledged_issue_pin_textで
     「対応中」として可視化されるため、督促からの除外であって不可視化ではない）。
     """
+    # [BL-233] 先送り集中の判定はrun単位で一度だけ算出し、各issueの判定へ渡す
+    # （_is_issue_effectively_deferredはissue1件ごとに呼ばれるため、内部で毎回
+    # 集計クエリを投げるとログも実行回数も無駄に膨らむ）。
+    _overloaded = _get_overloaded_defer_targets(conn, run_id)
     result = [
         r for r in _get_escalated_issues(conn, run_id)
-        if not _is_issue_effectively_deferred(conn, run_id, r, current_task_id)
+        if not _is_issue_effectively_deferred(conn, run_id, r, current_task_id,
+                                              overloaded_targets=_overloaded)
     ]
     if round_count is not None:
         result = [r for r in result if not _is_issue_acknowledged_active(r, round_count)]
@@ -4914,6 +5031,16 @@ class _StreamMessage:
 # 連続して同一結合ハッシュ（正規化テキスト＋ツール計画）がこの回数出たら崩壊とみなし、ツールループを強制終了する。
 _LOOP_GUARD_REPETITION_WINDOW = 3
 
+# [BL-231] 生成崩壊（同一文の逐語的な反復）そのものをデコード時に抑制するための反復ペナルティ
+# （AGENTS.md §7 重要定数: 2026-08-15 ユーザー承認値0.3）。目安は通常0.1〜0.5で、
+# 高く設定しすぎると文法が崩れるため、上限寄りではなく中央値に設定している。
+# log/2026-08-15/1014でDetector(Domain Review)が同一パラグラフを65回連続生成する崩壊を
+# 実機で観測（BL-231のiteration間ループガードは単一completion内の反復には無力なため
+# 別途デコード側の抑制が必要と判断）。全ノード共通の値とし、_LOOP_GUARD_REPETITION_WINDOWと
+# 同じ場所で管理する。
+_GENERATION_FREQUENCY_PENALTY = 0.3
+_GENERATION_PRESENCE_PENALTY = 0.3
+
 
 def _bl231_norm_text(text: str) -> str:
     # [BL-231] ホワイトスペースを正規化し、不可視文字の微小な揺らぎに強くする。
@@ -5039,6 +5166,8 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                 model=model,
                 messages=messages,
                 temperature=temperature,
+                frequency_penalty=_GENERATION_FREQUENCY_PENALTY,
+                presence_penalty=_GENERATION_PRESENCE_PENALTY,
             )
             if use_json_mode:
                 create_kwargs["response_format"] = {"type": "json_object"}
