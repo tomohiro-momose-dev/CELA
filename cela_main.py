@@ -3603,6 +3603,42 @@ def _bump_issue_occurrence(conn: sqlite3.Connection, run_id: str, row: dict, new
     return occurrence_count
 
 
+# [BL-235] topicが違う文言でも同じ懸念を指す近似重複issueを検知するための文字bi-gram類似度。
+# 日本語は単語境界が無くdifflib.SequenceMatcherでは実測ヒット率4%と低かったため、
+# bi-gram Jaccard係数を採用（"task_4_2予約完了能力未確認" vs "...未検証"のような表記ゆれを捕捉）。
+_ISSUE_SIMILARITY_BIGRAM_THRESHOLD = 0.4
+
+
+def _issue_char_bigram_similarity(text_a: str, text_b: str) -> float:
+    def _bigrams(s: str) -> set[str]:
+        s = (s or "").replace(" ", "").replace("　", "").strip()
+        if len(s) <= 1:
+            return {s} if s else set()
+        return {s[i:i + 2] for i in range(len(s) - 1)}
+    a, b = _bigrams(text_a), _bigrams(text_b)
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _find_similar_open_issues(conn: sqlite3.Connection, run_id: str, topic: str, description: str) -> list[dict]:
+    # [BL-235] 完全一致topicはCREATE呼び出し元で別途（再発として）処理されるため、ここでは
+    # 「topicが異なるがおそらく同じ懸念」の候補だけを対象にする。
+    rows = conn.execute(
+        "SELECT topic, description FROM issue_log WHERE run_id=? AND status != 'resolved' AND topic != ?",
+        (run_id, topic)
+    ).fetchall()
+    candidates = []
+    query_text = f"{topic}{description or ''}"
+    for row in rows:
+        other_text = f"{row['topic']}{row['description'] or ''}"
+        sim = _issue_char_bigram_similarity(query_text, other_text)
+        if sim >= _ISSUE_SIMILARITY_BIGRAM_THRESHOLD:
+            candidates.append({"topic": row["topic"], "similarity": round(sim, 2)})
+    candidates.sort(key=lambda c: c["similarity"], reverse=True)
+    return candidates[:3]
+
+
 def _write_issue_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str,
                        phase_id: str = "", task_id: str = "", state: dict | None = None) -> dict:
     """[BL-096] write_issue_toolの実体。CREATE=起票・再発、RESOLVE=解決、DEFER=明示的な先送り（BL-136）。
@@ -3679,6 +3715,10 @@ def _write_issue_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_
                 (combined_description, new_defer_to_task_id, now, existing["id"], run_id)
             )
             return {"success": True, "message": "再発として記録しました", "occurrence_count": occurrence_count}
+        # [BL-235] 完全一致topicは無いが、表記が異なるだけで同じ懸念を指している可能性のある
+        # 既存issueをbi-gram類似度で検知する。ブロックはしない（AGENTS.md §13.2:
+        # 誤検知で正当な新規issueの起票を妨げてはならない）。あくまでソフトな提案として返す。
+        similar = _find_similar_open_issues(conn, run_id, topic, description)
         severity = args.get("severity", "minor")
         if severity not in ("minor", "major"):
             return {"success": False, "error": f"不正なseverity: {severity}"}
@@ -3697,7 +3737,15 @@ def _write_issue_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_
              description, task_id, defer_to_task_id_value, now, now)
         )
         print(f"  🆕 [write_issue] {caller_role}が新規issueを起票しました: topic={topic}, severity={severity}, status={status}, id={issue_id}")
-        return {"success": True, "message": "新規issueを起票しました", "id": issue_id}
+        result: dict = {"success": True, "message": "新規issueを起票しました", "id": issue_id}
+        if similar:
+            result["similar_existing"] = similar
+            result["note"] = (
+                "未解決の既存issueと内容が近いものがあります。同じ懸念であれば、既存topicで "
+                "write_issue(action_type='CREATE', topic='<既存のtopic>', description='...') を呼んで"
+                "既存行のdescriptionへ追記することを検討してください（重複issueの氾濫防止）。"
+            )
+        return result
 
     if action_type == "DEFER":
         # [BL-136] BL-082の申し送り（Directive/status=Deferred/defer_to_task_id）と同じ思想を
@@ -5677,9 +5725,49 @@ def init_db(conn: sqlite3.Connection) -> None:
     );
     CREATE INDEX IF NOT EXISTS idx_plan_run ON plan_drafts(run_id, phase_id, task_id);
 
+    -- [BL-228] 既存の死蔵 chat_history を活性化し、統一活動系譜のスパインとする。
+    -- 既存定義(id, turn, role, content, timestamp, run_id)に下記を追加。
+    -- turn = round_count（「raund」）。task_id/phase_id で artifact と結合。
+    -- summary_brief/summary_detail は単一閾値N要約（軽量/ローカルLLM委任）の格納先だが、
+    -- 本フェーズでは要約委任を未実装（§15.4 audit-only）→ 常に空のまま。
+    -- is_rollback は detector 差戻の構造化（「弱い部分」の補強）。
     CREATE TABLE IF NOT EXISTS chat_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, turn INTEGER, role TEXT, content TEXT, timestamp REAL, run_id TEXT NOT NULL
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        turn INTEGER,                 -- = round_count（「raund」）
+        task_id TEXT DEFAULT '',
+        phase_id TEXT DEFAULT '',
+        role TEXT,                    -- user / expert / detector / facilitator / ...
+        content TEXT,                -- 生文（raw）
+        summary_brief TEXT DEFAULT '',   -- 系譜一覧用1行要約（軽量/ローカルLLM委任・immutable・未実装）
+        summary_detail TEXT DEFAULT '',  -- 会話ログ展開用要約（より高密度、同委任・未実装）
+        is_rollback INTEGER DEFAULT 0,  -- detector 差戻フラグ（1=差戻を含むターン）
+        timestamp REAL
     );
+    CREATE INDEX IF NOT EXISTS idx_chat_history_run_turn ON chat_history(run_id, turn);
+    -- [BL-228][§14.4] (run_id, task_id) インデックスはここでは作らない。executescriptは
+    -- 既存の旧スキーマDB（task_id列が無い）に対してもCREATE TABLE IF NOT EXISTSがno-opで
+    -- 実行され続けるため、ここでCREATE INDEXするとno such columnで落ちる。新規DB・既存DB
+    -- どちらでも列追加が確定した後（_ensure_chat_history_lineage_columns）で作成する。
+
+    -- [BL-228] Detector 評決の構造化永続（§15.4: 従来は in-memory のみで死蔵/揮発）。
+    -- agreements には混ぜず専用表（セマンティクス汚染回避）。relation_edges の
+    -- `detector_review:<id>` で chat_history の該当 turn と結ぶ。
+    CREATE TABLE IF NOT EXISTS detector_reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        turn_id INTEGER,                 -- chat_history.id（該当する発言/差戻しターン）
+        task_id TEXT DEFAULT '',
+        phase_id TEXT DEFAULT '',
+        risk TEXT DEFAULT '',            -- low/none/...
+        constraint_issue TEXT DEFAULT '',-- none/minor/major
+        comment TEXT DEFAULT '',         -- Detector の評決コメント（長文）
+        criteria_status_json TEXT DEFAULT '',
+        target_excerpt TEXT DEFAULT '',
+        observations TEXT DEFAULT '',
+        created_at REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_detector_reviews_run_turn ON detector_reviews(run_id, turn_id);
 
     CREATE TABLE IF NOT EXISTS current_goal (
         goal_id TEXT PRIMARY KEY, core_philosophy TEXT NOT NULL, absolute_constraints TEXT, updated_at REAL
@@ -5859,6 +5947,39 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_issue_log_defer_column(conn)
     _ensure_issue_log_acknowledge_columns(conn)
     _ensure_issue_log_human_input_columns(conn)
+    _ensure_chat_history_lineage_columns(conn)
+
+
+def _ensure_chat_history_lineage_columns(conn: sqlite3.Connection) -> None:
+    """[BL-228] 既存DBの chat_history へ活動系譜用の列(task_id/phase_id/summary_brief/
+    summary_detail/is_rollback)を追加する。既存の死蔵 chat_history を活性化するための拡張。
+    SQLiteはADD COLUMN IF NOT EXISTSを持たないためPRAGMA table_infoで確認してから追加する
+    （_ensure_verified_facts_r3a_columns等と同型のマイグレーションパターン）。
+    detector_reviews は新規表のため CREATE TABLE IF NOT EXISTS で既存DBにも自動作成される。"""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(chat_history)").fetchall()}
+    added = []
+    if "task_id" not in cols:
+        conn.execute("ALTER TABLE chat_history ADD COLUMN task_id TEXT DEFAULT ''")
+        added.append("task_id")
+    if "phase_id" not in cols:
+        conn.execute("ALTER TABLE chat_history ADD COLUMN phase_id TEXT DEFAULT ''")
+        added.append("phase_id")
+    if "summary_brief" not in cols:
+        conn.execute("ALTER TABLE chat_history ADD COLUMN summary_brief TEXT DEFAULT ''")
+        added.append("summary_brief")
+    if "summary_detail" not in cols:
+        conn.execute("ALTER TABLE chat_history ADD COLUMN summary_detail TEXT DEFAULT ''")
+        added.append("summary_detail")
+    if "is_rollback" not in cols:
+        conn.execute("ALTER TABLE chat_history ADD COLUMN is_rollback INTEGER DEFAULT 0")
+        added.append("is_rollback")
+    # task_id 列は新規DBでは executescript、既存DBでは上記 ALTER で確実に存在するため、
+    # (run_id, task_id) インデックスをここで作成する。executescript 内では旧スキーマ上
+    # task_id が無く no such column になるため、そちらからは除外済み（§14.4 既存DB互換）。
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_history_run_task ON chat_history(run_id, task_id)")
+    if added:
+        print(f"  🛠️ [schema migration] chat_historyへ活動系譜用列を追加します（BL-228）: {added}")
+        conn.commit()
 
 
 def _ensure_issue_log_defer_column(conn: sqlite3.Connection) -> None:
@@ -6083,6 +6204,34 @@ def _resolve_ref_table(query: str, run_id: str, ref: str) -> bool:
             (eid, attr, run_id),
         ).fetchone()
         return row is not None
+    if ref.startswith("turn:"):
+        try:
+            tid = int(ref[len("turn:"):])
+        except (TypeError, ValueError):
+            return False
+        row = query("SELECT 1 FROM chat_history WHERE id=? AND run_id=?", (tid, run_id)).fetchone()
+        return row is not None
+    if ref.startswith("issue:"):
+        topic = ref[len("issue:"):]
+        row = query("SELECT 1 FROM issue_log WHERE topic=? AND run_id=?", (topic, run_id)).fetchone()
+        return row is not None
+    if ref.startswith("whiteboard:"):
+        rest = ref[len("whiteboard:"):]
+        parts = rest.split(":", 1)
+        if len(parts) != 2:
+            return False
+        row = query(
+            "SELECT 1 FROM whiteboard_drafts WHERE phase_id=? AND task_id=? AND run_id=?",
+            (parts[0], parts[1], run_id),
+        ).fetchone()
+        return row is not None
+    if ref.startswith("detector_review:"):
+        try:
+            rid = int(ref[len("detector_review:"):])
+        except (TypeError, ValueError):
+            return False
+        row = query("SELECT 1 FROM detector_reviews WHERE id=? AND run_id=?", (rid, run_id)).fetchone()
+        return row is not None
     return False
 
 
@@ -6115,6 +6264,77 @@ def _write_relation_edge(
          source_task_id, source_phase_id),
     )
     return True
+
+
+def _write_chat_history_row(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    turn: int,
+    task_id: str,
+    phase_id: str,
+    role: str,
+    content: str,
+) -> int:
+    """[BL-228] W1: 死蔵 chat_history を活性化する単一書き込みゲート（§15.1）。
+
+    state["chat_history"] の全 append 点から呼ばれ、生文を正本（SoT）の chat_history 表へ書く
+    （checkpoint の in-memory バッファは輸送・§14.4）。新規行の autoincrement id を返す。
+    turn = round_count（「raund」）。task_id/phase_id は artifact との系譜結合キー。
+    summary_brief/summary_detail は要約委任未実装（§15.4 audit-only）のため常に空で書く。
+    """
+    cur = conn.execute(
+        "INSERT INTO chat_history "
+        "(run_id, turn, task_id, phase_id, role, content, summary_brief, summary_detail, is_rollback, timestamp) "
+        "VALUES (?,?,?,?,?,?,?,?,0,?)",
+        (run_id, turn, task_id or "", phase_id or "", role, content or "", "", "", time.time()),
+    )
+    return cur.lastrowid or 0
+
+
+def _bl228_record_detector_review(
+    conn: sqlite3.Connection, run_id: str, *,
+    turn_id: int, task_id: str = "", phase_id: str = "",
+    risk: str = "", constraint_issue: str = "minor", comment: str = "",
+    criteria_status: list | None = None, target_excerpt: str = "", observations: str = "",
+) -> int | None:
+    """[BL-228] W2: Detector 差戻を detector_reviews へ構造化記録し、監査対象 turn
+    （chat_history.id）の正本行に is_rollback=1 を立て、relation_edges で
+    detector_review:<id> → turn:<turn_id> を結ぶ（§15.1 単一ゲート・両 ref 実在検証）。
+
+    要約委任は未実装（§15.4 audit-only）のため、detector_reviews 本体は構造化記録のみ。
+    監査の出口は _render_lineage_audit / --ref turn:<id>。
+    """
+    if turn_id and turn_id <= 0:
+        turn_id = 0
+    try:
+        conn.execute(
+            "INSERT INTO detector_reviews "
+            "(run_id, turn_id, task_id, phase_id, risk, constraint_issue, comment, "
+            " criteria_status_json, target_excerpt, observations, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (run_id, turn_id, task_id or "", phase_id or "",
+             risk or "", constraint_issue or "", comment or "",
+             json.dumps(criteria_status or [], ensure_ascii=False),
+             target_excerpt or "", observations or "", time.time()),
+        )
+        review_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    except Exception as _e:
+        print(f"  ⚠️ [BL-228 W2] detector_reviews への INSERT に失敗しました: {_e}")
+        return None
+    if review_id and turn_id:
+        try:
+            conn.execute("UPDATE chat_history SET is_rollback=1 WHERE id=?", (turn_id,))
+        except Exception as _e:
+            print(f"  ⚠️ [BL-228 W2] chat_history.is_rollback UPDATE に失敗: {_e}")
+    if review_id and turn_id:
+        _write_relation_edge(
+            conn, run_id, f"detector_review:{review_id}", f"turn:{turn_id}",
+            "depends_on",
+            f"Detector差戻（{constraint_issue}）が turn:{turn_id} を監査して記録",
+            "detector", source_task_id=task_id or "", source_phase_id=phase_id or "",
+        )
+    return review_id or None
 
 
 def _traverse_lineage(
@@ -6325,11 +6545,12 @@ def _trace_lineage_handler(args: dict, state: dict | None = None) -> dict:
     if not ref:
         return {"status": "error",
                 "message": "ref は必須です（agreement:<id> / fact:<name> / entity:<entity_id>:<attr_name>）。"}
-    # [N3] 未知プレフィックスは走査せず即時返却（§15.3 機械的検証は _traverse_lineage 入口で）。
-    if not ref.startswith(("agreement:", "fact:", "entity:")):
+    # [N3/BL-228] 未知プレフィックスは走査せず即時返却（§15.3 機械的検証は _traverse_lineage 入口で）。
+    _LINEAGE_REF_PREFIXES = ("agreement:", "fact:", "entity:", "turn:", "issue:", "whiteboard:", "detector_review:")
+    if not ref.startswith(_LINEAGE_REF_PREFIXES):
         return {
             "status": "ok",
-            "result": "未知の ref プレフィックスです。agreement:/fact:/entity: のいずれかで指定してください。",
+            "result": "未知の ref プレフィックスです。agreement:/fact:/entity:/turn:/issue:/whiteboard:/detector_review: のいずれかで指定してください。",
             "lineage": [],
         }
     # [N3] 対象 ref が現在の run に実在しない（他 run の ref / 存在しない）場合は空リスト＋ヒント。
@@ -7476,8 +7697,75 @@ def _resolve_ref_line(conn: sqlite3.Connection, run_id: str, ref: str) -> str:
             if row is not None:
                 return f"[entity] {parts[0]}:{parts[1]} = {row['value']}{row['unit'] or ''} ({row['confidence']})"
         return f"{ref}: (解決不能: この run 内に該当 entity 属性がありません)"
-    return f"{ref}: (未知の ref プレフィックスです。agreement:/fact:/entity: のいずれかを使用)"
+    if ref.startswith("turn:"):
+        try:
+            tid = int(ref[len("turn:"):])
+        except (TypeError, ValueError):
+            return f"{ref}: (解決不能: turn id が整数ではありません)"
+        row = conn.execute(
+            "SELECT turn, role, content FROM chat_history WHERE id=? AND run_id=?",
+            (tid, run_id)).fetchone()
+        if row is None:
+            return f"{ref}: (解決不能: この run 内に該当 turn がありません)"
+        return f"[turn] round={row['turn']} role={row['role']} 内容={(row['content'] or '')[:120]}"
+    if ref.startswith("issue:"):
+        topic = ref[len("issue:"):]
+        row = conn.execute(
+            "SELECT severity, status, description FROM issue_log WHERE topic=? AND run_id=?",
+            (topic, run_id)).fetchone()
+        if row is None:
+            return f"{ref}: (解決不能: この run 内に該当 issue がありません)"
+        return f"[issue] severity={row['severity']} status={row['status']} {(row['description'] or '')[:120]}"
+    if ref.startswith("whiteboard:"):
+        rest = ref[len("whiteboard:"):]
+        parts = rest.split(":", 1)
+        if len(parts) == 2:
+            row = conn.execute(
+                "SELECT version, content FROM whiteboard_drafts "
+                "WHERE phase_id=? AND task_id=? AND run_id=? ORDER BY version DESC LIMIT 1",
+                (parts[0], parts[1], run_id)).fetchone()
+            if row is not None:
+                return f"[whiteboard] phase={parts[0]} task={parts[1]} version={row['version']} {(row['content'] or '')[:120]}"
+        return f"{ref}: (解決不能: この run 内に該当 whiteboard がありません)"
+    if ref.startswith("detector_review:"):
+        try:
+            rid = int(ref[len("detector_review:"):])
+        except (TypeError, ValueError):
+            return f"{ref}: (解決不能: detector_review id が整数ではありません)"
+        row = conn.execute(
+            "SELECT risk, constraint_issue, comment FROM detector_reviews WHERE id=? AND run_id=?",
+            (rid, run_id)).fetchone()
+        if row is None:
+            return f"{ref}: (解決不能: この run 内に該当 detector_review がありません)"
+        return f"[detector_review] risk={row['risk']} constraint_issue={row['constraint_issue']} {(row['comment'] or '')[:120]}"
+    return f"{ref}: (未知の ref プレフィックスです。agreement:/fact:/entity:/turn:/issue:/whiteboard:/detector_review: のいずれかを使用)"
 
+
+
+def _render_turn_whiteboard_timeline(conn: sqlite3.Connection, run_id: str, turn_id: int) -> str:
+    """[BL-228] C4: turn が属するタスクの whiteboard_drafts の版歴を時系列で描く（detector 差戻の「揺れ」可視化）。
+
+    turn 自体は 1 行だが、そのタスクの whiteboard が複数版を重ねている場合、その変遷を並べることで
+    「この turn の指摘で何がどう直されたか」を一望できる（§15.4 の出口＝_render_lineage_audit）。
+    """
+    row = conn.execute("SELECT task_id, phase_id FROM chat_history WHERE id=?", (turn_id,)).fetchone()
+    if not row or not row["task_id"]:
+        return ""
+    task_id, phase_id = row["task_id"], row["phase_id"]
+    if not phase_id:
+        return ""
+    rows = conn.execute(
+        "SELECT version, content, timestamp FROM whiteboard_drafts "
+        "WHERE run_id=? AND phase_id=? AND task_id=? ORDER BY version",
+        (run_id, phase_id, task_id),
+    ).fetchall()
+    if not rows:
+        return ""
+    lines = [f"\n[当該タスク {task_id} の whiteboard 版歴（turn チューリン）]{len(rows)}件"]
+    for w in rows:
+        snippet = (w["content"] or "")[:120].replace("\n", " ")
+        lines.append(f"  v{w['version']} ({w['timestamp']:.0f}): {snippet}")
+    return "\n".join(lines)
 
 
 def _render_lineage_audit(conn: sqlite3.Connection, run_id: str, ref: str) -> str:
@@ -7501,6 +7789,16 @@ def _render_lineage_audit(conn: sqlite3.Connection, run_id: str, ref: str) -> st
                      f"→ {_resolve_ref_line(conn, run_id, fw['ref'])}")
         if fw.get("reason"):
             lines.append(f"      なぜ: {fw['reason'][:200]}")
+    # [BL-228] C4: turn の場合、当該タスクの whiteboard 版歴を系譜の末尾に追記（ターン内チューリン）。
+    if ref.startswith("turn:"):
+        try:
+            _tid = int(ref[len("turn:"):])
+        except (TypeError, ValueError):
+            _tid = 0
+        if _tid:
+            _timeline = _render_turn_whiteboard_timeline(conn, run_id, _tid)
+            if _timeline:
+                lines.append(_timeline)
     return "\n".join(lines)
 
 
@@ -7850,6 +8148,10 @@ class LineageState(TypedDict):
     run_id: str
     db_path: str
     chat_history: list[dict]
+    # [BL-228] [BL-038] LangGraphは未宣言キーをノード間で伝播しない（同クラスの過去の実害は
+    # 下のexpert_wrote_agreement等のコメント参照）。直近のchat_history行id（detector差戻の
+    # turn_id系譜結合に使用）。生成元: expert_node/generate_user_utterance_node。
+    last_chat_history_id: int
     turn_count: int
     round_count: int  # [BL-005対応] turn_countはグラフ内部ループで凍結するため、
                        # generate_user_utterance_nodeへの再入場回数を数える別カウンタ。
@@ -11823,6 +12125,35 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     """)
 
     system_prompt += (
+        "\n【🔥 ゴール自体が実現不可能なサインを見逃すな（escalate_premise_concernの発火条件）】\n"
+        "あなたは「絶対にハードルを下げない」と命じられていますが、それは「Agent AIの能力不十分を\n"
+        "言い訳にさせない」ためであって、「ゴール文の制約・前提自体が真の目的と矛盾していることを\n"
+        "見逃せ」という意味ではありません。以下のサインが見えたら、突き返す前に一度立ち止まり、\n"
+        "escalate_premise_concernでゴール文の当該箇所を疑ってください：\n"
+        "・同じ種類の「この制約では実現不可能／前提が成り立たない」という報告を、\n"
+        "　**異なるタスクで3回以上**繰り返し受け取っている場合。\n"
+        "・Agent AIが技術的に妥当な複数の代替案を出しても、どれもゴール文の別の箇所と衝突して\n"
+        "　結局実現できない（＝問題はAgent AIの工夫の範囲を超えている）場合。\n"
+        "・「制約緩和」ではなく「ゴール文の文言そのものの見直し」をAgent AIが複数回提案しているが、\n"
+        "　あなたがそれを毎回「ハードルを下げるな」と却下し続けている場合。\n"
+        "・**同じタスク（またはタスクをまたいで）同一の懸念を、差戻しまたは人間依頼\n"
+        "　（flag_needs_human_input）で3回以上**繰り返している場合。典型例：自動運転バスという\n"
+        "　高価な機材のため調達台数が少数（1〜3台）に限定され、結果としてSLAが達成不能になる\n"
+        "　（task_4_1で既に顕在化）。これは「Agent AIがダメ」ではなく、「ゴール文の受入基準\n"
+        "　（SLA達成・実利用可能性・実証証跡）がこの前提・コンテキストでは満たせない」という\n"
+        "　前提の不成立のサインです。\n"
+        "これらは「Agent AIがダメ」ではなく、「ゴール文の制約・前提が真の目的と矛盾している」\n"
+        "サインです。特に最後の「同一懸念の3回以上の反復」は、同タスク内でも発生し得ます。\n"
+        "「厳しいが実現可能」と突き返し続けるだけでは、同じ懸念がタスクをまたいで（あるいは\n"
+        "同一タスク内で）無限に再発し、プロジェクトが先へ進みません。その際は、そもそも論\n"
+        "（first principles）に立ち返ってください：具体的根拠（どのタスクで何が実現不可能\n"
+        "だったか）を添えて escalate_premise_concern でゴール改定案（例：少数台数で達成可能な\n"
+        "SLAへの再定義、実証を人間オペレーターの責務とする、等）を申請し、HIL（人間）の承認を\n"
+        "経て revise_goal でゴール文を見直すのが理想の流れです（単なる「厳しい」という感想では\n"
+        "使わない）。\n"
+    )
+
+    system_prompt += (
         "\n【検算とドメインレビューの役割分担】\n"
         "Expertの提案に含まれる数値の機械的な検算（合計・比率・閾値比較等）は、"
         "既にDetector（監査システム）がpython_replで独立して実行済みです。"
@@ -12298,6 +12629,12 @@ def generate_user_utterance_node(state: LineageState) -> LineageState:
     print(f"\n>>> 👤 User AIの発言:\n{user_input}")
     state["user_input"] = user_input
     state["chat_history"].append({"role": "user", "content": state["user_input"]})
+    # [BL-228] W1: 死蔵 chat_history を活性化（SoT へ書く）。checkpoint の in-memory は輸送（§14.4）。
+    state["last_chat_history_id"] = _write_chat_history_row(
+        get_active_conn(), state["run_id"], turn=state.get("round_count", 0),
+        task_id=_effective_current_task_id_from(state),
+        phase_id=state.get("current_phase", {}).get("phase_id", ""),
+        role="user", content=state["user_input"])
     # [BL-103] 従来User AIの発言はdecisions/hydrate要約チャネルに一切記録されておらず、
     # Expertの発言（弱いながらも記録される）と非対称だった。ここで初めて記録する。
     decision = make_decision(who="user", what=f"Expertへの発言（ラウンド{state['round_count']}）",
@@ -12989,6 +13326,12 @@ Updates system state with the expert's output, decisions, and conversational his
 
     #state["chat_history"].append({"role": "user", "content": state["user_input"]})
     state["chat_history"].append({"role": "assistant", "content": output})
+    # [BL-228] W1: 死蔵 chat_history を活性化（SoT へ書く）。checkpoint の in-memory は輸送（§14.4）。
+    state["last_chat_history_id"] = _write_chat_history_row(
+        get_active_conn(), state["run_id"], turn=state.get("round_count", 0),
+        task_id=_effective_current_task_id_from(state),
+        phase_id=state.get("current_phase", {}).get("phase_id", ""),
+        role="assistant", content=output)
     return state
 
 
@@ -13094,12 +13437,25 @@ Manages state updates including risk levels, constraint logging, and decision re
     if criteria_status and current_task_id:
         state.setdefault("task_criteria_status", {})[current_task_id] = criteria_status
 
+    _bl228_review_id = None
     if result["constraint_issue"] in ("minor", "major"):
         state["constraint_issue_log"].append({
             "turn": state["turn_count"],
             "severity": result["constraint_issue"],
             "comment": result["comment"],
         })
+        # [BL-228] W2: Detector 差戻の構造化（§15.4: 出口＝_render_lineage_audit / --ref turn:<id>）。
+        _bl228_review_id = _bl228_record_detector_review(
+            get_active_conn(), state["run_id"],
+            turn_id=state.get("last_chat_history_id", 0),
+            task_id=current_task_id,
+            phase_id=state.get("current_phase", {}).get("phase_id", ""),
+            risk=result.get("risk", ""), constraint_issue=result["constraint_issue"],
+            comment=result.get("comment", ""),
+            criteria_status=result.get("criteria_status", []),
+            target_excerpt=result.get("target_excerpt", ""),
+            observations=result.get("observations", "") or "",
+        )
 
     # [BL-051軽量版] constraint_issueの判定に関わらず、Detectorが自由記述で書き残した
     # 気づき・懸念を蓄積する。noneの回でも記録される点がconstraint_issue_logと異なる。
@@ -14139,6 +14495,12 @@ def facilitator_node(state: LineageState) -> LineageState:
         print(f"\n\n---\n【ファシリテーターからの補足】\n{feedback}")
     else:
         state["chat_history"].append({"role": "assistant", "content": feedback})
+        # [BL-228] W1: 死蔵 chat_history を活性化（SoT へ書く）。checkpoint の in-memory は輸送（§14.4）。
+        state["last_chat_history_id"] = _write_chat_history_row(
+            get_active_conn(), state["run_id"], turn=state.get("round_count", 0),
+            task_id=_effective_current_task_id_from(state),
+            phase_id=state.get("current_phase", {}).get("phase_id", ""),
+            role="assistant", content=feedback)
 
     state["drift_flag"] = False
     state["discussion_status"] = "continuing"
@@ -14375,6 +14737,12 @@ def reviewer_node(state: LineageState) -> LineageState:
 
             msg = f"🔥 【QA責任者からの差し戻し (リテイク {state['review_count']}/3) - 延長戦突入】\n{feedback}\n※仕様の矛盾やバグを修正してください。制限ターンが {added_turns} ターン延長されました。"
             state["chat_history"].append({"role": "user", "content": msg})
+            # [BL-228] W1: 死蔵 chat_history を活性化（SoT へ書く）。checkpoint の in-memory は輸送（§14.4）。
+            state["last_chat_history_id"] = _write_chat_history_row(
+                _conn, _run_id, turn=state.get("round_count", 0),
+                task_id=_effective_current_task_id_from(state),
+                phase_id=state.get("current_phase", {}).get("phase_id", ""),
+                role="user", content=msg)
 
             decision = make_decision("reviewer", f"成果物の差し戻し (Needs Fix) -> {added_turns}ターン延長", feedback)
             db_append_decision(decision, _conn, _run_id)

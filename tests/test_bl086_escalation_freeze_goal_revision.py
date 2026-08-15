@@ -384,3 +384,18 @@ def test_bl086_get_open_goal_escalations_returns_only_open_in_order(db_conn):
     open_list = cela_main.get_open_goal_escalations(conn, run_id)
     assert len(open_list) == 1
     assert open_list[0]["escalation_id"] == id2
+
+
+# BL-235/D: User AI が escalate_premise_concern を実際に発火させるための
+# トリガー条件（「同じ実現困難を3回以上別タスクで見たら疑え」）がプロンプトに含まれること。
+# このテキストが消えると、ツールは配線されていても発火しなくなる（log調査で0回呼び出しを確認）。
+def test_user_utterance_prompt_has_escalation_fire_trigger():
+    src = inspect.getsource(cela_main.generate_user_utterance)
+    assert "escalate_premise_concern" in src
+    # [BL-235] 発火条件の明示: 「3回以上」の繰り返しサイン
+    assert "3回以上" in src
+    assert "ゴール自体が実現不可能" in src or "ゴール文の制約・前提" in src
+    # [BL-235 1314ログ調査後の第4条件] 同一タスク内で同じ懸念を繰り返し差戻し/HIL依頼している
+    # 場合も前提エスカレーションの対象にする（従来は「異なるタスクで3回以上」しか捕捉していなかった）。
+    assert "flag_needs_human_input" in src
+    assert "そもそも論" in src

@@ -504,3 +504,56 @@ def test_lineage_state_has_escalation_fields():
     annotations = cela_main.LineageState.__annotations__
     assert "escalation_active" in annotations
     assert "escalation_just_resolved_notice_pending" in annotations
+
+
+# --- BL-235: write_issue(CREATE) の「did_you_mean」類似issue提示 ---
+
+def test_create_suggests_similar_existing_issue(db_conn):
+    """[BL-235] 厳密なtopic一致は無いが文字bigramで類似する未解決issueがある場合、
+    新規作成と並行して similar_existing を提示する（強制ブロックはしない）。
+    """
+    conn, run_id = db_conn
+    # 既存: 予約完了能力未確認という懸念（log/2026-08-15/1137 の実際の重複パターン）
+    cela_main._write_issue_impl(
+        {"action_type": "CREATE", "topic": "task_4_2予約完了能力未確認", "description": "予約が完了できるか未確認"},
+        conn, run_id, "detector", "", "task_4_2",
+    )
+    # 新規: ほぼ同じ懸念だが別表現・別topic（「確認」vs「検証」のみの差）
+    result = cela_main._write_issue_impl(
+        {"action_type": "CREATE", "topic": "task_4_2予約完了能力未検証", "description": "予約が完了できるか未検証"},
+        conn, run_id, "detector", "", "task_4_2",
+    )
+    assert result["success"] is True
+    assert "similar_existing" in result
+    assert len(result["similar_existing"]) >= 1
+    # 新規行は作成されている（強制ブロックしていないことの確認）
+    new_row = conn.execute(
+        "SELECT * FROM issue_log WHERE run_id=? AND topic=?", (run_id, "task_4_2予約完了能力未検証")
+    ).fetchone()
+    assert new_row is not None
+
+
+def test_create_no_suggestion_when_unrelated_topic(db_conn):
+    """[BL-235] 類似する既存issueが無い場合は similar_existing を付けない。"""
+    conn, run_id = db_conn
+    cela_main._write_issue_impl(
+        {"action_type": "CREATE", "topic": "予約受入体制の設計", "description": "電話＋アプリ"},
+        conn, run_id, "detector", "", "task_4_2",
+    )
+    result = cela_main._write_issue_impl(
+        {"action_type": "CREATE", "topic": "代替交通の発動基準", "description": "費用と確保不能時"},
+        conn, run_id, "detector", "", "task_4_2",
+    )
+    assert result["success"] is True
+    assert "similar_existing" not in result
+
+
+def test_char_bigram_similarity_distinguishes_dupes():
+    """[BL-235] 文字bigram類似度が、同じ懸念の別表現を拾い、無関係なものは弾くことを確認。"""
+    sim_dup = cela_main._issue_char_bigram_similarity(
+        "task_4_2予約完了能力未確認", "task_4_2予約完了能力未検証")
+    sim_unrel = cela_main._issue_char_bigram_similarity(
+        "予約受入体制の設計", "代替交通の発動基準")
+    assert sim_dup >= 0.4
+    assert sim_unrel < 0.4
+
