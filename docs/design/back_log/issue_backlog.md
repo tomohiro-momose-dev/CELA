@@ -263,6 +263,7 @@
 | BL-229 | 中 | `cela_main.py`（task_planner/task_plan_reviewer への facts 登録ポリシー・§15.1 共有プロンプトヘルパ） | **計画段階の概算/Web探索値を `verified_facts` へ provisional 登録（`open`・調査済み・設計未着手）。** 計画ノード（task_planner 8243 / task_plan_reviewer 12035）は**既に `WRITE_AGREEMENT_TOOL` を持つ**が計画由来の数値を `verified_facts` に登録する挙動が無い（欠落はプロンプト指示）。ユーザー指摘（2026-08-14）「フェーズタスク作成は web 探索も使い概算も行い、計画・タスク・受け入れ要件は後続へ大きな影響を及ぼす」に基づき、重要な概算/Web探索値を `confidence='provisional'` で登録。捕捉そのものは BL-224 の C3（upsert 境界）が担うため、本 BL は「誰が・いつ書くか」のポリシー＋§15.1 共有ヘルパが対象。未決事項あり（登録対象の絞り込み・ツール可用性合意・ヘルパ文言）。 | P2 |
 | BL-230 | 中 | `cela_main.py`（新規バックフィル関数＋`tests/test_bl230_relation_edges_backfill.py`） | **BL-224 系譜バックフィル: 既存 `agreements.depends_on` 列 → `relation_edges`（`open`・設計未着手）。** 独立レビュー（N6）の指摘を受け個別 BL として起票。BL-224 実装（Phase 1）で `relation_edges` は**新規に書かれるエッジのみ**を蓄積し、過去の run や Phase 1 以前の既存 `depends_on` 列（実 id の JSON 配列、`5496`）は自動では遡及されない。**既存 run を開くと `relation_edges` が 0 件**（実測: 現行 run でもエッジ生成前は 0 件）となり、過去の「誰が・どうして」が辿れない。マッピングは W3 と同一（`f"agreement:{dep_id}"` → `f"agreement:{self_id}"`、`from_ref=agreement:<Y>`→`to_ref=agreement:<X>`、`relation_type='depends_on'`）。本 BL は (1) 既存 `agreements` を `run_id` 単位で走査、(2) `depends_on` 配列から上記エッジを生成、(3) `_write_relation_edge`（既存 ref 実在検証ゲートを通す）で書き込む、バックフィル関数を追加。トランザクション境界は Phase 1 の `relation_edges` 書き込みと同一にする（§15.4: バックフィル結果も `trace_lineage` で消費可能でなければ意味がない）。テスト: 既存 `depends_on` を持つ fixture run に対しバックフィル後 `trace_lineage(agreement:<X>)` が Y を返すこと。 | P2 |
 | BL-231 | 高 | `cela_main.py`（Detector ノード・オーケストレータ反復上限） | **Detector ノードの生成崩壊ループ（`open`・実測済み・実装は後日）。** 実ドライラン（run_id `1786699546-9ac0105d`、log `log/2026-08-14/1945`）で Detector が同一推論ブロックを**逐語的に 40 回**繰り返し収束せず（`"Let me do these calls."` ×40、実ツール実行は 1 セットのみ、`trace_lineage` ×0）。ループガード／最大反復回数の上限が無く、モデルの生成崩壊（repetition degeneracy）を検知・切断できないことが疑われる根本原因（未確定）。BL-224 との無関係は実証済み（§14／§16.2）。ユーザー指示「BL表記、ループガードなど検知、停止できる技術があるのなら後で実装」に基づき、**検知・停止ガードの実装は後日（deferred）**。未決: 検知方式・停止/復旧挙動・対象ノード範囲。 | P1 |
+| BL-237 | 高 | `cela_main.py`（`_query_AI_live` ツールループ・`THINK_TOOL`・`_BL093_THINK_VALUE_PARAGRAPH`） | **`done`。** think未呼び出しiterationの生reasoning無条件引き継ぎが、単一iteration内の生成崩壊（同一結論の延々再導出）を助長する問題を修正。log/2026-08-15/1735・1954（Task Plan Reviewer）で2回発生、BL-231のiterをまたいだループガードは単一iteration内暴走には届かないと判明。thinkを毎iteration必須化（プロンプトレベル、機械的強制は伴わない）し、think呼び出し時は生reasoningの代わりに構造化summaryのみを次iterationへ引き継ぐよう変更（D-206）。 | P1 |
 
 ---
 
@@ -8015,6 +8016,35 @@ YouTubeの LDD/Lineage 研究（`docs/refs/`）が起源の「判断の系譜を
 
 ---
 
+### BL-237: think未呼び出しiterationの生reasoning無条件引き継ぎが、単一iteration内の生成崩壊（同一結論の延々再導出）を助長する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done`（実装済み・回帰テスト作成済み） |
+| 優先度 | P1 |
+| テスト | `tests/test_bl237_think_mandatory_carryover.py`（新規4件）、`tests/test_bl093_d074_auto_reasoning_enforcement.py::test_auto_reasoning_digest_content_captured_via_create_kwargs`（既存テストをBL-237の新挙動に合わせて更新） |
+| 関連 | BL-093/BL-108/BL-110/BL-111（reasoning自動引き継ぎ機構の変遷）、BL-231（iterをまたいだ生成崩壊ガード。本件はiterを**またがない**単一iteration内の暴走であり、BL-231のガードは原理的に届かない別種の失敗）、AGENTS.md §14.1（表面的な一致は診断ではない）、§16.4（過去の決定を読み直す）、§17.1（リバートで失敗する回帰テスト） |
+
+**内容:**
+
+2026-08-15 のドライラン（log/2026-08-15/1735, 1954、いずれも run_id `1786782904-3622585a`、Task Plan Reviewerノード）で、`思考（iter=N）` のreasoningチャンネルが単一iteration内で同じ結論（「欠落タスク5件」の箇条書き）を段落単位で逐語的に繰り返し、ユーザーがCtrl+Cで2回停止させる事態が発生した。BL-231のループガード（`_LOOP_GUARD_REPETITION_WINDOW`）は、完了した複数iterationにまたがる同一出力の検知であり、本件のように**1回のiterationがそもそも完了しない**（tool_callsもcontentも一度も出さないまま暴走する）ケースには構造的に届かない。
+
+**原因調査（§14.1: 表面一致で即断せず実コードを確認）:**
+- temperature統一（0.5、ユーザーが手動で全ロール揃え済み）・`frequency_penalty`/`presence_penalty=0.3`（BL-231後半で追加済み）は、いずれも1954ログの再発時点で既に有効だったにもかかわらず再発した。これにより「temperatureが主因」という当初仮説は反証された。
+- `_query_AI_live`（cela_main.py 5658-5679付近、BL-093/BL-108/BL-111）が、**thinkを呼んだかどうかに関わらず、そのiterationの生reasoning全文を無条件に次iterationへsystemメッセージとして引き継いでいた**ことが判明。ユーザーがGeminiの解説（「迷い・撤回のトークンが文脈に乗ると、次の生成がその言い回しに引きずられて抜け出せなくなる」）を引いて指摘した通り、iter=4は直前のiter=1〜3の生reasoning（迷い・撤回を含む自然文）を丸ごと読んだ状態から開始しており、これが暴走の土壌になっていたと推定される。
+- `THINK_TOOL`の関数説明文自体が「Optionally record... calling think is not required to preserve reasoning」（英語、モデルへ直接渡る）となっており、think必須化の障害になっていた。
+
+**過去の決定の読み直し（§16.4）:** BL-108→BL-110で「thinkをsummary付きで併用しない限りツール呼び出しを差し戻す」機械的強制は、往復コスト（リトライ回数・トークン消費）が高すぎるとして撤廃された経緯がある。ユーザー指摘により、当時の強制は「think単独のための別iteration」を要求する設計だったのに対し、現在は全ノードへ`TOOL_CALL_RULE`（同一レスポンス内でツールをまとめて呼ぶ）が既に注入されているため、「他のツールを呼ぶ予定があるなら同一応答内でthinkもまとめて呼べ」という指示は追加の往復を生まないと判断。機械的な差し戻しは伴わない、プロンプトレベルの必須化に留めた。
+
+**実装（2026-08-15）:**
+1. `THINK_TOOL`の`description`を英語で書き換え、「毎iteration必須（他のツール使用有無に関わらず、使うなら同一応答内でまとめて呼ぶこと）」「think呼び出しの有無で次iterationへの引き継ぎ内容が変わる」ことを明示。
+2. `_BL093_THINK_VALUE_PARAGRAPH`（全8ノードのプロンプトから共有参照、§15.1単一ソース）を同趣旨で書き換え。
+3. `_query_AI_live`のツールループ内で、そのiterationに`think`のtool_callsが含まれていたかを`_think_called_this_iter`として機械的に記録。生reasoningのsystemメッセージ引き継ぎ（旧: 無条件）を`_this_iter_reasoning and not _think_called_this_iter`へ変更——thinkを呼んだiterationは、既にtool結果として渡っている構造化summary（`reasoning_log_so_far`、累積）のみを引き継ぎ、生reasoningの二重引き継ぎを省く。thinkを呼ばなかったiterationは従来通り生reasoningを引き継ぐ（情報欠落防止のフォールバック）。
+
+**未決事項・保険:** プロンプトレベルの必須化はモデルが従わない可能性を排除できない（BL-108の機械的強制のような不遵守時のリトライは意図的に持たせていない）。効果はまだ実ドライランで未検証。保険として、reasoningチャンネルが際限なく続く最悪ケース（本件のように一度もtool_callsに到達しない暴走）に備え、`MAX_TOKENS_BY_ROLE`の頭打ち（現状全ロール実質無制限=100000）を別途検討する提案をユーザーへ提示済み、未着手（§7の定数変更のため要承認）。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -8210,3 +8240,4 @@ YouTubeの LDD/Lineage 研究（`docs/refs/`）が起源の「判断の系譜を
 | 2026-08-12 | BL-217を実装完了（`done`）。ユーザーが「実装してください」と指示。設計時の見落とし2件を実装中に発見・是正した——①`--answer-human-input`が`upsert_verified_fact`へ渡す`variable_name`の永続化先が設計書に欠落しており、`issue_log`へ`human_variable_name`列を追加、②「Expertのツール一覧（call_expertの2経路）」という設計時の想定が誤りで、実際には1箇所のみだったため配線先を修正、③通知の呼び出し箇所も「4箇所」という見積りが`_build_escalation_pin_text`と`_build_deferred_issue_pin_text`を別々に数えた誤りで、実際は`call_expert`/`call_detector`/`generate_user_utterance`の3関数だった。設計の核（BL-125遷移ゲートは無改修で正しく機能する）は実データで確認できた——`flag_needs_human_input`起票直後はブロック、`--answer-human-input`後は自然にブロック解除。新規テスト20件、7箇所すべて個別リバートして失敗を確認、フルオフラインスイート1257 passed / 6 deselected（うち1件はBL-215由来の既知の統計的フレークで無関係）。 |
 | 2026-08-12 | BL-219を起票・実装完了（`done`）。ユーザーが実run（`run_id=1786457890-3273d6dd`）を調査し「1日の需要8,500人という根拠が見つからない」と指摘。調査の結果、task_plannerが計画立案段階で自己流の外挿（ピーク3時間×係数）で先に「約8,000-9,000人/日」を決め打ちし、後続タスクへ「task_1_4で確定した」体裁で埋め込んでいたことが判明。task_plan_reviewerは`think`ツールの中で「derived number, need to check calculation」と自ら疑問視していたが、その指摘は構造化記録として残らず、承認後は誰にも参照されなかった。ユーザーが「task_plannerにupsert_verified_factを追加しよう」「task_plan_reviewerにissueを書かせるべきか」と提案。調査の結果、`upsert_verified_fact`は独立ツールとして存在せず（実体は`write_agreement`の`confirmed_variables`経由のみ）、task_plannerは既にこのツールを保有していたため新規ツールは不要と判明。task_plan_reviewerへの`write_issue`付与も、BL-136の「DEFERはUser AIのみ」という既存設計原則と衝突するため見送り、代わりに既に書かれていながら承認時には誰にも読まれていなかった「レビュワーからの指摘」セクションの自動注入経路を新設する、より軽量な代替案をユーザーへ提示し合意を得た（D-196）。`_get_reviewer_comments_text`を新設しBL-082の「先送り事項」と同型の3箇所（call_expert/call_detector/generate_user_utterance）へ配線、task_plannerのプロンプトへconfirmed_variables登録指示を追加。新規テスト10件、7箇所個別リバート確認済み、フルオフラインスイート1268 passed / 5 deselected。 |
 | 2026-08-13 | BL-223を起票・実装完了（`done`）。ユーザーが`log/2026-08-13/1411`（`run_id=1786597142-55baeabc`）を監査し、Expertの成果物内での明示的な先送り宣言（SLA待ち時間の解釈）が構造化記録に一切残らないことを発見。BL-154/D-124が構築した「Expert自己申告の先送りをissue_log/plan_draftsへ橋渡しする」機構自体が、①`wrote_agreement_this_turn`のターン単位粗さ、②`defer_to_task_id`空文字時のissue_log起票丸ごとスキップ、の2つの独立した理由で発火しなかったことが根本原因と判明。ユーザーから「Expertにwrite_issueを与えなかった穴では」との指摘があったが、D-124は既にこの経路を手当て済みと確認し、Expertへの権限拡大（ロール分離原則の後退）ではなく既存橋渡し機構自体の修正を選んだ。設計段階で同一セッション内の独立レビュー（cline）から、当初のBug B修正案が既存テスト`test_unresolvable_target_task_id_skips_issue_log_creation`を破壊するとの指摘を受け、`_get_blocking_issues_for_transition`のSQLがdefer_to_task_idの実在性を検証しないことを確認したうえで、fail-closed動作を維持する3分岐設計へ修正。項目単位`(entry_type, task_id)`重複判定への置き換えと、defer_to_task_id空文字時のissue_log限定起票を実装。新規テスト7件、A・B-1・B-4の個別リバート確認済み（B-4はレビュー指摘のシナリオを再現）。実装中に既存テスト`test_r3b_t5_decision_extractor_skips_agreement_write_when_write_agreement_succeeded`が項目単位判定への変更で回帰することを発見し、実運用の状態伝播に合わせて修正。フルオフラインスイート1306 passed / 5 deselected（`test_bl195`の1件は無関係な既存失敗）。 |
+| 2026-08-15 | BL-237を起票・実装完了（`done`）。log/2026-08-15/1735・1954（同一run_id、Task Plan Reviewerノード）でreasoningチャンネルが単一iteration内で同一結論を延々と再導出する生成崩壊が2回発生。BL-231のiterをまたいだループガードは、iterが一度も完了しないこの種の暴走には原理的に届かないと判明。原因調査で、temperature統一・frequency/presence_penalty=0.3が既に有効な状態で再発したことから「temperatureが主因」という当初仮説を反証、`_query_AI_live`がthink呼び出しの有無に関わらず生reasoning全文を無条件に次iterationへ引き継いでいたこと（迷い・撤回を含む生の言い回しがそのまま伝播）が土壌になっていたと特定。ユーザー指摘により、BL-108→BL-110で撤廃されたthink機械的強制（往復コスト過大）とは異なり、既存のTOOL_CALL_RULE（同一応答内でのツールまとめ呼び出し）に乗せる形なら追加往復を生まないと判断し、thinkのプロンプトレベル必須化＋think呼び出し時のみ生reasoning引き継ぎを構造化summaryへ差し替える設計で実装。THINK_TOOLの説明文・`_BL093_THINK_VALUE_PARAGRAPH`（8ノード共有）・`_query_AI_live`の3箇所を変更。新規テスト4件、既存テスト1件を新挙動に更新、リバート確認済み、フルオフラインスイート1371 passed / 1 deselected。効果は実ドライラン未検証、MAX_TOKENS_BY_ROLEの頭打ちは保険として提案済み・未着手。 |

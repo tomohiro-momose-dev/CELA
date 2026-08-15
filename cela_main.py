@@ -334,7 +334,7 @@ client_resource_arbiter = client_openrouter
 model_resource_arbiter = laguna_S_2_1 #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = laguna_S_2_1  
+model_reflection = laguna_S_2_1
 
 client_facilitator = client_openrouter
 model_facilitator = laguna_S_2_1 
@@ -354,13 +354,13 @@ STRUCTURED_OUTPUT_LABEL_KEYWORDS = ("detector", "decision extractor", "reflectio
 
 
 MAX_TOKENS_BY_ROLE = {
-    "expert": 100000,
-    "user": 100000,
-    "detector": 100000,
-    "reflection": 100000,
-    "review": 100000,
-    "decision extractor": 100000,
-    "orchestrator": 100000,
+    "expert": 64000,
+    "user": 64000,
+    "detector": 64000,
+    "reflection": 64000,
+    "review": 64000,
+    "decision extractor": 64000,
+    "orchestrator": 64000,
 }
 
 def get_max_tokens(label: str) -> int:
@@ -371,7 +371,7 @@ def get_max_tokens(label: str) -> int:
     for keyword, tokens in MAX_TOKENS_BY_ROLE.items():
         if keyword in label_lower:
             return tokens
-    return 100000  # デフォルト
+    return 64000  # デフォルト
 
 
 # ---------------------------------------------------------------------------
@@ -1598,14 +1598,18 @@ THINK_TOOL = {
     "function": {
         "name": "think",
         "description": (
-            "Optionally record your reasoning, decisions, and a running todo/issue list here. "
-            "[BL-113] Your raw reasoning is automatically captured every iteration regardless of "
-            "whether you call this tool (native reasoning capture, accumulated append-only per "
-            "BL-108/BL-111) -- calling `think` is not required to preserve reasoning across "
-            "iterations. Its remaining value is structured articulation: explicitly stating what "
-            "you decided, why, and what alternative you rejected and why, plus maintaining a "
-            "running todo/issue list across iterations. "
-            "On your first call, it's useful to list your initial todo breakdown. "
+            "[BL-237] Call this EVERY iteration, whether or not you are also calling other tools "
+            "this step -- if you are calling other tools too, call `think` together with them in "
+            "the same response (do not spend a separate iteration/request on `think` alone). "
+            "Record your reasoning, decisions, and a running todo/issue list here. "
+            "[BL-113/BL-237] Your raw reasoning is automatically captured every iteration, but what "
+            "carries forward into the next iteration's context now depends on whether you called "
+            "`think`: if you did, only this structured summary (action/decided/why/rejected, "
+            "cumulative) carries forward; if you did not, your raw unstructured reasoning text "
+            "carries forward instead, verbatim. Raw reasoning left uncondensed by `think` has been "
+            "observed to drag subsequent iterations into repeating the same hedging/back-and-forth "
+            "wording rather than reaching a conclusion -- calling `think` every iteration is the "
+            "mitigation. On your first call, it's useful to list your initial todo breakdown. "
             "You do not need to track the iteration number yourself; it is stamped automatically."
         ),
         "parameters": {
@@ -5311,17 +5315,17 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
             # OpenRouterにサイレントに無視されてreasoningが一切発火していなかった（response.reasoningが
             # 常にnull）。判定系ノードに加え、ツール付与ノード（Expert/User AI/Resource Arbiter等）にも
             # ツール呼び出し前後の「つぶやき」をログで可視化する目的でlow reasoningを付与する。
-            reasoning_effort_level = None
+            reasoning_effort_level = "low"
             if label_lower in ("user ai", "decision extractor", "orchestrator", "facilitator"):
                 # [BL-109] orchestrator/facilitatorはBL-093以前と同じくtools=None（think無し）に
                 # 戻したが、reasoning_effort_levelは元々`elif tools is not None`経由でしか付与
                 # されていなかったため、明示的にlabelへ追加しないとtools=None化の副作用として
                 # サイレントにreasoningが無効化されてしまう（実装時に発見・修正）。
-                reasoning_effort_level = "medium"
+                reasoning_effort_level = "low"
             elif label_lower == "reflection" or label_lower == "review" or label_lower == "detector" or label_lower == "except":
-                reasoning_effort_level = "high"
+                reasoning_effort_level = "low"
             elif tools is not None:
-                reasoning_effort_level = "medium"
+                reasoning_effort_level = "low"
 
             create_kwargs["max_tokens"] = get_max_tokens(label_lower)
             # 🌟 【追加部分】OpenRouter使用時のみ、高速プロバイダーを強制指定する
@@ -5572,8 +5576,14 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                     # 解消された一方、差し戻し自体は実コスト（往復回数・トークン消費）としてこのセッション中
                     # 何度も観測されたため、ユーザー指示によりthinkツール自体は残しつつ強制（差し戻し）のみ
                     # 撤廃し、任意呼び出しに戻す。
+                    # [BL-237] このiterationでthinkが呼ばれたかを機械的に記録する。呼ばれていれば
+                    # 下のreasoningダイジェスト（生reasoning全文の引き継ぎ）を省略し、既にtool結果
+                    # として渡っているthinkの構造化summary（累積reasoning_log_so_far）だけに絞る。
+                    _think_called_this_iter = False
                     for tc in msg.tool_calls:
                         tool_calls_used += 1
+                        if tc.function.name == "think":
+                            _think_called_this_iter = True
                         handler = TOOL_DISPATCH.get(tc.function.name)
                         if handler is None:
                             result = f"[REPL Error] unknown tool: {tc.function.name}"
@@ -5665,8 +5675,16 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                     # 満たせていなかった）。対策として、全iterを1メッセージに再結合するのをやめ、
                     # 「そのiterationの生reasoningだけ」を独立した新規メッセージとして末尾に追記し、
                     # 以後は一切触れない（既存メッセージの削除・移動をしない）方式に変更する。
+                    # [BL-237] ただし、上でthinkが呼ばれていた場合はこの生reasoning全文の引き継ぎを
+                    # 省略する。thinkのtool結果（reasoning_log_so_far、上のloop_messages.appendで
+                    # 既に追加済み）が構造化された累積summaryとして同じ役割を果たす上、生reasoning
+                    # （迷い・撤回を含む自然文）まで二重に積むと、次iterationの文脈がその「迷いの
+                    # 言い回し」に引きずられて同じ堂々巡りを再生産するリスクがある（log/2026-08-15/
+                    # 1735・1954で観測: 生reasoningがそのまま次iterへ丸ごと引き継がれ、その延長で
+                    # 後続iterationが同じ結論を延々と再導出し続けた）。thinkを呼ばなかったiterationは
+                    # 従来通り生reasoningを引き継ぎ、情報の欠落を防ぐ（フォールバック）。
                     _this_iter_reasoning = "".join(reasoning_parts_all[_reasoning_start_idx:])
-                    if _this_iter_reasoning:
+                    if _this_iter_reasoning and not _think_called_this_iter:
                         loop_messages.append({
                             "role": "system",
                             "content": f"【BL-093: iter {iteration} の思考ログ（自動保存）】\n{_this_iter_reasoning}",
@@ -9194,11 +9212,15 @@ def _build_task_scope_context(state: LineageState, conn: sqlite3.Connection) -> 
 # ============================================================================
 
 _BL093_THINK_VALUE_PARAGRAPH = (
-    "自然に考えた理由づけの生文章は、thinkを使わなければ次のiterationには引き継がれません\n"
-    "（tool_callsの記録だけが残ります）。thinkを呼ぶと、その理由づけ（action/decided/why、\n"
-    "却下案があればrejected/rejected_why）は次回以降のtool結果として全履歴ごと返され、雪だるま式に\n"
-    "引き継がれます。まずtodoに確認すべき論点をリストアップしてください。他のツール呼び出しと\n"
-    "同一の応答内でまとめて呼んでも、単独で呼んでも構いません。"
+    "[BL-237] thinkは毎iteration必ず呼んでください（他のツールを呼ぶかどうかに関わらず）。\n"
+    "他に呼ぶツールがある場合は、そのためだけに別iterationを消費せず、同一の応答内でまとめて\n"
+    "呼んでください。まずtodoに確認すべき論点をリストアップしてください。\n"
+    "thinkを呼んだiterationは、その理由づけ（action/decided/why、却下案があればrejected/\n"
+    "rejected_why）が構造化された累積summaryとして次回以降のtool結果に引き継がれます。\n"
+    "thinkを呼ばなかったiterationは、代わりに自然に考えた理由づけの生文章がそのまま次の\n"
+    "iterationへ引き継がれます——迷い・撤回を含む生の言い回しがそのまま残るため、次の\n"
+    "iterationがその言い回しに引きずられて同じ結論を延々と再導出し続ける空回りの原因に\n"
+    "なりえます（実際に1735/1954ログで観測）。"
 )
 
 # [BL-228] trace_lineageの使用指示。BL-224で定義したツール自体は各ノードのtools=[]に配線済み

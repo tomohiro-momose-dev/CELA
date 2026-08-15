@@ -2885,6 +2885,20 @@
 
 ---
 
+### D-206: BL-237 — think呼び出しを毎iteration必須化し、think呼び出し時は生reasoningの引き継ぎを構造化summaryへ差し替える
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-15 |
+| 状態 | `decided` |
+| 決定者 | t-momose（Geminiによる「迷いトークンが文脈に乗ると抜け出せなくなる」という仮説の提示、往復コストを増やさない設計への訂正指示）、Claude（原因調査・実装） |
+| **決定理由** | log/2026-08-15/1735・1954で、単一iteration内のreasoningチャンネルが同一結論を延々と再導出する生成崩壊が2回発生した。temperature統一・frequency/presence_penalty=0.3を既に適用した状態で再発したため、これらは原因として不十分と実証された（§14.1）。`_query_AI_live`のコードを確認したところ、thinkの呼び出し有無に関わらず、そのiterationの生reasoning全文（迷い・撤回を含む自然文）が無条件に次iterationへ引き継がれる設計になっており、ユーザーが提示した「迷いのトークンが文脈に乗ると同じ迷いを再生産する」という仮説と整合する具体的な機構だった。過去にBL-108→BL-110で「thinkをsummary付きで併用しない限りツール呼び出しを差し戻す」機械的強制が往復コスト過大で撤廃された経緯があるが（§16.4で確認）、ユーザーの訂正により、それは「think単独のための別iteration」を要求する設計だったからだと判明。現在は全ノードへ`TOOL_CALL_RULE`（同一応答内でツールをまとめて呼ぶ）が既に注入されているため、「他のツールを呼ぶ予定があるなら同一応答内でthinkもまとめて呼べ」という指示に留めれば、機械的な差し戻しを伴わず追加往復を生まない。 |
+| 決定内容 | ①`THINK_TOOL`の`description`とプロンプト共有定数`_BL093_THINK_VALUE_PARAGRAPH`（8ノード共有、§15.1）を、「thinkは毎iteration必須（他のツール使用有無に関わらず、使うなら同一応答内でまとめて呼ぶ）」という趣旨へ書き換え。②`_query_AI_live`で、そのiterationにthinkのtool_callsが含まれていたかを機械的に記録し、含まれていれば生reasoningのsystemメッセージ引き継ぎを省略（既にtool結果として渡っている構造化summary`reasoning_log_so_far`のみに絞る）、含まれていなければ従来通り生reasoningを引き継ぐフォールバックとする。③強制は機械的な差し戻しではなくプロンプトレベルの必須化に留め、モデルが従わない場合の保険（`MAX_TOKENS_BY_ROLE`の頭打ち等）は別途検討事項として残す。 |
+| 影響 | `cela_main.py`（`THINK_TOOL`定義、`_BL093_THINK_VALUE_PARAGRAPH`、`_query_AI_live`のツールループ）、新規`tests/test_bl237_think_mandatory_carryover.py`、既存`tests/test_bl093_d074_auto_reasoning_enforcement.py`の1テストを新挙動へ更新。 |
+| 関連 BL | BL-237（本件）、BL-093/BL-108/BL-110/BL-111（reasoning自動引き継ぎ機構の変遷元）、BL-231（iterをまたいだ生成崩壊ガード。本件はiterをまたがない単一iteration内暴走であり別種の失敗としてBL-231とは独立に対処）、AGENTS.md §14.1（表面一致は診断ではない・再検証）、§16.4（過去の決定を読み直してから行動）、§17.1（リバートで失敗する回帰テスト） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
