@@ -8022,7 +8022,7 @@ YouTubeの LDD/Lineage 研究（`docs/refs/`）が起源の「判断の系譜を
 |------|------|
 | 状態 | `done`（実装済み・回帰テスト作成済み） |
 | 優先度 | P1 |
-| テスト | `tests/test_bl237_think_mandatory_carryover.py`（新規4件）、`tests/test_bl093_d074_auto_reasoning_enforcement.py::test_auto_reasoning_digest_content_captured_via_create_kwargs`（既存テストをBL-237の新挙動に合わせて更新） |
+| テスト | `tests/test_bl237_think_mandatory_carryover.py`（新規5件、think必須化＋生reasoning引き継ぎが常に無条件であることの回帰確認）、`tests/test_bl093_d074_auto_reasoning_enforcement.py`（既存テストは元の挙動のまま・docstringのみ経緯を追記） |
 | 関連 | BL-093/BL-108/BL-110/BL-111（reasoning自動引き継ぎ機構の変遷）、BL-231（iterをまたいだ生成崩壊ガード。本件はiterを**またがない**単一iteration内の暴走であり、BL-231のガードは原理的に届かない別種の失敗）、AGENTS.md §14.1（表面的な一致は診断ではない）、§16.4（過去の決定を読み直す）、§17.1（リバートで失敗する回帰テスト） |
 
 **内容:**
