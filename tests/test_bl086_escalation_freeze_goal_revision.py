@@ -49,6 +49,15 @@ def db_conn(tmp_path):
         cela_main._CURRENT_GOAL_TEXT = ""
 
 
+def _approve_goal_escalation_hil(conn, run_id, escalation_id):
+    """[BL-236] 人間が--answer-human-inputでescalationを承認した状態を再現するテストヘルパー。
+    revise_goalはこのHIL承認（verified_facts上のvalue='approved'）が無いと呼び出せない。"""
+    cela_main.upsert_verified_fact(
+        conn, run_id, cela_main._goal_escalation_hil_variable(escalation_id),
+        "approved", "", "", "", "human_operator", confidence="confirmed",
+    )
+
+
 # ===========================================================================
 # escalate_premise_concern（提起）
 # ===========================================================================
@@ -188,6 +197,7 @@ def test_bl086_revise_goal_accept_updates_escalation_and_goal_shift_event(db_con
         "suggested_reframe": "小型車両を複数台導入する構成に変更",
     })["escalation_id"]
 
+    _approve_goal_escalation_hil(conn, run_id, escalation_id)
     cela_main._CURRENT_CALLER_ROLE = "user"
     old_goal = "台数上限は2台とする。予算上限は1億円とする。"
     cela_main._CURRENT_GOAL_TEXT = old_goal
@@ -254,6 +264,7 @@ def test_bl086_revise_goal_with_freeze_agreement_id_freezes_and_blocks_supersede
         "why_conflicts_with_true_need": "w", "suggested_reframe": "r",
     })["escalation_id"]
 
+    _approve_goal_escalation_hil(conn, run_id, escalation_id)
     cela_main._CURRENT_CALLER_ROLE = "user"
     cela_main._CURRENT_GOAL_TEXT = "台数上限は2台とする。"
     result = cela_main.TOOL_DISPATCH["revise_goal"]({
@@ -299,8 +310,10 @@ def test_bl086_generate_user_utterance_node_applies_goal_revision_to_state(monke
     })
     # [BL-103] generate_user_utterance_nodeがUser AIの発言をdecisionsへ記録するようになった
     # ため、このstate遷移限定テストではDB書き込みをモックで無効化する。
+    # [BL-228] chat_historyへの正本書き込み（_write_chat_history_row）も同じ理由で無効化する。
     monkeypatch.setattr(cela_main, "get_active_conn", lambda: None)
     monkeypatch.setattr(cela_main, "db_append_decision", lambda *a, **k: None)
+    monkeypatch.setattr(cela_main, "_write_chat_history_row", lambda *a, **k: 0)
     monkeypatch.setattr(cela_main, "get_last_think_summary", lambda: "")
     state = {
         "goal": "改定前", "round_count": 0, "constraint_issue": "none",
@@ -318,6 +331,7 @@ def test_bl086_generate_user_utterance_node_keeps_goal_unchanged_when_no_revisio
     monkeypatch.setattr(cela_main, "get_last_goal_revision", lambda: None)
     monkeypatch.setattr(cela_main, "get_active_conn", lambda: None)
     monkeypatch.setattr(cela_main, "db_append_decision", lambda *a, **k: None)
+    monkeypatch.setattr(cela_main, "_write_chat_history_row", lambda *a, **k: 0)
     monkeypatch.setattr(cela_main, "get_last_think_summary", lambda: "")
     state = {
         "goal": "変わらないゴール", "round_count": 0, "constraint_issue": "none",
@@ -399,3 +413,132 @@ def test_user_utterance_prompt_has_escalation_fire_trigger():
     # 場合も前提エスカレーションの対象にする（従来は「異なるタスクで3回以上」しか捕捉していなかった）。
     assert "flag_needs_human_input" in src
     assert "そもそも論" in src
+
+
+# ===========================================================================
+# [BL-236] revise_goalは人間のHIL承認（--answer-human-input）を必須とする
+# escalate_premise_concernを提起したのと同じUser AI（LLM）が、同じツールループ内で
+# revise_goalも呼んで自己承認できてしまう経路を塞ぐ（王道はHIL、Bの「AI自身のゴール
+# 緩和」は却下、という議論の結論を機械的ゲートとして実装）。
+# ===========================================================================
+
+def test_bl236_escalate_premise_concern_creates_hil_gate_issue(db_conn):
+    conn, run_id = db_conn
+    cela_main._CURRENT_CALLER_ROLE = "expert"
+    escalation_id = cela_main.TOOL_DISPATCH["escalate_premise_concern"]({
+        "concern_summary": "s", "implicated_constraint": "c",
+        "why_conflicts_with_true_need": "w", "suggested_reframe": "r",
+    })["escalation_id"]
+
+    topic = cela_main._goal_escalation_hil_topic(escalation_id)
+    row = conn.execute(
+        "SELECT * FROM issue_log WHERE run_id=? AND topic=?", (run_id, topic)
+    ).fetchone()
+    assert row is not None
+    assert row["severity"] == "major"
+    assert row["status"] == "escalated"
+    assert row["human_variable_name"] == cela_main._goal_escalation_hil_variable(escalation_id)
+    assert row["human_research_prompt"]
+
+
+def test_bl236_revise_goal_rejected_without_hil_approval(db_conn):
+    conn, run_id = db_conn
+    cela_main._CURRENT_CALLER_ROLE = "expert"
+    escalation_id = cela_main.TOOL_DISPATCH["escalate_premise_concern"]({
+        "concern_summary": "s", "implicated_constraint": "c",
+        "why_conflicts_with_true_need": "w", "suggested_reframe": "r",
+    })["escalation_id"]
+
+    cela_main._CURRENT_CALLER_ROLE = "user"
+    cela_main._CURRENT_GOAL_TEXT = "台数上限は2台とする。"
+    result = cela_main.TOOL_DISPATCH["revise_goal"]({
+        "escalation_id": escalation_id,
+        "edits": [{"old_text": "台数上限は2台とする。", "new_text": "台数上限は撤廃する。"}],
+        "reason_why": "承認する",
+    })
+    assert result["success"] is False
+    assert "BL-236" in result["error"]
+    assert "承認" in result["error"]
+    # [BL-086] HIL未承認で拒否された場合、エスカレーションはOpenのままでリトライ可能。
+    row = cela_main.get_goal_escalation(conn, run_id, escalation_id)
+    assert row["status"] == "Open"
+
+
+def test_bl236_revise_goal_rejected_when_hil_answered_rejected(db_conn):
+    conn, run_id = db_conn
+    cela_main._CURRENT_CALLER_ROLE = "expert"
+    escalation_id = cela_main.TOOL_DISPATCH["escalate_premise_concern"]({
+        "concern_summary": "s", "implicated_constraint": "c",
+        "why_conflicts_with_true_need": "w", "suggested_reframe": "r",
+    })["escalation_id"]
+
+    # [BL-236] 人間が--answer-human-inputで「却下」と回答した状態を再現する。
+    cela_main.upsert_verified_fact(
+        conn, run_id, cela_main._goal_escalation_hil_variable(escalation_id),
+        "rejected", "", "", "", "human_operator", confidence="confirmed",
+    )
+
+    cela_main._CURRENT_CALLER_ROLE = "user"
+    cela_main._CURRENT_GOAL_TEXT = "台数上限は2台とする。"
+    result = cela_main.TOOL_DISPATCH["revise_goal"]({
+        "escalation_id": escalation_id,
+        "edits": [{"old_text": "台数上限は2台とする。", "new_text": "台数上限は撤廃する。"}],
+        "reason_why": "承認する",
+    })
+    assert result["success"] is False
+    assert "resolve_premise_concern" in result["error"]
+
+
+def test_bl236_revise_goal_succeeds_after_hil_approval(db_conn):
+    conn, run_id = db_conn
+    cela_main._CURRENT_CALLER_ROLE = "expert"
+    escalation_id = cela_main.TOOL_DISPATCH["escalate_premise_concern"]({
+        "concern_summary": "s", "implicated_constraint": "c",
+        "why_conflicts_with_true_need": "w", "suggested_reframe": "r",
+    })["escalation_id"]
+
+    _approve_goal_escalation_hil(conn, run_id, escalation_id)
+
+    cela_main._CURRENT_CALLER_ROLE = "user"
+    cela_main._CURRENT_GOAL_TEXT = "台数上限は2台とする。"
+    result = cela_main.TOOL_DISPATCH["revise_goal"]({
+        "escalation_id": escalation_id,
+        "edits": [{"old_text": "台数上限は2台とする。", "new_text": "台数上限は撤廃する。"}],
+        "reason_why": "承認する",
+    })
+    assert result["success"] is True
+
+
+def test_bl236_answer_human_input_cli_path_satisfies_gate(db_conn):
+    """[BL-236] 既存のBL-217 CLI経路（_answer_human_input）で回答しても、revise_goalの
+    HIL要件を満たせること（新しい別経路を作らず既存配線を再利用する設計の実証）。"""
+    conn, run_id = db_conn
+    cela_main._CURRENT_CALLER_ROLE = "expert"
+    escalation_id = cela_main.TOOL_DISPATCH["escalate_premise_concern"]({
+        "concern_summary": "s", "implicated_constraint": "c",
+        "why_conflicts_with_true_need": "w", "suggested_reframe": "r",
+    })["escalation_id"]
+
+    topic = cela_main._goal_escalation_hil_topic(escalation_id)
+    answer = cela_main._answer_human_input(
+        conn, run_id, topic, cela_main._GOAL_ESCALATION_HIL_APPROVED_VALUE, "", "human", "承認する"
+    )
+    assert answer["success"] is True
+
+    cela_main._CURRENT_CALLER_ROLE = "user"
+    cela_main._CURRENT_GOAL_TEXT = "台数上限は2台とする。"
+    result = cela_main.TOOL_DISPATCH["revise_goal"]({
+        "escalation_id": escalation_id,
+        "edits": [{"old_text": "台数上限は2台とする。", "new_text": "台数上限は撤廃する。"}],
+        "reason_why": "承認する",
+    })
+    assert result["success"] is True
+
+
+def test_bl236_tool_descriptions_mention_hil_requirement():
+    src_escalate = str(cela_main.ESCALATE_PREMISE_CONCERN_TOOL)
+    src_revise = str(cela_main.REVISE_GOAL_TOOL)
+    assert "BL-236" in src_escalate
+    assert "human" in src_escalate.lower()
+    assert "BL-236" in src_revise
+    assert "approved" in src_revise.lower()

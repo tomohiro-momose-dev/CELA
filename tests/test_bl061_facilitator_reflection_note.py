@@ -51,6 +51,9 @@ def test_bl061_reflection_node_stores_note_in_state(monkeypatch):
     # 呼ぶようになった。このテストはDB接続なしでreflection_nodeの状態遷移ロジックのみを
     # 検証する目的のため、DBアクセスをモックで無効化する。
     monkeypatch.setattr(cela_main, "_get_escalated_issues", lambda conn, run_id: [])
+    # [BL-233] _get_actionable_escalated_issuesが先送り集中判定のため_get_overloaded_defer_targets
+    # も呼ぶようになった。同じ理由でDBアクセスをモックで無効化する。
+    monkeypatch.setattr(cela_main, "_get_overloaded_defer_targets", lambda conn, run_id: set())
     # reflection_nodeはグローバルconfig（if __name__=="__main__"ブロック内でのみ設定される）
     # を参照するため、モジュールとして直接呼び出すテストではここで用意してやる必要がある。
     monkeypatch.setattr(cela_main, "config", {}, raising=False)

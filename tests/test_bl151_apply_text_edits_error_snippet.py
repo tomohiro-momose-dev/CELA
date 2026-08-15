@@ -117,6 +117,13 @@ def test_bl151_revise_goal_mismatch_error_reveals_actual_goal_text(db_conn):
         "why_conflicts_with_true_need": "w", "suggested_reframe": "r",
     })["escalation_id"]
 
+    # [BL-236] revise_goalは人間のHIL承認（--answer-human-input相当）を必須とするため、
+    # このテスト（edits不一致エラーの中身を確認する）でも承認済み状態を再現する。
+    cela_main.upsert_verified_fact(
+        conn, run_id, cela_main._goal_escalation_hil_variable(escalation_id),
+        "approved", "", "", "", "human_operator", confidence="confirmed",
+    )
+
     cela_main._CURRENT_CALLER_ROLE = "user"
     cela_main._CURRENT_GOAL_TEXT = "過疎地域向け「AIオンデマンド自動運転バス」の導入計画と安全基準策定"
     result = cela_main.TOOL_DISPATCH["revise_goal"]({

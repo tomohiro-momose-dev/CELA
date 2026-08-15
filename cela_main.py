@@ -2559,6 +2559,10 @@ ESCALATE_PREMISE_CONCERN_TOOL = {
             "outside your current task's scope or write anything else. It only creates a record for the "
             "User (project owner) to review and decide. You must still complete your current task's "
             "literal acceptance_criteria this turn -- raising this concern is not license to skip them. "
+            "[BL-236] This call also opens a real human-in-the-loop gate (same mechanism as "
+            "flag_needs_human_input): revise_goal cannot be applied for this escalation until a human "
+            "developer answers --answer-human-input with value='approved' for it. You (the AI acting as "
+            "User) cannot approve your own escalation by calling revise_goal in the same turn. "
             "[BL-110] Optionally call `think` (with a `summary`) alongside this or any other tool call "
             "to record your reasoning -- it is no longer required, and other tool calls are no "
             "longer rejected for omitting it."
@@ -2611,6 +2615,10 @@ REVISE_GOAL_TOOL = {
             "exception so Detector does not re-litigate it. If the exception is not yet recorded as an "
             "agreement, call write_agreement first (status='Approved') in this same turn, then call "
             "revise_goal with its id as freeze_agreement_id. "
+            "[BL-236] This call is REJECTED until a human developer has approved this escalation_id via "
+            "--answer-human-input (value='approved'). Do not call this immediately after "
+            "escalate_premise_concern -- wait for the human's decision; it will be surfaced back to you "
+            "once answered. "
             "[BL-110] Optionally call `think` (with a `summary`) alongside this or any other tool call "
             "to record your reasoning -- it is no longer required, and other tool calls are no "
             "longer rejected for omitting it."
@@ -2746,12 +2754,94 @@ def record_scheduling_decision(conn: sqlite3.Connection, run_id: str, decision_t
     return new_version
 
 
+# [BL-236] escalation_id から HIL ゲートissueのtopic/variable_nameを一意に導出する。
+# 別テーブル（goal_escalations）を持たず、決定的な命名規則だけでissue_logと結びつける
+# ことで、リンク用の新列を増やさない（§15.1: 参照は既存のescalation_idキーで足りる）。
+_GOAL_ESCALATION_HIL_TOPIC_PREFIX = "goal_escalation_hil_"
+_GOAL_ESCALATION_HIL_VARIABLE_PREFIX = "goal_escalation_decision_"
+_GOAL_ESCALATION_HIL_APPROVED_VALUE = "approved"
+
+
+def _goal_escalation_hil_topic(escalation_id: str) -> str:
+    return f"{_GOAL_ESCALATION_HIL_TOPIC_PREFIX}{escalation_id}"
+
+
+def _goal_escalation_hil_variable(escalation_id: str) -> str:
+    return f"{_GOAL_ESCALATION_HIL_VARIABLE_PREFIX}{escalation_id}"
+
+
+def _create_goal_escalation_hil_gate(conn: sqlite3.Connection, run_id: str, escalation_id: str,
+                                      phase_id: str, task_id: str, concern_summary: str,
+                                      implicated_constraint: str, why_conflicts: str,
+                                      suggested_reframe: str, raised_by_role: str) -> None:
+    """[BL-236] escalate_premise_concern提起と同時に、flag_needs_human_input（BL-217）と同じ
+    issue_log機構でHIL（人間承認）ゲートを起票する。
+
+    [CONSTRAINT] revise_goal（ゴール改定の実適用）は従来、caller_role=='user'の1行チェックのみで
+    許可されていた。'user'はUser AI（LLM）自身であり、escalate_premise_concernを提起したのと
+    同じツールループ内で同じLLMがrevise_goalも呼んで自己承認できてしまう——これはAGENTS.md的に
+    「AI自身がハードルを下げる」BのパターンとUser議論で明確に却下したはずの経路である。
+    本ゲートは、その自己承認を機械的に塞ぐ（§15.3: LLMの自己申告ではなく、人間が
+    --answer-human-inputで書いた確定値の有無で判定する）。
+
+    [REJECTED] goal_escalationsテーブルへ新しい承認列を足す案。issue_logの
+    human_research_prompt/human_variable_name機構が既に「人間しか解決できない懸念」を
+    表現できており、CLIレポート（--pending-human-input）・回答（--answer-human-input）・
+    通知（_build_human_input_answered_notice）が全て無料で使い回せるため、新規メカニズムを
+    作らず既存配線を再利用する（§16.5）。
+
+    severity='major'固定（常にstatus='escalated'を伴う）: ゴール前提の改定はSLA/予算等と並ぶ
+    重大な意思決定であり、"minor"にして可視化のみに留めることは選ばない——BL-125の遷移ゲートで
+    提起元task_idの遷移を実際にブロックし、真に人間の応答を待たせる（§王道HIL、User承認）。
+    """
+    topic = _goal_escalation_hil_topic(escalation_id)
+    variable_name = _goal_escalation_hil_variable(escalation_id)
+    human_research_prompt = (
+        f"AIが前提エスカレーション（escalation_id={escalation_id}）を提起しました。内容を精査し、"
+        f"ゴール文の改定を承認するか判断してください。承認する場合は "
+        f"--answer-human-input --topic {topic} --value {_GOAL_ESCALATION_HIL_APPROVED_VALUE} "
+        f"を、却下する場合は --value rejected を指定して実行してください。\n"
+        f"懸念の要約: {concern_summary}\n"
+        f"疑わしい制約・前提: {implicated_constraint}\n"
+        f"なぜ真の目的と矛盾するか: {why_conflicts}\n"
+        f"提案されている見直し案: {suggested_reframe}"
+    )
+    description = (
+        "ゴール文の制約・前提自体を改定するかどうかの判断はAI自身に委ねられない"
+        "（AIが自分でハードルを下げる経路を塞ぐためのHILゲート、BL-236）。"
+    )
+    now = time.time()
+    issue_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO issue_log (id, run_id, topic, raised_by, phase_id, task_id, severity, status, "
+        "description, occurrence_count, last_seen_task_id, defer_to_task_id, human_research_prompt, "
+        "human_variable_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'major', 'escalated', "
+        "?, 1, ?, '', ?, ?, ?, ?)",
+        (issue_id, run_id, topic, raised_by_role, phase_id, task_id,
+         description, task_id, human_research_prompt, variable_name, now, now)
+    )
+    print(f"  🙋 [BL-236] escalation_id={escalation_id}の承認判断をHILゲートとして起票しました: "
+          f"topic={topic}, variable_name={variable_name}。人間が--answer-human-inputで回答するまで、"
+          f"revise_goalによる改定適用はブロックされます。")
+
+
+def _get_goal_escalation_hil_decision(conn: sqlite3.Connection, run_id: str, escalation_id: str) -> str:
+    """[BL-236] HILゲートの回答値（'approved'/'rejected'等）を返す。未回答ならNone相当の空文字列。"""
+    row = conn.execute(
+        "SELECT value FROM verified_facts WHERE run_id=? AND variable_name=?",
+        (run_id, _goal_escalation_hil_variable(escalation_id)),
+    ).fetchone()
+    return (row["value"] or "").strip().lower() if row else ""
+
+
 def _escalate_premise_concern_tool_impl(args: dict, conn: sqlite3.Connection, run_id: str,
                                          caller_role: str, task_id: str) -> dict:
     """[BL-086] escalate_premise_concernの実体。expert/user/facilitatorロールのみ許可
     （detectorや他の監査ロールは対象外——このチャネルは「提起」専用でExpert/User/Facilitatorの
     対話に属する懸念のためのもの）。[BL-126 Stage D] facilitatorはツールループ化により、
-    本質対話モードでこの懸念提起を自ら能動的に行えるようになった。"""
+    本質対話モードでこの懸念提起を自ら能動的に行えるようになった。
+    [BL-236] 提起と同時にHIL（人間承認）ゲートを起票する（revise_goalはこのゲートが
+    'approved'で解決されるまで実適用できない）。"""
     if caller_role not in ("expert", "user", "facilitator"):
         return {"success": False, "error": f"{caller_role}はescalate_premise_concernを呼び出せません"}
     required = ["concern_summary", "implicated_constraint", "why_conflicts_with_true_need", "suggested_reframe"]
@@ -2759,13 +2849,27 @@ def _escalate_premise_concern_tool_impl(args: dict, conn: sqlite3.Connection, ru
     if missing:
         print(f"  🚫 [escalate_premise_concern guard] 必須フィールド不足を拒否: caller={caller_role}, missing={missing}")
         return {"success": False, "error": f"必須フィールドが不足: {missing}"}
+    _escalation_phase_id = args.get("phase_id", "")
+    _escalation_task_id = args.get("task_id") or task_id
     escalation_id = db_create_goal_escalation(
-        conn, run_id, args.get("phase_id", ""), args.get("task_id") or task_id, caller_role,
+        conn, run_id, _escalation_phase_id, _escalation_task_id, caller_role,
         args["concern_summary"], args["implicated_constraint"],
         args["why_conflicts_with_true_need"], args["suggested_reframe"],
     )
+    _create_goal_escalation_hil_gate(
+        conn, run_id, escalation_id, _escalation_phase_id, _escalation_task_id,
+        args["concern_summary"], args["implicated_constraint"],
+        args["why_conflicts_with_true_need"], args["suggested_reframe"], caller_role,
+    )
     print(f"  🚨 [BL-086] {caller_role}が前提エスカレーションを提起しました（escalation_id={escalation_id}）: {args['concern_summary']}")
-    return {"success": True, "escalation_id": escalation_id}
+    return {
+        "success": True,
+        "escalation_id": escalation_id,
+        "note": (
+            "[BL-236] このエスカレーションの承認判断は人間のHIL回答が必要です。人間が"
+            "--answer-human-inputで承認するまで、revise_goalは呼んでも拒否されます。"
+        ),
+    }
 
 
 def _resolve_premise_concern_tool_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str) -> dict:
@@ -2812,6 +2916,32 @@ def _revise_goal_tool_impl(args: dict, conn: sqlite3.Connection, run_id: str, ca
         return {"success": False, "error": f"escalation_id '{escalation_id}' が見つかりません"}
     if row["status"] != "Open":
         return {"success": False, "error": f"escalation_id '{escalation_id}' は既にstatus='{row['status']}'として解決済みです"}
+
+    # [BL-236] revise_goalはUser AI（LLM）自身がcaller_role=='user'の1行チェックだけで
+    # 呼べてしまい、escalate_premise_concernを提起したのと同じツールループ内で自己承認できる
+    # 経路が存在した（AIが自分でゴールのハードルを下げる、Userとの議論で明確に却下した経路）。
+    # ここで人間のHIL回答（--answer-human-input）が'approved'であることを機械的に要求する
+    # （§15.3: LLMの自己申告ではなく人間が書いた確定値で判定）。
+    _hil_decision = _get_goal_escalation_hil_decision(conn, run_id, escalation_id)
+    if _hil_decision != _GOAL_ESCALATION_HIL_APPROVED_VALUE:
+        _hil_topic = _goal_escalation_hil_topic(escalation_id)
+        if not _hil_decision:
+            return {
+                "success": False,
+                "error": (
+                    f"[BL-236] escalation_id '{escalation_id}' はまだ人間の承認（HIL）を得ていません。"
+                    f"開発者が --answer-human-input --topic {_hil_topic} --value approved で承認するまで、"
+                    "revise_goalは呼び出せません。人間の判断を待ってください。"
+                ),
+            }
+        return {
+            "success": False,
+            "error": (
+                f"[BL-236] escalation_id '{escalation_id}' は人間により value='{_hil_decision}' "
+                "（approved以外）として回答されました。ゴール改定は適用できません。"
+                "resolve_premise_concernでこのエスカレーションを却下してください。"
+            ),
+        }
 
     new_content, err = _apply_text_edits(_CURRENT_GOAL_TEXT, edits, content_label="現在のゴール文")
     if err:
