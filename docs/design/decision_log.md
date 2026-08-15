@@ -2899,6 +2899,20 @@
 
 ---
 
+### D-207: BL-237 — think呼び出し時の生reasoning差し替え（D-206②）を撤回し、常に無条件で引き継ぐ設計へ戻す
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-15 |
+| 状態 | `decided` |
+| 決定者 | t-momose（情報損失リスクの指摘、「生reasoningの引き継ぎを省略しない」という明確な決定指示）、Claude（実装のロールバック） |
+| **決定理由** | D-206②（thinkを呼んだiterationは生reasoningの代わりに構造化summaryのみを引き継ぐ）は、迷い・撤回の言い回しの伝播を抑える狙いだったが、think必須化（D-206①）と組み合わさると、web検索結果の統合過程・詳細な検討内容・最終出力の下書き・構造化出力の下書きなど、thinkのsummary（1-3文）には到底収まらない実質的な内容までiteration完了ごとに圧縮・破棄されてしまう。これは「モデルの推論内容そのものへの情報破壊的な介入」であり、当初の狙い（文脈を汚す言い回しの抑制）を大きく超える副作用だとユーザーが指摘し妥当と判断した。代替として、情報の中身に一切踏み込まない`MAX_TOKENS_BY_ROLE`の頭打ち（暴走の長さだけを制限する、内容の取捨選択はしない）の方が安全な手段として残る。 |
+| 決定内容 | `_query_AI_live`の生reasoning引き継ぎ（system メッセージ追記）を、think呼び出しの有無に関わらず**常に無条件**で行う設計に戻す（D-206以前の挙動へ復元）。D-206①（think毎iteration必須化・同一応答内でのまとめ呼び出し）とD-206③（機械的強制は伴わない）はそのまま維持する。thinkは「生reasoningに加えて構造化decided/whyのチェックポイントも積む」純粋加算の機構という位置づけに整理し、`THINK_TOOL`のdescriptionと`_BL093_THINK_VALUE_PARAGRAPH`から「thinkの有無で引き継ぎ内容が変わる」という記述を削除。単一iteration内の生成崩壊そのものへの対処は、本決定によりBL-237の直接のスコープからは外れ、`MAX_TOKENS_BY_ROLE`の頭打ち（別BL/別承認、§7）に委ねる。 |
+| 影響 | `cela_main.py`（`THINK_TOOL`のdescription、`_BL093_THINK_VALUE_PARAGRAPH`、`_query_AI_live`の`_think_called_this_iter`関連コードを削除）、`tests/test_bl237_think_mandatory_carryover.py`（swap前提のテストを、無条件引き継ぎを確認するテストへ差し替え）、`tests/test_bl093_d074_auto_reasoning_enforcement.py`（D-206②で変更した1テストの想定挙動を元に戻す）。フルオフラインスイート1372 passed / 1 deselected。 |
+| 関連 BL | BL-237（本件、D-206の一部撤回）、BL-093/BL-108/BL-110/BL-111（reasoning自動引き継ぎ機構）、AGENTS.md §16.1（ユーザー自身の提案でも軽い代替案とのトレードオフを提示してから実装すべきだった——本来は実装前にこの情報損失リスクを提示すべき論点だった） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
