@@ -159,11 +159,11 @@ def test_generate_user_utterance_still_shows_full_phases_json():
 
 
 def test_generate_user_utterance_static_stance_block_precedes_dynamic_agreements_text():
-    """「🔥発注者としての絶対的なスタンス」（自己完結・位置的参照なし）が、
+    """「発注者としてのスタンス」（自己完結・位置的参照なし）が、
     最も変動が激しいagreements_textの埋め込み位置よりソースコード上で前にあることを確認する。
     """
     src = inspect.getsource(cela_main.generate_user_utterance)
-    static_idx = src.index("🔥 【発注者としての絶対的なスタンス（質について）】")
+    static_idx = src.index("【発注者としてのスタンス（質について）】")
     dynamic_idx = src.index("現在までの決定事項・検討状況DB】")
     assert static_idx < dynamic_idx
 
@@ -329,7 +329,7 @@ def test_call_orchestrator_user_input_precedes_agreements_and_history():
 def test_call_resource_arbiter_static_instructions_precede_goal_and_overrun():
     src = inspect.getsource(cela_main.call_resource_arbiter)
     static_idx = src.index("【F-2.6 機械的検算ゲート（必須）】予算超過判定は")
-    goal_idx = src.index("■ 絶対目標: {goal}")
+    goal_idx = src.index("■ 目標: {goal}")
     overrun_idx = src.index("リソース「{overrun['constraint']}」が")
     assert static_idx < goal_idx < overrun_idx
 
@@ -369,7 +369,7 @@ def test_call_integrator_static_instructions_precede_goal_and_merged_text():
     集約されたため、呼び出し式そのものを静的ブロックの位置マーカーとして使う。"""
     src = inspect.getsource(cela_main.call_integrator)
     static_idx = src.index("_verification_throttle_warning()")
-    goal_idx = src.index("■ 絶対目標: {goal}")
+    goal_idx = src.index("■ 目標: {goal}")
     merged_idx = src.index("{merged_text}")
     assert static_idx < goal_idx < merged_idx
 
@@ -381,7 +381,7 @@ def test_call_integrator_static_instructions_precede_goal_and_merged_text():
 def test_call_reviewer_static_instructions_precede_goal_and_deliverable_text():
     src = inspect.getsource(cela_main.call_reviewer)
     static_idx = src.index("【F-2.6 機械的検算ゲート（必須）】成果物中の数値的主張")
-    goal_idx = src.index("■ 達成すべき【絶対目標(Goal)】:")
+    goal_idx = src.index("■ 達成すべき【目標(Goal)】:")
     deliverable_idx = src.index("{deliverable_text}")
     assert static_idx < goal_idx < deliverable_idx
 
@@ -393,7 +393,7 @@ def test_call_reviewer_static_instructions_precede_goal_and_deliverable_text():
 def test_call_task_plan_reviewer_static_criteria_precede_goal_and_phases_json():
     src = inspect.getsource(cela_main.call_task_plan_reviewer)
     static_idx = src.index("1. 曖昧な表記")
-    goal_idx = src.index("■ 絶対目標: {goal}")
+    goal_idx = src.index("■ 目標: {goal}")
     phases_json_idx = src.index("{phases_json}")
     assert static_idx < goal_idx < phases_json_idx
 

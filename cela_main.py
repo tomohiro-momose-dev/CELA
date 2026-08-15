@@ -5234,7 +5234,7 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
     # else: プロンプトをターミナルに出さない（ログファイルのみ）
 
     label_lower = label.lower()
-    temperature = 0.2 if any(kw in label_lower for kw in LOW_TEMP_LABEL_KEYWORDS) else 0.7
+    temperature = 0.5 if any(kw in label_lower for kw in LOW_TEMP_LABEL_KEYWORDS) else 0.5
     use_json_mode = any(kw in label_lower for kw in STRUCTURED_OUTPUT_LABEL_KEYWORDS)
     # [CONSTRAINT] response_format=json_objectとtools(Function Calling)は多くのプロバイダで排他的に
     # 動作するため、tools付与時はjson_modeを無効化する（設計書§3.5.1、R2.3）。
@@ -8357,7 +8357,7 @@ class Phase(TypedDict):
     focus_scope: str                        # このフェーズのスコープ
     expected_time_axis: str                 # このフェーズで主に扱う時間軸
     tasks: list[Task]                       # BL-018/BL-023: 従来は無型のdictキーとしてのみ存在
-    budget_hint: dict[str, float]            # BL-023 Phase C: 仮説であり絶対制約ではないサブ予算枠
+    budget_hint: dict[str, float]            # BL-023 Phase C: 仮説であり制約ではないサブ予算枠
 
 class Agreement(TypedDict):
     id: str
@@ -9767,7 +9767,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         あなたはプロフェッショナルとして、制約（予算・時間・性能・規模など）の壁に直面しても、\n
         安易に「制約の緩和」や「要件の放棄（一部機能の省略など）」を提案しないでください。\n
         制約が厳しい場合こそ、最新の技術動向、代替アプローチ、リソースの再配分、設計の見直しなど、\n
-        抜本的でクリエイティブな「代替案」を絞り出し、絶対目標の枠内に収める努力を最後まで諦めないでください。\n
+        抜本的でクリエイティブな「代替案」を絞り出し、目標の枠内に収める努力を最後まで諦めないでください。\n
         \n
         【制約と条件の切り分け（重要）】\n
         ゴール文には、動かせない「真の制約」（例：総予算の上限、法規制、安全基準）と、\n
@@ -9948,7 +9948,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     # 実は他タスクの制約と衝突する可能性を残したまま無条件に確定値として扱われ、
     # 後から発覚しても誰も再検討しない（Expertはスコープガードレールで他タスクに
     # 踏み込めず、write_agreementのSUPERSEDEも自発的には使われない）問題への対応。
-    # ゴールで与えられた絶対制約と、タスク内で導出した暫定値を区別させ、
+    # ゴールで与えられた制約と、タスク内で導出した暫定値を区別させ、
     # write_agreementのconfirmed_variables.confidenceで機械可読に記録させる。
     system_prompt += (f"""
     \n🔀 【確定値と暫定値の区別（重要）】\n
@@ -10189,7 +10189,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         f"【未充足の要求項目】\n{remaining_criteria_text}\n\n"
         + (f"🎯 【このタスクで特に注意すべき観点（Orchestratorより）】\n{expert_focus_guidance}\n\n" if expert_focus_guidance else "")
         + "他タスクのowns_variablesに該当する内容は新たに算出・提案しないでください。\n"
-        "[BL-041] ゴールで直接与えられた絶対制約以外で、このタスク内で導出した数値は、"
+        "[BL-041] ゴールで直接与えられた制約以外で、このタスク内で導出した数値は、"
         "write_agreementのconfirmed_variablesでconfidence=\"provisional\"として記録してください"
         "（他タスクの制約とまだ突き合わせが済んでいないため）。\n"
         "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
@@ -10419,21 +10419,21 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
     # 監査対象にする。プロバイダがreasoningを返さない場合は「(思考ログ取得不可)」を表示する。
     _reasoning_source = state.get("expert_last_reasoning" if target_role == "expert" else "user_last_reasoning", "")
     thought_process_audit = f"""
-【思考プロセス監査（★R5追加）】
-以下はExpert/User AIの内部思考過程（internal_thought_process）です。
-最終出力の内容だけでなく、この思考過程も確認してください。
-- 「計算ツールを使っていないのに適当な数字を出している」
-- 「都合の悪い制約から意図的に目を逸らして結論を急いでいる」
-このようなAIの事後正当化（取り繕い）が見られる場合、重度のハルシネーションと
-判定して強制差し戻し（major）としてください。
+        【思考プロセス監査（★R5追加）】
+        以下はExpert/User AIの内部思考過程（internal_thought_process）です。
+        最終出力の内容だけでなく、この思考過程も確認してください。
+        - 「計算ツールを使っていないのに適当な数字を出している」
+        - 「都合の悪い制約から意図的に目を逸らして結論を急いでいる」
+        このようなAIの事後正当化（取り繕い）が見られる場合、重度のハルシネーションと
+        判定して強制差し戻し（major）としてください。
 
-【重要な限界】ただし、思考ログ内で正しく検算していたとしても、それを読むあなた自身も
-LLMである以上、暗算による検証には誤りのリスクが伴います。数値的主張の妥当性は、
-本監査だけに依拠せず、必ず上記のBL-033機械的検算記録と突き合わせて判断してください。
+        【重要な限界】ただし、思考ログ内で正しく検算していたとしても、それを読むあなた自身も
+        LLMである以上、暗算による検証には誤りのリスクが伴います。数値的主張の妥当性は、
+        本監査だけに依拠せず、必ず上記のBL-033機械的検算記録と突き合わせて判断してください。
 
-【Expert/User AIの思考過程】
-{_reasoning_source or "(思考ログ取得不可)"}
-"""
+        【Expert/User AIの思考過程】
+        {_reasoning_source or "(思考ログ取得不可)"}
+        """
 
 # [BL-049/BL-054] 検算（数値監査）とは別視点のドメイン妥当性レビュー用instruction。
     # F-2.6検算ゲート導入以降、role_specific_instructionが「検算結果」を主なmajorトリガーに
@@ -10496,7 +10496,7 @@ LLMである以上、暗算による検証には誤りのリスクが伴いま�
             今回の発言は発注者からの『指示・指摘』または『提案へのレビュー・承認』です。\n
             以下の基準で厳格に監査してください：\n
             1. 【指示・指摘の場合】: User自身が成果物を作る立場ではないため、成果物の欠落や詳細な計算結果の未提示を理由にmajorにしてはいけません。\n
-                ただし、指示内容自体に論理破綻がある場合や、絶対目標の放棄（安易な制約緩和の要求など）がある場合は major としてください。\n\n
+                ただし、指示内容自体に論理破綻がある場合や、目標の放棄（安易な制約緩和の要求など）がある場合は major としてください。\n\n
             2. 【レビュー・承認の場合（最重要）】: UserがAgentの直前の提案に対して「妥当である」「承認する」「次のタスクへ進む」と合意の意思を示している場合、\n
                 **その承認しようとしている提案内容に制約違反や論理破綻がないか**を必ず確認してください。\n
                 Agentの提案に重大な不備（予算超過、要求事項の欠落、根拠のない計算など）があるにも関わらず、Userがそれを見落として安易に承認・合意している場合は、\n
@@ -11369,12 +11369,12 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goa
     {_scratch_concerns_closure_instruction("rationale")}
 
     【ゴール変容の検知（★R5 GoalShiftEvent）】
-    提示する再配分案が、当初の絶対制約（このリソースのtotal_cap自体）を
+    提示する再配分案が、当初の制約（このリソースのtotal_cap自体）を
     変更する必要があると判断した場合、requires_goal_constraint_change: true を
     含めて返答してください。単なるフェーズ間の配分見直し（total_capは維持）で
     あれば false としてください。
 
-    ■ 絶対目標: {goal}
+    ■ 目標: {goal}
     {goal_essence_text}
 
     リソース「{overrun['constraint']}」が、上限{overrun['cap']}に対し合計{overrun['claimed']}と、
@@ -11822,7 +11822,7 @@ def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "", st
     {_TRACE_LINEAGE_USAGE_PARAGRAPH}
     {_scratch_concerns_closure_instruction("details")}
 
-    ■ 絶対目標: {goal}
+    ■ 目標: {goal}
     {goal_essence_text}
 
     ■ 統合要件定義書:
@@ -11859,7 +11859,7 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
     prompt = f"""
     あなたは冷徹で優秀な「品質保証(QA)責任者」です。
     【🚨 最優先・最重要チェック：成果物の網羅性 🚨】
-    まず最初に、【絶対目標(Goal)】の文章を一字一句読み直し、
+    まず最初に、【目標(Goal)】の文章を一字一句読み直し、
     ユーザーが要求した「成果物・ドキュメントの種類」を全てリストアップしてください。
     （例：「仕様書」「テストケース」「マニュアル」「設計図」など、Goal文中に明記された名詞）
 
@@ -11875,15 +11875,27 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
         【🚨 厳格な審査の指示 🚨】
     挨拶や感謝の言葉だけで「承認」してはいけません。必ず「★最終成果物」の本文を精査対象としてください。
     AI同士の議論（決定事項DB）の中で、「制約条件の緩和要請（妥協）」や「一部要件の放棄」が
-    勝手に合意されている場合があります。しかし、あなたは【絶対目標(Goal)】を死守する最後の砦です。
+    勝手に合意されている場合があります。しかし、あなたは【目標(Goal)】を死守する最後の砦です。
 
-    1. 成果物が【絶対目標(Goal)】で明示された数値・制約条件（予算、時間、数量、性能指標等、
+    1. 成果物が【目標(Goal)】で明示された数値・制約条件（予算、時間、数量、性能指標等、
        種類を問わず）を1単位でも超過・逸脱している場合。
-    2. 成果物が【絶対目標(Goal)】で要求された機能・成果物・項目を放棄している場合。
+    2. 成果物が【目標(Goal)】で要求された機能・成果物・項目を放棄している場合。
 
     これらに該当する場合は、決定事項DBでAI同士が合意していようとも、絶対に passed: true にしてはいけません。
     容赦なく差し戻し（passed: false）とし、AIに対して「安易な妥協案（制約緩和や要件放棄）はQAとして
-    承認できない。技術的・運用的な工夫で絶対目標内に収める抜本的な代替案を再考せよ」と厳しく突き返してください。
+    承認できない。技術的・運用的な工夫で目標内に収める抜本的な代替案を再考せよ」と厳しく突き返してください。
+
+    【制約と条件の切り分け／エスカレーション経路の確認（重要）】上記1.を判定する前に、逸脱していると
+    見える制約が「動かせない真の制約」（総予算の上限、法規制、安全基準等）なのか、それとも「議論の
+    前提として例示的に与えられているだけの見直し可能な条件」（特定の調達方法を前提にした単価、
+    特定の運用パターンの例示的な数値等）なのかを見極めてください。ゴール文にはこの2種類が区別なく
+    並記されていることがあります。後者への言及だけを理由に安易にpassed: falseとしないでください。
+    また、この制約についてescalate_premise_concern/revise_goal（人間の承認を要する前提見直し
+    手続き）が既に使われていないか、trace_lineage(ref="issue:<topic>")や決定事項DBで確認して
+    ください。承認済みであれば、上記【目標(Goal)】のテキスト自体が既に改定後の内容です（改定前の
+    文言との整合性を独自に要求しないでください）。未解決のまま審議中の場合は、それを理由に無条件で
+    passed: falseとするのではなく、feedbackに「この制約はUser側でエスカレーション審議中」と明記し、
+    審議結果を待つべき点として指摘してください。
 
     【🚨 追加の必須チェック（機械的に確認すること）🚨】
     以下のような表現がDB/成果物内に残っている場合、それは「未検証」を意味するため、
@@ -11893,14 +11905,14 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
     - 「計画を立案した」「設計方針を定めた」など、計画・方針の作成自体をもって
       要件達成と扱っている記述
 
-    絶対目標に含まれる定量的・絶対的な要件（「◯◯以内」「いかなる場合でも」「必ず」「死守」等）は、
+    目標に含まれる定量的要件（「◯◯以内」「いかなる場合でも」「必ず」等）は、
     具体的な検証結果の数値・根拠が成果物中に明記されていない限り、未達成として扱ってください。
 
     【🚨 数値目標の再検証チェック 🚨】
     成果物中に「対策により目標達成率を向上させる」という記述がある場合、その対策を織り込んだ後の
     更新後の数値が明記されていなければ、「対策の効果が未検証」とみなし、passed: false としてください。
 
-    特に、絶対目標が「いかなる場合でも」「必ず」「死守」等の例外を許さない表現である場合、
+    特に、目標が「いかなる場合でも」「必ず」「死守」等の例外を許さない表現である場合、
     確率的な達成率（例: 92%、95%等）の提示だけでは要件を満たしたとみなさず、残存リスクへの
     対応策が「すべてのケースをカバーする」設計になっているかを厳密に確認してください。
 
@@ -11922,10 +11934,11 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
     突き合わせて確認できます。[BL-205] read_entityは名前を持つ事物専用です。対象を持たない
     単独の値（予算上限等）はread_verified_factを使ってください。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
-    write_agreement・read_entity・thinkです。{_THINK_TRAILER_SENTENCE}
+    write_agreement・read_entity・trace_lineage・thinkです。{_THINK_TRAILER_SENTENCE}
+    {_TRACE_LINEAGE_USAGE_PARAGRAPH}
     {_scratch_concerns_closure_instruction("feedback")}
 
-    ■ 達成すべき【絶対目標(Goal)】:
+    ■ 達成すべき【目標(Goal)】:
     {goal}
     {goal_essence_text}
 
@@ -12044,7 +12057,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"成果物を、これから4段階に分けてレビューします。今回はこの第1段（ドメイン妥当性レビュー）"
             f"のみを担当してください。承認判断・issueの記録・次の指示は後続の別ステージで行うため、"
             f"ここでは行わないでください。\n\n"
-            f"【絶対目標】{user_goal}\n"
+            f"【目標】{user_goal}\n"
             f"{goal_essence_text}\n"
             f"【検算とドメインレビューの役割分担】数値の機械的検算（合計・比率・閾値比較等）は既に"
             f"Detector（監査システム）がpython_replで独立して実行済みです。あなたが同じ検算を"
@@ -12156,18 +12169,17 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"行わないでください（後続の第4段で行います）。\n\n"
             f"【第1段（レビュー）の結果】{review_comment}\n"
             f"【第2段（issue確認）の結果】issues_handled等の対応済み、残存懸念: {remaining_concerns or '(なし)'}\n\n"
-            f"🔥 【発注者としての絶対的なスタンス】あなたは妥協を許さないプロジェクトオーナーです。"
-            f"相手が「制約が厳しい」「要件を満たせない」と泣き言を言ってきても、絶対に【絶対目標】の"
-            f"ハードルを下げないでください。ただし、緩和を求めているのが「動かせない真の制約」なのか"
-            f"「議論の前提として例示的に与えられているだけの見直し可能な条件」なのかは見極めてください。\n\n"
-            f"[BL-197: 承認基準はacceptance_criteriaを超えない] 上記の妥協なきスタンスは、絶対目標の"
+            f"【発注者としてのスタンス】相手が「制約が厳しい」と主張してきた場合、それが「動かせない"
+            f"真の制約」なのか「議論の前提として例示的に与えられているだけの見直し可能な条件」なのかを"
+            f"見極めてください。前者であれば、安易な緩和要求として却下してください。\n\n"
+            f"[BL-197: 承認基準はacceptance_criteriaを超えない] 上記の妥協なきスタンスは、目標の"
             f"ハードな数値制約（予算・SLA等）を安易に緩めないという意味であり、そのタスク自身の"
             f"【現在のタスクで未充足の要求項目】（acceptance_criteria）を超える独自の検証水準や、"
             f"特定のデータ取得手段・ソフトウェア・ファイル形式を新たに義務付けてよいという意味では"
             f"ありません。未充足の要求項目が既に満たされていれば承認してください。第2段でAgent AIが"
             f"正当にDEFERした懸念（別タスクの責務として先送りされたもの）を、このタスクの未解決懸念"
             f"として承認却下の理由にしないでください。\n\n"
-            f"【絶対目標】{user_goal}\n"
+            f"【目標】{user_goal}\n"
             f"{goal_essence_text}\n"
             f"【現在のタスクで未充足の要求項目】\n{remaining_criteria_text}\n"
             f"[R4] {_scope_ctx['whiteboard_text']}\n\n"
@@ -12264,7 +12276,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
                 f"第4段（最終段）です。第3段で成果物の承認（{approval_status}）が確定しました。"
                 f"あなたの役割は、Task Plannerが作成した計画に従い、Agent AIへ**1度に1つずつ**"
                 f"次のタスクを指示することです（一気に複数指示すると相手が混乱するため厳禁）。\n\n"
-                f"【絶対目標】{user_goal}\n"
+                f"【目標】{user_goal}\n"
                 f"{goal_essence_text}\n"
                 f"📊 [プロジェクト進行計画]\n{json.dumps(state.get('phases', []), ensure_ascii=False, indent=2)}\n\n"
                 f"{_task_focus_state_text}"
@@ -12305,7 +12317,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
                 f"あなたは目標達成のプロジェクトオーナー（発注者）です。これは4段階レビューの"
                 f"第4段（最終段）です。第3段の判断（{approval_status}）により、今回は承認せず、"
                 f"Agent AIへ現タスクの修正指示を出します。\n\n"
-                f"【絶対目標】{user_goal}\n"
+                f"【目標】{user_goal}\n"
                 f"{goal_essence_text}\n"
                 f"【却下・保留の理由（第3段）】{approval_reason}\n"
                 f"【第1段（レビュー）の結果】{review_comment}\n"
@@ -12380,7 +12392,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         system_prompt = (f"""
             あなたは目標を達成するための優秀な【プロジェクトオーナー（発注者）】です。\n
             相手のAIはあなたのアシスタントであり、作業を行う実務担当者です。\n
-            あなたの【絶対目標】は以下の通りです:\n
+            あなたの【目標】は以下の通りです:\n
             👉 {user_goal}\n\
             \n
             {_get_goal_essence_text(_conn, state["run_id"])}\n
@@ -12403,19 +12415,16 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         system_prompt = f"あなたは目標を達成するためにエージェントAIをリードする[発注者]です。\n"
 
     system_prompt += (f"""
-        \n🔥 【発注者としての絶対的なスタンス（質について）】\n
-         あなたは妥協を許さないプロジェクトオーナーです。相手（Agent AI）が「制約が厳しい」
-        「要件を満たせない」と泣き言を言ってきても、絶対に【絶対目標】のハードルを下げないでください。\n
-        「制約緩和の検討」や「重要要件の放棄」を提案された場合は、それを却下し、
-        『プロとして制約内に収めるための別の技術的アプローチや代替案を考え直せ』と厳しく突き返してください。\n
-        \n
-        【制約と条件の切り分け（重要）】\n
-        ただし、却下する前に、相手が緩和を求めているのが「動かせない真の制約」（総予算の上限、\n
-        法規制、安全基準等）なのか、それとも「議論の前提として例示的に与えられているだけの\n
-        見直し可能な条件」（特定の調達方法を前提にした単価、特定の運用パターンの例示的な数値等）\n
-        なのかを、あなた自身も都度見極めてください。ゴール文にはこの2種類が区別なく並記されている\n
-        ことがあります。後者だと判断できる場合は、思考停止で却下するのではなく、その前提自体を\n
-        見直す代替案（調達方法の変更、仕様の見直し等）を相手に検討させる指示に切り替えてください。\n
+        \n【発注者としてのスタンス（質について）】\n
+        相手（Agent AI）が「制約が厳しい」「要件を満たせない」と主張してきた場合、それが\n
+        「動かせない真の制約」（総予算の上限、法規制、安全基準等）なのか、それとも「議論の\n
+        前提として例示的に与えられているだけの見直し可能な条件」（特定の調達方法を前提にした\n
+        単価、特定の運用パターンの例示的な数値等）なのかを、都度見極めてください。ゴール文には\n
+        この2種類が区別なく並記されていることがあります。\n
+        前者（真の制約）であれば、安易な緩和要求として却下し、『プロとして制約内に収めるための\n
+        別の技術的アプローチや代替案を考え直せ』と指示してください。後者（見直し可能な前提）だと\n
+        判断できる場合は、思考停止で却下するのではなく、その前提自体を見直す代替案（調達方法の\n
+        変更、仕様の見直し等）を相手に検討させる指示に切り替えてください。\n
          <あなたの発話や指示の根拠や参考にした情報、思考過程を示してください。>\n
         \n
         【重要：ゴール自体の文言と真の目的が矛盾していると発注者自身が気づいた場合の3ツール】\n
@@ -12436,7 +12445,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
 
     system_prompt += (
         "\n【🔥 ゴール自体が実現不可能なサインを見逃すな（escalate_premise_concernの発火条件）】\n"
-        "あなたは「絶対にハードルを下げない」と命じられていますが、それは「Agent AIの能力不十分を\n"
+        "あなたは「ハードルを下げない」と命じられていますが、それは「Agent AIの能力不十分を\n"
         "言い訳にさせない」ためであって、「ゴール文の制約・前提自体が真の目的と矛盾していることを\n"
         "見逃せ」という意味ではありません。以下のサインが見えたら、突き返す前に一度立ち止まり、\n"
         "escalate_premise_concernでゴール文の当該箇所を疑ってください：\n"
@@ -12855,7 +12864,7 @@ def arbiter_node(state: LineageState) -> LineageState:
     )
     db_append_decision(decision, get_active_conn(), state["run_id"])
 
-    # [R5 GoalShiftEvent] 再配分案が絶対制約自体の変更を要求している場合、ゴール変容として記録する。
+    # [R5 GoalShiftEvent] 再配分案が制約自体の変更を要求している場合、ゴール変容として記録する。
     shift = detect_goal_shift(state, result)
     if shift is not None:
         print(f"  🔀 [Arbiter] GoalShiftEventを記録しました: {shift.get('shift_kind', '?')}")
@@ -12986,10 +12995,10 @@ def call_goal_essence_analyst(goal: str, state: dict | None = None) -> dict:
     """
     prompt = f"""
     あなたは、プロジェクト開始前に発注者と行う「壁打ち」を担当する、経験豊富なコンサルタントです。
-    以下の絶対目標を鵜呑みにしてそのままタスク分解する前に、2つの観点で一度立ち止まって
+    以下の目標を鵜呑みにしてそのままタスク分解する前に、2つの観点で一度立ち止まって
     検討してください。
 
-    ■ 絶対目標: {goal}
+    ■ 目標: {goal}
 
     【観点1: 大まかな実現可能性の壁打ち】
     ゴール文に明示されている数値制約（予算、台数、人数、時間等）から、大まかな見積もりで
@@ -13080,9 +13089,9 @@ def seed_entities_from_goal(goal: str, run_id: str, state: dict | None = None) -
         return {"registered": [], "rejected": [], "skipped": True}
 
     prompt = f"""
-    以下の絶対目標の本文に登場する「事物」（固有の名前を持つ実世界の対象）を洗い出してください。
+    以下の目標の本文に登場する「事物」（固有の名前を持つ実世界の対象）を洗い出してください。
 
-    ■ 絶対目標:
+    ■ 目標:
     {goal}
 
     【抽出の指針】
@@ -13304,7 +13313,7 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     # 「上記の通り」は同じ静的グループ内の曖昧さ混同注意ブロックを指しており、両ブロックの
     # 相対順序を維持しているため引き続き成立する。
     prompt = f"""
-    以下は、絶対目標を分解して生成された「フェーズ・タスク計画」です。実行を開始する前に、
+    以下は、目標を分解して生成された「フェーズ・タスク計画」です。実行を開始する前に、
     この計画自体の質をレビューしてください（個々のタスクの中身の是非ではなく、計画の構造
     そのものが後工程で無駄な手戻りを生まないかを見てください）。
 
@@ -13313,16 +13322,16 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     生じることが多いため、数値の細かい不整合ばかりを追いかけて2・3・4を見落とさないこと）:
     1. 曖昧な表記: 各タスクのacceptance_criteria/descriptionに、AIが読み違えるような曖昧な
        数量・比率・位置の表記がないか（例: 比率と絶対値が並記され、どちらが基準か不明瞭等）。
-    2. タスクの過不足: 絶対目標の達成に対して、明らかに欠けているタスク、または不要に
+    2. タスクの過不足: 目標の達成に対して、明らかに欠けているタスク、または不要に
        重複・過剰なタスクがないか。
     3. 順序の妥当性: depends_onで示される依存関係が、フェーズ・タスクの記載順序と矛盾して
        いないか（前提となるタスクが後のフェーズに配置されている等）。
     4. 条件の明示: 比率や制約から計算・仮定した派生値（本文に直接の記載がない数値）が、
-       前提条件（例: 新品購入かリース等の代替を除くか等）を伴わずに絶対制約として断定されて
+       前提条件（例: 新品購入かリース等の代替を除くか等）を伴わずに制約として断定されて
        いないか。「◯◯が上限」のような断定は、その根拠となる条件と一緒に書かれているべきです。
 
     【重要: 曖昧さの指摘とゴール文にない数値の捏造要求を混同しない】
-    ゴール文（絶対目標）自体が与えていない絶対値（例: 総量そのもの）を、taskに無理やり
+    ゴール文（目標）自体が与えていない絶対値（例: 総量そのもの）を、taskに無理やり
     確定させるよう差し戻してはいけません。以前のレビューで「〈部分X〉2単位≒全体の13.33%」と
     いう、task_planner自身が注記付きで示した推定値（原文の「約12%」との端数差はごくわずか）を
     「矛盾」としてmajor判定した結果、再生成されたtask_plannerが「〈部分X〉＝全体の15%」という
@@ -13405,7 +13414,7 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     read_entity・thinkです。{_THINK_TRAILER_SENTENCE}
     {_scratch_concerns_closure_instruction("observations")}
 
-    ■ 絶対目標: {goal}
+    ■ 目標: {goal}
     {goal_essence_text}
     ■ 生成された計画:
     {phases_json}
