@@ -1,24 +1,22 @@
 """
-BL-237: thinkが呼ばれたiterationでは、生reasoning全文の次iterationへの引き継ぎ
-（BL-093ダイジェスト）を省略し、既にtool結果として渡っているthinkの構造化summary
-（累積reasoning_log_so_far）だけに絞る回帰テスト。
+BL-237: thinkを毎iteration必須（プロンプトレベル、機械的強制なし）にする回帰テスト。
 
 背景: log/2026-08-15/1735・1954で、Task Plan Reviewerのreasoningチャンネルが
-単一iteration内で同じ結論を延々と再導出し続ける「生成崩壊」が発生した。原因調査の結果、
-_query_AI_liveが「そのiterationの生reasoning全文（迷い・撤回を含む）」を無条件に次
-iterationのcontextへ引き継いでいたことが判明（BL-093/BL-108/BL-111）。thinkを呼んだ
-iterationは、その理由づけが既に構造化されたtool結果として渡っているため、生reasoningの
-二重引き継ぎを省き、迷いの言い回しが次iterationへそのまま伝播することを防ぐ。
+単一iteration内で同じ結論を延々と再導出し続ける「生成崩壊」が発生した。当初、
+thinkを呼んだiterationは生reasoningの引き継ぎを省略し、thinkの構造化summaryだけに
+絞る案を実装したが、web検索結果の統合過程・詳細な検討・最終出力やJSON構造の下書きなど、
+summaryの1-3文には収まらない実質的な内容までthink必須化と組み合わさって失われる副作用が
+あるとユーザーが指摘したため撤回した。最終的な設計は、生reasoningの引き継ぎは常に無条件の
+まま維持し（情報を一切壊さない）、thinkは純粋加算（毎iteration必須の構造化decided/whyの
+チェックポイント）に留める。単一iteration内の生成崩壊そのものへの対処は、情報の中身に
+踏み込まないmax_tokens上限（別途）に委ねる。
 
 実LLMは呼ばず、tests/test_bl231_loop_guard.pyと同型のストリーミング互換モック
 OpenAIクライアントで_query_AI_liveを駆動する（§17.1: リバートで失敗することを確認済み）。
 """
 
-import inspect
 import json
 from types import SimpleNamespace
-
-import pytest
 
 import cela_main
 
@@ -63,9 +61,7 @@ class _FakeStream:
 
 
 class _FakeCompletions:
-    """[BL-237] kwargsのmessages（=loop_messages）を呼び出しごとに記録する。
-    これにより「iter Nで何を引き継いだか」を次のcreate()呼び出し引数から検証できる。
-    """
+    """[BL-237] kwargsのmessages（=loop_messages）を呼び出しごとに記録する。"""
     def __init__(self, factory):
         self._factory = factory
         self.calls = []
@@ -82,7 +78,7 @@ class _FakeClient:
         self.chat = SimpleNamespace(completions=_FakeCompletions(factory))
 
 
-REASONING_TEXT = "But actually, hmm, let me reconsider this from the start..."
+REASONING_TEXT = "iterationの生reasoning本文（web検索結果の統合過程や下書きを含みうる）"
 
 
 def _run(factory):
@@ -100,9 +96,9 @@ def _run(factory):
     return result, client.chat.completions.calls
 
 
-def test_think_called_iteration_skips_raw_reasoning_carryover():
-    """iter=1でthinkを呼んだ場合、iter=2へ渡るmessagesに『iter 1 の思考ログ（自動保存）』
-    という生reasoningダイジェストが含まれないこと（thinkのtool結果のみが引き継がれる）。"""
+def test_raw_reasoning_carries_forward_even_when_think_was_called():
+    """[BL-237] iter=1でthinkを呼んでも、生reasoningの引き継ぎは省略されないこと
+    （web検索結果の統合過程や下書きなど、thinkのsummaryに収まらない内容を壊さないため）。"""
     def factory(n):
         if n == 1:
             return _chunks(REASONING_TEXT, None, [("think", {"action": "reviewing", "summary": "ok"})])
@@ -111,26 +107,42 @@ def test_think_called_iteration_skips_raw_reasoning_carryover():
     result, calls = _run(factory)
 
     assert result == "final answer"
-    assert len(calls) == 2
     messages_for_iter2 = calls[1]
     digest_messages = [
         m for m in messages_for_iter2
-        if m.get("role") == "system" and "の思考ログ（自動保存）" in m.get("content", "")
+        if m.get("role") == "system" and "iter 1 の思考ログ（自動保存）" in m.get("content", "")
     ]
-    assert digest_messages == [], (
-        "thinkを呼んだiterationの生reasoningダイジェストが引き継がれてしまっている"
+    assert len(digest_messages) == 1, (
+        "thinkを呼んでも生reasoningの引き継ぎが維持されていること（BL-237の情報損失回避方針）"
     )
-    # thinkのtool結果（構造化summary）自体は引き継がれていること
+    assert REASONING_TEXT in digest_messages[0]["content"]
+
+
+def test_think_summary_is_additionally_carried_alongside_raw_reasoning():
+    """thinkを呼んだ場合、生reasoningに加えてthinkの構造化summary（tool結果）も
+    引き継がれること（置き換えではなく加算）。"""
+    def factory(n):
+        if n == 1:
+            return _chunks(REASONING_TEXT, None, [("think", {"action": "reviewing", "summary": "ok"})])
+        return _chunks(None, "final answer", [])
+
+    result, calls = _run(factory)
+
+    messages_for_iter2 = calls[1]
     think_tool_results = [
         m for m in messages_for_iter2
         if m.get("role") == "tool" and "reasoning_log_so_far" in m.get("content", "")
     ]
     assert len(think_tool_results) == 1
+    digest_messages = [
+        m for m in messages_for_iter2
+        if m.get("role") == "system" and "の思考ログ（自動保存）" in m.get("content", "")
+    ]
+    assert len(digest_messages) == 1
 
 
-def test_think_not_called_iteration_keeps_raw_reasoning_carryover_fallback():
-    """iter=1でthinkを呼ばなかった場合、従来通り生reasoningダイジェストがiter=2へ引き継がれること
-    （フォールバック、情報欠落を防ぐ）。"""
+def test_raw_reasoning_still_carries_forward_when_think_not_called():
+    """thinkを呼ばなかった場合も、従来通り生reasoningダイジェストが引き継がれること（回帰確認）。"""
     def factory(n):
         if n == 1:
             return _chunks(REASONING_TEXT, None, [("dummy_other_tool", {})])
@@ -148,15 +160,15 @@ def test_think_not_called_iteration_keeps_raw_reasoning_carryover_fallback():
     assert REASONING_TEXT in digest_messages[0]["content"]
 
 
-def test_bl237_guard_code_present_in_source():
-    """§17.1 後段: 実装を削除してもテストが落ちることを保証する存在証明。"""
-    src = inspect.getsource(cela_main._query_AI_live)
-    assert "_think_called_this_iter" in src
-    assert "and not _think_called_this_iter" in src
-
-
 def test_think_tool_description_states_mandatory_every_iteration():
     """THINK_TOOLのスキーマ説明文自体が「毎iteration必須」を明示していること
     （プロンプト側だけでなく、モデルに渡る関数定義そのものと矛盾しないため）。"""
     description = cela_main.THINK_TOOL["function"]["description"]
     assert "EVERY iteration" in description
+
+
+def test_think_tool_description_does_not_claim_raw_reasoning_is_dropped():
+    """[BL-237] thinkを呼ぶと生reasoningが失われる、という誤った説明が残っていないこと
+    （情報損失を避けるためswap案を撤回した経緯と矛盾しないための存在証明）。"""
+    description = cela_main.THINK_TOOL["function"]["description"]
+    assert "does NOT replace or drop" in description

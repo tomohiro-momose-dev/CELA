@@ -1602,14 +1602,14 @@ THINK_TOOL = {
             "this step -- if you are calling other tools too, call `think` together with them in "
             "the same response (do not spend a separate iteration/request on `think` alone). "
             "Record your reasoning, decisions, and a running todo/issue list here. "
-            "[BL-113/BL-237] Your raw reasoning is automatically captured every iteration, but what "
-            "carries forward into the next iteration's context now depends on whether you called "
-            "`think`: if you did, only this structured summary (action/decided/why/rejected, "
-            "cumulative) carries forward; if you did not, your raw unstructured reasoning text "
-            "carries forward instead, verbatim. Raw reasoning left uncondensed by `think` has been "
-            "observed to drag subsequent iterations into repeating the same hedging/back-and-forth "
-            "wording rather than reaching a conclusion -- calling `think` every iteration is the "
-            "mitigation. On your first call, it's useful to list your initial todo breakdown. "
+            "[BL-113] Your raw reasoning is automatically captured every iteration regardless of "
+            "whether you call this tool (native reasoning capture, accumulated append-only per "
+            "BL-108/BL-111) -- calling `think` does NOT replace or drop that raw reasoning; both are "
+            "kept. Its value is structured articulation on top of the raw text: explicitly stating "
+            "what you decided, why, and what alternative you rejected and why, plus maintaining a "
+            "running todo/issue list across iterations -- useful for downstream consumers and for "
+            "giving yourself a periodic checkpoint to actually reach a conclusion rather than "
+            "drifting. On your first call, it's useful to list your initial todo breakdown. "
             "You do not need to track the iteration number yourself; it is stamped automatically."
         ),
         "parameters": {
@@ -5576,14 +5576,8 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                     # 解消された一方、差し戻し自体は実コスト（往復回数・トークン消費）としてこのセッション中
                     # 何度も観測されたため、ユーザー指示によりthinkツール自体は残しつつ強制（差し戻し）のみ
                     # 撤廃し、任意呼び出しに戻す。
-                    # [BL-237] このiterationでthinkが呼ばれたかを機械的に記録する。呼ばれていれば
-                    # 下のreasoningダイジェスト（生reasoning全文の引き継ぎ）を省略し、既にtool結果
-                    # として渡っているthinkの構造化summary（累積reasoning_log_so_far）だけに絞る。
-                    _think_called_this_iter = False
                     for tc in msg.tool_calls:
                         tool_calls_used += 1
-                        if tc.function.name == "think":
-                            _think_called_this_iter = True
                         handler = TOOL_DISPATCH.get(tc.function.name)
                         if handler is None:
                             result = f"[REPL Error] unknown tool: {tc.function.name}"
@@ -5675,16 +5669,16 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                     # 満たせていなかった）。対策として、全iterを1メッセージに再結合するのをやめ、
                     # 「そのiterationの生reasoningだけ」を独立した新規メッセージとして末尾に追記し、
                     # 以後は一切触れない（既存メッセージの削除・移動をしない）方式に変更する。
-                    # [BL-237] ただし、上でthinkが呼ばれていた場合はこの生reasoning全文の引き継ぎを
-                    # 省略する。thinkのtool結果（reasoning_log_so_far、上のloop_messages.appendで
-                    # 既に追加済み）が構造化された累積summaryとして同じ役割を果たす上、生reasoning
-                    # （迷い・撤回を含む自然文）まで二重に積むと、次iterationの文脈がその「迷いの
-                    # 言い回し」に引きずられて同じ堂々巡りを再生産するリスクがある（log/2026-08-15/
-                    # 1735・1954で観測: 生reasoningがそのまま次iterへ丸ごと引き継がれ、その延長で
-                    # 後続iterationが同じ結論を延々と再導出し続けた）。thinkを呼ばなかったiterationは
-                    # 従来通り生reasoningを引き継ぎ、情報の欠落を防ぐ（フォールバック）。
+                    # [BL-237] 当初はthinkを呼んだiterationでこの生reasoning引き継ぎを省略し、
+                    # thinkの構造化summaryだけに絞る案を検討したが、web検索結果の統合過程・詳細な
+                    # 検討・最終出力やJSON構造の下書きなど、summaryの1-3文には収まらない実質的な
+                    # 内容までthink必須化と組み合わさって失われる副作用がある（ユーザー指摘）ため、
+                    # 撤回した。生reasoningの引き継ぎは常に無条件のまま維持し、thinkは純粋加算
+                    # （毎iteration必須の構造化decided/whyチェックポイント）に留める。単一iteration
+                    # 内の生成崩壊（log/2026-08-15/1735・1954）への対処は、情報の中身に踏み込まない
+                    # max_tokens上限（別途§7承認のうえ実装）に一本化する。
                     _this_iter_reasoning = "".join(reasoning_parts_all[_reasoning_start_idx:])
-                    if _this_iter_reasoning and not _think_called_this_iter:
+                    if _this_iter_reasoning:
                         loop_messages.append({
                             "role": "system",
                             "content": f"【BL-093: iter {iteration} の思考ログ（自動保存）】\n{_this_iter_reasoning}",
@@ -9215,12 +9209,11 @@ _BL093_THINK_VALUE_PARAGRAPH = (
     "[BL-237] thinkは毎iteration必ず呼んでください（他のツールを呼ぶかどうかに関わらず）。\n"
     "他に呼ぶツールがある場合は、そのためだけに別iterationを消費せず、同一の応答内でまとめて\n"
     "呼んでください。まずtodoに確認すべき論点をリストアップしてください。\n"
-    "thinkを呼んだiterationは、その理由づけ（action/decided/why、却下案があればrejected/\n"
-    "rejected_why）が構造化された累積summaryとして次回以降のtool結果に引き継がれます。\n"
-    "thinkを呼ばなかったiterationは、代わりに自然に考えた理由づけの生文章がそのまま次の\n"
-    "iterationへ引き継がれます——迷い・撤回を含む生の言い回しがそのまま残るため、次の\n"
-    "iterationがその言い回しに引きずられて同じ結論を延々と再導出し続ける空回りの原因に\n"
-    "なりえます（実際に1735/1954ログで観測）。"
+    "自然に考えた理由づけの生文章は、thinkを呼ぶかどうかに関わらず次のiterationへそのまま\n"
+    "引き継がれます（tool_callsの記録だけが残るわけではありません）。thinkを呼ぶと、その理由づけ\n"
+    "（action/decided/why、却下案があればrejected/rejected_why）が構造化された累積summaryとして\n"
+    "生reasoningに加えて次回以降のtool結果にも引き継がれます——生の思考に加えて、後から参照\n"
+    "しやすい要点も残す、という位置づけです。"
 )
 
 # [BL-228] trace_lineageの使用指示。BL-224で定義したツール自体は各ノードのtools=[]に配線済み
