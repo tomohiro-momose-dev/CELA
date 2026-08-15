@@ -9137,6 +9137,24 @@ def _build_task_scope_context(state: LineageState, conn: sqlite3.Connection) -> 
             "全ての箇所を（1箇所ずつ、または同一文言ならreplace_all=trueで）修正してください。"
             "1箇所だけ直すと、残った箇所が次のラウンドで再び矛盾として差し戻されます。"
         )
+        # [BL-228 1314ログ調査後の発火条件] chat_history_window/expert_history_windowにより、
+        # 改版を重ねるうちに過去の差戻し理由の推移は数ターンで視界から消える
+        # （whiteboard版歴にはagreements pinのような自動プッシュが存在しない）。task_4_2が
+        # V15→V24（10版）に渡って同一の根本課題（実利用可能性の実証欠如）を言い回しを変えて
+        # 再提出し続けた実例（log/2026-08-15/1314）を踏まえ、改版が一定回数を超えたら
+        # 明示的にtrace_lineageで版歴を確認させる。
+        if whiteboard["version"] >= 3:
+            whiteboard_text += (
+                "\n【🔎 このタスクの改版は既に3回目以降です（Ver."
+                f"{whiteboard['version']}）】このまま記憶だけを頼りに次の修正案を書く前に、"
+                f"trace_lineage(ref='whiteboard:{current_phase_id}:{current_task_id}')"
+                "で全版の変遷を取得してください。過去に何を試し、何が理由で繰り返し差し戻された"
+                "かを把握しないまま改版を重ねると、同じ根本課題を言い回しだけ変えて"
+                "再提出し続ける空回りに陥ります（実際にこのパターンで10版を要した事例が"
+                "あります）。差戻しの根本課題（例：実測・実証データそのものが存在しない等）が"
+                "設計の書き方では解決できない場合は、write_issueまたは"
+                "escalate_premise_concernで前提の見直しを検討してください。"
+            )
     else:
         whiteboard_text = "(このタスクの成果物はまだホワイトボードに存在しません。初版はwrite_agreementのdecision_whatに全文を渡してください)"
 
@@ -9188,14 +9206,26 @@ _BL093_THINK_VALUE_PARAGRAPH = (
 # （AGENTS.md §15.4: 入口はあるが出口＝消費経路が無い状態）。BL093同様の理由でツール一覧文
 # 自体は各呼び出し元へインラインのままにし、この後続段落のみ共有化する。挿入位置は既存の
 # 「あなたが使えるツールは...」文の直後（ツール説明群と同じ位置）に固定する。
+# [1314ログ調査後の改訂] 「疑問を持ったら確認する」という受動的な文言のままでは、
+# escalate_premise_concernが発火条件無しでは0回だったのと同型の理由で、trace_lineage自体も
+# 755回のツール呼び出し中0回のまま死蔵していた（実測）。系譜は「疑いを晴らすための例外的手段」
+# ではなく、意思決定・情報の変遷の解像度を積極的に高めるための道具であるとユーザーから訂正を
+# 受けたため、その趣旨で書き直す。また、agreements pinの「└─前提/└─系譜」は深さ3・各項目
+# 60字程度に切り詰めた抜粋でありSuperseded済みの旧版は一覧からも除外される
+# （_build_agreements_context/_render_agreement_lineage参照）。「pinに出ているから十分」という
+# 誤解を招かないよう、pinはあくまで要約であることも明記する。
 _TRACE_LINEAGE_USAGE_PARAGRAPH = (
-    "[BL-224/BL-228] 過去のターンの発言、ある合意（agreement）・確定値（fact）・事物の属性\n"
-    "（entity）が「なぜ今この内容なのか」「何を前提に導出されたか」「他の案はなぜ却下されたか」\n"
-    "に疑問を持った場合は、trace_lineageツールで根拠を遡って確認してください。ref には、system\n"
-    "prompt上に[AG-xxx]のように表示される実際のagreement id、fact:<変数名>、\n"
-    "entity:<entity_id>:<attr_name>、turn:<chat_history.id（発言そのものの系譜）>、\n"
-    "issue:<topic>、whiteboard:<phase_id>:<task_id>、detector_review:<id> のいずれかを指定できます。\n"
-    "このツールはLLMを呼ばず、DBに構造化保存済みの根拠のみを機械的に返す読み取り専用ツールです。"
+    "[BL-224/BL-228] trace_lineageは、疑わしい点を確認する例外的な手段ではなく、意思決定や\n"
+    "情報がどう変遷してきたかの解像度を積極的に高めるための道具です。system prompt上の\n"
+    "agreements一覧に出る「└─ 前提」「└─ 系譜（変遷）」は、深さ3・各項目60字程度に要約した\n"
+    "抜粋にすぎず、Supersededされた旧版そのものは一覧から除外されています。もっと詳しく\n"
+    "経緯を辿りたい場合、あるいはそもそも自動表示されない対象（過去のターンの発言、issueの\n"
+    "経緯、ホワイトボードの版歴、Detector差戻しの記録）について、trace_lineageで能動的に\n"
+    "取得してください。ref には、system prompt上に[AG-xxx]のように表示される実際のagreement\n"
+    "id、fact:<変数名>、entity:<entity_id>:<attr_name>、turn:<chat_history.id（発言そのものの\n"
+    "系譜）>、issue:<topic>、whiteboard:<phase_id>:<task_id>、detector_review:<id> のいずれかを\n"
+    "指定できます。このツールはLLMを呼ばず、DBに構造化保存済みの根拠のみを機械的に返す\n"
+    "読み取り専用ツールです。"
 )
 
 

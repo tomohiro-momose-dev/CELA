@@ -283,3 +283,46 @@ def test_trace_lineage_usage_paragraph_wired_into_expert_and_user_prompts():
     assert "TRACE_LINEAGE_TOOL" in src_expert
     src_user = inspect.getsource(cela_main.generate_user_utterance)
     assert "_TRACE_LINEAGE_USAGE_PARAGRAPH" in src_user
+
+
+def test_trace_lineage_usage_paragraph_frames_lineage_as_resolution_not_doubt():
+    """[1314ログ調査後の訂正] trace_lineageは「疑問を持ったときの確認手段」ではなく、
+    意思決定・情報の変遷の解像度を積極的に高めるための道具である、というユーザーによる
+    訂正を反映していること。またagreements pinが深さ3・各項目60字程度の要約に過ぎず
+    Superseded済みの旧版を含まない（＝pinだけでは不十分）ことも明示していること。"""
+    paragraph = cela_main._TRACE_LINEAGE_USAGE_PARAGRAPH
+    assert "解像度" in paragraph
+    assert "疑問を持った場合は" not in paragraph
+    assert "要約" in paragraph or "抜粋" in paragraph
+    assert "Superseded" in paragraph
+
+
+def _build_expert_task_scope_state(run_id: str, task_id="task_1_1", phase_id="phase_1"):
+    return {
+        "current_phase": {"phase_id": phase_id, "tasks": [
+            {"task_id": task_id, "acceptance_criteria": [], "owns_variables": []},
+        ]},
+        "current_task_id": task_id,
+        "phases": [],
+        "run_id": run_id,
+        "task_criteria_status": {},
+    }
+
+
+def test_whiteboard_revision_fires_trace_lineage_trigger_from_third_version(db_conn):
+    """[BL-228 1314ログ調査後の発火条件] task_4_2がV15→V24（10版）に渡って同一の根本課題を
+    言い回しを変えて再提出し続けた実例（log/2026-08-15/1314）を踏まえ、改版が3版目以降に
+    なったら、次の修正前にtrace_lineage(whiteboard:...)で版歴を確認するよう明示的に促すこと。
+    1〜2版目では発火せず、3版目以降でのみ発火する（閾値の境界を確認）。"""
+    conn, run_id = db_conn
+    _seed_whiteboard(conn, run_id, version=1, content="v1")
+    _seed_whiteboard(conn, run_id, version=2, content="v2")
+
+    state = _build_expert_task_scope_state(run_id)
+    ctx = cela_main._build_task_scope_context(state, conn)
+    assert "trace_lineage" not in ctx["whiteboard_text"], "2版目まではまだ発火しないはず"
+
+    _seed_whiteboard(conn, run_id, version=3, content="v3")
+    ctx = cela_main._build_task_scope_context(state, conn)
+    assert "trace_lineage" in ctx["whiteboard_text"]
+    assert "whiteboard:phase_1:task_1_1" in ctx["whiteboard_text"]
