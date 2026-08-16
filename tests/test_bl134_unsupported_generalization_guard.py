@@ -14,6 +14,12 @@ confidence="provisional"として扱いwrite_issueで記録することを求め
 非退行テストが保証する誤検知抑制と表裏一体）であることを確認した上で、見直し不要と判断した
 （記録のみ、コード変更なし）。
 
+[BL-240 2026-08-16] この「情報不足を理由にmajorにしない」原則は、web_searchの無い仮想
+シナリオ前提で書かれており、web_searchが使える実世界シナリオの今は抜け穴になりうると
+ユーザーが指摘。原則自体（genuinely調べようがない情報の欠如はmajorの根拠にしない）は
+維持しつつ、「調べようがない事項」と「web_search等で確認できるのに未確認の事項」を
+区別する形へ文言を書き換えた（D-209）。
+
 参照: docs/design/back_log/issue_backlog.md BL-134。実LLM API呼び出しは伴わない。
 """
 
@@ -40,10 +46,15 @@ def test_generate_user_utterance_has_unsupported_generalization_checklist_item()
 
 
 def test_call_detector_domain_review_criteria_unchanged_by_design():
-    """[BL-134候補(c)、記録のみ] call_detectorのドメイン妥当性レビューは、情報不足のみを
-    理由にconstraint_issue="major"にしない設計を意図的に維持している（BL-012/BL-133の
-    誤検知抑制と表裏一体のため、この非退行テストで変更されていないことを明示的に確認する）。
+    """[BL-134候補(c)、BL-240で文言更新] call_detectorのドメイン妥当性レビューは、
+    genuinelyに調べようがない情報の欠如のみを理由にconstraint_issue="major"にしない
+    という原則自体は維持している（BL-012/BL-133の誤検知抑制と表裏一体）。
+    [BL-240] ただし「調べれば分かることも情報不足扱いで済ませてよい」という抜け穴を
+    塞ぐため文言を書き換えた（D-209）。原則の存続と、web_search等で確認できる事項は
+    確認を要求する旨の両方をここで確認する。
     """
     src = inspect.getsource(cela_main.call_detector)
     assert "情報が不足していて確認できない" in src
-    assert "majorの" in src and "根拠にしてはいけません" in src
+    assert "majorの根拠にしないでよいのは" in src
+    assert "本当に調べようがない事項" in src
+    assert "read_goal_reference" in src and "web_searchで通常確認できる" in src
