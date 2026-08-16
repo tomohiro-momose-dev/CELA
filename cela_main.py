@@ -3328,6 +3328,30 @@ def _find_active_deliverable_agreement(conn: sqlite3.Connection, run_id: str, ph
     return None
 
 
+# [BL-248 2026-08-16/1512ログ調査] BL-095はtask_plannerへ「entry_type="Decision"、
+# topic="task_planner_phase_design"でwrite_agreementし、分解の判断根拠を書き残す」よう
+# 指示する一方、task_plan_reviewerへは「read_deliverable_file（task_planner_phase_design）
+# で確認する」よう指示していた。しかしread_deliverable_file/_resolve_deliverable_pointer
+# （BL-084/BL-241）はentry_type="Deliverable"かつFILE_PATH:/WHITEBOARD:ポインタを持つ行
+# だけを対象とする設計であり、entry_type="Decision"のこの行は構造的に一致しない
+# （実ログで4回連続'task_id...はtask_plannerの正式な計画に存在しません'エラーを確認）。
+# 修正は「別のツールを呼ばせる」ではなく、そもそも1件しかない固定topicの値を
+# 呼び出し元でPythonから直接取得しプロンプトへ埋め込む（現在タスクのJSON等と同型の
+# 既存パターン）。ツール呼び出しを一切要求しないため失敗しようがない。
+def _get_task_planner_phase_design_rationale_text(conn: sqlite3.Connection, run_id: str) -> str:
+    """[BL-248] task_plannerがwrite_agreement（entry_type="Decision",
+    topic="task_planner_phase_design"）で書き残した、直近のフェーズ・タスク分解の判断根拠を
+    テキスト化する。複数回の再分解で同一topicの行が積み上がるため、_find_active_deliverable_
+    agreementと同じ「reversed()して最初に一致した行＝最新行」のパターンで最新の1件のみを
+    返す。未記録ならその旨を返す。
+    """
+    for a in reversed(get_agreements_from_db(conn, run_id)):
+        if (a.get("entry_type") == "Decision" and a.get("topic") == "task_planner_phase_design"
+                and a.get("status") != "Superseded"):
+            return f"{a.get('decision_what', '')}\n（理由：{a.get('reason_why', '')}）"
+    return "(task_plannerはまだ分解の判断根拠を記録していません)"
+
+
 def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str, task_id: str = "", phase_id: str = "") -> tuple[str | None, str | None]:
     """[F-3.1] write_agreementツールからDBへagreementをコミットする。
     action_type=SUPERSEDEの場合は既存レコードをSupersededに更新する。
@@ -13524,6 +13548,15 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     comment）で返す実行前ゲート。
     """
     phases_json = json.dumps(phases, ensure_ascii=False, indent=2)
+    # [BL-248] task_plannerがwrite_agreementで書き残した分解の判断根拠（topic=
+    # "task_planner_phase_design"）を、ツール呼び出し無しで直接プロンプトへ埋め込む。
+    # BL-095は従来read_deliverable_fileでの取得を指示していたが、このtopicはentry_type=
+    # "Decision"でありread_deliverable_fileはentry_type="Deliverable"専用のため常に
+    # 失敗していた（実ログで4回連続失敗を確認）。
+    _task_planner_rationale_text = (
+        _get_task_planner_phase_design_rationale_text(get_active_conn(), state["run_id"])
+        if state and state.get("run_id") else "(state未提供のため取得不可)"
+    )
     # [BL-104] プロンプトキャッシュのヒット率向上のため、固定指示文（レビュー観点1-4・曖昧さと
     # 捏造要求の混同注意・BL-092/BL-093/BL-094/BL-095・ツール一覧の説明）を先頭にまとめ、
     # ゴール文（実行中はほぼ不変）をその次、呼び出しごとに変わる生成された計画本体
@@ -13610,13 +13643,15 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     遡れない場合）は、それ自体を要指摘としてください。read_deliverable_fileでは、その値が
     どのタスクでどんな前提のもと確定したかを遡って確認できます。【最低限、iter=1で一度は、
     計画中の主要な派生値についてread_verified_factで確認してから判定を進めてください】。
-    [BL-095: task_plannerの判断根拠が誤っている場合はSUPERSEDEする]
-    read_deliverable_file（task_planner_phase_design）でtask_plannerが記録した分解の判断根拠を
-    確認した際、その根拠自体に誤り（存在しない前提を根拠にしている等）があり、それが今回の
-    constraint_issue="major"判定の理由になっている場合は、write_agreement（action_type=
-    "SUPERSEDE", status="Rejected", target_topic="task_planner_phase_design", reason_why=
-    "<何が誤りか>"）でその記録を無効化してください（既存のBL-062と同型のパターンです）。
-    そうしないと、誤った判断根拠が「記録済み」として残り続け、後続タスクが誤ってそれを参照します。
+    [BL-095/BL-248: task_plannerの判断根拠が誤っている場合はSUPERSEDEする]
+    下記「■ task_plannerが記録した分解の判断根拠」を確認し、その根拠自体に誤り（存在しない
+    前提を根拠にしている等）があり、それが今回のconstraint_issue="major"判定の理由になって
+    いる場合は、write_agreement（action_type="SUPERSEDE", status="Rejected", target_topic=
+    "task_planner_phase_design", reason_why="<何が誤りか>"）でその記録を無効化してください
+    （既存のBL-062と同型のパターンです）。そうしないと、誤った判断根拠が「記録済み」として
+    残り続け、後続タスクが誤ってそれを参照します。[BL-248] この根拠は既に下記へ埋め込み済み
+    のため、read_deliverable_fileでの再取得は不要です（entry_type="Decision"のためread_
+    deliverable_fileの対象外であり、呼んでも常に失敗します）。
     [BL-188: web_search/web_fetch/read_reference_fileで現実世界の妥当性を検証する] あなた自身の
     学習知識から導き出した判断も、必ずしも正確であるとは限らず、最新の情勢（法令・相場・規制等）
     を反映しているとも限りません。計画中の前提（地理・距離・費用相場・法規制等）が現実的に成立
@@ -13636,6 +13671,8 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
 
     ■ 目標: {goal}
     {goal_essence_text}
+    ■ task_plannerが記録した分解の判断根拠（topic="task_planner_phase_design"）:
+    {_task_planner_rationale_text}
     ■ 生成された計画:
     {phases_json}
 
