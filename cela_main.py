@@ -5369,7 +5369,7 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                 # サイレントにreasoningが無効化されてしまう（実装時に発見・修正）。
                 reasoning_effort_level = "medium"
             elif label_lower == "reflection" or label_lower == "review" or label_lower == "detector" or label_lower == "except":
-                reasoning_effort_level = "medium"
+                reasoning_effort_level = "high"
             elif tools is not None:
                 reasoning_effort_level = "medium"
 
@@ -9284,16 +9284,27 @@ _BL093_THINK_VALUE_PARAGRAPH = (
 # 60字程度に切り詰めた抜粋でありSuperseded済みの旧版は一覧からも除外される
 # （_build_agreements_context/_render_agreement_lineage参照）。「pinに出ているから十分」という
 # 誤解を招かないよう、pinはあくまで要約であることも明記する。
+# [BL-243 2026-08-15/2149・2239・08-16/1000・1111ログ調査] BL-238はExpert向けの改版3回目
+# 発火ブロック（_build_task_scope_context）からtrace_lineage(whiteboard:...)呼び出し指示を
+# 削除したが、この共通段落（generate_user_utterance/call_detector等7箇所から呼ばれる）には
+# 「ホワイトボードの版歴」と「whiteboard:<phase_id>:<task_id>」がまだ残っていた。User AI の
+# Stage1/Stage3が実際にこれに従ってwhiteboard: refでtrace_lineageを呼び、正しい書式
+# （whiteboard:phase_2:task_2_2）でも系譜0件、書式を誤った場合（whiteboard:task_1_2）は
+# 「該当refなし」になることを2149/1111ログで確認した——relation_edgesにwhiteboard: refを
+# 指すエッジを書く本番コード経路が存在しない以上、書式の正誤に関わらず常に無駄打ちになる。
+# BL-238と同じ結論（版歴を読む専用の消費経路は不要、issue_log.occurrence_countが代替）を
+# この共有段落にも適用し、whiteboard:への言及を削除する（_resolve_ref_table/
+# _write_relation_edgeの汎用whiteboard:分岐自体はtest_bl228の意図通り残す）。
 _TRACE_LINEAGE_USAGE_PARAGRAPH = (
     "[BL-224/BL-228] trace_lineageは、疑わしい点を確認する例外的な手段ではなく、意思決定や\n"
     "情報がどう変遷してきたかの解像度を積極的に高めるための道具です。system prompt上の\n"
     "agreements一覧に出る「└─ 前提」「└─ 系譜（変遷）」は、深さ3・各項目60字程度に要約した\n"
     "抜粋にすぎず、Supersededされた旧版そのものは一覧から除外されています。もっと詳しく\n"
     "経緯を辿りたい場合、あるいはそもそも自動表示されない対象（過去のターンの発言、issueの\n"
-    "経緯、ホワイトボードの版歴、Detector差戻しの記録）について、trace_lineageで能動的に\n"
+    "経緯、Detector差戻しの記録）について、trace_lineageで能動的に\n"
     "取得してください。ref には、system prompt上に[AG-xxx]のように表示される実際のagreement\n"
     "id、fact:<変数名>、entity:<entity_id>:<attr_name>、turn:<chat_history.id（発言そのものの\n"
-    "系譜）>、issue:<topic>、whiteboard:<phase_id>:<task_id>、detector_review:<id> のいずれかを\n"
+    "系譜）>、issue:<topic>、detector_review:<id> のいずれかを\n"
     "指定できます。このツールはLLMを呼ばず、DBに構造化保存済みの根拠のみを機械的に返す\n"
     "読み取り専用ツールです。"
 )

@@ -10,6 +10,7 @@ DuckDuckGo HTML版のパーサ検証用サンプルは、実際に`https://html.
 参照: docs/design/back_log/BL-184/BL184_basic_design.md、issue_backlog.md BL-184。
 """
 
+import inspect
 import os
 import sys
 
@@ -763,3 +764,71 @@ def test_read_reference_file_grep_not_found_in_existing_file(monkeypatch, tmp_pa
     state = {"run_id": "run-1"}
     result = web_tools.read_reference_file_handler({"path": cache_path.name, "grep": "存在しないパターン"}, state)
     assert result["status"] == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# [BL-244] keyword+grepの同時指定（pathを別ターンで先に確認させず、1回のtool callで
+# 完結させたいという自然な意図）。log/2026-08-15/2149・2239で、独立した4つ以上のExpertが
+# それぞれ{"path": "", "keyword": X, "grep": X}という同型の呼び出しを行い、全て
+# 「grepはpathと組み合わせて指定してください」で拒否されていた（read_reference_file全26回
+# 中12回=46%を占めた）。keywordが一意に1件へ解決できる場合は、拒否する前にそれを試す。
+# ---------------------------------------------------------------------------
+
+def test_read_reference_file_keyword_and_grep_together_single_match_succeeds(monkeypatch, tmp_path):
+    """[BL-244本体] pathを省略し、keyword+grepを同時指定した実インシデントと同型の呼び出し。
+    keywordが一意に1件へ解決できるなら、以前のように問答無用でエラーにせず、そのファイルに
+    対してgrepを適用して結果を返すこと。"""
+    monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))
+    cache_path = web_tools.cache_file_path("https://example.com/target")
+    body = ("filler line\n" * 100) + "★目的の記述★\n" + ("filler line\n" * 100)
+    web_tools.write_cache(cache_path, "https://example.com/target", body)
+    state = {"run_id": "run-1"}
+    result = web_tools.read_reference_file_handler(
+        {"path": "", "keyword": "example.com/target", "grep": "★目的の記述★"}, state,
+    )
+    assert not isinstance(result, dict), f"エラー/not_foundのまま: {result}"
+    assert "★目的の記述★" in result
+    assert len(result) < len(body)
+
+
+def test_read_reference_file_keyword_and_grep_together_no_match_returns_not_found(monkeypatch, tmp_path):
+    """keywordが0件の場合は、grep用のエラーではなくkeywordのnot_foundを返すこと
+    （grepを理由にした拒否メッセージへ後退しない）。"""
+    monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))
+    state = {"run_id": "run-1"}
+    result = web_tools.read_reference_file_handler(
+        {"keyword": "存在しないキーワード", "grep": "何か"}, state,
+    )
+    assert result["status"] == "not_found"
+    assert "存在しないキーワード" in result["message"]
+
+
+def test_read_reference_file_keyword_and_grep_together_multiple_matches_returns_candidates(monkeypatch, tmp_path):
+    """keywordが複数件に一致する場合は、grepを保留してmultiple_matchesの候補一覧を返すこと
+    （どのファイルにgrepすべきか一意に決められないため、以前と同じ挙動に留める）。"""
+    monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))
+    p1 = web_tools.cache_file_path("https://example.com/a")
+    p2 = web_tools.cache_file_path("https://example.com/b")
+    web_tools.write_cache(p1, "https://example.com/a", "A")
+    web_tools.write_cache(p2, "https://example.com/b", "B")
+    state = {"run_id": "run-1"}
+    result = web_tools.read_reference_file_handler(
+        {"keyword": "example.com", "grep": "何か"}, state,
+    )
+    assert result["status"] == "multiple_matches"
+    assert len(result["candidates"]) == 2
+
+
+def test_read_reference_file_grep_without_path_or_keyword_still_errors():
+    """回帰確認: keywordも指定されていない場合は、従来通り即エラー
+    （解決できる情報が無い以上、無条件で受理しない）。"""
+    result = web_tools.read_reference_file_handler({"grep": "foo"}, {"run_id": "run-1"})
+    assert result["status"] == "error"
+    assert "grep" in result["message"]
+
+
+def test_bl244_keyword_resolution_helper_present_in_source():
+    """§17.1後段: 実装を削除してもテストが落ちることを保証する存在証明。"""
+    src = inspect.getsource(web_tools.read_reference_file_handler)
+    assert "_resolve_reference_cache_path_by_keyword" in src
+    assert "if not keyword:" in src

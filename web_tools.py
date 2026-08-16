@@ -576,7 +576,21 @@ def read_reference_file_handler(args: dict, state: dict) -> dict | str:
     grep = args.get("grep") or ""
 
     if grep and not path:
-        return {"status": "error", "message": "grepはpathと組み合わせて指定してください（対象ファイルを先に特定する必要があります）。"}
+        # [BL-244 2026-08-15/2149・2239ログ調査] pathを別ターンで先に確認させる設計だったが、
+        # 実ドライランでは4件以上の異なるExpertロールが独立に「keywordとgrepを同じ呼び出しに
+        # 同時指定する」形で呼んでおり（read_reference_file全26回中12回=46%がこの理由の
+        # status_errorだった）、単発の呼び出し形として自然に出てくることが判明した。
+        # keywordが同時に指定されていれば、grepを拒否する前にkeywordでpathを解決できないか
+        # 試す（0件/複数件時は従来通りnot_found/multiple_matchesへフォールバック、解決できる
+        # 情報が既に揃っているのに問答無用でエラーにしていたのを緩和する）。
+        if not keyword:
+            return {"status": "error", "message": "grepはpathと組み合わせて指定してください（対象ファイルを先に特定する必要があります）。"}
+        resolved = _resolve_reference_cache_path_by_keyword(base_dir, keyword)
+        if resolved is None:
+            return {"status": "not_found", "message": f"'{keyword}'に該当するキャッシュファイルが見つかりませんでした。"}
+        if isinstance(resolved, dict):
+            return resolved
+        path = resolved
 
     if path:
         try:
@@ -599,30 +613,42 @@ def read_reference_file_handler(args: dict, state: dict) -> dict | str:
     if keyword:
         if not base_dir.exists():
             return {"status": "not_found", "message": "web_cacheにまだキャッシュファイルがありません。"}
-        matches: list[str] = []
-        for f in sorted(base_dir.glob("*.md")):
-            head = f.read_text(encoding="utf-8", errors="ignore")[:500]
-            if keyword in head:
-                matches.append(f.name)
-        if not matches:
+        resolved = _resolve_reference_cache_path_by_keyword(base_dir, keyword)
+        if resolved is None:
             return {"status": "not_found", "message": f"'{keyword}'に該当するキャッシュファイルが見つかりませんでした。"}
-        if len(matches) > 1:
-            # [BL-216] ファイル名はsha256(url)[:16]のハッシュのため、候補一覧だけでは
-            # どれが目的のページか一切判別できず、モデルは1件ずつpathで開いて中身を確認する
-            # しかなかった（keyword検索の目的である「再取得の回避」が事実上働かなくなる）。
-            # 一覧の段階でSource URLと本文冒頭を添え、開かずに選べるようにする。
-            candidates = [
-                {"path": name, "preview": _cache_preview(base_dir / name)}
-                for name in matches
-            ]
-            return {
-                "status": "multiple_matches",
-                "message": "複数のキャッシュファイルが該当しました。previewを確認し、pathを指定して再取得してください。",
-                "candidates": candidates,
-            }
-        return (base_dir / matches[0]).read_text(encoding="utf-8")[:_MAX_READ_REFERENCE_CHARS]
+        if isinstance(resolved, dict):
+            return resolved
+        return (base_dir / resolved).read_text(encoding="utf-8")[:_MAX_READ_REFERENCE_CHARS]
 
     return {"status": "error", "message": "pathまたはkeywordのいずれかを指定してください。"}
+
+
+def _resolve_reference_cache_path_by_keyword(base_dir: Path, keyword: str) -> str | dict | None:
+    """[BL-244] read_reference_fileのkeyword解決ロジックの共通化。0件はNone、1件は
+    ファイル名(str)、複数件はmultiple_matchesのdictを返す。read_reference_file_handlerの
+    keyword単独ブランチと、grep+keyword同時指定時の先行解決の両方から呼ばれる。"""
+    matches: list[str] = []
+    for f in sorted(base_dir.glob("*.md")):
+        head = f.read_text(encoding="utf-8", errors="ignore")[:500]
+        if keyword in head:
+            matches.append(f.name)
+    if not matches:
+        return None
+    if len(matches) > 1:
+        # [BL-216] ファイル名はsha256(url)[:16]のハッシュのため、候補一覧だけでは
+        # どれが目的のページか一切判別できず、モデルは1件ずつpathで開いて中身を確認する
+        # しかなかった（keyword検索の目的である「再取得の回避」が事実上働かなくなる）。
+        # 一覧の段階でSource URLと本文冒頭を添え、開かずに選べるようにする。
+        candidates = [
+            {"path": name, "preview": _cache_preview(base_dir / name)}
+            for name in matches
+        ]
+        return {
+            "status": "multiple_matches",
+            "message": "複数のキャッシュファイルが該当しました。previewを確認し、pathを指定して再取得してください。",
+            "candidates": candidates,
+        }
+    return matches[0]
 
 
 # [BL-199] 実行中のweb_search/web_fetchとは別に、開発者がAGENTS.md §9に従って事前収集した
