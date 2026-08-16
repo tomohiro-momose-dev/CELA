@@ -12,9 +12,13 @@ User AI Stage4が書く指示文自体の具体性を高める。
 
 既存のBL-192（次タスク指示文の質を強化する共通ブロック、Stage4パス・非Stage4パス双方から
 参照される）を拡張し、③Expertのツール一覧の周知と行動計画の明示、④ゴール文・既存成果物の
-定性的な言及（「商業施設が複数点在」「小中学校」「冬季は冷え込む」等）を具体的な事物・数値へ
-深堀りする指示、を追加した。あわせてExpert自身のプロンプトにも対になる深堀り指示（BL-246）を
-追加した。
+定性的な言及（具体的な数・所在・数値・実態を伴わない記述）を具体的な事物・数値へ深堀りする
+指示、を追加した。あわせてExpert自身のプロンプトにも対になる深堀り指示（BL-246）を追加した。
+
+[フォローアップ] 初版は例文が茅野市自動運転バスシナリオ（商業施設・学校・冬季気候）に
+強く紐付いており、別のゴールでは通用しない具体例だった（ユーザー指摘）。ゴールの種類に
+依らない一般化した表現（「◯◯が複数存在する」「対象は◯◯を利用する（はずだ）」等）へ
+書き直した。
 
 実LLM API呼び出しは伴わない。参照: docs/design/back_log/issue_backlog.md BL-246。
 """
@@ -49,12 +53,16 @@ def test_bl192_block_instructs_action_plan_before_instruction():
 
 def test_bl192_block_instructs_deep_dive_on_qualitative_mentions():
     """ゴール文・既存成果物の定性的な言及（具体的な数・所在・数値を伴わない記述）を
-    深堀りするよう促す文言と、代表的な例（商業施設・学校・気候）が含まれていること。"""
+    深堀りするよう促す文言が含まれていること。例文はゴールの種類に依らない一般化した
+    表現であり、特定シナリオ（茅野市自動運転バス等）の固有名詞を含まないこと。"""
     text = cela_main._BL192_DIRECTIVE_QUALITY_BLOCK
     assert "定性的な言及" in text or "深堀り" in text
-    assert "商業施設" in text
-    assert "小中学校" in text
-    assert "冷え込む" in text
+    assert "複数存在する" in text
+    assert "利用する" in text
+    # [フォローアップ回帰確認] 特定シナリオ固有の例文が残っていないこと
+    assert "商業施設" not in text
+    assert "小中学校" not in text
+    assert "冷え込む" not in text
 
 
 def test_bl192_block_does_not_expand_acceptance_criteria_scope():
@@ -77,11 +85,13 @@ def test_bl192_existing_points_still_present():
 def test_expert_prompt_has_matching_deep_dive_instruction():
     """[BL-246] Expert自身の system prompt（call_expert）にも、対になる深堀り指示
     （BL-246）が追加されていること。Stage4側だけでなくExpert自身も、指示されなくても
-    定性的な言及を深堀りする姿勢を持てるようにする。"""
+    定性的な言及を深堀りする姿勢を持てるようにする。例文はゴールの種類に依らない
+    一般化した表現であること（特定シナリオ固有の例文が残っていないこと）。"""
     src = inspect.getsource(cela_main.call_expert)
     assert "BL-246" in src
-    assert "商業施設" in src
-    assert "小中学校" in src
+    assert "複数存在する" in src
+    assert "商業施設" not in src
+    assert "小中学校" not in src
 
 
 def test_bl192_directive_block_still_wired_into_generate_user_utterance():
