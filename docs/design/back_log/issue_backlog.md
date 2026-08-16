@@ -271,6 +271,7 @@
 | BL-242 | 中 | `cela_main.py`（`call_detector`・`_read_deliverable_file_handler`・`query_AI`） | **`done`。** BL-241の議論を受け、ユーザーが「依存タスクを読んでいなかったら機械的に検知してDetectorに示すか」と提案。既存のBL-033（Expertがpython_replを未使用の場合にDetectorへ警告する仕組み）と同型のパターンで実装することで合意し、機械的な強制差し戻し（BL-108→BL-110/D-206→D-207で撤回済みの往復コスト過大な方式）は採用しないことを確認。`_read_deliverable_file_handler`がtask_id指定で成功したread_deliverable_file呼び出しを`_LAST_DELIVERABLE_READ_TASK_IDS`へ記録し、`expert_node`が`state["expert_last_deliverable_reads"]`へ橋渡し、`call_detector`が現在タスクのdepends_onとの差分（未読の依存task_id）を検知してDetectorへ警告ブロックとして提示する。ターンは強制しない（D-211）。 | P2 |
 | BL-243 | 中 | `cela_main.py`（`_TRACE_LINEAGE_USAGE_PARAGRAPH`） | **`done`。** ユーザーが`log/2026-08-16/1111`で`trace_lineage(ref="whiteboard:task_1_2")`が系譜0件で返ったログを提示し、`08-15/2149`・`2239`・`08-16/1000`も含め、ツール実行がうまくいかなかった箇所を横断調査するよう依頼。`実行（iter=`文字列で全4ログのツール呼び出し・結果を機械的にペアリングして分類した結果、`trace_lineage`のwhiteboard: ref呼び出し5件中5件が空系譜（書式が正しい`whiteboard:phase_2:task_2_2`でも0件、書式を誤った`whiteboard:task_1_2`でも「該当refなし」）だったことを確認。BL-238はExpert向けの改版3回目発火ブロックからのみ同種の指示を削除しており、User AI(Stage1/Stage3)等7箇所から共有される`_TRACE_LINEAGE_USAGE_PARAGRAPH`には「ホワイトボードの版歴」「whiteboard:<phase_id>:<task_id>」が残存していた（§15.1: 同じ事実を修正したはずが別の場所に生き残っていた再発例）。BL-238と同じ結論を適用し、共有段落からwhiteboard:への言及を削除（`_resolve_ref_table`/`_write_relation_edge`の汎用whiteboard:分岐自体はtest_bl228が検証する既存機構のため削除しない）。 | P2 |
 | BL-244 | 中 | `web_tools.py`（`read_reference_file_handler`） | **`done`。** BL-243と同じ横断調査で発見。`read_reference_file`は全26回中12回（46%）が「grepはpathと組み合わせて指定してください」のエラーで、独立した4つ以上のExpertロールが`{"path": "", "keyword": X, "grep": X}`という同型の呼び出しで失敗していた。ハンドラは`grep and not path`を即座にエラーにしており、`keyword`が同時に与えられ一意に1件へ解決できる場合でもそれを試さずに拒否していたのが原因（BL-241と同型の「解決できる情報が既に揃っているのに問答無用で撥ねる」パターン）。`keyword`が同時指定されていれば、まず`_resolve_reference_cache_path_by_keyword`ヘルパでpathを解決してから通常のgrep処理へフォールスルーするよう変更（0件/複数件時は従来通りnot_found/multiple_matchesへ後退）。keyword単独ブランチも同ヘルパへ統合（§15.1）。 | P2 |
+| BL-245 | 高 | `cela_main.py`（`call_detector`の思考プロセス監査＝R5） | **`done`。** ユーザーが稼働中のrun（`log/2026-08-16/1150`）でtask_2_4_1が停滞（Ver.1→Ver.24、判定：Rejectedを8回繰り返す）していることを報告し原因調査を依頼。当初「User AI Stage3/4がacceptance_criteriaを超えた水準を要求している」と仮診断したが（BL-197として既にその防止策は存在し的外れと判明）、実際にはDetectorの自己矛盾が原因だった。全28回のDetector応答を機械抽出すると、`criteria_status=[true,true,true]`（BL-023の受入基準チェックは全項目充足と自己申告）でありながら、同一応答内で「AIの思考過程では独立検証を行わずユーザーの再提出への自信を根拠に承認を急いでおり、思考プロセス監査上の重大な事後正当化に該当する」という理由で`constraint_issue="major"`にしているケースが複数回確認された。原因はR5の思考プロセス監査文言（Expertの数値ハルシネーション対策として設計された「計算ツール未使用で適当な数字」「都合の悪い制約から目を逸らして結論を急ぐ」→強制major）が、`target_role=="user"`（User AI Stage3自身の承認判断のreasoningを監査する場合、python_replを持たずそもそも計算ツール未使用の指摘が成立しない）にも無条件に適用されていたこと。ユーザー判断（3択のうち「思考プロセス監査の適用対象を限定」を選択）を受け、`target_role=="user"`の場合のみ強制差し戻し指示を外し、reasoningを参考情報として提示するに留め、判断をBL-023のcriteria_status等の構造化判定へ委ねるよう分岐（D-214）。 | P1 |
 
 ---
 
@@ -8209,6 +8210,31 @@ BL-243と同じ横断調査（4ログ全件の`実行（iter=N）`呼び出し�
 `read_reference_file_handler`（`web_tools.py`）を確認したところ、`if grep and not path:`という早期ガードが`keyword`の値を一切見ずに即座にエラーを返していた。しかし`keyword`が同時に指定されており、かつそれが一意に1件のキャッシュファイルへ解決できる場合、ハンドラは（`grep`が無ければ）その1件を難なく特定できる情報を既に持っている——BL-241（`_resolve_deliverable_pointer`がtask_idという権威情報を持っているのにtopic_keywordの不一致で撥ねていた）と同型の「解決できる情報が既に揃っているのに問答無用で撥ねる」パターンだった。
 
 **修正:** `grep and not path`の場合、`keyword`が無ければ従来通り即エラー。`keyword`があれば、新設した`_resolve_reference_cache_path_by_keyword`ヘルパー（keyword単独ブランチの既存ロジックを共通化）でまず`path`を解決し、0件はnot_found・複数件は既存のmultiple_matches（BL-216のpreview付き候補一覧）にフォールバックし、1件に絞れた場合のみ`path`へ代入して通常のpath+grep処理へフォールスルーする。keywordが無い場合の既存エラー（回帰テストで確認）は変更していない。
+
+---
+
+### BL-245: Detectorの思考プロセス監査（R5）が、User AI自身の承認判断reasoningにもExpert向けの強制major指示を適用し、承認ループを引き起こしていた
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| テスト | `tests/test_bl245_detector_thought_audit_scoped_to_expert.py`（新規4件: target_roleによる分岐の存在確認、user分岐に強制major指示が無いこと、expert分岐の既存指示が維持されていること、reasoning参照フィールド分岐の回帰確認） |
+| 関連 | BL-245（本件）、R5/F-2.1（思考プロセス監査の初出）、BL-023（criteria_status機構）、BL-197（承認基準はacceptance_criteriaを超えないというStage3向けの既存ルール、今回の初期仮診断で誤って対象にしかけた） |
+
+**内容:**
+
+ユーザーが稼働中のドライラン（`log/2026-08-16/1150`）で「task_2_4_1が停滞しています」と報告。同タスクのホワイトボードはVer.1からVer.24まで改版され、判定：Rejectedが8回繰り返されていた（ユーザーは`phase_2_task_2_4_1_V24.md`をIDEで開いて提示）。
+
+**調査の経緯（2段階）:** 当初、User AI Stage3/4の承認理由が「候補経路ごとの区間別実績証跡が提示されていない」という、task_2_4_1自身が明示する「実走はtask_5_2の担当」という切り分けを超えた水準を要求しているように見え、「Stage3/4のプロンプトにacceptance_criteria遵守の自己チェックを追加する」という修正方針でユーザーの承認を得た。しかし実装前にコードを確認したところ、その趣旨のルール（`[BL-197: 承認基準はacceptance_criteriaを超えない]`）は既にStage3のプロンプトに存在しており、この仮診断は的外れと判明（AGENTS.md §16.2: 提案は必ず現在のコードに照らして検証する）。
+
+改めて、`実行（iter=N）`のペアリング分析と同じ手法で、このrunで発生した全28回のDetector応答（`"criteria_status":\[...\]`と`"constraint_issue":"..."`のペア）を機械抽出したところ、次の自己矛盾が繰り返し見つかった: `criteria_status=[true,true,true]`（BL-023の受入基準チェックは3項目とも充足と自己申告）でありながら、同一応答内で"AIの思考過程では独立した確認や検証を行わず、ユーザーの再提出への自信と次タスク指示がないことを根拠に承認を急いでおり、思考プロセス監査上の重大な事後正当化に該当する"という理由で`constraint_issue="major"`にしているケースが複数回（該当ラウンドの大半）あった。
+
+原因は`call_detector`内のR5「思考プロセス監査」ブロック（Expert/User AIのreasoningを提示し、「計算ツールを使っていないのに適当な数字を出している」「都合の悪い制約から目を逸らして結論を急いでいる」ように見えたら強制的にmajorとする指示）が、`target_role`（Detectorが誰の出力を監査しているか）に関わらず同一文面で適用されていたこと。この文面はExpertの数値的主張（python_replを使わず適当な数字を出す等）を想定して設計されたものだが、`target_role=="user"`（Detectorが**User AI Stage3自身の承認/却下判断**のreasoningを監査する場合）に適用すると、User AI Stage3はそもそもpython_repl等の計算ツールを持たず、かつ承認判断は本質的に確信を持った言い切りになりやすいため、「確信を持って承認した」という正当な判断そのものが「結論を急いだハルシネーション」と機械的に誤判定される。
+
+**選択肢とユーザー判断:** ①R5の適用対象をExpert監査（target_role!="user"）に限定する、②criteria_statusとconstraint_issueの整合性をPython側で機械的に担保しDetectorへ再考を促す、③task_2_4_1単独の事象かもう少し調査してから決める、の3択を提示し、ユーザーは①（軽量・R5本来の設計意図に立ち返る）を選択。
+
+**修正:** `_reasoning_source`取得後、`target_role`で分岐。`target_role=="user"`の場合は「思考プロセス（参考情報）」として、承認・却下の最終判断はBL-023 criteria_status等の構造化判定を優先すること、「確信を持った言い回しで承認している」こと自体を理由に単独でmajorとしないことを明記（ただし明白な事実誤認・issue矛盾は従来どおり反映可）。`target_role!="user"`（Expertの成果物監査）の場合は既存の強制major指示をそのまま維持する。
 
 ---
 
