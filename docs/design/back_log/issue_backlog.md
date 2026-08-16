@@ -8096,7 +8096,7 @@ BL-238で削除したExpert/User AI向けの改版フック（自己修正用シ
 |------|------|
 | 状態 | `done` |
 | 優先度 | P2 |
-| テスト | `tests/test_bl134_unsupported_generalization_guard.py`（既存の存在確認テストが引き続きPass、文言追加のみで既存文は変更していないため回帰なし） |
+| テスト | `tests/test_bl134_unsupported_generalization_guard.py`（既存の存在確認テストを最終文言に合わせて更新、「情報不足だけではmajorにしない」という原則自体の存続とweb_search確認要求の両方を確認） |
 | 関連 | BL-188（citations付き主張の裏取り指示、本件が対象とする「何も言っていない欠落」とは別軸）、BL-198（地理データにおける同種の「取得できないものに限定」区別、既に存在していた先例）、AGENTS.md §15.1（同じ設計原則を横展開） |
 
 **内容:**
