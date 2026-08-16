@@ -2955,6 +2955,20 @@
 
 ---
 
+### D-211: BL-242 — 依存タスク未読の検知はDetectorへの警告に留め、ターンの機械的強制は行わない
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-16 |
+| 状態 | `decided` |
+| 決定者 | t-momose（機械的検知＋差し戻しの両案を提示）、Claude（差し戻し案の却下理由の提示、警告案の実装） |
+| **決定理由** | BL-241の対応後、ユーザーが「依存タスクを読んでいなければ機械的に検知してDetectorに示すか、あるいはターンを強制続行して必ず読ませるべきでは」と提案した。後者（機械的強制）は、同日中に実装・撤回したthink必須化の機械的強制（D-206②→D-207で撤回）と同型のコスト構造——往復回数・トークン消費の増加、形だけの遵守（read_deliverable_fileを呼ぶだけ呼んで中身を活かさない）のリスク——を持つと判断した。前者（機械的検知＋Detectorへの警告）は、既存のBL-033（Expertがpython_replを一度も使わなかった場合にDetectorへ警告し独立検算を促す仕組み）と全く同型のパターンで実装リスクが低く、ターンを止めないためコスト増も無い。まず軽い方（警告）を実装し、それだけでは実効性が不足すると実ドライランで確認されてから重い方（強制）を検討する、という順序で合意した。 |
+| 決定内容 | `_read_deliverable_file_handler`がtask_id指定付きで成功した読み取りを`_LAST_DELIVERABLE_READ_TASK_IDS`へ記録し、`expert_node`が`state["expert_last_deliverable_reads"]`へ橋渡しする。`call_detector`が現在タスクの`depends_on`とこの記録の差分（未読のtask_id）を計算し、非空であればDetectorへの警告ブロックとして提示する（BL-033の`python_calls_block`と対になる位置）。`constraint_issue`を機械的に上書きする処理は持たず、Detector自身の判断に委ねる。ターンの強制差し戻し（機械的リトライ）は本決定の対象外とし、実装しない。 |
+| 影響 | `cela_main.py`（`_LAST_DELIVERABLE_READ_TASK_IDS`/`get_last_deliverable_reads`の新設、`_read_deliverable_file_handler`、`query_AI`のリセット対象、`expert_node`のstate橋渡し、`LineageState` TypedDict、初期state構築、`call_detector`のプロンプト構築）、新規`tests/test_bl242_deliverable_read_gap_detector_warning.py`（6件）。 |
+| 関連 BL | BL-242（本件）、BL-241（本件の直接の動機）、BL-033（同型の先例）、BL-108/BL-110・D-206/D-207（機械的強制を避けた根拠） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
