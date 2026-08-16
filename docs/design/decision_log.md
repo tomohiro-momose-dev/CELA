@@ -2969,6 +2969,34 @@
 
 ---
 
+### D-212: BL-243 — `trace_lineage`のwhiteboard: ref使用案内は、共有段落からも完全に削除する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-16 |
+| 状態 | `decided` |
+| 決定者 | t-momose（`log/2026-08-16/1111`の空系譜ログの提示、4ログ横断調査の指示、「`実行（iter`で検索して実直に追え」という全数調査の指示）、Claude（原因特定・修正） |
+| **決定理由** | BL-238は`_build_task_scope_context`のExpert向け改版3回目発火ブロックからtrace_lineage(whiteboard:...)呼び出し指示を削除したが、`log/2026-08-16/1111`で同じ空振りがUser AI(Stage1)から再発した。4ログ全件のツール呼び出し・結果をペアリングして機械的に分類した結果、whiteboard: refでの`trace_lineage`呼び出しは正しい書式（2149ログ）でも系譜0件、誤った書式（1111ログ）でも「該当refなし」であり、書式によらず常に無駄打ちになると確認した。原因は、Expert/User AI各Stage/Detector等7箇所から共有される`_TRACE_LINEAGE_USAGE_PARAGRAPH`に「ホワイトボードの版歴」「whiteboard:<phase_id>:<task_id>」という案内がBL-238修正後も残っていたため（AGENTS.md §15.1: 同じ規則の別コピーの更新漏れ）。relation_edgesにwhiteboard: refを指すエッジを書く本番コード経路は依然として存在しないため、BL-238と同じ結論（版歴を読む専用の消費経路は不要、issue_log.occurrence_countが代替）を、今度は全ての参照箇所に一貫して適用する。 |
+| 決定内容 | `_TRACE_LINEAGE_USAGE_PARAGRAPH`から「ホワイトボードの版歴」および「whiteboard:<phase_id>:<task_id>」というref書式の案内を削除する。`_resolve_ref_table`・`_write_relation_edge`側のwhiteboard:分岐（`test_bl228_chat_history_lineage.py`が検証する汎用機構）自体は削除しない——trace_lineageツールがwhiteboard: refを技術的に受け付けること自体に害はなく、問題は「積極的に使うよう案内する」文言の側にあったため。 |
+| 影響 | `cela_main.py`（`_TRACE_LINEAGE_USAGE_PARAGRAPH`）、新規`tests/test_bl243_trace_lineage_whiteboard_removed.py`（4件）。 |
+| 関連 BL | BL-243（本件）、BL-238（同一原因の先行対応、今回の未完了分）、BL-228（`trace_lineage`使用指示の初出） |
+
+---
+
+### D-213: BL-244 — `read_reference_file`はkeyword+grep同時指定時、keywordが一意に解決できればgrepを試みる
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-16 |
+| 状態 | `decided` |
+| 決定者 | t-momose（4ログ横断調査・全数調査の指示、BL-243と同一の依頼から派生）、Claude（原因特定・実装） |
+| **決定理由** | BL-243と同じ全数調査（4ログの`実行（iter=N）`呼び出し・結果ペアの機械的分類）で、`read_reference_file`が全26回中12回（46%）「grepはpathと組み合わせて指定してください」で失敗していたことを発見した。内訳は独立した4つ以上のExpertロールが、いずれも`{"path": "", "keyword": X, "grep": X}`という同一の形で呼んでおり、単発の個体差ではなくモデルが自然に到達する呼び出し形と判断した。`read_reference_file_handler`の実装を確認すると、`grep and not path`の早期ガードは`keyword`の値を一切見ずに拒否しており、`keyword`が一意に1件へ解決できる場合でもそれを試さなかった。BL-241（task_idという権威情報を持っているのにtopic_keywordの不一致で撥ねていた）と同型の「解決できる情報が既に揃っているのに問答無用で撥ねる」パターンであり、同じ考え方（既に持っている情報で解決を試みてから拒否する）を適用するのが妥当と判断した。 |
+| 決定内容 | `read_reference_file_handler`（`web_tools.py`）で、`grep`が`path`無しで指定された場合、`keyword`が無ければ従来通り即エラー。`keyword`があれば、新設の`_resolve_reference_cache_path_by_keyword`ヘルパー（keyword単独ブランチの既存ロジックを共通化したもの）でまず`path`を解決し、0件はnot_found・複数件は既存のmultiple_matches（BL-216のpreview付き候補一覧）へフォールバックし、1件に絞れた場合のみ解決した`path`で通常のpath+grep処理へフォールスルーする。 |
+| 影響 | `web_tools.py`（`read_reference_file_handler`、新設`_resolve_reference_cache_path_by_keyword`）、`tests/test_bl184_web_tools.py`に新規5件追加。 |
+| 関連 BL | BL-244（本件）、BL-243（同一調査で発見）、BL-241（同型パターンの先例）、BL-221（`grep`パラメータの初出）、BL-216（keyword複数マッチ時のpreview機構） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
