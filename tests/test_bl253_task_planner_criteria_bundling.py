@@ -16,6 +16,14 @@ BL-253: task_plannerの分割ルール（BL-023、acceptance_criteria最大3個�
 した複数シナリオ・複数対象を暗黙に束ねていないか」という判定軸を追加する、より的を絞った
 軽量な対処とした（ユーザー承認）。
 
+[フォローアップ、同日] ユーザーが「task_plannerの実装ですが、レビュワーにも同じ観点が
+必要です」と指摘。task_plan_reviewer（call_task_plan_reviewer）のレビュー観点は当初
+1〜4（曖昧な表記／タスクの過不足／順序の妥当性／条件の明示）のみで、acceptance_criteriaの
+個数・束ねを直接チェックする観点が無かった（「タスクの過不足」はタスク単位の欠落・重複を
+見るものであり、1タスク内の受入基準の粒度は対象外）。task_plannerの生成段階にBL-253を
+入れても、実際の生成では見落とされうるため、独立した第二の防衛線として、Reviewer側にも
+同じ判定軸を観点5として追加した。
+
 実LLM API呼び出しは伴わない。参照: docs/design/back_log/issue_backlog.md BL-253。
 """
 
@@ -50,3 +58,27 @@ def test_task_planner_prompt_applies_even_when_count_is_within_limit():
     idx = src.index("BL-253")
     nearby = src[idx: idx + 400]
     assert "3以内" in nearby or "個数" in nearby
+
+
+def test_task_plan_reviewer_prompt_mentions_bl253():
+    """[フォローアップ] Reviewer側にも同じBL-253の判定軸が追加されていること。"""
+    src = inspect.getsource(cela_main.call_task_plan_reviewer)
+    assert "BL-253" in src
+
+
+def test_task_plan_reviewer_prompt_checks_bundling_even_within_count_limit():
+    """Reviewerの観点5が、個数が3以内でも暗黙の束ねを確認する旨を含むこと。"""
+    src = inspect.getsource(cela_main.call_task_plan_reviewer)
+    idx = src.index("BL-253")
+    nearby = src[idx: idx + 500]
+    assert "3以内" in nearby
+    assert "複数のシナリオ" in nearby or "複数対象" in nearby
+    assert "暗黙" in nearby
+
+
+def test_task_plan_reviewer_prompt_lists_five_review_criteria():
+    """観点の総数が4→5へ更新され、"5つとも"という文言に一貫していること
+    （観点を追加したのに導入文の個数だけ古いままという不整合を防ぐ回帰チェック）。"""
+    src = inspect.getsource(cela_main.call_task_plan_reviewer)
+    assert "5つとも" in src
+    assert "4つとも" not in src
