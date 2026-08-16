@@ -2066,17 +2066,42 @@ def _resolve_deliverable_pointer(task_id: str, topic_keyword: str) -> str | None
     Deliverableのファイル名はトピック文字列＋Unixタイムスタンプ（またはR4のWHITEBOARD:ポインタ）
     で決まり、AIが事前に予測できないため、agreements DBに記録された`FILE_PATH:...`/`WHITEBOARD:...`
     ポインタ（生の値）を逆引きする。同一task_id/topicで複数件ある場合は最新（id最大）を優先する。
+    [BL-241] 従来はtask_idを指定していても、topic_keyword全体（スペース区切りの複数語を
+    そのまま連結した文字列）が実際のtopic文字列に一字一句連続して含まれていないと一致せず、
+    モデルの推測キーワードが実際のtopic文言と完全には一致しない現実的なケース
+    （log/2026-08-16/1000でtask_7_1がtask_5_4/task_6_3の読み取りに3回とも失敗し、それ以降は
+    他の依存タスクへの読み取りを一切試みないまま統合文書を書いた）でほぼ確実に空振りしていた。
+    BL-084で「Deliverableの識別はtopic文字列ではなく(phase_id, task_id)を権威とする」方針が
+    既に確立されている（topic文字列はDeliverableの識別子として信頼できないため）ため、
+    task_idが指定されている場合はそれ自体で十分とみなし、topic_keywordによる絞り込みを求めない
+    （ユーザー指摘）。task_id未指定でtopic_keywordのみによる検索の場合に限り、従来のフレーズ
+    全体一致に加え、read_verified_fact側のBL-187と同型のトークン分割OR検索フォールバックを使う
+    （同じヘルパー_tokenize_topic_keywordを再利用、§15.1単一ソース）。
     """
     conn = get_active_conn()
     run_id = _CURRENT_RUN_ID
     agreements = get_agreements_from_db(conn, run_id)
-    candidates = [
+    deliverables = [
         a for a in agreements
         if a.get("entry_type") == "Deliverable"
         and (str(a.get("decision_what", "")).startswith("FILE_PATH:") or str(a.get("decision_what", "")).startswith("WHITEBOARD:"))
         and (not task_id or a.get("task_id") == task_id)
-        and (not topic_keyword or topic_keyword in str(a.get("topic", "")))
     ]
+    if task_id:
+        # task_id自体が権威（BL-084）。topic_keywordはここでは絞り込みに使わない。
+        candidates = deliverables
+    else:
+        candidates = [
+            a for a in deliverables
+            if not topic_keyword or topic_keyword in str(a.get("topic", ""))
+        ]
+        if not candidates and topic_keyword:
+            tokens = _tokenize_topic_keyword(topic_keyword)
+            if tokens:
+                candidates = [
+                    a for a in deliverables
+                    if any(t in str(a.get("topic", "")) for t in tokens)
+                ]
     if not candidates:
         return None
     best = max(candidates, key=lambda a: a.get("id", 0))
@@ -5315,17 +5340,17 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
             # OpenRouterにサイレントに無視されてreasoningが一切発火していなかった（response.reasoningが
             # 常にnull）。判定系ノードに加え、ツール付与ノード（Expert/User AI/Resource Arbiter等）にも
             # ツール呼び出し前後の「つぶやき」をログで可視化する目的でlow reasoningを付与する。
-            reasoning_effort_level = "low"
+            reasoning_effort_level = "medium"
             if label_lower in ("user ai", "decision extractor", "orchestrator", "facilitator"):
                 # [BL-109] orchestrator/facilitatorはBL-093以前と同じくtools=None（think無し）に
                 # 戻したが、reasoning_effort_levelは元々`elif tools is not None`経由でしか付与
                 # されていなかったため、明示的にlabelへ追加しないとtools=None化の副作用として
                 # サイレントにreasoningが無効化されてしまう（実装時に発見・修正）。
-                reasoning_effort_level = "low"
+                reasoning_effort_level = "medium"
             elif label_lower == "reflection" or label_lower == "review" or label_lower == "detector" or label_lower == "except":
-                reasoning_effort_level = "low"
+                reasoning_effort_level = "medium"
             elif tools is not None:
-                reasoning_effort_level = "low"
+                reasoning_effort_level = "medium"
 
             create_kwargs["max_tokens"] = get_max_tokens(label_lower)
             # 🌟 【追加部分】OpenRouter使用時のみ、高速プロバイダーを強制指定する
