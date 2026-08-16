@@ -281,6 +281,7 @@
 | BL-252 | 中 | `web_tools.py`（`_grep_with_context`）・`cela_main.py`（`READ_REFERENCE_FILE_TOOL`のgrep説明） | **`done`。** ユーザーが「`read_reference_file`実行でファイル名を指定しているが、読めていないのは？」と質問。`path`＋`grep`指定の呼び出し14件を洗い出すと、`|`を含まない単一語グレップ7件は全件成功、`|`区切りOR7件は全件`not_found`という完全な相関が判明。該当キャッシュファイルの内容を直接確認したところ検索対象の語は実在しており、`_grep_with_context`が`pattern in line`のリテラル部分一致のみで`|`をOR演算子として扱っていなかったことが原因（ツール名・パラメータ名`grep`が示唆する挙動と実装の食い違い）。フル正規表現化（ReDoSリスク）ではなく`pattern.split("|")`によるいずれか一致へ限定して対応し、schema説明にも仕様を明記。 | P2 |
 | BL-253 | 中 | `cela_main.py`（`call_task_planner`の指示3、`call_task_plan_reviewer`の観点5） | **`done`。** ユーザーが`log/2026-08-16/1832`のtask_2_1成果物の分量を見て「サブタスク化して個別項目に集中させる方が良いか」と相談。調査の結果、task_2_1はacceptance_criteria3個以内（BL-023ルール）を満たしながら、1個の基準の中に縮小・基準・上振れ3シナリオ等、独立した複数の分析を暗黙に束ねていたと判明（BL-023が元々防ごうとした「粗い分解による検証コストの乗算的増大」の抜け道）。無制限の細分化のトレードオフ（Detector監査・User AI承認ラウンドの増加）を提示した上で、既存の分割判定基準（指示3）へ「個数が3以内でも1個の基準が複数シナリオ・複数対象を暗黙に束ねていないか」という判定軸を追加する軽量な対処で合意。同日フォローアップでユーザーが「レビュワーにも同じ観点が必要」と指摘し、`call_task_plan_reviewer`にも同じ判定軸を観点5として追加。 | P2 |
 | BL-254 | 中 | `cela_main.py`（`call_task_plan_reviewer`の観点6〜8） | **`done`。** BL-253フォローアップ後、ユーザーが「最近のタスクプランナーの実装でレビュワー側に抜けている点も洗い出してください」と依頼。`call_task_planner`の指示1〜15とReviewerの観点を全件突き合わせ、BL-219（派生値のconfirmed_variables登録）・BL-196（Expertの実行環境で到達可能な水準か）・BL-250（範囲限定文言への調査許可併記）の3件がReviewer未反映と判明（いずれも「生成側にだけ判定軸があり監査側に無い」というBL-253と同型パターン）。ユーザー承認を得てReviewerの観点を5個から8個へ拡張し実装。 | P2 |
+| BL-255 | 高 | `cela_main.py`（`_resolve_task_transition`・`_build_next_task_candidates_text`・`generate_user_utterance`のStage4） | **`done`。** ユーザーが実行中のドライラン（`log/2026-08-16/2020`）で「phase2からいきなり5に飛んでいます。なぜですか？」と質問。write_agreementのDeliverable全件を機械抽出したところ、phase_3・phase_4・task_2_3が一度も実行されずphase_5へ進んでいたと判明。原因はUser AI (Stage4)がdepends_on充足だけを根拠に先読みしていたこと、かつtask_5_1への指示文自体が未実行のtask_3_1/task_4_1の前提を引き継ぐよう書かれていた実害を確認。ユーザーの追加指摘（「タスク表は一番上にあるので後続コンテキストに押し流されているかも」）を受け、stage4_system_promptが巨大なphases_json＋大量の指示文をchat_historyより前に固定する構成だったこと、`_resolve_task_transition`が遷移先のdepends_on充足を一切検証していなかったことの2点を特定。(1) 依存充足済みタスクをPython側で機械算出しchat_historyより後ろへ配置する候補リスト、(2) 遷移先のdepends_on未完了を機械的にブロックするゲート（BL-125/176と同型）、の両方を実装。 | P1 |
 
 ---
 
@@ -8435,6 +8436,32 @@ BL-253フォローアップ実装の直後、ユーザーから「最近のタ�
 いずれも「生成側（task_planner）にだけ判定軸があり、監査側（Reviewer）に無い」というBL-253と同型のパターン（AGENTS.md §15.2「部分的な保護は無いより危険」）。ユーザーが3件とも実装を承認。
 
 **修正:** `call_task_plan_reviewer`の観点を5個から8個へ拡張。観点6（BL-196: 実行環境での実現可能性）・観点7（BL-250: 範囲限定文言の調査許可併記）・観点8（BL-219: confirmed_variables登録）を追加し、導入文の個数表記（「8つとも」）・「重大な問題」の列挙（到達不能な要求・調査許可併記漏れ・confirmed_variables未登録）を整合させた。BL-219チェックに必要な`READ_VERIFIED_FACT_TOOL`は既にReviewerのツールリストに含まれており、新規ツール追加は不要だった。
+
+---
+
+### BL-255: User AI (Stage4)が依存タスクを飛ばして先読みし、phase_3・phase_4を丸ごと未実行のままphase_5へ進んだ
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| テスト | `tests/test_bl255_task_transition_dependency_gate.py`（新規9件: 依存未完了タスクが候補から除外されること、依存完了後に候補へ現れること、候補ゼロ時のメッセージ、`_resolve_task_transition`が依存未完了で遷移をブロックすること、依存充足時は許可されること、ブロック通知のone-shot消費、`route_after_user_decision`が新フラグを条件に含むソースレベル確認、候補リストがchat_history後・独立systemメッセージとして追加される配置確認2件） |
+| 関連 | BL-024（`_resolve_task_transition`＝current_task_id唯一の書き手の初出）、BL-125/BL-176/BL-181/BL-183（同型の機械的遷移ブロックパターンの先例）、BL-178/BL-185（「最重要情報はchat_historyより後ろに置く」recency設計原則の初出） |
+
+**内容:**
+
+ユーザーが実行中のドライラン（`log/2026-08-16/2020`、run_id=1786879248-754a2c00）で「phase2からいきなり5に飛んでいます。なぜですか？」と質問。`write_agreement`（entry_type="Deliverable"）の全件を実行順に機械抽出したところ、実際の完了順序は`task_1_1→task_1_2→task_2_1→task_2_2→task_5_2→task_5_3→task_5_1（実行中）`で、**phase_3・phase_4・task_2_3はこのrunで一度も実行されていなかった**。
+
+原因を追ったところ、task_2_2承認直後のUser AI (Stage4)のthink記録に「依存関係上、次はtask_5_2を指示する」とあり、**フェーズ順序ではなく`depends_on`の充足だけを根拠に先読みしていた**ことが判明した。さらにtask_5_1への実際の指示文（User AI自身が書いた文面）は「task_2_1、task_3_1、task_4_1の前提を引き継ぎ」となっていたが、task_3_1・task_4_1は共に未実行であり、Expertが引き継ぐべき前提は実在しなかった。
+
+ユーザーから「User AIはプロンプスにタスク表を入れているが、一番上なので、その後のコンテキストに押し流されているのかもしれない」という追加の指摘があり、これを踏まえて実装を精査した結果、原因は2つあると判明した。
+
+1. **stage4_system_prompt（実際にStage4で使われる、`system_prompt_leading`/`trailing`とは別の独立したプロンプト構築経路）は、冒頭近くに巨大なphases_json（全フェーズ・全タスク）を埋め込み、その直後に`_BL192_DIRECTIVE_QUALITY_BLOCK`等の大量のテキストが積み上がる構成で、chat_historyより前に固定される。**BL-178/BL-185が確立した「最重要情報はchat_historyより後ろ（プロンプト全体で最後）に置く」という設計原則が、このStage4専用の経路には適用されておらず、依存関係の判断材料が実質的に埋もれていた。
+2. **`_resolve_task_transition`（BL-024、`current_task_id`の唯一の書き手）は、離脱元タスクの状態（BL-125: 未解決issue、BL-176: 未承認）しか検証しておらず、「これから進む先」のdepends_onが実際に完了しているかは一度も検証していなかった。** User AIの自由な依存関係の読解に委ねるだけの構造で、機械的な後ろ盾が存在しなかった。
+
+**修正:** ユーザー承認のもと両方を実装した。
+1. `_build_next_task_candidates_text(conn, run_id, phases)`を新設。depends_onが全て完了している未着手タスクをPython側で確定的に算出し、`stage4_messages`のchat_history追記より後ろ（＝プロンプト全体で最後）に独立したsystemメッセージとして追加する（BL-178/BL-185と同型のrecency配置パターン）。
+2. `_resolve_task_transition`に、遷移先task_idの`depends_on`が実際に完了しているかを検証する機械的ゲートを追加。未完了があれば、BL-125/BL-176と同型のone-shot通知フラグ（`task_transition_blocked_unmet_deps_task_id`/`task_transition_blocked_unmet_deps`）をセットして遷移をブロックし、`_build_task_transition_blocked_notice`で理由を通知、`route_after_user_decision`のBL-181機械的差し戻しにも同フラグを追加してOrchestrator/Expertへ素通りしないようにした。
 
 ---
 
