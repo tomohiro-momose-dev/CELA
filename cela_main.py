@@ -9457,6 +9457,22 @@ _BL192_DIRECTIVE_QUALITY_BLOCK = (
     "ください（①②③④はすべて、指示文を『抽象的な依頼』から『具体的な行動計画』へ変える"
     "ためのものであり、受入基準自体を拡張するものではありません）。\n"
 )
+# [BL-247] User AIの役割そのものを明文化する共通ブロック。ユーザー指摘：「ユーザーAIの役割は、
+# 目標・フェーズ・タスクの意図を読み取り、その意図から何を具体化させるか／させなければ
+# ならないかを考え、その手段と作業をエキスパートに指示する。それに基づきレビューも行う」。
+# BL-192/BL-246が「指示文の質」という戦術面を扱うのに対し、これはレビュー（Stage1/Stage3）と
+# 指示（Stage4）の両方に共通する上位の役割認識を明文化する。issue確認（Stage2、既存issueの
+# 状態整理という機械的な作業が主）と技術待機メッセージ（ApprovalRecordingFailed）には
+# 適用しない。
+_USER_AI_ROLE_MANDATE = (
+    "\n【あなたの役割】あなたは提出された成果物を字面だけで検収する係ではありません。目標・"
+    "フェーズ・現在タスクの記述が持つ意図（なぜこのタスクが計画に存在するのか、最終的に何を"
+    "明らかにしたいのか）を読み取り、その意図に照らして「何を具体的にする必要があるか／"
+    "しなければならないか」を自分で考えてください。次タスクへの指示はその考えに基づいて"
+    "具体的に出し、レビュー・承認判断も同じ意図に照らして行ってください——"
+    "acceptance_criteriaの字面が形式上満たされているかだけでなく、その背後にある意図が"
+    "実質的に満たされているかを見てください。\n"
+)
 # [BL-115] BL-094（read_verified_fact/read_deliverable_fileでの既存確定値との同期説明）は
 # 当初パラメータ化ヘルパーへの集約を試みたが、tests/test_bl094_read_tool_orientation.pyが
 # 各関数自身のinspect.getsource()に"BL-094"/"read_verified_fact"/"read_deliverable_file"/
@@ -12257,6 +12273,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"成果物を、これから4段階に分けてレビューします。今回はこの第1段（ドメイン妥当性レビュー）"
             f"のみを担当してください。承認判断・issueの記録・次の指示は後続の別ステージで行うため、"
             f"ここでは行わないでください。\n\n"
+            f"{_USER_AI_ROLE_MANDATE}"
             f"【目標】{user_goal}\n"
             f"{goal_essence_text}\n"
             f"【検算とドメインレビューの役割分担】数値の機械的検算（合計・比率・閾値比較等）は既に"
@@ -12367,6 +12384,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"（統合承認判断）です。第1段（レビュー）・第2段（issue確認）の結果を踏まえ、"
             f"Agent AIの成果物を承認するかどうかだけを判断してください。次タスクへの指示はまだ"
             f"行わないでください（後続の第4段で行います）。\n\n"
+            f"{_USER_AI_ROLE_MANDATE}"
             f"【第1段（レビュー）の結果】{review_comment}\n"
             f"【第2段（issue確認）の結果】issues_handled等の対応済み、残存懸念: {remaining_concerns or '(なし)'}\n\n"
             f"【発注者としてのスタンス】相手が「制約が厳しい」と主張してきた場合、それが「動かせない"
@@ -12476,6 +12494,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
                 f"第4段（最終段）です。第3段で成果物の承認（{approval_status}）が確定しました。"
                 f"あなたの役割は、Task Plannerが作成した計画に従い、Agent AIへ**1度に1つずつ**"
                 f"次のタスクを指示することです（一気に複数指示すると相手が混乱するため厳禁）。\n\n"
+                f"{_USER_AI_ROLE_MANDATE}"
                 f"【目標】{user_goal}\n"
                 f"{goal_essence_text}\n"
                 f"📊 [プロジェクト進行計画]\n{json.dumps(state.get('phases', []), ensure_ascii=False, indent=2)}\n\n"
@@ -12517,6 +12536,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
                 f"あなたは目標達成のプロジェクトオーナー（発注者）です。これは4段階レビューの"
                 f"第4段（最終段）です。第3段の判断（{approval_status}）により、今回は承認せず、"
                 f"Agent AIへ現タスクの修正指示を出します。\n\n"
+                f"{_USER_AI_ROLE_MANDATE}"
                 f"【目標】{user_goal}\n"
                 f"{goal_essence_text}\n"
                 f"【却下・保留の理由（第3段）】{approval_reason}\n"
