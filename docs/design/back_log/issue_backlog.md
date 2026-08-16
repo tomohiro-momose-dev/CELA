@@ -275,6 +275,9 @@
 | BL-246 | 高 | `cela_main.py`（`_BL192_DIRECTIVE_QUALITY_BLOCK`・`call_expert`） | **`done`。** ユーザーが「成果物に地理情報に基づく具体的な数値からの台数・金額算定が見られない、後続タスクか」と質問。調査の結果、task_2_2/task_2_6は正しい担当タスクだが、Expertに配線済みのgsi_geocode/gsi_get_elevation/gsi_calc_distance_bearing/calc_road_route（GSI実測ツール）がrun全体（log/2026-08-16/1100〜1333、run_id=1786845632-22283a33）を通じて一度も呼ばれていないことが判明。ユーザーが「他のランでは積極的に使っていた」と指摘し、`docs/goal/chino_city_autonomous_bus.md`・`docs/refs/chino_city/chino_city_data.md`をバックアップの`copy`ファイルとdiffした結果、以前は与えられていた実座標・距離・標高等の具体的数値が、より厳しい自律探索版シナリオへの意図的な作り替えにより空欄化されていたと確認（ユーザー確認：Detectorが大学在籍者数の1名差等の些末な不一致で差し戻す等の問題を避けるため、ゴール/参照データに頼らずAI自身にWeb・GISで調べさせ構造化させたかったとのこと）。空欄化自体は意図通りだが、GISツール0回という結果について、モデルの知性の問題かプロンプトの縛りかとユーザーから問いがあり、調査の結果、コード中に「ゴール文の数値だけ使え」という明示的制約は存在しない一方、次タスクの指示文を自由記述するUser AI Stage4自身がExpertの持つツールの存在を一切知らされておらず、「web_searchで確認できなければ未確認としてください」という語彙だけで指示を書いていたこと（Stage4が実際に書いたtask_2_2の指示文で確認）、およびExpert自身のBL-198指示が「推測を実測へ差し替えよ」という是正型で「未確認をツールで能動的に確定させよ」という能動型ではなかったことを特定。ユーザー指示（「ユーザーAIにエキスパートが使用できるツールをまず認識させ、その上で、タスクに応じてそれらのツールの使用の指示を明示するように」「作業中に出てきた事物についてもっと深堀りするように」）を受け実装。既存のBL-192（次タスク指示文の質を強化する共通ブロック）に③Expertのツール一覧の周知＋行動計画を先に立てる指示、④ゴール文・既存成果物の定性的な言及（商業施設・学校・気候等）を具体的な事物・数値へ深堀りする指示、を追加。Expert自身のプロンプトにも対になる深堀り指示（BL-246）を追加した。 | P1 |
 | BL-247 | 中 | `cela_main.py`（`_USER_AI_ROLE_MANDATE`・`generate_user_utterance`） | **`done`。** BL-246の対応後、ユーザーが「ユーザーAIの役割は、目標、フェーズ、タスクの意図を読み取り、その意図と何を具体化させるか、させなければならないかを考え、その手段と作業をエキスパートに指示をする。それに基づき、レビューも行う。そのように動くようにプロンプトを修正、または追記」と指示。BL-192/BL-246が「指示文の質」という戦術面（web_search義務化・思考プロセス明示・ツール一覧・深堀り）を扱うのに対し、その土台となる上位の役割認識（acceptance_criteriaの字面だけでなく、目標・フェーズ・タスクの意図を自分で読み取り、何を具体化すべきかを考えて指示・レビューする）を明文化する`_USER_AI_ROLE_MANDATE`を新設し、Stage1（レビュー）・Stage3（承認判断）・Stage4（次タスク指示・現タスク修正指示の両分岐）へ挿入した。issue確認段（Stage2、機械的な状態整理が主）と技術的待機メッセージ（ApprovalRecordingFailed、成果物内容に一切言及しないことが要件）には適用しない。 | P1 |
 | BL-248 | 中 | `cela_main.py`（`call_task_plan_reviewer`・新設`_get_task_planner_phase_design_rationale_text`） | **`done`。** ユーザーが`log/2026-08-16/1512`のレビュー結果を受け、「Task Plan Reviewerがread_deliverable_fileをtask_id=\"task_planner_phase_design\"という実在しないIDで4回試みています（毎回正しく拒否）。Task PlanerとTask Plan Reviewerが上手く情報を取得できるように、プロンプトの指示を修正して」と依頼。調査の結果、BL-095はtask_plannerへ`entry_type=\"Decision\"`・`topic=\"task_planner_phase_design\"`でwrite_agreementするよう指示する一方、task_plan_reviewerへは`read_deliverable_file（task_planner_phase_design）`で確認するよう指示していたが、`read_deliverable_file`（`_resolve_deliverable_pointer`、BL-084/BL-241で確立）は`entry_type=\"Deliverable\"`かつFILE_PATH:/WHITEBOARD:ポインタを持つ行だけを対象とする設計であり、`entry_type=\"Decision\"`のこの行とは構造的に一致せず、書式の正誤に関わらず常に失敗する指示だったと判明（BL-243のtrace_lineage(whiteboard:...)と同型の「消費経路の指示自体が対象外のツールを名指ししていた」パターン）。修正は「別のツールを呼ばせる」のではなく、そもそも1件しかない固定topicの値を`call_task_plan_reviewer`がPython側で直接取得しプロンプトへツール呼び出し無しで埋め込む（`current_task_json`等と同型の既存パターン）。BL-095のSUPERSEDE指示（判断根拠に誤りがあった場合の無効化）自体は維持し、read_deliverable_fileでの再取得指示のみを削除した。 | P1 |
+| BL-249 | 中 | `cela_main.py`（`call_task_planner`） | **`done`。** ユーザーが「タスクプランナーは後続タスクで使えるツールが説明されていない。なのでタスク分解時に具体的にweb検索やGISを使用するという作業が生成できない」と指摘。`call_task_planner`のツール一覧はtask_planner自身が使えるツールのみで、分解先のExpertが使う下流ツール（GIS一式・register_entity等、BL-246の`_EXPERT_TOOL_AWARENESS_BLOCK`）を一切知らせていなかったと判明。既存の共有ブロックをそのまま追加参照し、ゴール文に無い事物・数値もExpertの下流ツールで調べられる旨を明示（新規の指示14）。 | P2 |
+| BL-250 | 高 | `cela_main.py`（`call_task_planner`・`_BL192_DIRECTIVE_QUALITY_BLOCK`・`call_expert`） | **`done`。** ユーザーが「車両の相場価格などを取得していないように見える」と指摘。task_2_2の「正式な◯◯を決定しないでください」という範囲限定文言を、Expertが「調べる必要もない」と誤読し、BL-192①のweb_search義務化指示が発火していたにもかかわらず一度もweb_searchせず未確定のまま完了させていたと判明。ユーザーは「正式」という語の全体置換を提案したが、調査の結果cela_main.py側の「正式」（11箇所）はほぼ全て草案/登録済み計画の区別という構造的用語で決定回避とは無関係、実際の原因はtask_planner（LLM）が生成するタスク記述側と判明。AGENTS.md §16.1に基づきより狭い代案（範囲限定文言を書く3箇所＝task_planner／User AI Stage4／Expertに「決定しない≠調べない、provisional登録は行え」を明示）を提案しユーザーが承認。 | P1 |
+| BL-251 | 高 | `cela_main.py`（`call_expert`のask_user_question案内・`generate_user_utterance`の相談応答モード） | **`done`。** ユーザーが「エキスパートは成果物内に個別事項の承認待ちを埋め込むが、ユーザーAIは成果物全体の承認/拒否しかできず、エキスパートが困っている」と指摘し、個別事項の採否確認をask_user_question経由で行い妥当なら承認する新しい状態遷移を提案。調査の結果`ask_user_question`＋`expert_consultation_mode`（BL-130）のループ自体は既に配線済みで、(1)Expert側の案内が抑制的で個別採否確認への使用を想定していなかった点、(2)User AI側の相談応答プロンプトが`write_agreement`呼び出しを一律不要と明記していた点（ツール自体はtools引数に含まれている）の2箇所のみが塞がれていたと判明。新たなノード・エッジは追加せず、既存のstatus語彙（Approved/Approved_with_Conditions）で個別事項をその場即決できるよう2箇所を解禁・明示した。 | P1 |
 
 ---
 
@@ -8310,6 +8313,65 @@ Stage2（issue確認、既存issueの状態整理という機械的な作業が�
 
 ---
 
+### BL-249: task_plannerがExpertの下流ツールを一切知らないままタスクを分解していた
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| テスト | `tests/test_bl249_task_planner_tool_awareness.py`（新規3件: call_task_plannerが_EXPERT_TOOL_AWARENESS_BLOCKを埋め込んでいること、共有ブロックが主要ツールを列挙していること、具体的な調査手段を書けという指示文言の存在） |
+| 関連 | BL-246（_EXPERT_TOOL_AWARENESS_BLOCKの初出、User AI Stage4向け）、BL-250（同時対応、範囲限定文言の誤読対策） |
+
+**内容:**
+
+ユーザーが`log/2026-08-16/1512`のレビュー結果（車両相場価格がweb_searchされていない）を受けて、「タスクプランナーは後続タスクで使えるツールが説明されていない。なので、タスク分解時に具体的にweb検索やGISを使用するという作業が生成できない」と指摘。
+
+調査したところ、`call_task_planner`のプロンプト（[cela_main.py:9671](../../../cela_main.py#L9671)付近）に列挙されているツール一覧は、task_planner自身が計画立案中に使えるツール（python_repl・web_search等）のみであり、task_plannerが分解した各タスクを実際に実行するExpertの下流ツール（GIS一式・register_entity・write_agreement confirmed_variables等、BL-246で導入済みの`_EXPERT_TOOL_AWARENESS_BLOCK`）には一切触れていなかった。分解する側がExpertの持ち駒を知らなければ、acceptance_criteria/descriptionに「web_searchで相場を調べよ」「GISツールで実距離を算出せよ」という具体的な作業を書けない（本日のBL-243/246/248と同型の「入口はあるが出口がない」パターン、AGENTS.md §15.4）。
+
+**修正:** 既存の`_EXPERT_TOOL_AWARENESS_BLOCK`をそのまま`call_task_planner`のプロンプトへ挿入し（新規の指示14）、ゴール文に無い事物・数値もExpertの下流ツールで現実世界から調べられる旨を明示した。新しい定数は追加せず、既存の共有ブロックを1箇所追加参照しただけ（§15.1: 1ルール1箇所の維持）。
+
+---
+
+### BL-250:「正式に決定しない」という範囲限定指示が、Expertに「調べる必要もない」と誤読されていた
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| テスト | `tests/test_bl250_scope_limit_not_research_limit.py`（新規4件: User AI Stage4/Expert/task_plannerの3箇所すべてにBL-250の原則が含まれること、3箇所横断の欠落チェック） |
+| 関連 | BL-249（同時対応）、BL-192（次タスク指示文の質、①web_search義務化との整合）、task_2_2（実際にこの誤読が観測されたタスク） |
+
+**内容:**
+
+ユーザーが「エキスパートは車両の相場価格などを取得していないように見える」と指摘したのを受けた調査で、task_2_2「調達・契約・運用主体の成立条件確認」のタスク記述に「このタスクでは、正式な運行方式、車両台数、正式費用、契約先を決定しないでください」という範囲限定の文言があり、BL-192①のweb_search義務化指示が同タスクで正しく発火していた（「車両価格、保守費…はweb_searchで検証してから使用してください」）にもかかわらず、Expertは一度もweb_searchを呼ばず、「正式費用は未確定」という状態のまま項目を"Gate A〜E"の保留一覧へ登録して完了と判断していたことが判明した。
+
+続けてユーザーが「全体に"正式"という言葉に引っ張られている気がする。モデルの性質なのか、決定を躊躇している」と提起し、プロンプト全体で「正式」という語を"提案せよ"のニュアンスへ全体的に置き換えてはどうかと提案。調査したところ、`cela_main.py`固定プロンプト中の「正式」（11箇所）はほぼ全て`task_plannerの正式な計画に存在しません`のような、草案と実際に登録された計画とを区別する構造的な用語であり、決定回避とは無関係と判明した。実際に決定回避を招いていたのは、task_planner（LLM）自身が生成したtask_2_2固有の記述であり、固定プロンプト文言の全体置換では効かない。そこでAGENTS.md §16.1に基づき、より的を絞った軽量な代案（範囲限定を書く3箇所すべてに「決定しない≠調べない」を明示する一文を追加する）を提案しユーザーが承認。
+
+**修正:** 「正式決定しない」旨の指示は最終確定の先送りであって調査・暫定提案の禁止ではない、という原則を(1)task_plannerが範囲限定文言を書く箇所（新規の指示15）、(2)User AI Stage4が次タスク指示を書く際に参照する`_BL192_DIRECTIVE_QUALITY_BLOCK`（新規の原則⑤）、(3)Expert自身のプロンプト（BL-246深堀りブロックの直後に新規ブロック）の3箇所へ追加した。範囲外の項目でも`confidence="provisional"`でのweb_search調査・登録は行うよう明示している。
+
+---
+
+### BL-251: Expertが成果物内に埋め込む個別事項の「承認待ち」に、User AIが応答する経路がなかった
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| テスト | `tests/test_bl251_individual_item_consultation_approval.py`（新規4件: Expert側がask_user_questionを優先する指示を含むこと、User AI相談応答モードの一律禁止文言が消えたこと、個別事項承認の指示が含まれること、WRITE_AGREEMENT_TOOLが相談応答パスでも渡されていること） |
+| 関連 | BL-130（ask_user_question・expert_consultation_modeの初出、今回再利用した既存ループ） |
+
+**内容:**
+
+ユーザーが「エキスパートは成果物にしばしば個別事項について承認待ちという文言を入れてくる。ユーザーAIは成果物全体を承認/拒否する動作しか与えられておらず、個別事項が承認されないとエキスパートは困っている様子がある」と指摘し、個別事項の採否確認をask_user_question経由で行い、妥当ならUser AIがその場で承認してExpertに作業続行を指示する、という新しい動作を提案した。
+
+調査したところ、Expertが成果物ではなく質問を投げる`ask_user_question`ツール（BL-130）と、それに応答するUser AIの相談応答モード（`expert_consultation_mode`）は既に配線済みで、Expert→User AI→（`chat_history`経由で）Expertという一往復のループ自体は存在していた（[cela_main.py:13890](../../../cela_main.py#L13890)、[cela_main.py:15509](../../../cela_main.py#L15509)）。塞がれていたのは2箇所のみ：(1) Expert側の`ask_user_question`案内が「本当に前進できない場合にのみ使え」という抑制的なトーンで、個別の小さな採否確認への使用を想定していなかったため、Expertは相談機能を使わず成果物に未解決の「承認待ち」を埋め込んだまま提出していた。(2) User AI側の相談応答プロンプトが「write_agreementの呼び出しやタスク進行の判断は不要です」と明記しており、`WRITE_AGREEMENT_TOOL`自体はこのモードでも`tools=[...]`に含まれている（[cela_main.py:13044](../../../cela_main.py#L13044)）にもかかわらず、使用が明示的に抑制されていた。承認しても記録が残らないため、Expertは後から`read_verified_fact`等で確認できなかった。
+
+ユーザーは「差戻しとも違うので新たな状態遷移になる」と想定していたが、調査の結果グラフのノード・エッジは変更不要で、既存ループの使われ方を解禁・明示するだけの軽量な修正で対応可能と判断し、その旨をユーザーへ説明した上で実装した。
+
+**修正:** (1) Expert側の`ask_user_question`案内に、個別事項の採否確認（「◯◯は承認待ち」等を成果物内に埋め込まず、その場でask_user_questionを呼ぶ）を促す一文を追加。(2) User AI側の相談応答プロンプトから一律禁止の文言を除去し、「質問が個別事項の具体的な採否確認である場合は、ドメイン的・数値的に合理的なら`write_agreement(status="Approved"`または`"Approved_with_Conditions")`でその場で確定し、Expertが作業を継続できるよう回答文でも明示せよ。方向性の確認等、確定すべき個別事項がない質問はこれまで通り回答のみでよい」という分岐を追加した。既存の`status`語彙（Approved/Approved_with_Conditions/Rejected等）をそのまま使い、新しいstatus値・新しいグラフのノード・エッジは追加していない。
+
+---
+
 | 日付 | 内容 |
 |------|------|
 | YYYY-MM-DD | 初版 |
@@ -8517,3 +8579,4 @@ Stage2（issue確認、既存issueの状態整理という機械的な作業が�
 | 2026-08-16 | BL-246フォローアップを実装完了（`done`）。ユーザーが「プロンプトの内容がこのゴールに最適化しすぎている、別のお題が来ても通用するようにより一般化した表現にしてください」と指摘。Stage4側④・Expert側BL-246ブロックの例文を、茅野市シナリオ固有の語彙（商業施設・学校・冬季気候・SLA判定）から、ゴールの種類に依らない一般化した表現へ書き直した。テストのアサーションも旧語彙が残っていないことを確認する形へ更新、フルオフラインスイート1404 passed / 5 deselected。 |
 | 2026-08-16 | BL-247を起票・実装完了（`done`）。BL-246の対応後、ユーザーが「ユーザーAIの役割は、目標、フェーズ、タスクの意図を読み取り、その意図と何を具体化させるか、させなければならないかを考え、その手段と作業をエキスパートに指示をする。それに基づき、レビューも行う。そのように動くようにプロンプトを修正、または追記」と指示。BL-192/BL-246が「指示文の質」という戦術面を扱うのに対し、その土台となる上位の役割認識が明文化されていなかったため、`_USER_AI_ROLE_MANDATE`を新設し、Stage1（レビュー）・Stage3（承認判断）・Stage4（次タスク指示・現タスク修正指示の両分岐）の計4箇所へ挿入した。Stage2（機械的な状態整理が主）とStage4のApprovalRecordingFailed分岐（成果物内容への言及自体が禁止）には適用しない。新規テスト3件、§17.1リバート確認済み（`git stash`で3件中2件の失敗を確認）、フルオフラインスイート1407 passed / 5 deselected。 |
 | 2026-08-16 | BL-248を起票・実装完了（`done`）。ユーザーが`log/2026-08-16/1512`のレビュー結果を受け、「Task Plan Reviewerがread_deliverable_fileをtask_id=\"task_planner_phase_design\"という実在しないIDで4回試みている、上手く情報を取得できるようプロンプトを修正して」と依頼。BL-095はtask_plannerへentry_type=\"Decision\"で判断根拠を記録するよう指示する一方、task_plan_reviewerにはentry_type=\"Deliverable\"専用のread_deliverable_fileで読むよう指示しており、entry_typeが最初から食い違い書式の正誤に関わらず常に失敗する指示だったと判明（本日のBL-243と同型のパターン）。ツールを呼ばせるのではなく、`_get_task_planner_phase_design_rationale_text`をPython側で新設しcall_task_plan_reviewerのプロンプトへ直接埋め込む方式へ変更（D-217）。BL-095のSUPERSEDE指示は維持。新規テスト6件、§17.1リバート確認済み（`git stash`で6件全ての失敗を確認）、フルオフラインスイート1413 passed / 5 deselected。 |
+| 2026-08-16 | BL-249・BL-250・BL-251を起票・実装完了（いずれも`done`）。ユーザーが「タスクプランナーは後続タスクで使えるツールが説明されていない」「"正式"という言葉に引っ張られて決定を躊躇しているのでは、"提案せよ"のニュアンスにしては」「エキスパートが成果物内に埋め込む個別事項の承認待ちに、ユーザーAIが応答する経路がない」の3点を一度に指摘。BL-249: `call_task_planner`が自身の使えるツールしか知らず、Expertの下流ツール（`_EXPERT_TOOL_AWARENESS_BLOCK`、BL-246で導入済み）を知らないまま分解していた問題を、既存の共有ブロックを追加参照するだけで解消。BL-250: 「正式」という語自体はcela_main.py側では草案/登録済み計画を区別する構造的用語がほとんどで決定回避とは無関係と判明し、全体置換ではなく、task_plannerが生成する範囲限定文言（「正式な◯◯を決定しないでください」）が実際にExpertへ「調べる必要もない」と誤読されていた1点（task_2_2、車両価格）に絞って、task_planner/User AI Stage4/Expertの3箇所へ「決定しない≠調べない、provisionalでの調査・登録は行え」を明示する軽量な対処へ変更（AGENTS.md §16.1、ユーザー提案より狭い代案を提示し承認を得た）。BL-251: 個別事項承認の経路は`ask_user_question`＋`expert_consultation_mode`（BL-130）として既に配線済みと判明し、ユーザーが想定していた「新たな状態遷移」は不要と説明の上、(1)Expert側の相談ツール利用の抑制的トーンを緩和、(2)User AI側の相談応答プロンプトが明記していたwrite_agreement一律禁止を除去し、個別事項の採否確認には既存のstatus語彙（Approved/Approved_with_Conditions）でその場即決してよい分岐を追加、の2箇所のみで対応。3件とも新規テスト（4/4/4件、計12件）、§17.1リバート確認済み（`git stash`で12件中10件の失敗を確認）。フルオフラインスイート1425 passed / 5 deselected（既知の`test_bl215_record_id_uniqueness_and_ordering.py`の確率的衝突1件は無関係、単体再実行で8 passed）。 |
