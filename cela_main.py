@@ -4619,6 +4619,20 @@ def _build_task_transition_blocked_notice(state: LineageState) -> str:
         print(f"  📣 [BL-190] タスク再割当通知をLLMプロンプトへ注入します。")
         return f"\n【🛑 {reassigned_notice}】\n"
 
+    unmet_deps_task_id = state.get("task_transition_blocked_unmet_deps_task_id")
+    if unmet_deps_task_id:
+        unmet_deps = state.get("task_transition_blocked_unmet_deps") or []
+        state["task_transition_blocked_unmet_deps_task_id"] = ""
+        state["task_transition_blocked_unmet_deps"] = []
+        deps_text = "、".join(unmet_deps)
+        print(f"  📣 [BL-255] タスク遷移ブロック通知をLLMプロンプトへ注入します（{unmet_deps_task_id}、未完了の依存: {deps_text}）。")
+        return (
+            f"\n【🛑 BL-255: タスク遷移をブロックしました】直前の発言は'{unmet_deps_task_id}'への"
+            f"移行として解釈されましたが、その依存タスク（{deps_text}）がまだ完了していないため、"
+            "移行を見送りました。これらの依存タスクを先に完了させるか、直後に提示される"
+            "「次タスク候補」一覧の中から選び直してください。\n"
+        )
+
     return ""
 
 
@@ -5313,7 +5327,7 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
     # else: プロンプトをターミナルに出さない（ログファイルのみ）
 
     label_lower = label.lower()
-    temperature = 0.5 if any(kw in label_lower for kw in LOW_TEMP_LABEL_KEYWORDS) else 0.5
+    temperature = 0.2 if any(kw in label_lower for kw in LOW_TEMP_LABEL_KEYWORDS) else 0.2
     use_json_mode = any(kw in label_lower for kw in STRUCTURED_OUTPUT_LABEL_KEYWORDS)
     # [CONSTRAINT] response_format=json_objectとtools(Function Calling)は多くのプロバイダで排他的に
     # 動作するため、tools付与時はjson_modeを無効化する（設計書§3.5.1、R2.3）。
@@ -7406,6 +7420,48 @@ def _build_scheduling_history_text(conn: sqlite3.Connection, run_id: str) -> str
     return "【🗓️ BL-191: 直近のスケジューリング決定履歴】\n" + "\n".join(lines) + "\n"
 
 
+def _build_next_task_candidates_text(conn: sqlite3.Connection, run_id: str, phases: list[dict]) -> str:
+    """[BL-255] Stage4が次タスクを選ぶ際、depends_onが実際に全て完了しているタスクだけを
+    Python側で機械的に列挙する。実ドライラン（log/2026-08-16/2020）で、User AI (Stage4)が
+    task_2_2承認直後にphase_3・phase_4を飛ばしてtask_5_2→task_5_3→task_5_1へ進み、task_5_1の
+    指示文で「task_3_1、task_4_1の前提を引き継ぎ」と書きながら、その2タスクが一度も実行
+    されていなかった事故が発端。原因は2つ：(1) stage4_system_promptは巨大なphases_json
+    （プロンプト冒頭）の直後にBL-192指示ブロック等の大量のテキストが積み上がる構成で、
+    chat_historyより前に固定されるため、依存関係の判断材料が実質的に埋もれていた。
+    (2) 依存関係の判定自体をAIの自由な読解に委ねており、確定的な検証手段が無かった。
+    本関数はこの判定をPython側で確定的に行い、chat_historyより後ろ（＝プロンプト全体の
+    最後）に配置することで、依存未完了タスクへの先走りを構造的に防ぐ（§13.2/§15.4対応）。
+    """
+    completed = {
+        t.get("task_id", "") for phase in phases for t in phase.get("tasks", [])
+        if _is_task_completed(conn, run_id, t.get("task_id", ""))
+    }
+    candidates = []
+    for phase in phases:
+        for t in phase.get("tasks", []):
+            task_id = t.get("task_id", "")
+            if not task_id or task_id in completed:
+                continue
+            deps = t.get("depends_on") or []
+            if all(d in completed for d in deps):
+                dep_note = "、".join(deps) if deps else "なし"
+                candidates.append(f"- {task_id}「{t.get('title', '')}」（依存: {dep_note}）")
+    if not candidates:
+        return (
+            "\n【🧭 BL-255: 次タスク候補（機械的に算出）】\n"
+            "依存タスクが全て完了している未着手タスクは現時点でありません。"
+            "現在のタスクの完了・承認を優先してください。\n"
+        )
+    return (
+        "\n【🧭 BL-255: 次タスク候補（機械的に算出、必読・最優先）】\n"
+        "以下は、Task Plannerの計画上、依存タスク（depends_on）が現時点で全て完了している"
+        "未着手タスクの一覧です。次タスクとして指示する場合は、必ずこの一覧の中から選んで"
+        "ください。一覧に無いタスク（依存タスクが未完了のもの）への移行は、システム側で"
+        "機械的にブロックされます。\n"
+        + "\n".join(candidates) + "\n"
+    )
+
+
 def _get_frozen_agreements_text(conn: sqlite3.Connection, run_id: str) -> str:
     """[BL-086] Freeze済み（is_frozen=1）項目のみを抽出した軽量テキスト。Detectorの
     ドメイン妥当性レビューパス（従来agreements_textを一切受け取っていなかった）に、
@@ -8534,6 +8590,11 @@ class LineageState(TypedDict):
     # 不在）によりタスク遷移をブロックした場合、そのtask_idを次のUser AIターンへ一度だけ
     # 通知するためのフラグ。空文字列は未設定を意味する。
     task_transition_blocked_unapproved_task_id: str
+    # [BL-255] _resolve_task_transitionが遷移先task_idのdepends_on未完了によりタスク遷移を
+    # ブロックした場合、その遷移先task_idと未完了の依存task_id一覧を次のUser AIターンへ
+    # 一度だけ通知するためのフラグ。空文字列/空配列は未設定を意味する。
+    task_transition_blocked_unmet_deps_task_id: str
+    task_transition_blocked_unmet_deps: list[str]
     # [BL-144] reflection_nodeがBL-096の機械的stagnant上書きを「escalated issueが1件でも
     # 存在すれば無条件」から「同じescalated issueがユーザーノードを3回通過しても未解決」へ
     # 絞るための滞留追跡。issue_log行id -> 初めてescalated状態で観測したround_countの辞書。
@@ -12659,6 +12720,14 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             _role = "assistant" if msg["role"] == "user" else "user"
             stage4_messages.append({"role": _role, "content": msg["content"]})
 
+        # [BL-255] 依存関係が完了しているタスク候補を、chat_historyより後ろ（プロンプト全体で
+        # 最後）に独立したsystemメッセージとして追加する。冒頭のphases_json＋大量の指示文に
+        # 埋もれず、次タスク選定の直前に確定的な候補一覧を読ませるため（BL-178/BL-185と同型の
+        # 「最も重要な情報を最後に置く」パターン）。
+        _next_task_candidates_text = _build_next_task_candidates_text(_conn, state["run_id"], state.get("phases", []))
+        if approval_status in RESOLVING_DELIVERABLE_STATUSES and _next_task_candidates_text:
+            stage4_messages.append({"role": "system", "content": _next_task_candidates_text})
+
         content = query_AI(stage4_messages, client=client_user, model=model_user, label="User AI (Stage4)",
                             tools=[THINK_TOOL, SCHEDULE_TASK_FOCUS_TOOL, READ_ENTITY_TOOL], state=state)
         _absorb_stage_trackers()
@@ -14360,6 +14429,30 @@ def _resolve_task_transition(state: LineageState, transition: dict,
                 state["task_transition_blocked_unapproved_task_id"] = departing_task_id
                 return
 
+        # [BL-255] 遷移先タスクのdepends_onが実際に全て完了しているかを機械的に検証する。
+        # BL-125/BL-176は「離脱元」の状態しか見ておらず、「これから進む先」の前提条件は
+        # 誰も検証していなかった（実ドライラン log/2026-08-16/2020、phase_3・phase_4を
+        # 飛ばしてtask_5_1へ進もうとし、その指示文自身が「task_3_1、task_4_1の前提を引き継ぐ」
+        # と書きながら両タスクとも未実行だった事故）。User AI Stage4の自由な依存関係の読解に
+        # 委ねるだけでは防げないため、ここで確定的にブロックする。
+        if canonical_task_id != departing_task_id:
+            target_task_obj = next(
+                (t for t in target_phase.get("tasks", []) if t.get("task_id") == canonical_task_id), None
+            )
+            declared_deps = (target_task_obj.get("depends_on") or []) if target_task_obj else []
+            unmet_deps = [
+                d for d in declared_deps
+                if not _is_task_completed(get_active_conn(), state["run_id"], d)
+            ]
+            if unmet_deps:
+                print(
+                    f"  🛑 [BL-255] '{canonical_task_id}'の依存タスク{unmet_deps}が未完了のため、"
+                    f"遷移をブロックしました。"
+                )
+                state["task_transition_blocked_unmet_deps_task_id"] = canonical_task_id
+                state["task_transition_blocked_unmet_deps"] = unmet_deps
+                return
+
         state["current_task_id"] = canonical_task_id
         print(f"  ➡️ [decision_extractor] current_task_id を '{canonical_task_id}' に更新しました。")
 
@@ -15566,12 +15659,16 @@ Otherwise, routing to "user_decision_extractor."
         # 生成され、write_agreementのtask_id不一致ゲートに阻まれてtask_idを誤登録する回避策を
         # Expertが取ってしまった）。第1段（user_detectorのドメイン監査）で捕捉できなかった場合の
         # 保険として、ここでPython側のみで機械的に差し戻す（LLMを再度介在させない）。
-        # [BL-183] _resolve_task_transitionのブロック要因はtask_transition_blocked_unapproved_task_id
-        # （BL-176: 離脱先未承認）とtask_transition_blocked_issue_topics（BL-125本来: 未解決severe
-        # issue）の2種類が排他的に立ちうる。当初はBL-176側のみをチェックしており、BL-125本来の
-        # ブロック（`log/2026-08-06/0009`→`0751`で実際に再発、task_6_1の成果物がtask_id='task_5_2'
-        # として誤登録された）を素通りさせてしまっていたため、両方をチェックする。
-        if state.get("task_transition_blocked_unapproved_task_id") or state.get("task_transition_blocked_issue_topics"):
+        # [BL-183][BL-255] _resolve_task_transitionのブロック要因はtask_transition_blocked_unapproved_task_id
+        # （BL-176: 離脱先未承認）、task_transition_blocked_issue_topics（BL-125本来: 未解決severe
+        # issue）、task_transition_blocked_unmet_deps_task_id（BL-255: 遷移先の依存タスク未完了）
+        # の3種類が排他的に立ちうる（_resolve_task_transitionは最初に該当した1つでreturnするため）。
+        # 当初はBL-176側のみをチェックしており、BL-125本来のブロック（`log/2026-08-06/0009`→
+        # `0751`で実際に再発、task_6_1の成果物がtask_id='task_5_2'として誤登録された）を
+        # 素通りさせてしまっていたため、3種類全てをチェックする。
+        if (state.get("task_transition_blocked_unapproved_task_id")
+                or state.get("task_transition_blocked_issue_topics")
+                or state.get("task_transition_blocked_unmet_deps_task_id")):
             print("\n[route_after_user_decision]------ !!! BL-125によりタスク遷移がブロックされたため、Orchestratorへは進めずUser AIへ差し戻します !!! ------\n")
             return "generate_user_utterance"
 
@@ -15901,6 +15998,8 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
                 "escalation_just_resolved_notice_pending": False,
                 "task_transition_blocked_issue_topics": [],
                 "task_transition_blocked_unapproved_task_id": "",
+                "task_transition_blocked_unmet_deps_task_id": "",
+                "task_transition_blocked_unmet_deps": [],
                 "escalated_issue_first_seen_round": {},
                 "web_search_call_count": 0,
                 "web_fetch_call_count": 0,
