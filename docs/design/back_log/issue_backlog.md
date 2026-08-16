@@ -268,6 +268,7 @@
 | BL-239 | 低 | `cela_main.py`（`call_reflection`） | **`open`（記録のみ、実装は見送り）。** BL-238の議論中、ユーザーが「しいて言えばreflectorが停滞を追えるかもしれない」と指摘。`call_reflection`のプロンプトには現状ホワイトボードのバージョン番号が一切渡っておらず、「特定タスクが多数版まで来ている」という安価な停滞シグナルを見ていないことを確認した。対象ノード・役割がBL-238（Expert/User AI向け自己修正シグナル）とは異なるため別issueとして分離。着手する場合は`call_reflection`のプロンプト構築時にホワイトボード版数を渡し、停滞判定の追加材料とする設計になる見込み。 | P3 |
 | BL-240 | 中 | `cela_main.py`（`call_detector`のドメイン妥当性レビュー判定基準） | **`done`。** ユーザーが、Detectorの「情報不足を理由にmajorにしないこと」判定基準（シナリオに明記されていない詳細が不明であること自体は矛盾ではない）は、web検索が無い仮想シナリオ前提で書かれたものであり、web_searchが使える実世界シナリオの今は「調べれば分かることを調べずに済ませる」抜け穴になっているのではと指摘。確認したところ、BL-188の検証指示はExpertが**主張した**内容の裏取りに限定されており、Expertが**何も言っていない欠落**を能動的に確認する指示にはなっていなかった（BL-198の地理データ箇所には既に同種の「取得できないものに限定」という区別があるのに、この判定基準ブロックには無かった）。「本当に調べようがない事項」と「web_search等で確認できるのに未確認の事項」を区別し、後者は確認してから判定するよう一文追加（D-209）。 | P2 |
 | BL-241 | 高 | `cela_main.py`（`_resolve_deliverable_pointer`） | **`done`。** ユーザーが`log/2026-08-16/1000`のtask_7_1（統合計画書）について「過去タスクの成果物を網羅的に読んでつくっているか」と質問。調査したところ、Expertはtask_5_4/task_6_3の`read_deliverable_file`を試みたが**3回とも`not_found`で失敗**し、depends_on残り5タスクへは読み取りを一切試みないまま統合文書を書いていたことが判明。原因は`_resolve_deliverable_pointer`のtopic_keyword照合が、キーワード文字列全体がtopic文字列に一字一句連続一致しないと通らない仕様で、モデルの推測キーワードではほぼ確実に空振りするバグだった。ユーザー指摘により、BL-084で確立済みの「Deliverableの識別は(phase_id, task_id)が権威」方針と整合させ、task_id指定時はtopic_keywordの一致を一切求めない設計へ変更（task_id未指定でtopic_keywordのみの検索の場合に限り、BL-187と同型のトークン分割OR検索フォールバックを維持）（D-210）。 | P1 |
+| BL-242 | 中 | `cela_main.py`（`call_detector`・`_read_deliverable_file_handler`・`query_AI`） | **`done`。** BL-241の議論を受け、ユーザーが「依存タスクを読んでいなかったら機械的に検知してDetectorに示すか」と提案。既存のBL-033（Expertがpython_replを未使用の場合にDetectorへ警告する仕組み）と同型のパターンで実装することで合意し、機械的な強制差し戻し（BL-108→BL-110/D-206→D-207で撤回済みの往復コスト過大な方式）は採用しないことを確認。`_read_deliverable_file_handler`がtask_id指定で成功したread_deliverable_file呼び出しを`_LAST_DELIVERABLE_READ_TASK_IDS`へ記録し、`expert_node`が`state["expert_last_deliverable_reads"]`へ橋渡し、`call_detector`が現在タスクのdepends_onとの差分（未読の依存task_id）を検知してDetectorへ警告ブロックとして提示する。ターンは強制しない（D-211）。 | P2 |
 
 ---
 
@@ -8140,6 +8141,32 @@ read_deliverable_file(task_id="task_6_3", topic_keyword="住民説明 アクセ�
 **実装（初版）:** `read_verified_fact`側が既にBL-187で持っているフレーズ全体一致失敗時のトークン分割OR検索フォールバックを、`_resolve_deliverable_pointer`にも追加した。
 
 **修正（同日、ユーザー指摘）:** ユーザーが「task_idが指定されているので、task_idが指定されていればキーワードより優先して検索できないか」と指摘。BL-084で「Deliverableの識別はtopic文字列ではなく(phase_id, task_id)を権威とする」方針が既に確立されていることを踏まえ、**task_idが指定されている場合はtopic_keywordの一致を一切求めない**設計へ変更した（`_find_active_deliverable_agreement`が既にこの方針でDeliverableを識別しているのと整合）。task_id未指定・topic_keywordのみによる検索の場合に限り、初版のトークン分割フォールバックを維持する。
+
+**横断調査（同日、ユーザー指摘）:** ユーザーが「他のツールでも同様にtask_idで十分検索できるのに、キーワードによって撥ねられるのでは」と指摘。task_id+keywordの組み合わせを持つ全ツールを確認した結果、同型のバグを持つのは`read_deliverable_file`のみだった。`read_issues`は一見同じ構造だが、topic_keyword指定時にtask_idフィルタを意図的に無視する設計（D-080: タスク横断の再発検知が目的、別task_idで起票された同じ懸念も見つける必要があるため）であり、バグではなく仕様と確認。`read_plan_draft`はtask_id単独必須でkeyword自体を持たない。`read_whiteboard_excerpt`はtask_idを取らず現在タスクに閉じた検索で、完全一致→正規化緩い一致の2段フォールバックが元々実装済み。`read_reference_file`はURLキーのキャッシュでtask_id自体を持たない。
+
+---
+
+### BL-242: Expertが依存タスクの成果物を読んだかを機械的に検知し、未読があればDetectorへ警告する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| テスト | `tests/test_bl242_deliverable_read_gap_detector_warning.py`（新規6件: 追跡機構単体、`_query_AI_live`統合、`call_detector`プロンプト構築のソース確認、強制差し戻しを行わない設計の確認） |
+| 関連 | BL-241（本件の直接の動機）、BL-033（同型の先例：Expertがpython_replを未使用の場合にDetectorへ警告する既存パターン）、BL-108/BL-110・D-206/D-207（機械的強制の往復コストが過大と判断した過去の経緯、本件で強制差し戻しを避けた根拠） |
+
+**内容:**
+
+BL-241の対応後、ユーザーが「過去タスクへ依存がある場合は、各ノードに過去タスクの情報・ホワイトボードを必ず読めとプロンプトで指示し、ホワイトボードを読んでいなかったら機械的に検知してDetectorに示すか、あるいはターンを強制続行して必ず依存タスクの情報を読ませるべきではないか」と提案。
+
+Claudeは、機械的な強制差し戻し（後者）は、本セッション中に一度実装して撤回した「thinkを呼ぶまでツールループを機械的に差し戻す」仕組み（BL-108→BL-110、当日中のD-206→D-207）と同型のコスト構造（往復回数・トークン消費の増加、表面的な遵守のリスク）を持つと指摘。一方、機械的検知＋Detectorへの警告（前者）は、既存のBL-033（Expertがpython_replを一度も使わなかった場合にDetectorへ警告し、Detector自身に独立検算を促す仕組み）と全く同型のパターンであり、実装リスクが低くターンを止めないためコスト増が無いと判断し、こちらを先に実装する方針で合意した。
+
+**実装:**
+1. `_LAST_DELIVERABLE_READ_TASK_IDS`（BL-033の`_LAST_PYTHON_CALLS`と同型のモジュールレベル一時バッファ）と`get_last_deliverable_reads()`アクセサを新設。
+2. `_read_deliverable_file_handler`が、task_id指定付きで成功した（WHITEBOARD:/FILE_PATH:いずれの経路でも文字列本文を返した）場合に、そのtask_idを記録するよう変更。
+3. `query_AI`のターン開始時リセット対象globalリストへ`_LAST_DELIVERABLE_READ_TASK_IDS`を追加（`_LAST_PYTHON_CALLS`等と同じ位置）。
+4. `expert_node`が`call_expert`呼び出し後、`state["expert_last_deliverable_reads"] = get_last_deliverable_reads()`でstateへ橋渡し（`expert_last_python_calls`と同じブリッジパターン）。`LineageState` TypedDictへフィールド追加、初期state構築にも初期値`[]`を追加。
+5. `call_detector`が、現在タスクの`depends_on`と`state["expert_last_deliverable_reads"]`の差分（未読のtask_id）を計算し、非空であればDetectorへの警告ブロック（BL-033の`python_calls_block`と対になる位置に挿入）として提示。「該当箇所があればobservationsに具体的に記載するか、疑わしい場合はconstraint_issueの根拠にしてください」と促すのみで、`constraint_issue`を機械的に上書きする処理は持たない（BL-033のフェイルクローズ層とは異なり、本件はターンを強制しない設計であることをテストで確認）。
 
 ---
 
