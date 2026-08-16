@@ -2941,6 +2941,20 @@
 
 ---
 
+### D-210: BL-241 — `read_deliverable_file`はtask_id指定時、topic_keywordの一致を求めない（BL-084方針との整合）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-16 |
+| 状態 | `decided` |
+| 決定者 | t-momose（実地調査の質問「網羅的に読んでいるか」、修正方針の指摘「task_id優先」）、Claude（原因調査・実装） |
+| **決定理由** | log/2026-08-16/1000で、task_7_1のExpertが依存タスク（task_5_4/task_6_3）のread_deliverable_fileに3回とも失敗し、以降の依存タスクへは読み取りすら試みず統合文書を書いていたことが判明した。原因は`_resolve_deliverable_pointer`のtopic_keyword照合がフレーズ全体一致必須で、モデルの推測キーワードがtopic文字列とスペース位置まで完全一致することはまず無い設計だったため。初版はBL-187と同型のトークン分割OR検索フォールバックを追加したが、ユーザーが「task_idが指定されているならキーワードより優先すべきでは」と指摘。BL-084で既に「Deliverableの識別はtopic文字列ではなく(phase_id, task_id)を権威とする」方針が確立されており（`_find_active_deliverable_agreement`も同方針）、この既存方針と整合させるのがより根本的で単純な修正だと判断した。 |
+| 決定内容 | `_resolve_deliverable_pointer`で、task_idが指定されている場合はtopic_keywordによる絞り込みを一切行わず、その task_idのDeliverable候補（`FILE_PATH:`/`WHITEBOARD:`ポインタを持つ行）の中から最新（id最大）を返す。task_id未指定・topic_keywordのみによる検索の場合に限り、フレーズ全体一致→トークン分割OR検索の2段階フォールバック（BL-187と同型）を維持する。 |
+| 影響 | `cela_main.py`（`_resolve_deliverable_pointer`）、新規`tests/test_bl241_deliverable_topic_keyword_token_fallback.py`（6件）。 |
+| 関連 BL | BL-241（本件）、BL-040/R4（`_resolve_deliverable_pointer`の導入元）、BL-084（Deliverable識別方針の確立元、本件が整合させた先例）、BL-187（トークン分割フォールバックの参考元）、AGENTS.md §15.1（既存方針との整合を優先） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
