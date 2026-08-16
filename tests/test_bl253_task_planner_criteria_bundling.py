@@ -76,9 +76,10 @@ def test_task_plan_reviewer_prompt_checks_bundling_even_within_count_limit():
     assert "暗黙" in nearby
 
 
-def test_task_plan_reviewer_prompt_lists_five_review_criteria():
-    """観点の総数が4→5へ更新され、"5つとも"という文言に一貫していること
-    （観点を追加したのに導入文の個数だけ古いままという不整合を防ぐ回帰チェック）。"""
+def test_task_plan_reviewer_prompt_lists_at_least_five_review_criteria():
+    """観点5（BL-253の束ね判定軸）が存在すること。観点の総数自体は後続のBL-254で
+    5→8へさらに拡張されているため、ここでは「4つとも」という古い表記が残っていない
+    ことだけを確認する（総数の厳密な値はtest_bl254側で検証）。"""
     src = inspect.getsource(cela_main.call_task_plan_reviewer)
-    assert "5つとも" in src
     assert "4つとも" not in src
+    assert "5. [BL-253]" in src
