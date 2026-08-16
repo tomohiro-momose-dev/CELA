@@ -2997,6 +2997,20 @@
 
 ---
 
+### D-214: BL-245 — Detectorの思考プロセス監査（R5）の強制major指示は、Expert監査時のみ適用する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-16 |
+| 状態 | `decided` |
+| 決定者 | t-momose（停滞の報告、当初仮診断への訂正後の3択提示への回答）、Claude（原因調査・仮診断の訂正・実装） |
+| **決定理由** | 稼働中のドライラン（log/2026-08-16/1150）でtask_2_4_1がVer.1→Ver.24、判定：Rejectedを8回繰り返す停滞を起こしていた。当初「User AI Stage3/4がacceptance_criteria（BL-197で明文化済みのはずの上限）を超える水準を要求している」と仮診断したが、実装前にコードを確認したところBL-197の該当ルールは既にStage3プロンプトに存在しており、この仮診断は誤りだった（AGENTS.md §16.2: 提案は必ず現在のコードに照らして検証する。今回は自分自身の仮診断についても同じ検証を適用した）。改めて全28回のDetector応答を機械抽出したところ、`criteria_status=[true,true,true]`（BL-023の受入基準チェックは全項目充足と自己申告）でありながら、同一応答内でR5の思考プロセス監査（「都合の悪い制約から目を逸らして結論を急いでいる」ように見えたら強制major）を理由に`constraint_issue="major"`としている自己矛盾を複数回確認した。R5はExpertの数値的ハルシネーション対策として設計された文面であり、`target_role=="user"`（python_replを持たないUser AI Stage3自身の承認判断reasoningの監査）に同一文面を適用すると、確信を持った正当な承認そのものが機械的にハルシネーション扱いされる。①R5の適用対象をExpert監査に限定する、②criteria_statusとconstraint_issueの整合性をPython側で機械的に担保する、③もう少し調査してから決める、の3択を提示し、軽量で既存の設計意図（R5はExpertの数値主張向け）に立ち返る①を採用した。 |
+| 決定内容 | `call_detector`内、`_reasoning_source`取得直後の`thought_process_audit`構築を`target_role`で分岐する。`target_role=="user"`の場合は「思考プロセス（参考情報）」として提示し、承認・却下の最終判断はBL-023 criteria_status等の構造化判定を優先すること、「確信を持った言い回しで承認している」こと自体を理由に単独でmajorとしないことを明記する（ただし明白な事実誤認・既存issueとの矛盾がreasoningから読み取れる場合は通常どおり判定へ反映してよい）。`target_role!="user"`（Expertの成果物監査）の場合は、既存の「思考プロセス監査（★R5追加）」の強制major指示をそのまま維持する。 |
+| 影響 | `cela_main.py`（`call_detector`の`thought_process_audit`構築）、新規`tests/test_bl245_detector_thought_audit_scoped_to_expert.py`（4件）。 |
+| 関連 BL | BL-245（本件）、R5/F-2.1（思考プロセス監査の初出）、BL-023（criteria_status機構）、BL-197（Stage3の承認基準上限、今回の初期仮診断で誤って対象にしかけたが既に実装済みだった既存ルール） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
