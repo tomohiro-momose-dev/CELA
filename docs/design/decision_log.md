@@ -3137,6 +3137,20 @@
 
 ---
 
+### D-224: BL-255 — 依存タスク未完了への先読みを、プロンプトのrecency配置とPython側の機械的ゲートの両方で防ぐ
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-16 |
+| 状態 | `decided` |
+| 決定者 | t-momose（不具合の発見・追加の原因指摘）、Claude（機械抽出による原因調査・実装） |
+| **決定理由** | ユーザーが実行中のドライラン（`log/2026-08-16/2020`）で「phase2からいきなり5に飛んでいます。なぜですか？」と質問。`write_agreement`のDeliverable全件を機械抽出したところ、phase_3・phase_4・task_2_3が一度も実行されずphase_5へ進んでいたことが判明した。原因はUser AI (Stage4)が`depends_on`充足だけを根拠にタスクを先読みしていたことで、task_5_1への実際の指示文自体が未実行のtask_3_1・task_4_1の前提を引き継ぐよう書かれているという実害も確認した。ユーザーが「タスク表はプロンプトの一番上にあるので、後続のコンテキストに押し流されているかもしれない」と追加で指摘し、調査の結果、(1) Stage4の実際のプロンプト構築経路（`stage4_system_prompt`、`system_prompt_leading`/`trailingとは別の独立経路）が巨大なphases_json＋大量の指示文をchat_historyより前に固定しており、BL-178/BL-185で確立した「最重要情報はchat_historyより後ろに置く」recency設計原則が適用されていなかったこと、(2) `_resolve_task_transition`が離脱元タスクの状態（BL-125/BL-176）しか検証しておらず、遷移先task_idの`depends_on`充足は一度も検証していなかったこと、の2つの根本原因を特定した。両方が独立に効いていると判断し、ユーザーの承認を得て両方実装した。 |
+| 決定内容 | (1) `_build_next_task_candidates_text(conn, run_id, phases)`を新設し、depends_onが全て完了している未着手タスクをPython側で確定的に算出、`stage4_messages`のchat_history追記より後ろ（プロンプト全体で最後）に独立したsystemメッセージとして追加する。(2) `_resolve_task_transition`に、遷移先task_idの`depends_on`が実際に完了しているかを検証する機械的ゲートを追加する。未完了があれば、BL-125/BL-176と同型のone-shot通知フラグ（`task_transition_blocked_unmet_deps_task_id`/`task_transition_blocked_unmet_deps`）で遷移をブロックし、`_build_task_transition_blocked_notice`で理由を通知、`route_after_user_decision`のBL-181機械的差し戻しにも同フラグを追加する。 |
+| 影響 | `cela_main.py`（`_build_next_task_candidates_text`新設、`_resolve_task_transition`の機械的ゲート追加、`generate_user_utterance`のStage4メッセージ構築、`_build_task_transition_blocked_notice`、`route_after_user_decision`、`LineageState`への新規フィールド2件）、新規`tests/test_bl255_task_transition_dependency_gate.py`（9件）。 |
+| 関連 BL | BL-255（本件）、BL-024（`_resolve_task_transition`の初出）、BL-125/BL-176/BL-181/BL-183（同型の機械的遷移ブロックパターンの先例）、BL-178/BL-185（recency設計原則の初出） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
