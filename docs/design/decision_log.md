@@ -3039,6 +3039,20 @@
 
 ---
 
+### D-217: BL-248 — Task Plan Reviewerへのtask_planner分解根拠の受け渡しは、ツール呼び出しではなくPython側の直接埋め込みで行う
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-16 |
+| 状態 | `decided` |
+| 決定者 | t-momose（不具合の報告と修正依頼）、Claude（原因調査・実装） |
+| **決定理由** | `log/2026-08-16/1512`で、Task Plan Reviewerが`read_deliverable_file`を`task_id="task_planner_phase_design"`という実在しないIDで4回連続失敗していたことをユーザーへ報告したところ、「Task PlanerとTask Plan Reviewerが上手く情報を取得できるように、プロンプトの指示を修正して」と依頼された。調査の結果、BL-095はtask_plannerへ`entry_type="Decision"`でこの判断根拠を記録するよう指示する一方、task_plan_reviewerには`read_deliverable_file`（`entry_type="Deliverable"`専用、BL-084/BL-241で確立）で読むよう指示しており、両者の`entry_type`が最初から食い違っていたため、書式の正誤に関わらず常に失敗する指示だった（本日のBL-243と同型の「消費経路の指示が対象外のツールを名指ししていた」パターン）。この固定topicの値は1件しか存在せず、Task Plan Reviewerが自分でツールを呼んで探し当てる必要のあるものではないため、そもそもツール呼び出しに頼らずPython側で直接取得してプロンプトへ埋め込む方が、失敗の余地が無く軽量だと判断した。 |
+| 決定内容 | `_get_task_planner_phase_design_rationale_text(conn, run_id)`を新設し、`_find_active_deliverable_agreement`と同じ「`reversed()`して最初に一致した行＝最新行」というパターンで、`entry_type="Decision"`かつ`topic="task_planner_phase_design"`の最新行を取得する。`call_task_plan_reviewer`がこれをプロンプト本文へ直接埋め込み、BL-095の指示文からは`read_deliverable_file`での再取得指示を削除する（SUPERSEDE指示自体は維持）。 |
+| 影響 | `cela_main.py`（`_get_task_planner_phase_design_rationale_text`新設、`call_task_plan_reviewer`のプロンプト構築・BL-095指示文の修正）、新規`tests/test_bl248_task_plan_reviewer_rationale_lookup.py`（6件）。 |
+| 関連 BL | BL-248（本件）、BL-095（判断根拠の記録・SUPERSEDE指示の初出）、BL-084/BL-241（`read_deliverable_file`の設計確立元）、BL-243（同型の先例） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
