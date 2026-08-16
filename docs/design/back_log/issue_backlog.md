@@ -269,6 +269,8 @@
 | BL-240 | 中 | `cela_main.py`（`call_detector`のドメイン妥当性レビュー判定基準） | **`done`。** ユーザーが、Detectorの「情報不足を理由にmajorにしないこと」判定基準（シナリオに明記されていない詳細が不明であること自体は矛盾ではない）は、web検索が無い仮想シナリオ前提で書かれたものであり、web_searchが使える実世界シナリオの今は「調べれば分かることを調べずに済ませる」抜け穴になっているのではと指摘。確認したところ、BL-188の検証指示はExpertが**主張した**内容の裏取りに限定されており、Expertが**何も言っていない欠落**を能動的に確認する指示にはなっていなかった（BL-198の地理データ箇所には既に同種の「取得できないものに限定」という区別があるのに、この判定基準ブロックには無かった）。「本当に調べようがない事項」と「web_search等で確認できるのに未確認の事項」を区別し、後者は確認してから判定するよう一文追加（D-209）。 | P2 |
 | BL-241 | 高 | `cela_main.py`（`_resolve_deliverable_pointer`） | **`done`。** ユーザーが`log/2026-08-16/1000`のtask_7_1（統合計画書）について「過去タスクの成果物を網羅的に読んでつくっているか」と質問。調査したところ、Expertはtask_5_4/task_6_3の`read_deliverable_file`を試みたが**3回とも`not_found`で失敗**し、depends_on残り5タスクへは読み取りを一切試みないまま統合文書を書いていたことが判明。原因は`_resolve_deliverable_pointer`のtopic_keyword照合が、キーワード文字列全体がtopic文字列に一字一句連続一致しないと通らない仕様で、モデルの推測キーワードではほぼ確実に空振りするバグだった。ユーザー指摘により、BL-084で確立済みの「Deliverableの識別は(phase_id, task_id)が権威」方針と整合させ、task_id指定時はtopic_keywordの一致を一切求めない設計へ変更（task_id未指定でtopic_keywordのみの検索の場合に限り、BL-187と同型のトークン分割OR検索フォールバックを維持）（D-210）。 | P1 |
 | BL-242 | 中 | `cela_main.py`（`call_detector`・`_read_deliverable_file_handler`・`query_AI`） | **`done`。** BL-241の議論を受け、ユーザーが「依存タスクを読んでいなかったら機械的に検知してDetectorに示すか」と提案。既存のBL-033（Expertがpython_replを未使用の場合にDetectorへ警告する仕組み）と同型のパターンで実装することで合意し、機械的な強制差し戻し（BL-108→BL-110/D-206→D-207で撤回済みの往復コスト過大な方式）は採用しないことを確認。`_read_deliverable_file_handler`がtask_id指定で成功したread_deliverable_file呼び出しを`_LAST_DELIVERABLE_READ_TASK_IDS`へ記録し、`expert_node`が`state["expert_last_deliverable_reads"]`へ橋渡し、`call_detector`が現在タスクのdepends_onとの差分（未読の依存task_id）を検知してDetectorへ警告ブロックとして提示する。ターンは強制しない（D-211）。 | P2 |
+| BL-243 | 中 | `cela_main.py`（`_TRACE_LINEAGE_USAGE_PARAGRAPH`） | **`done`。** ユーザーが`log/2026-08-16/1111`で`trace_lineage(ref="whiteboard:task_1_2")`が系譜0件で返ったログを提示し、`08-15/2149`・`2239`・`08-16/1000`も含め、ツール実行がうまくいかなかった箇所を横断調査するよう依頼。`実行（iter=`文字列で全4ログのツール呼び出し・結果を機械的にペアリングして分類した結果、`trace_lineage`のwhiteboard: ref呼び出し5件中5件が空系譜（書式が正しい`whiteboard:phase_2:task_2_2`でも0件、書式を誤った`whiteboard:task_1_2`でも「該当refなし」）だったことを確認。BL-238はExpert向けの改版3回目発火ブロックからのみ同種の指示を削除しており、User AI(Stage1/Stage3)等7箇所から共有される`_TRACE_LINEAGE_USAGE_PARAGRAPH`には「ホワイトボードの版歴」「whiteboard:<phase_id>:<task_id>」が残存していた（§15.1: 同じ事実を修正したはずが別の場所に生き残っていた再発例）。BL-238と同じ結論を適用し、共有段落からwhiteboard:への言及を削除（`_resolve_ref_table`/`_write_relation_edge`の汎用whiteboard:分岐自体はtest_bl228が検証する既存機構のため削除しない）。 | P2 |
+| BL-244 | 中 | `web_tools.py`（`read_reference_file_handler`） | **`done`。** BL-243と同じ横断調査で発見。`read_reference_file`は全26回中12回（46%）が「grepはpathと組み合わせて指定してください」のエラーで、独立した4つ以上のExpertロールが`{"path": "", "keyword": X, "grep": X}`という同型の呼び出しで失敗していた。ハンドラは`grep and not path`を即座にエラーにしており、`keyword`が同時に与えられ一意に1件へ解決できる場合でもそれを試さずに拒否していたのが原因（BL-241と同型の「解決できる情報が既に揃っているのに問答無用で撥ねる」パターン）。`keyword`が同時指定されていれば、まず`_resolve_reference_cache_path_by_keyword`ヘルパでpathを解決してから通常のgrep処理へフォールスルーするよう変更（0件/複数件時は従来通りnot_found/multiple_matchesへ後退）。keyword単独ブランチも同ヘルパへ統合（§15.1）。 | P2 |
 
 ---
 
@@ -8167,6 +8169,46 @@ Claudeは、機械的な強制差し戻し（後者）は、本セッション�
 3. `query_AI`のターン開始時リセット対象globalリストへ`_LAST_DELIVERABLE_READ_TASK_IDS`を追加（`_LAST_PYTHON_CALLS`等と同じ位置）。
 4. `expert_node`が`call_expert`呼び出し後、`state["expert_last_deliverable_reads"] = get_last_deliverable_reads()`でstateへ橋渡し（`expert_last_python_calls`と同じブリッジパターン）。`LineageState` TypedDictへフィールド追加、初期state構築にも初期値`[]`を追加。
 5. `call_detector`が、現在タスクの`depends_on`と`state["expert_last_deliverable_reads"]`の差分（未読のtask_id）を計算し、非空であればDetectorへの警告ブロック（BL-033の`python_calls_block`と対になる位置に挿入）として提示。「該当箇所があればobservationsに具体的に記載するか、疑わしい場合はconstraint_issueの根拠にしてください」と促すのみで、`constraint_issue`を機械的に上書きする処理は持たない（BL-033のフェイルクローズ層とは異なり、本件はターンを強制しない設計であることをテストで確認）。
+
+---
+
+### BL-243: `_TRACE_LINEAGE_USAGE_PARAGRAPH`が実行不能なwhiteboard: refの使用を案内し続けていた（BL-238の未完了分）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| テスト | `tests/test_bl243_trace_lineage_whiteboard_removed.py`（新規4件: 段落からwhiteboard:言及が消えたこと、動作するref型の案内は残ること、Expert/User AIプロンプトへの配線が壊れていないこと、`_resolve_ref_table`等の汎用機構自体は削除していないこと） |
+| 関連 | BL-238（同一原因の先行対応、Expert向け改版3回目ブロックのみを修正して残した未完了分）、BL-228（`trace_lineage`使用指示の初出）、BL-244（同一調査で発見した別ツールの類似欠陥） |
+
+**内容:**
+
+ユーザーが`log/2026-08-16/1111`で`🔧 [User AI (Stage1: レビュー)] trace_lineage 実行（iter=1）: {"ref": "whiteboard:task_1_2", ...}` → `系譜0件`のログを提示し、`08-15/2149`・`2239`・`08-16/1000`も含めた4ログについて、ツール実行が意図通り機能しなかった箇所を横断調査するよう依頼。さらに「`実行（iter`の文字列で検索して、各ツール実行を実直に追え」と指示があり、grepのキーワードマッチだけに頼らず、4ログ全件の`🔧 ... 実行（iter=N）:`呼び出し行とその直後の`→ {...}`結果行を機械的にペアリングして分類するスクリプトで全数調査した。
+
+`trace_lineage`は7回中5回が`lineage_empty`（空系譜）だった。内訳を見ると、正しい書式（`whiteboard:phase_2:task_2_2`、2149ログ）でも「系譜を0件取得しました」、書式を誤った場合（`whiteboard:task_1_2`、1111ログ）でも「現在のrun内に該当refはありません」となり、**書式の正誤に関わらず常に無駄打ちになる**ことを確認した。一方`fact:`/`agreement:`refでの呼び出し（2239ログ）は正しく系譜を返しており、`trace_lineage`ツール自体は正常に機能している。
+
+原因はBL-238で既に特定済みだった——`relation_edges`にwhiteboard: refを指すエッジを書く本番コード経路が`_write_relation_edge`の全4呼び出し箇所（agreement→agreement/agreement→fact/fact→ref/detector_review→turn）のいずれにも存在しない。しかしBL-238は**Expert向けの改版3回目発火ブロック**（`_build_task_scope_context`）からのみtrace_lineage(whiteboard:...)呼び出し指示を削除しており、Expert/User AI(Stage1/Stage3)/Detector等**7箇所から共有される**`_TRACE_LINEAGE_USAGE_PARAGRAPH`には「ホワイトボードの版歴」「whiteboard:<phase_id>:<task_id>」というref書式の案内がそのまま残っていた。AGENTS.md §15.1（同じ事実は一箇所で管理し、複数箇所にあるものは全て更新する）の再発例——BL-238の修正時点で「他に同じ指示が無いか」の網羅確認が漏れていた。
+
+**修正:** `_TRACE_LINEAGE_USAGE_PARAGRAPH`から「ホワイトボードの版歴」および「whiteboard:<phase_id>:<task_id>」の案内を削除。`_resolve_ref_table`・`_write_relation_edge`のwhiteboard:分岐自体（`test_bl228_chat_history_lineage.py`が検証する汎用機構）は削除せず、あくまで「積極的に使うよう案内する文言」のみを外した（BL-238と同じ結論：版歴を読む専用の消費経路は不要、`issue_log.occurrence_count`が同じ役目を担う）。
+
+---
+
+### BL-244: `read_reference_file`がkeyword+grep同時指定を一律拒否し、独立した複数Expertが同一パターンで失敗していた
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| テスト | `tests/test_bl184_web_tools.py`に追加した新規5件（keyword+grep同時指定が単一マッチで成功すること、0件時はnot_found、複数件時はmultiple_matches、keyword無しでの従来エラーの回帰確認、ヘルパー関数のソース存在証明） |
+| 関連 | BL-243（同一調査で発見）、BL-221（`grep`パラメータの初出）、BL-216（keyword複数マッチ時のpreview機構）、BL-241（同型の「解決できる情報が既に揃っているのに問答無用で撥ねる」パターンの先例） |
+
+**内容:**
+
+BL-243と同じ横断調査（4ログ全件の`実行（iter=N）`呼び出し・結果のペアリング分類）で発見。`read_reference_file`は全26回中12回（46%）が`{'status': 'error', 'message': 'grepはpathと組み合わせて指定してください（対象ファイルを先に特定する必要があります）。'}`で失敗しており、内訳を見ると自動運転バス導入車両・冬季運用設計専門家、電話・アプリ併用予約運用・配車管制設計専門家、オンデマンド地域交通の予約・配車能力評価専門家、地域交通の運行設計・冬季対応統合SLA評価専門家という**互いに独立した4つ以上のExpertロール**が、いずれも`{"path": "", "keyword": X, "grep": X}`という同一の形で呼び出し、同一の理由で失敗していた。単発の個体差ではなく、モデルが自然に到達する呼び出し形として構造的に発生していると判断した。
+
+`read_reference_file_handler`（`web_tools.py`）を確認したところ、`if grep and not path:`という早期ガードが`keyword`の値を一切見ずに即座にエラーを返していた。しかし`keyword`が同時に指定されており、かつそれが一意に1件のキャッシュファイルへ解決できる場合、ハンドラは（`grep`が無ければ）その1件を難なく特定できる情報を既に持っている——BL-241（`_resolve_deliverable_pointer`がtask_idという権威情報を持っているのにtopic_keywordの不一致で撥ねていた）と同型の「解決できる情報が既に揃っているのに問答無用で撥ねる」パターンだった。
+
+**修正:** `grep and not path`の場合、`keyword`が無ければ従来通り即エラー。`keyword`があれば、新設した`_resolve_reference_cache_path_by_keyword`ヘルパー（keyword単独ブランチの既存ロジックを共通化）でまず`path`を解決し、0件はnot_found・複数件は既存のmultiple_matches（BL-216のpreview付き候補一覧）にフォールバックし、1件に絞れた場合のみ`path`へ代入して通常のpath+grep処理へフォールスルーする。keywordが無い場合の既存エラー（回帰テストで確認）は変更していない。
 
 ---
 
