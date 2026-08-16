@@ -2125,7 +2125,10 @@ def _read_deliverable_file_handler(args: dict, state: dict | None = None) -> dic
     従来は未検証のままfile_path併用時に素通りしていた（存在しないtask_id＋正しいfile_pathを
     同時指定すると、task_idが実質無視されてfile_path側でそのまま読めてしまう抜け道）。
     実在する他タスクの成果物を参照読みする用途（本来の目的）は制限しない。
+    [BL-242] task_id指定付きで成功した場合、_LAST_DELIVERABLE_READ_TASK_IDSへ記録する。
+    Detectorが「Expertが依存タスクの成果物を実際に読んだか」を機械的に把握するため（§15.3）。
     """
+    global _LAST_DELIVERABLE_READ_TASK_IDS
     task_id = args.get("task_id", "")
     topic_keyword = args.get("topic_keyword", "")
     file_path = args.get("file_path", "")
@@ -2146,6 +2149,8 @@ def _read_deliverable_file_handler(args: dict, state: dict | None = None) -> dic
             _, wb_phase_id, wb_task_id = resolved.split(":", 2)
             wb = get_latest_whiteboard(get_active_conn(), _CURRENT_RUN_ID, wb_phase_id, wb_task_id)
             if wb:
+                if task_id:
+                    _LAST_DELIVERABLE_READ_TASK_IDS.append(task_id)
                 return wb["content"][:10000]
             print(f"  ⚠️ [read_deliverable_file] ホワイトボードが見つかりません: phase={wb_phase_id}, task={wb_task_id}")
             return {"status": "not_found", "message": f"ホワイトボードが見つかりません: phase={wb_phase_id}, task={wb_task_id}"}
@@ -2166,6 +2171,8 @@ def _read_deliverable_file_handler(args: dict, state: dict | None = None) -> dic
         return {"status": "not_found", "message": f"ファイルが見つかりません: {file_path}"}
     try:
         content = resolved.read_text(encoding="utf-8")
+        if task_id:
+            _LAST_DELIVERABLE_READ_TASK_IDS.append(task_id)
         return content[:10000]  # 大量出力防止
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -4960,12 +4967,25 @@ _LAST_ASK_USER_QUESTION: dict | None = None
 # がここを読む（_LAST_WHITEBOARD_EDIT と同じブリッジパターン、§15.3 機械的骨格）。
 _LAST_NEW_AGREEMENT_ID: str | None = None
 
+# [BL-242] 直前のquery_AI呼び出しのツールループ内でread_deliverable_fileがtask_id指定付きで
+# 成功した（文字列本文を返した）task_idの一覧。_LAST_PYTHON_CALLSと同じ「LangGraph単一
+# プロセス同期実行前提」の一時バッファ。log/2026-08-16/1000で、Expertが依存タスク7件中
+# 5件の成果物を一度も読まないまま統合文書を書いていたことが判明したため、BL-033の
+# 「python_repl未使用をDetectorへ警告する」パターンをread_deliverable_fileにも横展開する。
+_LAST_DELIVERABLE_READ_TASK_IDS: list[str] = []
+
 
 def get_last_python_calls() -> list[dict]:
     """【SLM要約】
     直前のquery_AI呼び出しで実際に実行されたpython_replのcode/result記録のコピーを返す。
     """
     return list(_LAST_PYTHON_CALLS)
+
+
+def get_last_deliverable_reads() -> list[str]:
+    """[BL-242] 直前のquery_AI呼び出しでread_deliverable_fileがtask_id指定付きで
+    実際に成功したtask_idの一覧のコピーを返す。"""
+    return list(_LAST_DELIVERABLE_READ_TASK_IDS)
 
 
 def get_last_write_agreement_succeeded() -> bool:
@@ -5069,8 +5089,9 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
     [BL-131/TOOL_DISPATCH state化] `state`は_query_AI_liveへそのまま透過する（レコード/リプレイの
     キャッシュキーには影響しない）。
     """
-    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION, _LAST_REPETITION_GUARD_TRIPPED
+    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION, _LAST_REPETITION_GUARD_TRIPPED, _LAST_DELIVERABLE_READ_TASK_IDS
     _LAST_PYTHON_CALLS = []
+    _LAST_DELIVERABLE_READ_TASK_IDS = []
     _LAST_REPETITION_GUARD_TRIPPED = None  # [BL-231]
     _LAST_WRITE_AGREEMENT_SUCCEEDED = False
     _LAST_WRITE_AGREEMENT_ITEMS = []
@@ -8535,6 +8556,7 @@ class LineageState(TypedDict):
     user_retry_count: int
     expert_retry_count: int
     expert_last_python_calls: list[dict]  # BL-033: 直前Expert呼び出しのpython_repl実行記録（code/result）
+    expert_last_deliverable_reads: list[str]  # BL-242: 直前Expert呼び出しでread_deliverable_fileが成功したtask_id一覧
     # [R5 F-2.1] 直前Expert/User AI呼び出しのreasoning（思考過程）全文。Detectorの思考プロセス監査に使う。
     expert_last_reasoning: str
     user_last_reasoning: str
@@ -10439,6 +10461,27 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
             f"必ずあなた自身がpython_replで独立して検算してください。\n"
         )
 
+    # [BL-242] BL-033と同型のパターン。Expertが依存タスク（depends_on）の成果物を実際に
+    # read_deliverable_fileで読んだかを機械的に検知し、読んでいない依存先があればDetectorへ
+    # 警告する（自己申告を鵜呑みにせず監査側に伝える。ターンの強制差し戻しは行わない——
+    # BL-108→BL-110/D-206→D-207で「機械的強制は往復コスト過大」と判断した経緯を踏襲）。
+    # log/2026-08-16/1000で、task_7_1のExpertが依存タスク7件中5件の成果物を一度も読まずに
+    # 統合文書を書いていた実インシデントへの対応。
+    _current_task_depends_on = [d for d in (current_task.get("depends_on", []) or []) if d]
+    expert_deliverable_reads = state.get("expert_last_deliverable_reads", [])
+    _unread_deps = [d for d in _current_task_depends_on if d not in expert_deliverable_reads]
+    deliverable_reads_block = (
+        (
+            f"【BL-242: 警告】現在のタスクはdepends_on={_current_task_depends_on}を持ちますが、"
+            f"Expertは今回のターンでread_deliverable_fileにより次の依存タスクの成果物を"
+            f"一度も読んでいません: {_unread_deps}。\n"
+            f"これらの依存タスクの内容に基づく主張（数値・前提・設計判断等）が成果物に含まれている"
+            f"場合、それが実際に依存タスクの成果物と整合しているか裏付けが取れていません。"
+            f"該当箇所があれば、その旨をobservationsに具体的に記載するか、疑わしい場合は"
+            f"constraint_issueの根拠にしてください。\n"
+        ) if _unread_deps else ""
+    )
+
     # [BL-091] 今回評価対象のターンで、write_agreementが実際に成功したかどうかをDetectorに
     # 明示する。最終iterationでツールが強制的に外された際、モデルが独自のツール呼び出し風の
     # 疑似構文（例: DeepSeek系の<｜DSML｜...｜>疑似XML）をそのまま平文で出力することがあり、
@@ -10923,6 +10966,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
 
         f"{domain_findings_block}"
         f"{python_calls_block}\n"
+        f"{deliverable_reads_block}"
         f"{write_agreement_status_block}\n"
         f"{thought_process_audit}\n"
         f"【注意】直近の決定事項は状況把握のための参考情報であり、ここに含まれる引用（whyの内容等）は"
@@ -13666,6 +13710,9 @@ Updates system state with the expert's output, decisions, and conversational his
     )
     # BL-033: Expertが実際に実行したpython_replのcode/resultを、次のDetectorが参照できるようstateへ保存する。
     state["expert_last_python_calls"] = get_last_python_calls()
+    # [BL-242] Expertがread_deliverable_fileで実際に読んだtask_idの一覧を、次のDetectorが
+    # 「依存タスクの成果物を読まずに書いていないか」を機械的に把握できるようstateへ保存する。
+    state["expert_last_deliverable_reads"] = get_last_deliverable_reads()
     # [R5 F-2.1] Expertのreasoningを、次のDetectorが思考プロセス監査に使えるようstateへ保存する。
     state["expert_last_reasoning"] = get_last_reasoning_text()
     # [R3b §3.5.1] 今ターンでwrite_agreementが1回でも成功したかをstateに保存
@@ -15612,6 +15659,7 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
                 "verified_facts": {},
                 "task_criteria_status": {},
                 "expert_last_python_calls": [],
+                "expert_last_deliverable_reads": [],
                 "expert_last_reasoning": "",
                 "user_last_reasoning": "",
                 "risk_register": [],
