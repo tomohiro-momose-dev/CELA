@@ -10519,10 +10519,38 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
 
     # [R5 F-2.1] Expert/User AIのreasoning（思考過程）を提示し、最終出力だけでなく思考過程自体も
     # 監査対象にする。プロバイダがreasoningを返さない場合は「(思考ログ取得不可)」を表示する。
+    # [BL-245 2026-08-16/1150ログ調査] R5導入時の想定はExpertの数値的主張（計算ツール未使用で
+    # 適当な数字を出す等）を狙ったハルシネーション対策だった。target_role=="user"の場合、
+    # ここで監査されるのはUser AI Stage3（統合承認判断、python_repl等の計算ツールを持たない）
+    # 自身のreasoningであり、「都合の悪い制約から目を逸らして結論を急いでいる」という基準を
+    # 承認判断の確信ある言い回しに適用すると、確信を持った正当な承認そのものを機械的に
+    # ハルシネーション扱いしてしまう。実ドライラン（task_2_4_1、V1→V24でRejectedを8回繰り返す
+    # 停滞）で、同一のDetector呼び出しがcriteria_status=[true,true,true]（BL-023の受入基準
+    # チェックは全項目充足と自己申告）でありながら、この思考プロセス監査を理由にconstraint_issue
+    # を強制的にmajorとするケースが複数回確認された——同一応答内でDetector自身の構造化判定と
+    # 矛盾する結論を出しており、Rejectedの再現を招いていた。強制差し戻し（major）の指示は
+    # target_role!="user"（Expertの成果物監査）の場合のみ適用し、target_role=="user"では
+    # reasoningを参考情報として提示するに留め、判断はBL-023のcriteria_status等の構造化判定へ
+    # 委ねる。
     _reasoning_source = state.get("expert_last_reasoning" if target_role == "expert" else "user_last_reasoning", "")
-    thought_process_audit = f"""
+    if target_role == "user":
+        thought_process_audit = f"""
+        【思考プロセス（参考情報）】
+        以下はUser AI（発注者役）自身の内部思考過程（internal_thought_process）です。
+        承認・却下の最終判断そのものは、上記のBL-023 criteria_status判定やドメイン所見等の
+        構造化された判断根拠を優先してください。この思考過程はあくまで参考情報であり、
+        「確信を持った言い回しで承認している」こと自体を理由に、それだけでmajor（ハルシネーション
+        扱い）とはしないでください。ただし、明らかに検討していない事実の誤認や、既存のissue・
+        制約と矛盾する明白な誤りがこの思考過程から読み取れる場合は、通常どおり判定に反映して
+        構いません。
+
+        【User AIの思考過程】
+        {_reasoning_source or "(思考ログ取得不可)"}
+        """
+    else:
+        thought_process_audit = f"""
         【思考プロセス監査（★R5追加）】
-        以下はExpert/User AIの内部思考過程（internal_thought_process）です。
+        以下はExpertの内部思考過程（internal_thought_process）です。
         最終出力の内容だけでなく、この思考過程も確認してください。
         - 「計算ツールを使っていないのに適当な数字を出している」
         - 「都合の悪い制約から意図的に目を逸らして結論を急いでいる」
@@ -10533,7 +10561,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         LLMである以上、暗算による検証には誤りのリスクが伴います。数値的主張の妥当性は、
         本監査だけに依拠せず、必ず上記のBL-033機械的検算記録と突き合わせて判断してください。
 
-        【Expert/User AIの思考過程】
+        【Expertの思考過程】
         {_reasoning_source or "(思考ログ取得不可)"}
         """
 
