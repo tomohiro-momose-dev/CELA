@@ -454,9 +454,18 @@ def _grep_with_context(content: str, pattern: str, context_lines: int = _GREP_CO
     返すことでトークン消費を抑えたまま任意の位置にアクセスできるようにする。
     大文字小文字を区別する単純な部分一致（read_reference_fileのkeyword検索と同じ方式）。
     マッチが無ければNoneを返す（呼び出し側でnot_foundメッセージを組み立てる）。
+    [BL-252] `grep`という名称・パラメータ名から、Expertは`|`区切りでOR検索できると
+    自然に類推するが、正規表現エンジンは使っておらず`pattern in line`のリテラル部分
+    一致のみだったため、`|`を含む行が実際には存在せず常にnot_foundになっていた
+    （実ログでは`|`を含むgrepパターン7件中7件が不一致、含まないもの7件中7件が成功という
+    完全な相関を確認）。正規表現化（re.search）はReDoS等の新たなリスクを持ち込むため、
+    観測された実際の用途（単純なOR）にのみ対応する`|`分割によるいずれか一致へ限定する。
     """
     lines = content.split("\n")
-    match_indices = [i for i, line in enumerate(lines) if pattern in line]
+    terms = [t for t in pattern.split("|") if t]
+    if not terms:
+        return None
+    match_indices = [i for i, line in enumerate(lines) if any(t in line for t in terms)]
     if not match_indices:
         return None
 

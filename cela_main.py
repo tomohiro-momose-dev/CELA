@@ -1038,7 +1038,12 @@ READ_REFERENCE_FILE_TOOL = {
                         "[BL-221] Requires 'path'. Substring to search for within that cached "
                         "file's full text (case-sensitive). Returns matching lines with "
                         "surrounding context lines, not the whole file -- use this for large "
-                        "documents instead of reading from the top."
+                        "documents instead of reading from the top. "
+                        "[BL-252] Use '|' to match ANY of several terms on a line (e.g. "
+                        "'A|B|C' matches a line containing A, or B, or C) -- this is the only "
+                        "supported operator. This is NOT a full regular expression engine: other "
+                        "regex syntax (., *, [ ], ^, $, etc.) is matched as a LITERAL character, "
+                        "not a pattern."
                     ),
                 },
             },
@@ -9580,6 +9585,13 @@ It serves as the initial planning layer for breaking down complex objectives acr
          （例: 「〈数量Xの算出〉」「〈初期費用の内訳〉」「〈年間ランニングコストの内訳〉」
          「〈感度分析〉」を1タスクに束ねてはいけません。それぞれ独立したタスクにするか、
          密接に関連する場合でもacceptance_criteriaの数を3以内に抑える粒度まで分割してください）。
+         [BL-253] 個数が3以内でも、**1個のacceptance_criteriaの中に、独立して検証・執筆できる
+         複数のシナリオ・複数の対象・複数の観点が暗黙に束ねられていないか**を確認してください
+         （例：「縮小・基準・上振れの3ケースを設計する」という1個の基準は、個数では1個に
+         見えても、実質的には独立した3つの分析を要求しています）。このような暗黙の束ねが
+         あれば、3個以内という条件を満たしていても分割の対象としてください（実ドライランで、
+         acceptance_criteria3個以内という条件は満たしながら、1個の基準の中に独立した複数の
+         シナリオ設計・複数対象の分析が隠れており、1タスクの成果物が過大になる事例を確認）。
        - depends_on: このタスクが前提として使う他タスクのtask_idを配列で指定してください
          （前提がなければ空配列）。
        - owns_variables: このタスクで初めて確定させる共有変数名を配列で指定してください

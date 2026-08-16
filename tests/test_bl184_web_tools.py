@@ -738,6 +738,78 @@ def test_grep_with_context_caps_match_blocks_and_notes_truncation():
     assert "先頭30件のみ表示" in result
 
 
+def test_bl252_grep_with_context_pipe_matches_any_term():
+    """[BL-252] `|`区切りのいずれかの語を含む行がヒットすること（OR検索）。
+    実ドライラン（log/2026-08-16/1832）で、`grep="調査対象者|回答者数|利用"`のような
+    パターンが、対象ファイルに実際にこれらの語が含まれているにもかかわらず
+    リテラル部分一致のため常にnot_foundになっていたことを受けた修正。"""
+    content = "\n".join([
+        "1行目: 無関係な内容",
+        "2行目: 調査対象者は約2707人である",
+        "3行目: また別の無関係な内容",
+        "4行目: 回答者数は880人だった",
+    ])
+    result = web_tools._grep_with_context(content, "調査対象者|回答者数|利用", context_lines=0)
+    assert result is not None
+    assert "調査対象者" in result
+    assert "回答者数" in result
+    assert "無関係な内容" not in result
+
+
+def test_bl252_grep_with_context_pipe_no_match_still_returns_none():
+    assert web_tools._grep_with_context("line1\nline2", "存在しないA|存在しないB") is None
+
+
+def test_bl252_grep_with_context_pipe_single_term_still_works():
+    """`|`を含まない従来通りの単一語検索が引き続き動作すること（非退行）。"""
+    result = web_tools._grep_with_context("foo\nbar\nbaz", "bar", context_lines=0)
+    assert result is not None
+    assert "bar" in result
+
+
+def test_bl252_grep_with_context_trailing_pipe_does_not_crash():
+    """`"A|"`のような空語を含む分割結果でもクラッシュせず、空語を無視すること。"""
+    result = web_tools._grep_with_context("foo\nbar\nbaz", "bar|", context_lines=0)
+    assert result is not None
+    assert "bar" in result
+
+
+def test_bl252_grep_with_context_not_a_full_regex_engine():
+    """`|`以外の正規表現メタ文字（`.`等）はリテラル文字として扱われること（意図的な
+    仕様の維持——re.searchへの全面移行はReDoS等の新リスクを持ち込むため採用しない）。"""
+    content = "a.b\nacb\naxb"
+    result = web_tools._grep_with_context(content, "a.b", context_lines=0)
+    assert result is not None
+    assert result.count("\n") == 0  # "a.b"の1行のみヒット（"acb"はリテラル一致しない）
+    assert "a.b" in result
+
+
+def test_bl252_read_reference_file_grep_pipe_end_to_end(monkeypatch, tmp_path):
+    """read_reference_file_handler経由でも`|`のOR検索が機能すること。"""
+    monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path))
+    cache_file = tmp_path / "abc123.md"
+    cache_file.write_text(
+        "# Source: https://example.com\n# Fetched: 2026-01-01T00:00:00\n\n"
+        "無関係な行\n調査対象者は2707人\n無関係な行2\n",
+        encoding="utf-8",
+    )
+    result = web_tools.read_reference_file_handler(
+        {"path": "abc123.md", "grep": "調査対象者|回答者数"}, {"run_id": "run-1"}
+    )
+    assert isinstance(result, str)
+    assert "調査対象者" in result
+
+
+def test_bl252_tool_schema_documents_pipe_or_syntax():
+    """[BL-252] cela_main.py側のツールschema説明に、`|`でOR検索できる旨と、
+    フル正規表現エンジンではない旨が明記されていること（Expertが誤って他の正規表現
+    構文を使わないようにするため）。"""
+    import cela_main
+    grep_desc = cela_main.READ_REFERENCE_FILE_TOOL["function"]["parameters"]["properties"]["grep"]["description"]
+    assert "|" in grep_desc
+    assert "BL-252" in grep_desc
+
+
 def test_read_reference_file_grep_requires_path():
     result = web_tools.read_reference_file_handler({"grep": "foo"}, {"run_id": "run-1"})
     assert result["status"] == "error"
