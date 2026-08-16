@@ -274,6 +274,7 @@
 | BL-245 | 高 | `cela_main.py`（`call_detector`の思考プロセス監査＝R5） | **`done`。** ユーザーが稼働中のrun（`log/2026-08-16/1150`）でtask_2_4_1が停滞（Ver.1→Ver.24、判定：Rejectedを8回繰り返す）していることを報告し原因調査を依頼。当初「User AI Stage3/4がacceptance_criteriaを超えた水準を要求している」と仮診断したが（BL-197として既にその防止策は存在し的外れと判明）、実際にはDetectorの自己矛盾が原因だった。全28回のDetector応答を機械抽出すると、`criteria_status=[true,true,true]`（BL-023の受入基準チェックは全項目充足と自己申告）でありながら、同一応答内で「AIの思考過程では独立検証を行わずユーザーの再提出への自信を根拠に承認を急いでおり、思考プロセス監査上の重大な事後正当化に該当する」という理由で`constraint_issue="major"`にしているケースが複数回確認された。原因はR5の思考プロセス監査文言（Expertの数値ハルシネーション対策として設計された「計算ツール未使用で適当な数字」「都合の悪い制約から目を逸らして結論を急ぐ」→強制major）が、`target_role=="user"`（User AI Stage3自身の承認判断のreasoningを監査する場合、python_replを持たずそもそも計算ツール未使用の指摘が成立しない）にも無条件に適用されていたこと。ユーザー判断（3択のうち「思考プロセス監査の適用対象を限定」を選択）を受け、`target_role=="user"`の場合のみ強制差し戻し指示を外し、reasoningを参考情報として提示するに留め、判断をBL-023のcriteria_status等の構造化判定へ委ねるよう分岐（D-214）。 | P1 |
 | BL-246 | 高 | `cela_main.py`（`_BL192_DIRECTIVE_QUALITY_BLOCK`・`call_expert`） | **`done`。** ユーザーが「成果物に地理情報に基づく具体的な数値からの台数・金額算定が見られない、後続タスクか」と質問。調査の結果、task_2_2/task_2_6は正しい担当タスクだが、Expertに配線済みのgsi_geocode/gsi_get_elevation/gsi_calc_distance_bearing/calc_road_route（GSI実測ツール）がrun全体（log/2026-08-16/1100〜1333、run_id=1786845632-22283a33）を通じて一度も呼ばれていないことが判明。ユーザーが「他のランでは積極的に使っていた」と指摘し、`docs/goal/chino_city_autonomous_bus.md`・`docs/refs/chino_city/chino_city_data.md`をバックアップの`copy`ファイルとdiffした結果、以前は与えられていた実座標・距離・標高等の具体的数値が、より厳しい自律探索版シナリオへの意図的な作り替えにより空欄化されていたと確認（ユーザー確認：Detectorが大学在籍者数の1名差等の些末な不一致で差し戻す等の問題を避けるため、ゴール/参照データに頼らずAI自身にWeb・GISで調べさせ構造化させたかったとのこと）。空欄化自体は意図通りだが、GISツール0回という結果について、モデルの知性の問題かプロンプトの縛りかとユーザーから問いがあり、調査の結果、コード中に「ゴール文の数値だけ使え」という明示的制約は存在しない一方、次タスクの指示文を自由記述するUser AI Stage4自身がExpertの持つツールの存在を一切知らされておらず、「web_searchで確認できなければ未確認としてください」という語彙だけで指示を書いていたこと（Stage4が実際に書いたtask_2_2の指示文で確認）、およびExpert自身のBL-198指示が「推測を実測へ差し替えよ」という是正型で「未確認をツールで能動的に確定させよ」という能動型ではなかったことを特定。ユーザー指示（「ユーザーAIにエキスパートが使用できるツールをまず認識させ、その上で、タスクに応じてそれらのツールの使用の指示を明示するように」「作業中に出てきた事物についてもっと深堀りするように」）を受け実装。既存のBL-192（次タスク指示文の質を強化する共通ブロック）に③Expertのツール一覧の周知＋行動計画を先に立てる指示、④ゴール文・既存成果物の定性的な言及（商業施設・学校・気候等）を具体的な事物・数値へ深堀りする指示、を追加。Expert自身のプロンプトにも対になる深堀り指示（BL-246）を追加した。 | P1 |
 | BL-247 | 中 | `cela_main.py`（`_USER_AI_ROLE_MANDATE`・`generate_user_utterance`） | **`done`。** BL-246の対応後、ユーザーが「ユーザーAIの役割は、目標、フェーズ、タスクの意図を読み取り、その意図と何を具体化させるか、させなければならないかを考え、その手段と作業をエキスパートに指示をする。それに基づき、レビューも行う。そのように動くようにプロンプトを修正、または追記」と指示。BL-192/BL-246が「指示文の質」という戦術面（web_search義務化・思考プロセス明示・ツール一覧・深堀り）を扱うのに対し、その土台となる上位の役割認識（acceptance_criteriaの字面だけでなく、目標・フェーズ・タスクの意図を自分で読み取り、何を具体化すべきかを考えて指示・レビューする）を明文化する`_USER_AI_ROLE_MANDATE`を新設し、Stage1（レビュー）・Stage3（承認判断）・Stage4（次タスク指示・現タスク修正指示の両分岐）へ挿入した。issue確認段（Stage2、機械的な状態整理が主）と技術的待機メッセージ（ApprovalRecordingFailed、成果物内容に一切言及しないことが要件）には適用しない。 | P1 |
+| BL-248 | 中 | `cela_main.py`（`call_task_plan_reviewer`・新設`_get_task_planner_phase_design_rationale_text`） | **`done`。** ユーザーが`log/2026-08-16/1512`のレビュー結果を受け、「Task Plan Reviewerがread_deliverable_fileをtask_id=\"task_planner_phase_design\"という実在しないIDで4回試みています（毎回正しく拒否）。Task PlanerとTask Plan Reviewerが上手く情報を取得できるように、プロンプトの指示を修正して」と依頼。調査の結果、BL-095はtask_plannerへ`entry_type=\"Decision\"`・`topic=\"task_planner_phase_design\"`でwrite_agreementするよう指示する一方、task_plan_reviewerへは`read_deliverable_file（task_planner_phase_design）`で確認するよう指示していたが、`read_deliverable_file`（`_resolve_deliverable_pointer`、BL-084/BL-241で確立）は`entry_type=\"Deliverable\"`かつFILE_PATH:/WHITEBOARD:ポインタを持つ行だけを対象とする設計であり、`entry_type=\"Decision\"`のこの行とは構造的に一致せず、書式の正誤に関わらず常に失敗する指示だったと判明（BL-243のtrace_lineage(whiteboard:...)と同型の「消費経路の指示自体が対象外のツールを名指ししていた」パターン）。修正は「別のツールを呼ばせる」のではなく、そもそも1件しかない固定topicの値を`call_task_plan_reviewer`がPython側で直接取得しプロンプトへツール呼び出し無しで埋め込む（`current_task_json`等と同型の既存パターン）。BL-095のSUPERSEDE指示（判断根拠に誤りがあった場合の無効化）自体は維持し、read_deliverable_fileでの再取得指示のみを削除した。 | P1 |
 
 ---
 
@@ -8287,6 +8288,25 @@ BL-192/BL-246は「指示文の質」という戦術面（web_search義務化・
 4. Stage4・現タスク修正指示分岐（Rejected/Pending時）の冒頭
 
 Stage2（issue確認、既存issueの状態整理という機械的な作業が主）と、Stage4のApprovalRecordingFailed分岐（技術的待機メッセージ、「Agent AIの成果物内容には一切言及・評価しないでください」が明示要件）には適用しない——意図の読み取り・具体化の判断がそもそも不要または禁止されている場面のため。
+
+---
+
+### BL-248: Task Plan Reviewerがtask_plannerの分解の判断根拠をread_deliverable_fileで取得できず常に失敗していた
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| テスト | `tests/test_bl248_task_plan_reviewer_rationale_lookup.py`（新規6件: 未記録時のプレースホルダ、記録済み時の取得、再分解時に最新1件のみ返ること、call_task_plan_reviewerがツール呼び出し無しで埋め込んでいること、壊れたread_deliverable_file指示が消えSUPERSEDE指示は残っていること、ヘルパーの存在証明） |
+| 関連 | BL-095（判断根拠の記録・SUPERSEDE指示の初出）、BL-084/BL-241（`read_deliverable_file`がentry_type="Deliverable"専用である設計の確立元）、BL-243（同型の「消費経路の指示が対象外のツールを名指ししていた」パターンの先例） |
+
+**内容:**
+
+ユーザーが`log/2026-08-16/1512`のレビュー結果を受け、「Task Plan Reviewerがread_deliverable_fileをtask_id="task_planner_phase_design"という実在しないIDで4回試みています（毎回「read_project_planで正しいtask_idを確認してください」と正しく拒否）。Task PlanerとTask Plan Reviewerが上手く情報を取得できるように、プロンプトの指示を修正して」と依頼。
+
+調査したところ、BL-095はtask_plannerへ`write_agreement（entry_type="Decision", topic="task_planner_phase_design"）`で「なぜこのフェーズ構成・タスク分割にしたか」を書き残すよう指示する一方、task_plan_reviewerへは「`read_deliverable_file（task_planner_phase_design）`で確認する」よう指示していた。しかし`read_deliverable_file`の実体`_resolve_deliverable_pointer`（本日のBL-241で扱った箇所）は、`entry_type="Deliverable"`かつ`decision_what`が`FILE_PATH:`/`WHITEBOARD:`で始まる行だけを対象とする設計であり、`entry_type="Decision"`のプレーンテキスト行はそもそも一致条件を満たさない。つまり、topic文字列や書式の巧拙に関わらず、**この指示は構造的に実行不能**だった——本日のBL-243（`trace_lineage`にwhiteboard: refを渡す指示が、書式の正誤に関わらず常に空振りしていた）と同型のパターンで、「消費経路の指示自体が対象外のツールを名指ししていた」ケース。
+
+**修正:** 新しいツールを追加したり、別のツールを呼ぶよう指示を書き換えたりするのではなく、そもそも1件しかない固定topicの値を`call_task_plan_reviewer`がPython側で直接取得し、プロンプトへツール呼び出し無しで埋め込む方針を採用した（`current_task_json`/`verified_facts_json`等、他ノードで既に使われているのと同じパターン）。`_get_task_planner_phase_design_rationale_text(conn, run_id)`を新設し、`_find_active_deliverable_agreement`と同じ「`reversed()`して最初に一致した行＝最新行」というパターンで、複数回の再分解で積み上がった`topic="task_planner_phase_design"`のDecision行から最新の1件を取得する。プロンプト本文へ「■ task_plannerが記録した分解の判断根拠」という節を追加し、BL-095のSUPERSEDE指示（判断根拠に誤りがあった場合の無効化）はそのまま維持しつつ、`read_deliverable_file`での再取得を指示する文言は削除した。
 
 ---
 
