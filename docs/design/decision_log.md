@@ -3123,6 +3123,20 @@
 
 ---
 
+### D-223: BL-254 — task_planner向けに追加した最近のルール群を、Reviewerの観点にも網羅的に反映する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-16 |
+| 状態 | `decided` |
+| 決定者 | t-momose（追加調査の依頼・実装承認）、Claude（全件突き合わせ調査・実装） |
+| **決定理由** | D-222（BL-253フォローアップ）の直後、ユーザーが「最近のタスクプランナーの実装でレビュワー側に抜けている点も洗い出してください」と依頼。`call_task_planner`の指示1〜15と`call_task_plan_reviewer`の観点・補足ブロックを全件突き合わせた結果、BL-219（派生値のconfirmed_variables登録）・BL-196（Expertの実行環境で到達可能な水準か）・BL-250（範囲限定文言への調査許可併記）の3件が、task_plannerには指示があるのにReviewerには対応する確認観点が無いギャップと判明した。BL-253と同型の「生成側にだけ判定軸があり監査側に無い」パターンであり、AGENTS.md §15.2「部分的な保護は無いより危険」に照らして看過できないと判断し、実装をユーザーへ提案、承認を得た。 |
+| 決定内容 | `call_task_plan_reviewer`の観点を5個から8個へ拡張する。観点6（BL-196: acceptance_criteria/descriptionがExpertの実行環境〈python_replサンドボックス・web_fetch対応形式等〉で到達可能な水準を超えていないか）、観点7（BL-250: 範囲限定文言に「調査・暫定提案は行ってよい」の一文が併記されているか）、観点8（BL-219: 派生値がwrite_agreementのconfirmed_variablesとして登録されread_verified_factで検索可能か）を追加する。導入文の個数表記（「8つとも」）と「重大な問題」の列挙も新観点に合わせて更新する。 |
+| 影響 | `cela_main.py`（`call_task_plan_reviewer`の観点6〜8）、新規`tests/test_bl254_task_plan_reviewer_gaps.py`（6件）。 |
+| 関連 BL | BL-254（本件）、BL-253（同型パターンの直前の先例）、BL-196/BL-219/BL-250（各ルールの初出） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
