@@ -8575,6 +8575,8 @@ Expert自身の思考ログ（iter=2、`I recognize there's some confusion aroun
 
 **修正:** `decision_extractor_node`の安全網ループに`status != "Rejected" and entry_type != "Directive"`の機械的ガードを追加し、該当時は`upsert_verified_fact`自体を呼ばないようにした（主防御）。却下は定義上「値の確定」ではあり得ず、指示は「今後登録すべき内容」であって確定した値そのものではないため。あわせて`call_decision_extractor`のプロンプトにも同じ区別を明記した（多層防御、ただしLLMの指示遵守に依存しない機械的ガードが主）。
 
+**追記（W2、同日）:** ユーザーが「なかなかうまくいきませんね」と感想を述べたのを機に、BL-036/037（統合パスがファイルを読み返せない）→BL-258（Expertが正規経路を呼び忘れる）→BL-259（正規経路を呼んでも別経路に踏みつぶされる）という3件が同一の構造的パターン（信頼できる確定値ストアを作るたびに書き込み手段が増え、増えた手段の一部が無検証という循環）であると深掘りを依頼された。上記のstatus/entry_typeガードは今回観測した2パターンを塞ぐ対症療法に過ぎず、decision_extractorが将来別のstatus/entry_typeの組み合わせでnarrative文を抽出する亜種を防げない点を指摘し、より構造的な対策を提案・実装した：`_query_AI_live`のwrite_agreement成功トラッキング（`_LAST_WRITE_AGREEMENT_ITEMS`）に、`confirmed_variables`経由で直接確定したvariable_name集合も記録するよう拡張し、`decision_extractor_node`の安全網ループが「そのvariable_nameが同ターンに既に正規経路で確定済みか」をvariable_name単位で機械的に判定してスキップするようにした。これにより、status/entry_typeの値が何であれ、正規経路が既に確定した変数を安全網が上書きすることは構造的にできなくなった（既存のstatus/entry_typeガードは別軸の防御として維持）。
+
 ---
 
 | 日付 | 内容 |
