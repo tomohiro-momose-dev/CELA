@@ -285,6 +285,7 @@
 | BL-256 | 中 | `cela_main.py`（モジュールレベルの定数・プロンプト定義） | **`open`（起票のみ）。** ユーザーが「SOLIDを適用したい、全面リライトではなく一つずつ集約・分離化していきたい」と提起。全面リライトの高リスクをClaudeが指摘し、段階的アプローチで合意。`bl_history_audit.md`の実測を再測定（`scripts/bl_patch_density.py`）した結果、モジュールレベル（定数・スキーマ・プロンプト定義）が102BLで最大のホットスポットと判明。核心のアダバーサリアルループ（`call_detector`/`generate_user_utterance`/`call_expert`）は今も頻繁に変更され続けており切り出しリスクが高いため、静的文字列が主体でリスクが低いモジュールレベルから着手する方針とした。予備調査で「read_entityは名前を持つ事物専用」等の説明文が13回、「同じ検証・計算を繰り返さない」注意文が6箇所で独立に記述されている等の冗長性を確認。実装（`web_tools.py`分離と同型の安全なモジュール切り出し）は未着手。 | P2 |
 | BL-257 | 中 | `cela_main.py`（`CALC_ROAD_ROUTE_TOOL`・`call_expert`・`call_detector`） | **`done`。** BL-255の続きでユーザーが`log/2026-08-17/0757`の「task_2_1がつまずいています」を指摘。同runの他タスクが全て一発承認の中task_2_1だけ17バージョンかかっており、原因は`calc_road_route`のGIS実測値（横谷峡12.22分）と公式バス案内（約35分）の混同でDetectorから3回連続major判定を受けていたこと。ユーザーとの対話で、差の原因が信号待ち等ではなく「乗用車の自由走行時間（driving-carプロファイル）」対「バスの停留所停車・ダイヤを含む運行時間」という計測対象自体の違いと特定。ツールschema・call_expert（通常/軽量）・call_detector（ドメインレビュー/数値監査）の計4箇所に、混同を防ぐ生成時ガードと、一致しないこと自体を誤ってmajor判定しない監査時ガードの両方を追加。 | P2 |
 | BL-258 | 中 | `cela_main.py`（`WRITE_AGREEMENT_TOOL`の`confirmed_variables`説明） | **`done`。** 同じ`log/2026-08-17/0757`ランで、ユーザーが「task_3_1_authorityが停滞している、原因は？」と質問。Detectorレビュー15件を機械抽出し、Expertが`authority_requirement_register`/`insurance_responsibility_boundary`（約32件の構造化レコード）を「登録」しようとしながら、`write_agreement`の`confirmed_variables`を一度も呼ばず、代わりにtopic/decision_what経由の通常agreementsレコードを作成しただけだったと判明。`verified_facts`には何も書き込まれず、Detectorの`read_verified_fact`/`read_entity`独立確認は毎回正しくnot_foundを返しており、Expert側が15サイクル（約63分）にわたり「登録済み・検証済み」という虚偽の完了主張を繰り返していた。ユーザーとの相談で、ツール統合ではなく的を絞った軽量対応（`confirmed_variables`の説明に、これが`verified_facts`への唯一の書き込み経路であることと、表形式の値もJSON文字列として同経路で確定できることを明記）を採用。 | P2 |
+| BL-259 | 高 | `cela_main.py`（`decision_extractor_node`のowned_variable_values安全網、`call_decision_extractor`のプロンプト） | **`done`。** 新しい`log/2026-08-17/1151`ランで、ユーザーが「task_4_1_mountain_designで`write_agreementによるDB更新成功`だが`read_verified_factによる独立読み戻しはnot_found`」というUser AIの却下文を共有。`cela.db`の`verified_facts`を直接確認したところ行自体は存在し、Expertの構造化データではなく決定抽出由来の短い説明文（「独立読み戻し未達・未検証」等）に置き換わっていたと判明。実際のログ追跡で、Expertが`confirmed_variables`で正しく登録した直後、同ターンの`decision_extractor_node`が(1) `status="Rejected"`の却下理由説明文、(2) `entry_type="Directive"`の作業指示文の両方を誤って`owned_variable_values`として抽出し、write_agreement呼び出し有無に関わらず無条件実行される安全網パスが2回連続でExpertの正しい値を上書きしていたことを特定（BL-258とは別原因、AGENTS.md §13.4「複数の書き込み経路の非対称な検証」の典型例）。却下・指示は定義上「値の確定」ではあり得ないため、安全網パスに`status != "Rejected" and entry_type != "Directive"`の機械的ガードを追加し、`call_decision_extractor`のプロンプトにも同じ区別を多層防御として明記。 | P1 |
 
 ---
 
@@ -8552,6 +8553,27 @@ Expert自身の思考ログ（iter=2、`I recognize there's some confusion aroun
 **検討した対応案とユーザー判断:** Claudeから、①confirmed_variables/entities/write_agreementの3経路を統合する案と②`confirmed_variables`の説明を軽量に補強する案を提示。①は決定・事実・実世界事物という別種の監査意味を持つ3経路を無理に一本化するリスクがあるため非推奨と説明し、ユーザーは②を選択。
 
 **修正:** `WRITE_AGREEMENT_TOOL`の`confirmed_variables`パラメータ説明に、(1) これが`verified_facts`へ書き込む唯一の経路であり、agreementsのtopic/decision_whatにどれだけ詳しく書いても登録にはならない旨、(2) 表形式・リスト形式の値もJSON文字列として`value`に渡すことでこの経路のまま確定できる旨、を明記した（ドキュメントのみの修正）。
+
+---
+
+### BL-259: decision_extractorのowned_variable_values安全網が、確定値でないイベント（Rejected/Directive）でExpertの正しい登録を上書きしていた
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| テスト | `tests/test_bl259_decision_extractor_owned_variable_guard.py`（新規6件: BL-259マーカーの存在、`status != "Rejected"`ガードの存在、`entry_type != "Directive"`ガードの存在、ガードが実際に`upsert_verified_fact`呼び出しへ適用されていること、`call_decision_extractor`プロンプトへの同じ区別の明記、実インシデントの2パターンを再現したガード述語の検証） |
+| 関連 | BL-258（同じ`log/2026-08-17`系列だが逆方向：Expertが呼び忘れる事故）、BL-023（owns_variables/verified_facts設計）、BL-041（confidence='provisional'のデフォルト化） |
+
+**内容:**
+
+新しい`log/2026-08-17/1151`のドライラン（同一run_id=1786921069-6bb4a6a5の再開）で、ユーザーがtask_4_1_mountain_designのUser AI却下文（「`write_agreement`によるDB更新成功だが、`read_verified_fact`による独立読み戻しは`not_found`」、対象3変数）を共有。BL-258と同じ症状に見えたが、実際のツール呼び出しを確認するとExpertは`confirmed_variables`を正しく呼んでおり（3変数とも構造化JSON配列を`value`に渡していた）、BL-258の原因（呼び忘れ）には該当しなかった。
+
+`cela.db`の`verified_facts`テーブルを直接確認したところ、3変数とも行自体は存在していたが、値がExpertの構造化データではなく`独立読み戻し未達・未検証`「正式値へ接続しない判定条件・入力欄として保持」といった短い説明文に置き換わっていた。実際の書き込みログ（`🔄 [verified_facts] ...を上書きしました`）を時系列で追うと、原因は次の通り。(1) Expertが`confirmed_variables`で正しい構造化JSONを登録（成功）。(2) 同ターンの`decision_extractor_node`が、User AIの却下発言（「登録成功だが独立読み戻しはnot_found」という状況説明）をJSON抽出する際、その状況説明の文言自体を誤って`owned_variable_values`として抽出（`status="Rejected"`のDeliverable UPDATE）。(3) `decision_extractor_node`には「Expertが`confirmed_variables`を呼び忘れた場合の保険」として`owned_variable_values`を無条件で`verified_facts`へ書き込む安全網パス（BL-023 2.6節、コメントに「write_agreement呼び出し有無に関わらず毎ターン無条件実行する」と明記）があり、これがExpertの正しい登録の直後に発火し上書き。(4) 同じ抽出結果内の別のDirective（`entry_type="Directive"`、作業指示文「〜を登録する」）もowned_variable_valuesを持っており、安全網パスが2回連続で発火し、最終的に意味のないプレースホルダ文字列だけが残った。
+
+これはAGENTS.md §13.4（「同じ状態を書き込む複数経路がある場合、両方に同じ検証を課さなければならない」）が想定する典型パターンで、「保険のはずの第二の書き込み経路が、無検証のまま正規経路を踏みつぶす」ケース。BL-258とは逆方向（Expertが正しく書いた後で別経路に踏みつぶされる）の同根事故。
+
+**修正:** `decision_extractor_node`の安全網ループに`status != "Rejected" and entry_type != "Directive"`の機械的ガードを追加し、該当時は`upsert_verified_fact`自体を呼ばないようにした（主防御）。却下は定義上「値の確定」ではあり得ず、指示は「今後登録すべき内容」であって確定した値そのものではないため。あわせて`call_decision_extractor`のプロンプトにも同じ区別を明記した（多層防御、ただしLLMの指示遵守に依存しない機械的ガードが主）。
 
 ---
 

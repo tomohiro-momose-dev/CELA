@@ -2447,7 +2447,16 @@ WRITE_AGREEMENT_TOOL = {
                         "decision_extractor_node runs this turn. confidence='provisional' is a fully legitimate "
                         "value — it means 'proceeded with this value for now', not 'this is unverified/wrong'. "
                         "[BL-041] Default to 'provisional' unless this value is an absolute constraint given "
-                        "directly in the goal, or the User has explicitly approved it as final."
+                        "directly in the goal, or the User has explicitly approved it as final. "
+                        "[BL-258] This is the ONLY path that writes to verified_facts. Writing a regular "
+                        "CREATE/UPDATE entry whose topic/decision_what merely describes or names an "
+                        "owns_variables variable does NOT register it -- verified_facts stays empty and "
+                        "read_verified_fact/read_entity will keep returning not_found, no matter how "
+                        "detailed the agreement text is. If the value you need to confirm is a table/list of "
+                        "several structured records (not a single scalar), you can still confirm it here: "
+                        "serialize the whole table as one JSON string and pass it as this entry's 'value' "
+                        "(variable_name = the owns_variables name). Do not silently fall back to writing it "
+                        "only as agreement text because the value 'doesn't feel like' a single scalar."
                     ),
                     "items": {
                         "type": "object",
@@ -11586,6 +11595,13 @@ def call_decision_extractor(chat_history: list[dict], existing_topics: list[str]
         `content`（Deliverable本体）は上記の通り簡潔な要約で構いませんが、`owned_variable_values`は
         それとは別に、他タスクが`depends_on`を通じてこの値を参照する際に読む、ごく簡潔な要約
         （確定した結論・数値・根拠の要点のみ）にしてください。
+
+        【BL-259: owned_variable_valuesに「値でないもの」を入れない】
+        `status="Rejected"`のイベント（却下理由の説明）や`entry_type="Directive"`のイベント
+        （「〜を登録する」という今後の作業指示）に`owned_variable_values`を付けないでください。
+        却下は値の確定ではなく、指示はまだ確定していない未来の作業内容です。「独立読み戻しが
+        not_foundだった」「〜を登録するよう指示した」のような、値そのものではなく状況・指示の
+        説明文をここへ入れると、Agentが別途正しく確定した値を無条件に上書きしてしまいます。
         """
     else:
         # ==========================================
@@ -14795,8 +14811,19 @@ def decision_extractor_node(state: LineageState) -> LineageState:
 
         # BL-023 2.6節: owns_variablesに含まれる変数のみをverified_factsへ確定保存する
         # ★R3b §3.5.1: write_agreement呼び出し有無に関わらず毎ターン無条件実行
+        # [BL-259] ただし、以下の2種は「値の確定」ではないため対象外とする（実ドライラン
+        # log/2026-08-17/1151、run_id=1786921069-6bb4a6a5で確認された実害: Expertがwrite_agreement
+        # のconfirmed_variablesで正しく構造化データを登録した直後、同ターンのdecision_extractorが
+        # (1) status="Rejected"のDeliverable差し戻し理由の説明文（「独立読み戻し未達・未検証」）と
+        # (2) entry_type="Directive"の作業指示文（「〜を登録する」）の両方をowned_variable_valuesへ
+        # 誤って抽出し、この無条件パスが2回連続でExpertの正しい値を意味のないプレースホルダ文字列で
+        # 上書きした）。
+        # - status="Rejected": 却下は定義上「値の確定」ではあり得ない（却下理由の説明文がここに
+        #   紛れ込む）。
+        # - entry_type="Directive": 指示は「今後これを登録せよ」という未来の作業内容であり、
+        #   確定した値そのものではない（Expert自身の確定はDecision/Deliverableとして抽出される）。
         owned_variable_values = item.get("owned_variable_values", {})
-        if isinstance(owned_variable_values, dict):
+        if isinstance(owned_variable_values, dict) and status != "Rejected" and entry_type != "Directive":
             for var_name, var_value in owned_variable_values.items():
                 if var_name in owns_variables:
                     upsert_verified_fact(

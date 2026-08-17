@@ -3175,6 +3175,18 @@
 | 影響 | `cela_main.py`（`WRITE_AGREEMENT_TOOL`の`confirmed_variables`説明）、新規`tests/test_bl258_confirmed_variables_table_value_guidance.py`（4件）。 |
 | 関連 BL | BL-258（本件）、BL-036/037/219（confirmed_variables欠落の先行事例）、BL-041（confidence='provisional'デフォルト化）、BL-255（発見の発端） |
 
+### D-227: BL-259 — decision_extractorのowned_variable_values安全網は「値の確定」でないイベント（Rejected/Directive）を機械的に除外する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-17 |
+| 状態 | `decided` |
+| 決定者 | t-momose（1151ログの現象共有）、Claude（原因特定・修正実装） |
+| **決定理由** | 新しい`log/2026-08-17/1151`ランで、ユーザーがtask_4_1_mountain_designのUser AI却下文（「write_agreementによるDB更新成功だが、read_verified_factによる独立読み戻しはnot_found」）を共有。`cela.db`を直接確認すると`verified_facts`の3変数は行として存在するが、値がExpertの構造化データではなくdecision_extractor由来の短い説明文に置き換わっていた。ログ追跡により、Expertが`confirmed_variables`で正しく登録した直後、同ターンの`decision_extractor_node`が(1) `status="Rejected"`の却下理由の説明文、(2) `entry_type="Directive"`の作業指示文の両方を誤って`owned_variable_values`として抽出し、`write_agreement`呼び出し有無に関わらず無条件実行される安全網パス（BL-023 2.6節、confirmed_variables指定漏れの保険）が2回連続でExpertの正しい登録を上書きしていたと特定した。BL-258（Expertが呼び忘れる）とは逆に、こちらはExpertが正しく書いた後で別経路に踏みつぶされるケースであり、AGENTS.md §13.4（複数書き込み経路の検証非対称）そのものの実例。却下は定義上「値の確定」ではなく、指示は「今後登録すべき内容」であって確定した値そのものではないため、この2条件を機械的に除外することとした。 |
+| 決定内容 | `decision_extractor_node`の安全網ループに`status != "Rejected" and entry_type != "Directive"`のガードを追加し、該当時は`upsert_verified_fact`自体を呼ばない。あわせて`call_decision_extractor`のプロンプトにも同じ区別を明記する（多層防御だが、主たる防御はLLMの指示遵守に依存しない機械的ガードの方）。 |
+| 影響 | `cela_main.py`（`decision_extractor_node`・`call_decision_extractor`）、新規`tests/test_bl259_decision_extractor_owned_variable_guard.py`（6件）。 |
+| 関連 BL | BL-259（本件）、BL-258（Expert呼び忘れ、逆方向の同根事故）、BL-023（owns_variables/verified_facts設計）、BL-041（confidence='provisional'デフォルト化） |
+
 ---
 
 ## 決定の記録ルール
