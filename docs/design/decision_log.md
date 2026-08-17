@@ -3187,6 +3187,8 @@
 | 影響 | `cela_main.py`（`decision_extractor_node`・`call_decision_extractor`）、新規`tests/test_bl259_decision_extractor_owned_variable_guard.py`（6件）。 |
 | 関連 BL | BL-259（本件）、BL-258（Expert呼び忘れ、逆方向の同根事故）、BL-023（owns_variables/verified_facts設計）、BL-041（confidence='provisional'デフォルト化） |
 
+**追記（W2、同日）:** ユーザーから「BL-036/037→BL-258→BL-259が同じ構造的パターンの繰り返しではないか」と深掘りを依頼された。status/entry_typeによるホワイトリスト/ブラックリスト判定は今回の2パターンにしか効かず、decision_extractorが将来別のstatus/entry_type組み合わせでnarrative文を抽出する亜種を防げない対症療法であることを認め、より構造的な対策を追加実装することとした。`_query_AI_live`のwrite_agreement成功トラッキング（`_LAST_WRITE_AGREEMENT_ITEMS`）へ、`confirmed_variables`経由で直接確定したvariable_name集合を記録するよう拡張し、`decision_extractor_node`の安全網ループが「同ターンに正規経路で既に確定済みのvariable_nameか」をvariable_name単位で直接判定してスキップするガードを追加した（既存のstatus/entry_typeガードは別軸の防御として維持）。`tests/test_bl259_decision_extractor_owned_variable_guard.py`へ4件追加（計10件）、§17.1差し戻しテスト（3件failure確認→復元）、フルスイート1472件Pass。
+
 ---
 
 ## 決定の記録ルール
