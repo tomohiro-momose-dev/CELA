@@ -3163,6 +3163,18 @@
 | 影響 | `cela_main.py`（`CALC_ROAD_ROUTE_TOOL`・`call_expert`・`call_detector`）、新規`tests/test_bl257_calc_road_route_car_vs_transit_time.py`（5件）。 |
 | 関連 BL | BL-257（本件）、BL-198（`calc_road_route`等の地理データ実測ツールの初出）、BL-255（発見の発端） |
 
+### D-226: BL-258 — `confirmed_variables`欠落によるverified_facts未登録は、ツール統合ではなく説明の補強で対応する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-17 |
+| 状態 | `decided` |
+| 決定者 | t-momose（現象の指摘・統合案への疑問提起）、Claude（原因分析・統合案とのトレードオフ提示） |
+| **決定理由** | 同じ`log/2026-08-17/0757`ランで、ユーザーが「task_3_1_authorityが停滞している、原因は？」と質問。`detector_reviews`15件を機械抽出した結果、Expertが約32件の構造化レコード（`authority_requirement_register`/`insurance_responsibility_boundary`）を`write_agreement`のtopic/decision_what経由で作成しただけで、`confirmed_variables`（`verified_facts`への唯一の書き込み経路）を一度も呼んでいなかったと判明。Detectorの`read_verified_fact`/`read_entity`独立確認は正しくnot_foundを返し続け、Expertは矛盾する完了主張を15サイクル（約63分）繰り返した。ユーザーが「紛らわしいツールや使い方はできるだけ統合、シンプルにしたい」と提起したのに対し、Claudeは`confirmed_variables`（スカラー事実）・`entities`（実世界固有物）・`write_agreement`のtopic/decision_what（決定record）は監査上の意味が異なるため統合すると誤用を増やしうると指摘。実際の欠陥はツール数ではなく`confirmed_variables`が省略可能でありサイレントに失敗する点にあるとし、②ツール説明への明記（軽量・低リスク）と③owns_variables未充足を機械的に検出するBL-255型ゲート（重量）の2案を提示。ユーザーは②のみを選択した。 |
+| 決定内容 | `WRITE_AGREEMENT_TOOL`の`confirmed_variables`パラメータ説明に、(1) これが`verified_facts`への唯一の書き込み経路でありagreementsのtopic/decision_whatだけでは登録にならない旨、(2) 表形式・リスト形式の値もJSON文字列として`value`に渡せば同経路で確定できる旨、を明記する（ドキュメントのみ）。③の機械的ゲートは今回は見送り、必要になれば別BLとして再提起する。 |
+| 影響 | `cela_main.py`（`WRITE_AGREEMENT_TOOL`の`confirmed_variables`説明）、新規`tests/test_bl258_confirmed_variables_table_value_guidance.py`（4件）。 |
+| 関連 BL | BL-258（本件）、BL-036/037/219（confirmed_variables欠落の先行事例）、BL-041（confidence='provisional'デフォルト化）、BL-255（発見の発端） |
+
 ---
 
 ## 決定の記録ルール
