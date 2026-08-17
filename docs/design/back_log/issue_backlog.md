@@ -8513,6 +8513,15 @@ BL-253フォローアップ実装の直後、ユーザーから「最近のタ�
 
 **次のアクション（未着手）:** 上記の予備調査で見つかった候補（BL-204/205説明文、「同じ検証・計算」注意文、BL-188説明文）について、実際の本文を機械抽出し、真に統合可能なものから`web_tools.py`分離（BL-184）と同型の安全なパターン（`cela_main.py`への逆依存なし）で、新規モジュール（例: `prompt_blocks.py`）へ切り出す。各統合につき、統合前後でフルオフラインスイートが一致することを確認し、既存のsource-inspectionテスト（`test_bl246_*`等と同型）を追加する。
 
+**仕分け作業と実装（2026-08-17、同日）:**
+
+ユーザーの依頼を受け、上記2グループの本文を機械抽出してdiffし、統合可否を仕分けた。
+
+- **「同じ検証・計算を繰り返さない」グループ（`done`）:** 実は既に共有ヘルパー`_verification_throttle_warning(example="")`が存在し、docstring通り`call_integrator`/`call_reviewer`/`call_goal_essence_analyst`/`call_resource_arbiter`の4箇所が正しく利用していたが、`call_expert`・`generate_user_utterance`・`call_task_plan_reviewer`の3箇所はヘルパーへ移行されず手書きの近似テキストのまま放置されていたと判明。ヘルパーへ`output_form`引数（既定`"json"`＝既存4箇所と完全byte-identical、`"answer"`＝`call_expert`、`"utterance"`＝`generate_user_utterance`）を追加し、この3箇所を移行。`call_task_plan_reviewer`は「python_replの呼び出し回数だけでなく思考中の再検討も含む」「major/noneの判断を蒸し返さない」という固有の2文があったため、ヘルパー呼び出しの直後に維持したまま残した（意味の欠落を避けるため）。既存の`tests/test_bl089_*`・`tests/test_bl104_*`の3件が、移行前の手書き文言の存在を直接assertしていたため、`call_resource_arbiter`向けに既に確立されていた「呼び出し式そのものをマーカーとする」パターンへ揃えて更新（形骸化ではなく既存パターンの横展開）。
+- **`read_entity`専用警告グループ（BL-205、未着手）:** 13箇所のうち3箇所（generate_user_utteranceのorchestrator向け）は他10箇所と**意味が逆**（read_verified_factという代替手段自体が使えないパスであり、代替を勧める文ではない）と判明したため、無条件の一括統合は誤り。この3箇所は独立した別定数に、残り10箇所は可変部分（例示句・追加注意句の有無）をパラメータ化した上で統合する設計が必要。次回以降の実装対象として残す。
+
+§17.1差し戻しテスト実施（6件failure確認→復元）。関連回帰326件・フルオフラインスイート1485件すべてPass。
+
 ---
 
 ### BL-257: `calc_road_route`（乗用車の自由走行時間）とバス等の公式所要時間の混同を防ぐ・誤検知を防ぐ
