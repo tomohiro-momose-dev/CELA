@@ -3213,7 +3213,7 @@
 | 状態 | `decided` |
 | 決定者 | t-momose（英語化の前段として集約を提案、仕分け作業の指示）、Claude（機械抽出・仕分け・実装） |
 | **決定理由** | ユーザーが「プロンプトを英語化するなら、その前に可能な限り集約すべき」と提起し、BL-256（起票済み・未着手）の仕分け作業から着手するよう依頼。「read_entityは名前を持つ事物専用」（13箇所）と「同じ検証・計算を繰り返さない」（6箇所）の2グループを機械抽出してdiffした結果、後者は既に共有ヘルパー`_verification_throttle_warning()`が存在し4箇所（call_integrator/call_reviewer/call_goal_essence_analyst/call_resource_arbiter）で正しく利用されていたが、3箇所（call_expert/generate_user_utterance/call_task_plan_reviewer）が移行漏れのまま手書きの近似テキストを持っていたと判明。前者は13箇所のうち3箇所が他10箇所と意味が逆（read_verified_factという代替手段自体が使えないパス）であり、無条件統合は誤った案内を生むリスクがあるため、より慎重な設計が必要と判断し実装を見送った。 |
-| 決定内容 | `_verification_throttle_warning()`へ`output_form`引数（既定"json"は既存4箇所と完全byte-identBeibehalten、"answer"/"utterance"を追加）を導入し、移行漏れの3箇所を統合。`read_entity`専用警告グループ（BL-205）は仕分け結果をBL-256へ記録し、実装は別途の機会に持ち越す。 |
+| 決定内容 | `_verification_throttle_warning()`へ`output_form`引数（既定"json"は既存4箇所と完全byte-identical、"answer"/"utterance"を追加）を導入し、移行漏れの3箇所を統合。`read_entity`専用警告グループ（BL-205）は仕分け結果をBL-256へ記録し、実装は別途の機会に持ち越す。 |
 | 影響 | `cela_main.py`（`_verification_throttle_warning`・`call_expert`・`generate_user_utterance`・`call_task_plan_reviewer`）、新規`tests/test_bl256_verification_throttle_warning_consolidation.py`（8件）、既存`tests/test_bl089_anti_repetition_instructions.py`・`tests/test_bl104_project_plan_toc_and_prompt_reorder.py`の計3件を「呼び出し式そのものをマーカーとする」既存パターンへ更新。 |
 | 関連 BL | BL-256（本件）、BL-115（`call_resource_arbiter`での先行統合パターン）、BL-021（プロンプト英語化、本件が前段） |
 
