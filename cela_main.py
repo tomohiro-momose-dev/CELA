@@ -301,7 +301,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = gpt_5_6_luna
+model_user = nemotron_3_ultra
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -311,42 +311,42 @@ model_user = gpt_5_6_luna
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = gpt_5_6_luna # nemotron_3_ultra
+model_orchestrator = nemotron_3_super # nemotron_3_ultra
 
 client_expert = client_openrouter
-model_expert = gpt_5_6_luna # nemotron_3_ultra
+model_expert = nemotron_3_ultra # nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = gpt_5_6_luna
+model_task_planner = nemotron_3_super
 
 client_task_plan_reviewer = client_openrouter
-model_task_plan_reviewer = gpt_5_6_luna
+model_task_plan_reviewer = nemotron_3_super
 
 client_detector_domain = client_openrouter
-model_detector_domain = gpt_5_6_luna
+model_detector_domain = nemotron_3_ultra
 client_detector_numeric = client_openrouter
-model_detector_numeric = gpt_5_6_luna # nemotron_3_ultra
+model_detector_numeric = nemotron_3_super # nemotron_3_ultra
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = gpt_5_6_luna
+model_decision_extractor = nemotron_3_super
 
 client_resource_arbiter = client_openrouter
-model_resource_arbiter = gpt_5_6_luna #nemotron_3_ultra
+model_resource_arbiter = nemotron_3_ultra #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = gpt_5_6_luna
+model_reflection = nemotron_3_ultra
 
 client_facilitator = client_openrouter
-model_facilitator = gpt_5_6_luna
+model_facilitator = nemotron_3_ultra
 
 client_integrator = client_openrouter
-model_integrator = gpt_5_6_luna #nemotron_3_ultra
+model_integrator = nemotron_3_ultra #nemotron_3_ultra
 
 client_reviewer_qa = client_openrouter
-model_reviewer_qa = gpt_5_6_luna #nemotron_3_ultra
+model_reviewer_qa = nemotron_3_ultra #nemotron_3_ultra
 
 client_goal_essence = client_openrouter
-model_goal_essence = gpt_5_6_luna #nemotron_3_ultra
+model_goal_essence = nemotron_3_ultra #nemotron_3_ultra
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -5732,9 +5732,20 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                                         # [BL-223] 項目単位のdecision_extractor重複判定用に、
                                         # _commit_agreement_from_toolと同じtask_idフォールバック
                                         # 規則（args優先、無ければ呼び出し元の現在タスク）を踏襲する。
+                                        # [BL-259 W2] さらに、このwrite_agreement呼び出しが
+                                        # confirmed_variables経由で直接確定したvariable_name集合も
+                                        # 記録する。decision_extractor_nodeの安全網パスが、同ターンに
+                                        # 正規経路で既に確定済みの変数をvariable_name単位で識別し、
+                                        # ステータス値の推測（Rejected/Directive除外）に頼らず
+                                        # 上書きを防げるようにするため。
                                         _LAST_WRITE_AGREEMENT_ITEMS.append({
                                             "entry_type": args.get("entry_type", "Decision"),
                                             "task_id": args.get("task_id") or _CURRENT_TASK_ID,
+                                            "confirmed_variable_names": [
+                                                cv.get("variable_name")
+                                                for cv in (args.get("confirmed_variables") or [])
+                                                if cv.get("variable_name")
+                                            ],
                                         })
                                 elif tc.function.name == "revise_goal":
                                     # [BL-086] revise_goalはツールハンドラ内でLangGraph stateに
@@ -14774,6 +14785,15 @@ def decision_extractor_node(state: LineageState) -> LineageState:
         state.get("expert_wrote_agreement_items", []) if target_role == "expert"
         else state.get("user_wrote_agreement_items", [])
     )
+    # [BL-259 W2] 同ターンに正規経路（write_agreementのconfirmed_variables）で既に確定済みの
+    # variable_name集合。decision_extractor_nodeの安全網パス（下のowned_variable_valuesループ）が
+    # これらを再上書きしないためのガード。ステータス値（Rejected/Directive除外）による推測より
+    # 精密——「正規経路が今ターン実際に確定した変数」を機械的事実として直接判定する（§13.4）。
+    _confirmed_this_turn_var_names = {
+        var_name
+        for w in _written_this_turn_items
+        for var_name in (w.get("confirmed_variable_names") or [])
+    }
     # [DEBUG][BL-038調査用/2026-07-22] wrote_agreement_this_turnがなぜFalse評価されるか切り分けるための一時計装。
     print(
         f"[DEBUG] decision_extractor target_role={target_role!r} "
@@ -14825,16 +14845,28 @@ def decision_extractor_node(state: LineageState) -> LineageState:
         owned_variable_values = item.get("owned_variable_values", {})
         if isinstance(owned_variable_values, dict) and status != "Rejected" and entry_type != "Directive":
             for var_name, var_value in owned_variable_values.items():
-                if var_name in owns_variables:
-                    upsert_verified_fact(
-                        _conn, _run_id, var_name, var_value, unit="",
-                        source_task_id=task_id, source_phase_id=phase_id,
-                        confirmed_by=proposed_by
-                        # [BL-041] confidence未指定→デフォルトのprovisionalで保存される。
-                        # このパスはwrite_agreementのconfirmed_variables指定漏れの保険であり、
-                        # Expert自身がconfidenceを判断した経路ではないため安全側に倒す。
+                if var_name not in owns_variables:
+                    continue
+                # [BL-259 W2] この変数が同ターンに既に正規経路（confirmed_variables）で
+                # 確定済みなら、ステータス値が何であれ安全網パスは発火させない。ステータス値の
+                # 推測（上のRejected/Directive除外）だけでは、将来decision_extractorが別の
+                # ステータスの組み合わせでnarrative文を抽出するケースを防げないため、
+                # 「正規経路が今ターン実際に確定した」という機械的事実で直接ガードする。
+                if var_name in _confirmed_this_turn_var_names:
+                    print(
+                        f"  ⏭️ [BL-259 W2] '{var_name}'は同ターンに正規経路（confirmed_variables）で"
+                        f"既に確定済みのため、安全網パスによる上書きをスキップしました。"
                     )
-                    print(f"  🔒 [verified_facts] '{var_name}' = {var_value} を暫定値(provisional)として保存しました（source: {task_id}）。")
+                    continue
+                upsert_verified_fact(
+                    _conn, _run_id, var_name, var_value, unit="",
+                    source_task_id=task_id, source_phase_id=phase_id,
+                    confirmed_by=proposed_by
+                    # [BL-041] confidence未指定→デフォルトのprovisionalで保存される。
+                    # このパスはwrite_agreementのconfirmed_variables指定漏れの保険であり、
+                    # Expert自身がconfidenceを判断した経路ではないため安全側に倒す。
+                )
+                print(f"  🔒 [verified_facts] '{var_name}' = {var_value} を暫定値(provisional)として保存しました（source: {task_id}）。")
 
         # ★R3b §3.5.1 / [BL-223]: 同ターンに直接write_agreementで書き込まれたのと同じ
         # (entry_type, task_id)の抽出項目のみ、decision_extractor_nodeによるAgreement書き込み
