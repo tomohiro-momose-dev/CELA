@@ -285,7 +285,8 @@
 | BL-256 | 中 | `cela_main.py`（モジュールレベルの定数・プロンプト定義） | **`open`（起票のみ）。** ユーザーが「SOLIDを適用したい、全面リライトではなく一つずつ集約・分離化していきたい」と提起。全面リライトの高リスクをClaudeが指摘し、段階的アプローチで合意。`bl_history_audit.md`の実測を再測定（`scripts/bl_patch_density.py`）した結果、モジュールレベル（定数・スキーマ・プロンプト定義）が102BLで最大のホットスポットと判明。核心のアダバーサリアルループ（`call_detector`/`generate_user_utterance`/`call_expert`）は今も頻繁に変更され続けており切り出しリスクが高いため、静的文字列が主体でリスクが低いモジュールレベルから着手する方針とした。予備調査で「read_entityは名前を持つ事物専用」等の説明文が13回、「同じ検証・計算を繰り返さない」注意文が6箇所で独立に記述されている等の冗長性を確認。実装（`web_tools.py`分離と同型の安全なモジュール切り出し）は未着手。 | P2 |
 | BL-257 | 中 | `cela_main.py`（`CALC_ROAD_ROUTE_TOOL`・`call_expert`・`call_detector`） | **`done`。** BL-255の続きでユーザーが`log/2026-08-17/0757`の「task_2_1がつまずいています」を指摘。同runの他タスクが全て一発承認の中task_2_1だけ17バージョンかかっており、原因は`calc_road_route`のGIS実測値（横谷峡12.22分）と公式バス案内（約35分）の混同でDetectorから3回連続major判定を受けていたこと。ユーザーとの対話で、差の原因が信号待ち等ではなく「乗用車の自由走行時間（driving-carプロファイル）」対「バスの停留所停車・ダイヤを含む運行時間」という計測対象自体の違いと特定。ツールschema・call_expert（通常/軽量）・call_detector（ドメインレビュー/数値監査）の計4箇所に、混同を防ぐ生成時ガードと、一致しないこと自体を誤ってmajor判定しない監査時ガードの両方を追加。 | P2 |
 | BL-258 | 中 | `cela_main.py`（`WRITE_AGREEMENT_TOOL`の`confirmed_variables`説明） | **`done`。** 同じ`log/2026-08-17/0757`ランで、ユーザーが「task_3_1_authorityが停滞している、原因は？」と質問。Detectorレビュー15件を機械抽出し、Expertが`authority_requirement_register`/`insurance_responsibility_boundary`（約32件の構造化レコード）を「登録」しようとしながら、`write_agreement`の`confirmed_variables`を一度も呼ばず、代わりにtopic/decision_what経由の通常agreementsレコードを作成しただけだったと判明。`verified_facts`には何も書き込まれず、Detectorの`read_verified_fact`/`read_entity`独立確認は毎回正しくnot_foundを返しており、Expert側が15サイクル（約63分）にわたり「登録済み・検証済み」という虚偽の完了主張を繰り返していた。ユーザーとの相談で、ツール統合ではなく的を絞った軽量対応（`confirmed_variables`の説明に、これが`verified_facts`への唯一の書き込み経路であることと、表形式の値もJSON文字列として同経路で確定できることを明記）を採用。 | P2 |
-| BL-259 | 高 | `cela_main.py`（`decision_extractor_node`のowned_variable_values安全網、`call_decision_extractor`のプロンプト） | **`done`。** 新しい`log/2026-08-17/1151`ランで、ユーザーが「task_4_1_mountain_designで`write_agreementによるDB更新成功`だが`read_verified_factによる独立読み戻しはnot_found`」というUser AIの却下文を共有。`cela.db`の`verified_facts`を直接確認したところ行自体は存在し、Expertの構造化データではなく決定抽出由来の短い説明文（「独立読み戻し未達・未検証」等）に置き換わっていたと判明。実際のログ追跡で、Expertが`confirmed_variables`で正しく登録した直後、同ターンの`decision_extractor_node`が(1) `status="Rejected"`の却下理由説明文、(2) `entry_type="Directive"`の作業指示文の両方を誤って`owned_variable_values`として抽出し、write_agreement呼び出し有無に関わらず無条件実行される安全網パスが2回連続でExpertの正しい値を上書きしていたことを特定（BL-258とは別原因、AGENTS.md §13.4「複数の書き込み経路の非対称な検証」の典型例）。却下・指示は定義上「値の確定」ではあり得ないため、安全網パスに`status != "Rejected" and entry_type != "Directive"`の機械的ガードを追加し、`call_decision_extractor`のプロンプトにも同じ区別を多層防御として明記。 | P1 |
+| BL-259 | 高 | `cela_main.py`（`decision_extractor_node`のowned_variable_values安全網、`call_decision_extractor`のプロンプト） | **`done`。** 新しい`log/2026-08-17/1151`ランで、ユーザーが「task_4_1_mountain_designで`write_agreementによるDB更新成功`だが`read_verified_factによる独立読み戻しはnot_found`」というUser AIの却下文を共有。`cela.db`の`verified_facts`を直接確認したところ行自体は存在し、Expertの構造化データではなく決定抽出由来の短い説明文（「独立読み戻し未達・未検証」等）に置き換わっていたと判明。実際のログ追跡で、Expertが`confirmed_variables`で正しく登録した直後、同ターンの`decision_extractor_node`が(1) `status="Rejected"`の却下理由説明文、(2) `entry_type="Directive"`の作業指示文の両方を誤って`owned_variable_values`として抽出し、write_agreement呼び出し有無に関わらず無条件実行される安全網パスが2回連続でExpertの正しい値を上書きしていたことを特定（BL-258とは別原因、AGENTS.md §13.4「複数の書き込み経路の非対称な検証」の典型例）。却下・指示は定義上「値の確定」ではあり得ないため、安全網パスに`status != "Rejected" and entry_type != "Directive"`の機械的ガードを追加し、`call_decision_extractor`のプロンプトにも同じ区別を多層防御として明記。**同日W2追記:** status/entry_typeによる推測は対症療法であり将来の亜種を防げないと指摘され、`confirmed_variables`経由で同ターンに直接確定したvariable_name集合を記録し、安全網が該当変数をvariable_name単位でスキップする構造的ガードへ強化。 | P1 |
+| BL-260 | P0 | `cela_main.py`（`_write_agreement_impl`のconfirmed_variablesループ、`_query_AI_live`のconfirmed_variable_names収集） | **`done`。** ユーザーが実ドライラン中に発生したクラッシュ（`AttributeError: 'str' object has no attribute 'get'`、`_write_agreement_impl`の`cv.get("variable_name")`）を報告。task_plannerが`write_agreement`の`confirmed_variables`へ、ツールschemaが要求するオブジェクト配列（`{variable_name, value, ...}`）ではなく文字列の配列を返し、無条件に`.get()`していたコードがAttributeErrorを送出、LangGraphのノード実行を貫通してrun_ai_vs_ai_loop全体が未処理例外で停止した。BL-258/259（誤った値の登録・上書き）とは異なり、初めて**プロセス全体のクラッシュ**という帰結だった点が新規（AGENTS.md §13：LLM出力は空文字だけでなくスキーマに反した型でも返り得る）。`_write_agreement_impl`と`_query_AI_live`の両方の`confirmed_variables`反復箇所に`isinstance(cv, dict)`ガードを追加し、非dict要素は個別にスキップしてwarningへ蓄積する（呼び出し自体は成功のまま、既存のderived_from無効ref・protected_warningと同じパターン）。 | P0 |
 
 ---
 
@@ -8576,6 +8577,33 @@ Expert自身の思考ログ（iter=2、`I recognize there's some confusion aroun
 **修正:** `decision_extractor_node`の安全網ループに`status != "Rejected" and entry_type != "Directive"`の機械的ガードを追加し、該当時は`upsert_verified_fact`自体を呼ばないようにした（主防御）。却下は定義上「値の確定」ではあり得ず、指示は「今後登録すべき内容」であって確定した値そのものではないため。あわせて`call_decision_extractor`のプロンプトにも同じ区別を明記した（多層防御、ただしLLMの指示遵守に依存しない機械的ガードが主）。
 
 **追記（W2、同日）:** ユーザーが「なかなかうまくいきませんね」と感想を述べたのを機に、BL-036/037（統合パスがファイルを読み返せない）→BL-258（Expertが正規経路を呼び忘れる）→BL-259（正規経路を呼んでも別経路に踏みつぶされる）という3件が同一の構造的パターン（信頼できる確定値ストアを作るたびに書き込み手段が増え、増えた手段の一部が無検証という循環）であると深掘りを依頼された。上記のstatus/entry_typeガードは今回観測した2パターンを塞ぐ対症療法に過ぎず、decision_extractorが将来別のstatus/entry_typeの組み合わせでnarrative文を抽出する亜種を防げない点を指摘し、より構造的な対策を提案・実装した：`_query_AI_live`のwrite_agreement成功トラッキング（`_LAST_WRITE_AGREEMENT_ITEMS`）に、`confirmed_variables`経由で直接確定したvariable_name集合も記録するよう拡張し、`decision_extractor_node`の安全網ループが「そのvariable_nameが同ターンに既に正規経路で確定済みか」をvariable_name単位で機械的に判定してスキップするようにした。これにより、status/entry_typeの値が何であれ、正規経路が既に確定した変数を安全網が上書きすることは構造的にできなくなった（既存のstatus/entry_typeガードは別軸の防御として維持）。
+
+---
+
+### BL-260: `confirmed_variables`の要素がスキーマに反して文字列で返るとプロセス全体がクラッシュしていた
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P0 |
+| テスト | `tests/test_bl260_confirmed_variables_malformed_element_crash.py`（新規5件: 文字列要素混入時にクラッシュせず成功レスポンスを返すこと、不正要素がverified_factsへ書き込まれないこと、正常要素と不正要素が混在しても正常要素は保存されること、`_write_agreement_impl`のisinstanceガードの存在、`_query_AI_live`側の同ガードの存在） |
+| 関連 | BL-258/259（同じ`confirmed_variables`/`verified_facts`まわりの一連の不具合だが、本件は書き込み内容の誤りではなく初のプロセスクラッシュ）、AGENTS.md §13（LLM出力の型・形状に対する防御） |
+
+**内容:**
+
+ユーザーが実ドライラン中に発生した未処理例外によるプロセス全体停止を報告。
+
+```
+File "cela_main.py", line 3782, in _write_agreement_impl
+    var_name = cv.get("variable_name")
+AttributeError: 'str' object has no attribute 'get'
+```
+
+task_plannerが`write_agreement`を`entry_type="Decision"`, `topic="task_planner_phase_design"`で呼び出した際、`confirmed_variables`パラメータへ、ツールschemaが要求するオブジェクト配列（`items.type == "object"`、`{variable_name, value, ...}`）ではなく文字列の配列を返した。`_write_agreement_impl`の`confirmed_variables`処理ループ（BL-259 W2で書き込みトラッキングを拡張した箇所と同じ経路）は各要素を無条件に`cv.get("variable_name")`しており、要素が文字列だとAttributeErrorを送出。この例外はLangGraphのノード実行（`task_planner_node`）を貫通し、`run_ai_vs_ai_loop`全体が未処理例外で終了した。
+
+BL-258/259はいずれも「`verified_facts`に間違った値が書き込まれる／書き込まれない」という結果整合性の問題だったが、本件は初めて**プロセス全体のクラッシュ**という帰結であり、より重大度が高い（優先度P0）。AGENTS.md §13は「LLMはフィールドを空文字にすることがある」ことを主眼に書かれているが、本件はそれをさらに一般化した「LLMはfunction callingのJSON schemaに反した型・形状を返すことがある」という同種のリスクであり、コード側は空文字だけでなく型の逸脱にも防御的であるべきだった。
+
+**修正:** `_write_agreement_impl`の`confirmed_variables`ループ、および`_query_AI_live`のwrite_agreement成功トラッキング（`confirmed_variable_names`収集、BL-259 W2で追加）の両方に`isinstance(cv, dict)`チェックを追加。非dict要素は個別にスキップし、`_confirmed_variables_warnings`へ蓄積してレスポンスの`warning`フィールドでLLMへ次ターンの修正を促す（既存の`derived_from`無効ref・`protected_warning`と同じ「呼び出し自体は成功のまま、部分的な問題はwarningで可視化する」パターンを踏襲）。正常な要素と不正な要素が混在していても、正常な要素の保存とagreement本体のコミットは影響を受けない。
 
 ---
 
