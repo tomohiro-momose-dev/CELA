@@ -8562,7 +8562,7 @@ Expert自身の思考ログ（iter=2、`I recognize there's some confusion aroun
 |------|------|
 | 状態 | `done` |
 | 優先度 | P1 |
-| テスト | `tests/test_bl259_decision_extractor_owned_variable_guard.py`（新規6件: BL-259マーカーの存在、`status != "Rejected"`ガードの存在、`entry_type != "Directive"`ガードの存在、ガードが実際に`upsert_verified_fact`呼び出しへ適用されていること、`call_decision_extractor`プロンプトへの同じ区別の明記、実インシデントの2パターンを再現したガード述語の検証） |
+| テスト | `tests/test_bl259_decision_extractor_owned_variable_guard.py`（10件: 当初6件＋W2追加4件。BL-259マーカーの存在、`status != "Rejected"`ガードの存在、`entry_type != "Directive"`ガードの存在、ガードが実際に`upsert_verified_fact`呼び出しへ適用されていること、`call_decision_extractor`プロンプトへの同じ区別の明記、実インシデントの2パターンを再現したガード述語の検証、`_query_AI_live`でのconfirmed_variable_names記録、`decision_extractor_node`での同ターン確定済みセット構築、variable_name単位のスキップ分岐、status/entry_typeに関わらず変数単位で保護されることの検証） |
 | 関連 | BL-258（同じ`log/2026-08-17`系列だが逆方向：Expertが呼び忘れる事故）、BL-023（owns_variables/verified_facts設計）、BL-041（confidence='provisional'のデフォルト化） |
 
 **内容:**
