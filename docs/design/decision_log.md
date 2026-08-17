@@ -3191,6 +3191,20 @@
 
 ---
 
+### D-228: BL-260 — confirmed_variablesの要素がスキーマに反した型でもプロセス全体をクラッシュさせない防御を追加する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-17 |
+| 状態 | `decided` |
+| 決定者 | t-momose（クラッシュ報告）、Claude（原因特定・修正実装） |
+| **決定理由** | ユーザーが実ドライラン中の未処理例外によるプロセス全体停止を報告（`AttributeError: 'str' object has no attribute 'get'`、`_write_agreement_impl`の`cv.get("variable_name")`）。task_plannerが`write_agreement`の`confirmed_variables`へ、ツールschemaが要求するオブジェクト配列ではなく文字列の配列を返し、無条件の`.get()`呼び出しがAttributeErrorを送出、LangGraphのノード実行を貫通してrun_ai_vs_ai_loop全体が停止した。BL-258/259は書き込み内容の誤りだったが、本件は初めてプロセス全体のクラッシュという帰結であり、優先度をP0とした。AGENTS.md §13の「LLM出力は空文字にもなり得る」という教訓を、型・形状の逸脱一般へ拡張して適用すべき事例。 |
+| 決定内容 | `_write_agreement_impl`の`confirmed_variables`ループと`_query_AI_live`の`confirmed_variable_names`収集（BL-259 W2で追加）の両方に`isinstance(cv, dict)`ガードを追加する。非dict要素は個別にスキップしてwarningへ蓄積し、呼び出し自体は成功のまま次ターンでLLMに修正を促す（既存のderived_from無効ref・protected_warningと同じパターン）。 |
+| 影響 | `cela_main.py`（`_write_agreement_impl`・`_query_AI_live`）、新規`tests/test_bl260_confirmed_variables_malformed_element_crash.py`（5件）。 |
+| 関連 BL | BL-260（本件）、BL-258/259（同じconfirmed_variables/verified_facts領域の一連の不具合） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
