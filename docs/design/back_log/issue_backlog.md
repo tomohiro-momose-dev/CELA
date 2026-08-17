@@ -284,6 +284,7 @@
 | BL-255 | 高 | `cela_main.py`（`_resolve_task_transition`・`_build_next_task_candidates_text`・`generate_user_utterance`のStage4） | **`done`。** ユーザーが実行中のドライラン（`log/2026-08-16/2020`）で「phase2からいきなり5に飛んでいます。なぜですか？」と質問。write_agreementのDeliverable全件を機械抽出したところ、phase_3・phase_4・task_2_3が一度も実行されずphase_5へ進んでいたと判明。原因はUser AI (Stage4)がdepends_on充足だけを根拠に先読みしていたこと、かつtask_5_1への指示文自体が未実行のtask_3_1/task_4_1の前提を引き継ぐよう書かれていた実害を確認。ユーザーの追加指摘（「タスク表は一番上にあるので後続コンテキストに押し流されているかも」）を受け、stage4_system_promptが巨大なphases_json＋大量の指示文をchat_historyより前に固定する構成だったこと、`_resolve_task_transition`が遷移先のdepends_on充足を一切検証していなかったことの2点を特定。(1) 依存充足済みタスクをPython側で機械算出しchat_historyより後ろへ配置する候補リスト、(2) 遷移先のdepends_on未完了を機械的にブロックするゲート（BL-125/176と同型）、の両方を実装。 | P1 |
 | BL-256 | 中 | `cela_main.py`（モジュールレベルの定数・プロンプト定義） | **`open`（起票のみ）。** ユーザーが「SOLIDを適用したい、全面リライトではなく一つずつ集約・分離化していきたい」と提起。全面リライトの高リスクをClaudeが指摘し、段階的アプローチで合意。`bl_history_audit.md`の実測を再測定（`scripts/bl_patch_density.py`）した結果、モジュールレベル（定数・スキーマ・プロンプト定義）が102BLで最大のホットスポットと判明。核心のアダバーサリアルループ（`call_detector`/`generate_user_utterance`/`call_expert`）は今も頻繁に変更され続けており切り出しリスクが高いため、静的文字列が主体でリスクが低いモジュールレベルから着手する方針とした。予備調査で「read_entityは名前を持つ事物専用」等の説明文が13回、「同じ検証・計算を繰り返さない」注意文が6箇所で独立に記述されている等の冗長性を確認。実装（`web_tools.py`分離と同型の安全なモジュール切り出し）は未着手。 | P2 |
 | BL-257 | 中 | `cela_main.py`（`CALC_ROAD_ROUTE_TOOL`・`call_expert`・`call_detector`） | **`done`。** BL-255の続きでユーザーが`log/2026-08-17/0757`の「task_2_1がつまずいています」を指摘。同runの他タスクが全て一発承認の中task_2_1だけ17バージョンかかっており、原因は`calc_road_route`のGIS実測値（横谷峡12.22分）と公式バス案内（約35分）の混同でDetectorから3回連続major判定を受けていたこと。ユーザーとの対話で、差の原因が信号待ち等ではなく「乗用車の自由走行時間（driving-carプロファイル）」対「バスの停留所停車・ダイヤを含む運行時間」という計測対象自体の違いと特定。ツールschema・call_expert（通常/軽量）・call_detector（ドメインレビュー/数値監査）の計4箇所に、混同を防ぐ生成時ガードと、一致しないこと自体を誤ってmajor判定しない監査時ガードの両方を追加。 | P2 |
+| BL-258 | 中 | `cela_main.py`（`WRITE_AGREEMENT_TOOL`の`confirmed_variables`説明） | **`done`。** 同じ`log/2026-08-17/0757`ランで、ユーザーが「task_3_1_authorityが停滞している、原因は？」と質問。Detectorレビュー15件を機械抽出し、Expertが`authority_requirement_register`/`insurance_responsibility_boundary`（約32件の構造化レコード）を「登録」しようとしながら、`write_agreement`の`confirmed_variables`を一度も呼ばず、代わりにtopic/decision_what経由の通常agreementsレコードを作成しただけだったと判明。`verified_facts`には何も書き込まれず、Detectorの`read_verified_fact`/`read_entity`独立確認は毎回正しくnot_foundを返しており、Expert側が15サイクル（約63分）にわたり「登録済み・検証済み」という虚偽の完了主張を繰り返していた。ユーザーとの相談で、ツール統合ではなく的を絞った軽量対応（`confirmed_variables`の説明に、これが`verified_facts`への唯一の書き込み経路であることと、表形式の値もJSON文字列として同経路で確定できることを明記）を採用。 | P2 |
 
 ---
 
@@ -8528,6 +8529,29 @@ BL-255の続きで、ユーザーが`log/2026-08-17/0757`のドライラン（ru
 ユーザーとの対話で、この23分の差の性質を検討。信号待ち等の副次的要因ではなく、`calc_road_route`が実際にはOpenRouteServiceの`profile="driving-car"`（乗用車の自由走行時間、停留所停車なし・ノンストップ）を返しているのに対し、公式の「約35分」はバスの停留所停車・巡航速度・ダイヤ遵守を含む運行実績であり、**そもそも計測対象が別物**であることを特定した。
 
 **修正:** この区別を、実際に数値を扱う4箇所すべてへ明記した。(1) `CALC_ROAD_ROUTE_TOOL`のツールschema説明、(2) `call_expert`の通常プロンプト（成果物にGIS値とバス公式値を混同・上書きせず出典を分けて別値として保持するよう指示）、(3) 同・軽量プロンプト（iter2以降）、(4) `call_detector`のドメインレビューパスと数値監査パスの両方（車の走行時間とバスの時刻表が数値として一致しないこと自体を「実測値との食い違い」として誤ってmajor判定しないよう指示、ただし実際に両者を混同・上書きしている場合は引き続き指摘対象）。(2)〜(4)がそれぞれ独立した箇所であり、生成側だけでなく監査側（Detector）にも同じ区別を持たせないと、Detector自身が誤検知でmajorを出し続けるリスクがあるため、BL-253/254と同型の「両側に同じ判定軸を持たせる」パターンを踏襲した。
+
+---
+
+### BL-258: `confirmed_variables`を一度も呼ばずagreementsテキストへ「登録」を誤認していた（task_3_1_authorityの15サイクル停滞）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| テスト | `tests/test_bl258_confirmed_variables_table_value_guidance.py`（新規4件: BL-258マーカーの存在、`verified_facts`への唯一の書き込み経路である旨の明記、agreementsテキストだけでは登録されない旨の明記、表形式の値をJSON文字列として確定できる旨の明記） |
+| 関連 | BL-036/037/219（confirmed_variables欠落による確定値ドリフトの先行事例）、BL-041（confidence='provisional'のデフォルト化）、BL-255（同日の`log/2026-08-17/0757`ログレビューで発見の発端） |
+
+**内容:**
+
+同じ`log/2026-08-17/0757`のドライラン（run_id=1786921069-6bb4a6a5）で、ユーザーが「task_3_1_authorityが停滞している、原因は？」と質問。`detector_reviews`テーブルからtask_3_1_authority宛の15件のレビューを機械抽出し、時系列で内容を精査した。
+
+Expertは`authority_requirement_register`（AUTH-01〜09）・`insurance_responsibility_boundary`（INS-01〜08、RESP-01〜09、DATA-01〜06）という計32件の構造化レコードを「構造化factとして登録した」と繰り返し主張していたが、実際の`write_agreement`ツール呼び出しをすべて確認したところ、`confirmed_variables`パラメータは一度も渡されておらず、代わりに`action_type="CREATE"`・`topic="authority_requirement_register 項目別許認可・協議台帳"`のような、通常のagreementsレコード（topic/decision_what）を作成していただけだった。`verified_facts`への書き込みはコード上`confirmed_variables`経由の一本道であるため、Detectorが`read_verified_fact`/`read_entity`で独立確認するたびに正しく`not_found`を返し続け、Expertは「登録fact の参照可能性は確認済みである」という自らの主張と矛盾する完了報告を繰り返した（id=181のレビューではこの矛盾自体が明白な論理矛盾としてmajor判定されている）。15サイクル・約63分を経て、Expertが「登録済み・検証済み」という断定をやめ永続化未確認をtask_7_3_integrity_auditへ正直に申し送った時点でようやくminor判定に切り替わり次タスクへ進んだ。
+
+Expert自身の思考ログ（iter=2、`I recognize there's some confusion around variable names versus entities`）から、32件という表形式の値が`confirmed_variables`の「1変数=1スカラー値」という想定形状に素直に収まらず、見慣れた`write_agreement`のtopic/decision_what経由の記述で済ませてしまったことが一因と考えられる。
+
+**検討した対応案とユーザー判断:** Claudeから、①confirmed_variables/entities/write_agreementの3経路を統合する案と②`confirmed_variables`の説明を軽量に補強する案を提示。①は決定・事実・実世界事物という別種の監査意味を持つ3経路を無理に一本化するリスクがあるため非推奨と説明し、ユーザーは②を選択。
+
+**修正:** `WRITE_AGREEMENT_TOOL`の`confirmed_variables`パラメータ説明に、(1) これが`verified_facts`へ書き込む唯一の経路であり、agreementsのtopic/decision_whatにどれだけ詳しく書いても登録にはならない旨、(2) 表形式・リスト形式の値もJSON文字列として`value`に渡すことでこの経路のまま確定できる旨、を明記した（ドキュメントのみの修正）。
 
 ---
 
