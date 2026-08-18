@@ -311,24 +311,24 @@ model_user = nemotron_3_ultra
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = nemotron_3_super # nemotron_3_ultra
+model_orchestrator = nemotron_3_ultra # nemotron_3_ultra
 
 client_expert = client_openrouter
 model_expert = nemotron_3_ultra # nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = nemotron_3_super
+model_task_planner = nemotron_3_ultra
 
 client_task_plan_reviewer = client_openrouter
-model_task_plan_reviewer = nemotron_3_super
+model_task_plan_reviewer = nemotron_3_ultra
 
 client_detector_domain = client_openrouter
 model_detector_domain = nemotron_3_ultra
 client_detector_numeric = client_openrouter
-model_detector_numeric = nemotron_3_super # nemotron_3_ultra
+model_detector_numeric = nemotron_3_ultra # nemotron_3_ultra
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = nemotron_3_super
+model_decision_extractor = nemotron_3_ultra
 
 client_resource_arbiter = client_openrouter
 model_resource_arbiter = nemotron_3_ultra #nemotron_3_ultra
@@ -3532,7 +3532,14 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
                 # だけで判定すると、承認理由を詳しく書いただけのUser AI（Stage3）が既存の完全版を
                 # 丸ごと消し飛ばす事故が実際に発生した（`log/2026-08-05/1639`、task_1_2のV1詳細仕様書
                 # が3行の承認コメントへ全置換された）。expert以外は文字数によらず常に保護する。
-                if len(raw_content) > 200 and (caller_role == "expert" or not is_whiteboard):
+                # [BL-261] 上記コメントの「expert以外は保護する」を素直に裏返すと「expertなら常に
+                # 全文置換して良い」と誤読できたため、is_whiteboard（既に完全版が存在する）状態で
+                # expertがedits未指定の短いdecision_what（≒修正サマリ）を送っても200字を超えていれば
+                # 通過し、282行の完全版が2行のサマリへ丸ごと消失する事故が発生した
+                # （`log/2026-08-18/0730`、task_1_5のV10→V11）。全文置換（raw_contentをそのまま採用）は
+                # 「まだホワイトボード化されていない初回作成」（not is_whiteboard）の場合のみに限定し、
+                # 既に完全版が存在する場合はcaller_roleを問わずeditsパラメータを必須とする。
+                if len(raw_content) > 200 and not is_whiteboard:
                     v = apply_whiteboard_patch(conn, run_id, phase_id, tid, raw_content, author_role=caller_role,
                                                 edit_summary=args.get("reason_why", ""))
                     _LAST_WHITEBOARD_EDIT = {"phase_id": phase_id, "task_id": tid, "version": v}
@@ -3552,7 +3559,18 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
                     # [BL-127] 従来はprint()のみでLLMへは一切伝わらず、ホワイトボード本体が
                     # 実際には更新されていないのに「成功」と返るためExpertが誤って自己申告する
                     # 実インシデントが発生していた。呼び出し元へ返す警告として明示する。
-                    if len(raw_content) > 200:
+                    if caller_role == "expert":
+                        # [BL-261] expertはDeliverable本文の執筆権限自体は持つが、既に完全版が
+                        # 存在する状態でのedits未指定の全文置換は文字数によらず常に拒否する
+                        # （理由は権限ではなく、既存の完全版を丸ごと消失させる事故を防ぐため）。
+                        protected_warning = (
+                            f"⚠️ '{target_topic}'への更新は反映されませんでした：既にホワイトボード化"
+                            f"済みの完全版が存在するため、edits未指定のdecision_whatによる全文置換は"
+                            f"文字数によらず拒否されます（既存の完全版を丸ごと消失させる事故を防ぐ保護"
+                            f"仕様）。ホワイトボード本文を変更したい場合は、必ずeditsパラメータ"
+                            f"（old_text/new_text）で差分を指定してください。"
+                        )
+                    elif len(raw_content) > 200:
                         protected_warning = (
                             f"⚠️ '{target_topic}'への更新は反映されませんでした：あなた（{caller_role}）"
                             f"はentry_type='Deliverable'の本文を執筆する権限がないため、edits未指定の"
@@ -3565,8 +3583,7 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
                             f"⚠️ '{target_topic}'への更新は反映されませんでした：edits未指定で"
                             f"decision_whatが200字以下の短文だったため、既存の完全版（ホワイトボード）"
                             f"を上書きしない保護仕様が適用されました。実際にホワイトボード本文を"
-                            f"変更したい場合は、editsパラメータ（old_text/new_text）を指定するか、"
-                            f"200字を超える全文をdecision_whatに渡してください。"
+                            f"変更したい場合は、editsパラメータ（old_text/new_text）を指定してください。"
                         )
                     print(f"  🔒 [Whiteboard Protected] '{target_topic}' への更新（caller_role={caller_role}）が既存の完全版を上書きしないよう保護しました。")
                 # 200文字以下かつ未昇格ならそのまま短文としてagreementsに保持（content=raw_contentのまま）
@@ -3778,7 +3795,17 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
     # が _LAST_NEW_AGREEMENT_ID に捕捉した新 id を使う。
     new_ag_id = _LAST_NEW_AGREEMENT_ID
     _derived_from_warnings: list[str] = []  # [BL-224 W4] 無効な derived_from ref を蓄積
+    # [BL-260] §13: confirmed_variablesはツールschema上{variable_name, value, ...}の
+    # オブジェクト配列を要求するが、LLMがスキーマに反して文字列の配列を返すことがある
+    # （実ドライランで`cv.get("variable_name")`がAttributeErrorを送出しプロセス全体が
+    # クラッシュした事故を確認）。要素がdictでない場合は個別にスキップし、他の正当な
+    # 要素の保存やagreement本体のコミット（既に成功済み）を巻き添えにしない。
+    _confirmed_variables_warnings: list[str] = []
     for cv in args.get("confirmed_variables", []) or []:
+        if not isinstance(cv, dict):
+            print(f"  ⚠️ [BL-260] confirmed_variablesの要素がオブジェクトではないためスキップしました: {cv!r}")
+            _confirmed_variables_warnings.append(str(cv))
+            continue
         var_name = cv.get("variable_name")
         if not var_name:
             continue
@@ -3816,14 +3843,19 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
     # コミットされたが、ホワイトボード本体への実反映は保護によりスキップされている。
     # successはTrueのまま維持し（呼び出し自体は失敗していないため）、warningフィールドで
     # 呼び出し元（Expert/User AI）に明示し、次のターンで再試行を促す。
+    _all_warnings: list[str] = []
+    if _confirmed_variables_warnings:
+        _all_warnings.append(
+            "confirmed_variablesの一部の要素がオブジェクト形式（{variable_name, value, ...}）で"
+            "なかったためスキップされました。正しい形式で再送してください: "
+            + ", ".join(_confirmed_variables_warnings)
+        )
     if _derived_from_warnings:
-        _df_warn = "derived_from の一部が無効なためスキップされました: " + ", ".join(_derived_from_warnings)
-        if protected_warning:
-            return {"success": True, "message": "DB update successful",
-                    "warning": f"{protected_warning} ／ {_df_warn}"}
-        return {"success": True, "message": "DB update successful", "warning": _df_warn}
+        _all_warnings.append("derived_from の一部が無効なためスキップされました: " + ", ".join(_derived_from_warnings))
     if protected_warning:
-        return {"success": True, "message": "DB update successful", "warning": protected_warning}
+        _all_warnings.append(protected_warning)
+    if _all_warnings:
+        return {"success": True, "message": "DB update successful", "warning": " ／ ".join(_all_warnings)}
     return {"success": True, "message": "DB update successful"}
 
 
@@ -5738,13 +5770,17 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                                         # 正規経路で既に確定済みの変数をvariable_name単位で識別し、
                                         # ステータス値の推測（Rejected/Directive除外）に頼らず
                                         # 上書きを防げるようにするため。
+                                        # [BL-260] confirmed_variablesの要素はスキーマに反して
+                                        # 文字列で返ってくることがある（_write_agreement_impl側で
+                                        # 個別スキップ済み）。ここでも同じくisinstance(cv, dict)を
+                                        # 通過した要素のみを対象にする。
                                         _LAST_WRITE_AGREEMENT_ITEMS.append({
                                             "entry_type": args.get("entry_type", "Decision"),
                                             "task_id": args.get("task_id") or _CURRENT_TASK_ID,
                                             "confirmed_variable_names": [
                                                 cv.get("variable_name")
                                                 for cv in (args.get("confirmed_variables") or [])
-                                                if cv.get("variable_name")
+                                                if isinstance(cv, dict) and cv.get("variable_name")
                                             ],
                                         })
                                 elif tc.function.name == "revise_goal":
@@ -9456,20 +9492,43 @@ def _scratch_concerns_closure_instruction(final_output_field: str, escalation_to
     )
 
 
-def _verification_throttle_warning(example: str = "") -> str:
+def _verification_throttle_warning(example: str = "", output_form: str = "json") -> str:
     """【SLM要約】
     「同じ検証・計算を繰り返さない」注意書き（call_integrator/call_reviewer/
     call_goal_essence_analystでbyte-identical、call_resource_arbiterはタスク固有の
     例示句を挿入するのみ）を共通化したテンプレート。
+    [BL-256] output_formで出力形式ごとの結び（何を書く余地が無くなるか）を切り替える。
+    デフォルト"json"は元の（call_integrator/call_reviewer/call_goal_essence_analyst/
+    call_resource_arbiter向けの）文面とbyte-identicalを維持する。call_expertは
+    output_form="answer"（回答）、generate_user_utteranceはoutput_form="utterance"
+    （発言）で、同じ核心の注意文をそれぞれの出力形式に合わせて再利用する（従来はこの2箇所が
+    ヘルパーへ移行されず手書きの近似テキストとして残っていた）。
     """
     example_clause = f"（例:{example}）" if example else ""
+    if output_form == "answer":
+        tail = (
+            "実際の回答を書く余地が無くなり、上限到達時に強制的に打ち切られたテキスト応答と\n"
+            "せざるを得なくなります（大規模な成果物では応答が途中で切れて後工程に支障が出る\n"
+            "リスクがあります）。必要な検算がすべて終わったら、それ以上の確認は行わず、\n"
+            "直ちに回答の記述に移ってください。"
+        )
+    elif output_form == "utterance":
+        tail = (
+            "実際の発言を書く余地が無くなり、上限到達時に強制的に打ち切られたテキスト応答と\n"
+            "せざるを得なくなります。必要な検算が終わったら、それ以上の確認は行わず、\n"
+            "直ちに発言の記述に移ってください。"
+        )
+    else:
+        tail = (
+            "JSON出力そのものを書く余地が無くなり、上限到達時に強制的に打ち切られたテキスト応答として\n"
+            "JSONを一度に出力せざるを得なくなり、出力が途中で切れて構文エラーになるリスクがあります。\n"
+            "必要な検証が終わったら、直ちに最終的なJSONオブジェクトの記述に移ってください。"
+        )
     return (
         f"【同じ検証・計算を繰り返さない（重要）】ツール呼び出しの回数には上限があります。同じ論点\n"
         f"{example_clause}をpython_replで繰り返し再確認しないでください。各検証項目は2回程度の\n"
-        "計算・確認で十分です。新しい数値や新しい論点が無いまま「念のため最終確認」を重ねると、\n"
-        "JSON出力そのものを書く余地が無くなり、上限到達時に強制的に打ち切られたテキスト応答として\n"
-        "JSONを一度に出力せざるを得なくなり、出力が途中で切れて構文エラーになるリスクがあります。\n"
-        "必要な検証が終わったら、直ちに最終的なJSONオブジェクトの記述に移ってください。"
+        f"計算・確認で十分です。新しい数値や新しい論点が無いまま「念のため最終確認」を重ねると、\n"
+        f"{tail}"
     )
 
 def _build_retry_situation_label(state: LineageState, retry_count: int, max_retries: int = 3) -> str:
@@ -10257,14 +10316,12 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "acceptance_criteriaの範囲外であっても許容されません。\n"
     )
 
+    # [BL-256] 既存の共有ヘルパー（call_integrator/call_reviewer/call_goal_essence_analyst/
+    # call_resource_arbiterで使用中）へ移行。output_form="answer"でExpertの出力形式に合わせる。
     system_prompt += (
-        "\n【同じ検証・計算を繰り返さない（重要）】\n"
-        "ツール呼び出しの回数には上限があります。同じ論点（例:「この数値は制約を満たすか」）を"
-        "python_replで繰り返し再確認しないでください。各検証項目は2回計算・確認できれば十分です。"
-        "新しい数値や新しい論点が無いまま「念のため最終確認」を重ねると、実際の回答を書く余地が"
-        "無くなり、上限到達時に強制的に打ち切られたテキスト応答とせざるを得なくなります"
-        "（大規模な成果物では応答が途中で切れて後工程に支障が出るリスクがあります）。必要な検算が"
-        "すべて終わったら、それ以上の確認は行わず、直ちに回答の記述に移ってください。\n"
+        "\n" + _verification_throttle_warning(
+            example="「この数値は制約を満たすか」", output_form="answer"
+        ) + "\n"
     )
 
     system_prompt += (
@@ -12932,13 +12989,11 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         "数値は、python_replでの検算に加え、あなた自身の判断でも根拠を問い直してください。\n"
     )
 
+    # [BL-256] 既存の共有ヘルパー（call_integrator/call_reviewer/call_goal_essence_analyst/
+    # call_resource_arbiter/call_expertで使用中）へ移行。output_form="utterance"でUser AIの
+    # 出力形式に合わせる。
     system_prompt += (
-        "\n【同じ検証・計算を繰り返さない（重要）】\n"
-        "ツール呼び出しの回数には上限があります。同じ論点をpython_replで繰り返し再確認しないで"
-        "ください。各検証項目は2回程度の計算・確認で十分です。新しい数値や新しい論点が無いまま"
-        "「念のため再確認」を重ねると、実際の発言を書く余地が無くなり、上限到達時に強制的に"
-        "打ち切られたテキスト応答とせざるを得なくなります。必要な検算が終わったら、それ以上の"
-        "確認は行わず、直ちに発言の記述に移ってください。\n"
+        "\n" + _verification_throttle_warning(output_form="utterance") + "\n"
     )
 
     # [§13.2/§13.3] 3モードは排他（同時に複数立たない前提）。elif連鎖で必ずどれか1つの
@@ -13850,18 +13905,14 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     上流の判断であり、ここでの暗算・計算ミスは後続の全タスクに伝播します）。ただし、計算で
     「ゴール文に絶対値の記載がない」ことが判明した場合は、上記の通り数値の捏造要求はしないこと。
 
-    【同じ検証・計算を繰り返さない（重要）】ツール呼び出しの回数には上限があります。同じ論点
-    （例: 特定のタスクのacceptance_criteriaが曖昧かどうか、既に確認した数値の整合性）を
-    python_replや思考の中で何度も再検討・再計算しないでください。各論点は2回程度の確認・計算で
-    十分です。一度major/noneの判断がついた論点を、新しい情報が無いまま何度も蒸し返さないこと。
-    新しい論点が無いまま「もう一度よく考えよう」を繰り返すと、JSON出力そのものを書く余地が無く
-    なり、上限到達時に強制的に打ち切られたテキスト応答としてJSONを一度に出力せざるを得なくなり、
-    大規模な計画では出力が途中で切れて構文エラーになるリスクがあります。また、最終回答は
-    ```json ... ``` のコードブロックを**1つだけ**書いてください（下書き・プレビューとして
+    {_verification_throttle_warning(example="特定のタスクのacceptance_criteriaが曖昧かどうか、既に確認した数値の整合性")}
+    これはpython_replの呼び出し回数に限らず、思考の中で同じ論点を何度も再検討することも含みます。
+    一度major/noneの判断がついた論点を、新しい情報が無いまま何度も蒸し返さないこと。
+
+    また、最終回答は```json ... ``` のコードブロックを**1つだけ**書いてください（下書き・プレビューとして
     別のJSONブロックを先に書き、その後で「最終的な」ブロックを別途書く、という2段構成には
     しないこと。複数のJSONブロックが混在すると機械的な抽出に失敗し、あなたの判定が正しく
-    伝わらない事故が実際に発生しています）。必要な検証が終わったら、直ちに最終的な
-    JSONオブジェクトを1つだけ記述してください。
+    伝わらない事故が実際に発生しています）。
 
     【BL-093: thinkツールで検討過程を残す】このレビューは複数回のpython_repl/
     diff_plan_draft_versions呼び出しを跨ぐことが多く、自然に考えた理由づけの生文章は、think

@@ -132,9 +132,11 @@ def test_commit_update_with_edits_returns_no_warning(db_conn):
     assert "140人/日" not in latest["content"]
 
 
-def test_commit_update_with_long_raw_content_returns_no_warning(db_conn):
-    """[対照] edits未指定でも200字を超える全文が渡された場合（全文置換の抜け道）は
-    正常に反映され、protected_warningはNoneのままであること。"""
+def test_commit_update_with_long_raw_content_on_existing_whiteboard_is_protected(db_conn):
+    """[BL-261] edits未指定で200字を超える全文が渡された場合でも、既にホワイトボード化
+    済みの完全版が存在する限りcaller_role="expert"でも全文置換されず、既存の完全版が
+    保護されてprotected_warningが返ること（旧仕様=expertは無条件通過、はtask_1_5の
+    282行→2行消失事故の直接原因だったため保護対象へ変更）。"""
     conn, run_id = db_conn
     _create_whiteboard_deliverable(conn, run_id)
 
@@ -148,11 +150,11 @@ def test_commit_update_with_long_raw_content_returns_no_warning(db_conn):
         conn, run_id, caller_role="expert", task_id="task_1_1",
     )
     assert err is None
-    assert warning is None
+    assert warning is not None and "edits" in warning
 
     latest = cela_main.get_latest_whiteboard(conn, run_id, "phase_1", "task_1_1")
-    assert latest["version"] == 2
-    assert "105人/日" in latest["content"]
+    assert latest["version"] == 1
+    assert "105人/日" not in latest["content"]
 
 
 # --- _write_agreement_impl レベル（ツール応答としてExpertへ実際に返る形） ---

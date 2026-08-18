@@ -95,9 +95,11 @@ def test_user_role_long_decision_what_on_whiteboard_is_protected_not_replaced(db
     assert latest["content"] == original_content, "既存の完全版が上書きされず温存されているはず"
 
 
-def test_expert_role_long_decision_what_still_replaces_as_before(db_conn):
-    """[対照/非退行確認] expertロールによる200字超のdecision_what全文置換は、BL-180以前と
-    同じくそのまま反映されること（既存のBL-127正常系を壊していないことの確認）。"""
+def test_expert_role_long_decision_what_now_protected_requires_edits(db_conn):
+    """[BL-261] expertロールであっても、既にホワイトボード化済みの完全版が存在する状態で
+    edits未指定の全文decision_what（200字超）を送った場合は、全文置換せず既存の完全版を
+    保護すること（BL-180直後の旧仕様=expertは無条件許可、はtask_1_5で282行→2行の消失事故を
+    招いたため、is_whiteboard=Trueならcaller_roleを問わずeditsを必須化した）。"""
     conn, run_id = db_conn
     _create_whiteboard_deliverable(conn, run_id)
 
@@ -111,11 +113,34 @@ def test_expert_role_long_decision_what_still_replaces_as_before(db_conn):
         conn, run_id, caller_role="expert", task_id="task_1_2",
     )
     assert err is None
+    assert warning is not None and "edits" in warning
+
+    latest = cela_main.get_latest_whiteboard(conn, run_id, "phase_1", "task_1_2")
+    assert latest["version"] == 1
+    assert "4台に修正" not in latest["content"]
+
+
+def test_expert_role_edits_still_replaces_existing_whiteboard(db_conn):
+    """[BL-261対照] editsパラメータを指定すれば、既存の完全版に対してexpertが差分編集できる
+    こと（保護仕様はedits未指定の全文置換のみを拒否し、正規の編集経路は塞がないことの確認）。"""
+    conn, run_id = db_conn
+    original_content = _create_whiteboard_deliverable(conn, run_id)
+
+    err, warning = cela_main._commit_agreement_from_tool(
+        {
+            "action_type": "UPDATE", "entry_type": "Deliverable", "status": "Proposed",
+            "topic": "task_1_2 成果物", "decision_what": "必要台数を4台に修正",
+            "edits": [{"old_text": original_content.splitlines()[0], "new_text": "# task_1_2 詳細仕様書（改訂版）"}],
+            "reason_why": "Detector指摘を受けた修正", "phase_id": "phase_1", "task_id": "task_1_2",
+        },
+        conn, run_id, caller_role="expert", task_id="task_1_2",
+    )
+    assert err is None
     assert warning is None
 
     latest = cela_main.get_latest_whiteboard(conn, run_id, "phase_1", "task_1_2")
     assert latest["version"] == 2
-    assert "4台に修正" in latest["content"]
+    assert "改訂版" in latest["content"]
 
 
 def test_detector_role_long_decision_what_on_whiteboard_is_also_protected(db_conn):

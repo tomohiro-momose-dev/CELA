@@ -169,8 +169,10 @@ def test_generate_user_utterance_static_stance_block_precedes_dynamic_agreements
 
 
 def test_generate_user_utterance_anti_repetition_block_precedes_dynamic_agreements_text():
+    """[BL-256] 文面は共有ヘルパー_verification_throttle_warning()へ集約されたため、
+    静的ブロックの位置マーカーは呼び出し式そのものとする（実際の文面はヘルパー内）。"""
     src = inspect.getsource(cela_main.generate_user_utterance)
-    static_idx = src.index("【同じ検証・計算を繰り返さない（重要）】")
+    static_idx = src.index("_verification_throttle_warning(")
     dynamic_idx = src.index("現在までの決定事項・検討状況DB】")
     assert static_idx < dynamic_idx
 
