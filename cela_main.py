@@ -3311,6 +3311,7 @@ def _check_issue_permission(args: dict, caller_role: str) -> str | None:
         "detector_auto": {"CREATE"},  # [BL-096] detector_nodeのPython側自動バックアップ書き込み専用
         "decision_extractor_auto": {"CREATE"},  # [BL-154] decision_extractor_nodeのPython側自動起票専用
         "revise_goal_auto": {"CREATE"},  # [BL-163] revise_goal成功時のPython側自動起票専用
+        "whiteboard_version_auto": {"CREATE"},  # [BL-263] 改版数が閾値に達した際のPython側自動起票専用
     }
     action_type = args.get("action_type")
     allowed = ALLOWED_ISSUE_ACTIONS_BY_ROLE.get(caller_role, set())
@@ -7119,11 +7120,59 @@ def _write_whiteboard_to_file(phase_id: str, task_id: str, version: int, content
         return None
 
 
+# [BL-263] ホワイトボードの改版がこの版数の倍数に達するたび、収束していない兆候として
+# issue_logへ機械的に起票する。
+# [CONSTRAINT] 実ドライラン（log/2026-08-10〜11）での改版数は中央値15〜18に対し、
+# task_2_1=51版・task_8_3=49版という外れ値があり、後者の最終盤の編集は「予約方法→予約種別」
+# といった用語統一のみだった。すなわち版数が伸び続けること自体は収束の失敗を示すが、
+# 中央値付近の値を閾値にすると常時発火してノイズになる。
+# [REJECTED] 「直前版との差分が実質的か（語彙置換のみか）」で判定する案は、差分の意味的な
+# 大小を機械的に測る手段が現状なく、LLM判断を機械的な最終防衛線に戻すことになるため見送った
+# （AGENTS.md §15.3）。版数という機械的に一意な量で代替する。
+_WHITEBOARD_VERSION_ESCALATION_STEP = 20
+
+
+def _escalate_stalled_whiteboard(conn: sqlite3.Connection, run_id: str, phase_id: str,
+                                 task_id: str, version: int) -> None:
+    """[BL-263] 改版が_WHITEBOARD_VERSION_ESCALATION_STEPの倍数に達したとき、収束していない
+    兆候としてissue_logへ機械的に起票する。
+
+    [CONSTRAINT] 既存の`_bump_issue_occurrence`の昇格ラダー（同一topicの2回目でseverity=major・
+    status=escalatedへ機械的に昇格、D-079/D-080）へ意図的に相乗りする。topicをtask単位で固定
+    するため、1度目（Ver.20）はminorで起票され、2度目（Ver.40）に到達した時点で自動的に
+    escalatedへ昇格し、escalation_pin等の意思決定経路へ載る。閾値と昇格の二段構えを別途
+    実装する必要がない（AGENTS.md §15.1）。
+
+    [SAFETY] caller_roleは内部専用の"whiteboard_version_auto"。BL-157がdetector_autoの昇格を
+    抑制しているのとは対照的に、こちらは抑制対象に含めない——版数の伸びはDetectorの自由記述
+    メモとは違い、機械的に数えた事実であって誤検知の余地がないため。
+    """
+    _write_issue_impl(
+        {
+            "action_type": "CREATE",
+            "topic": f"whiteboard_not_converging_{task_id}",
+            "severity": "minor",
+            "description": (
+                f"task_id={task_id}の成果物が{version}版に達しました。改版が続いていること自体が、"
+                f"同じ根本課題を解けないまま推敲を重ねている兆候の可能性があります。"
+                f"受入基準のどれが未達で、次の1版で何を確定させるのかを明示してください。"
+                f"制約自体が充足不能だと判断する場合は、escalate_premise_concernで前提に異議を"
+                f"申し立ててください。"
+            ),
+            "phase_id": phase_id,
+            "task_id": task_id,
+        },
+        conn, run_id, "whiteboard_version_auto", phase_id, task_id,
+    )
+    print(f"  🔁 [BL-263] task_id={task_id}がVer.{version}に達したため、収束していない兆候としてissue_logへ自動起票しました。")
+
+
 def apply_whiteboard_patch(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str,
                             new_content: str, author_role: str, edit_summary: str) -> int:
     """[R4] 現在の最新バージョンを取得し、new_contentを新バージョンとしてINSERTする。
     削除は行わずバージョンを積み増す方式（cela_r4_design.md §2.2、N-2のトレーサビリティ原則に従う）。
     ★修正（BL-085）: DB保存に加え、_write_whiteboard_to_fileでMarkdownファイルへも書き出す。
+    ★修正（BL-263）: 版数が閾値の倍数に達したら収束していない兆候としてissue_logへ機械的に起票する。
     """
     latest = get_latest_whiteboard(conn, run_id, phase_id, task_id)
     new_version = (latest["version"] + 1) if latest else 1
@@ -7134,6 +7183,9 @@ def apply_whiteboard_patch(conn: sqlite3.Connection, run_id: str, phase_id: str,
     )
     _write_whiteboard_to_file(phase_id, task_id, new_version, new_content, author_role, edit_summary)
     print(f"  📄 [whiteboard_drafts] task_id={task_id}をVer.{new_version}に更新しました（author={author_role}）: {edit_summary}")
+    # [BL-263] 閾値の倍数ちょうどでのみ発火させる（毎版起票すると再発カウントが無意味に膨らむ）。
+    if new_version >= _WHITEBOARD_VERSION_ESCALATION_STEP and new_version % _WHITEBOARD_VERSION_ESCALATION_STEP == 0:
+        _escalate_stalled_whiteboard(conn, run_id, phase_id, task_id, new_version)
     return new_version
 
 
@@ -13376,6 +13428,30 @@ def arbiter_node(state: LineageState) -> LineageState:
 # 4. ノード定義
 # ---------------------------------------------------------------------------
 
+
+def _is_detector_redo_required(state: dict) -> bool:
+    """[BL-262] 直近のDetector判定の結果、発言者に発言をやり直させる（差し戻す）かどうか。
+
+    [CONSTRAINT] この述語は「差し戻すか」を決めるルーティング側
+    （route_after_user_detector / route_after_expert_detector）と、「差し戻すなら直前のNG発言を
+    chat_historyから取り消す」pop-guard側（generate_user_utterance_node / expert_node）の
+    両方から呼ばれる。両者は必ず同じ条件でなければならない——ルーティングだけが差し戻すと、
+    取り消されないままのNG発言の後ろに新しい発言が積まれ、同一roleが連続する
+    （AGENTS.md §15.1「1つのルールは1箇所に」）。
+
+    実際、修正前はルーティングが`constraint_issue major または halt`、pop-guardが
+    `constraint_issue major`のみという非対称になっており、risk=highでconstraint_issueがmajor
+    以外（両者はDetectorの独立したフィールド）という実在の経路で、role連続が発生していた。
+
+    [SAFETY] 判定を`in ("major")`ではなく`== "major"`で行う。`("major")`はタプルではなく
+    ただの文字列であり、`x in "major"`は部分文字列一致になる。constraint_issueはDBの既定値が
+    空文字（`constraint_issue TEXT DEFAULT ''`）でありLLMも空文字を返しうるところ、
+    `"" in "major"`はTrueになるため、「指摘なし」が差し戻し扱いされていた
+    （AGENTS.md §13.1 空文字トラップ）。
+    """
+    return state.get("constraint_issue") == "major" or bool(state.get("halt"))
+
+
 def generate_user_utterance_node(state: LineageState) -> LineageState:
     """【SLM要約】
     Generates the user's next utterance based on system state, managing conversation history and retries following constraint violations.
@@ -13385,7 +13461,8 @@ def generate_user_utterance_node(state: LineageState) -> LineageState:
     # turn_count（グラフ内部ループで凍結し得る、BL-005）に依存せず、ここで確実に加算する。
     state["round_count"] = state.get("round_count", 0) + 1
     # 🌟 追加: 差し戻しループの場合、前回エラーになった発言を履歴から削除（履歴汚染とAPIエラーを防止）
-    if state.get("constraint_issue") in ("major"):
+    # [BL-262] 判定はroute_after_user_detectorと同一の述語に集約する（条件がずれるとrole連続を招く）。
+    if _is_detector_redo_required(state):
         if state["chat_history"] and state["chat_history"][-1]["role"] == "user":
             state["chat_history"].pop()
             state["user_retry_count"] += 1
@@ -14134,7 +14211,8 @@ Updates system state with the expert's output, decisions, and conversational his
     """
     print(f"\n------ [expert] が思考中 ------")
 
-    if state.get("constraint_issue") in ("major"):
+    # [BL-262] 判定はroute_after_expert_detectorと同一の述語に集約する（条件がずれるとrole連続を招く）。
+    if _is_detector_redo_required(state):
         if state["chat_history"] and state["chat_history"][-1]["role"] == "assistant":
             state["chat_history"].pop()
             state["expert_retry_count"] += 1
@@ -15769,7 +15847,7 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
         Deciding the next processing step based on user detector output, escalating to "reflection" after three retries due to constraint issues or halting.
 Otherwise, routing to "user_decision_extractor."
         """
-        if state.get("constraint_issue") in ("major") or state.get("halt"):
+        if _is_detector_redo_required(state):  # [BL-262] pop-guardと同一述語
             if state.get("user_retry_count", 0) >= 3:
                 print("\n[route_after_user_detector]------ ユーザーAIの差し戻し上限に達しました。reflectionに渡します ------\n")
                 state["user_retry_count"] = 0 # カウンターをリセット
@@ -15855,7 +15933,7 @@ Otherwise, routing to "user_decision_extractor."
         if state.get("expert_consultation_mode"):
             print("\n[route_after_expert_detector]------ BL-130: Expert相談ターンのためgenerate_user_utteranceへ直行します ------\n")
             return "generate_user_utterance"
-        if state.get("constraint_issue") in ("major") or state.get("halt"):
+        if _is_detector_redo_required(state):  # [BL-262] pop-guardと同一述語
             if state.get("expert_retry_count", 0) >= 3:
                 print("\n[route_after_expert_detector]------ エキスパートAIの差し戻し上限に達しました。reflectionに渡します ------\n")
                 state["expert_retry_count"] = 0 # カウンターをリセット
