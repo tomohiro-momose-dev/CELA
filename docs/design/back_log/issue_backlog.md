@@ -297,6 +297,7 @@
 | BL-268 | 低 | `cela_main.py`（`call_integrator`の`contradictions`、bool正規化の未対策バグ） | **`open`。** BL-266のbool正規化調査中に発見。`contradictions`が文字列"false"をtruthyでTrueと誤判定しうる既存バグ、および`scope_compliant`/`issues_handled`の未使用フィールドを記録。 | P3 |
 | BL-269 | 低 | `tests/test_r3_smoke.py`（フルスイート実行時のみのグローバルstate汚染） | **`open`（原因未特定）。** フルオフラインスイート実行時のみ4件が失敗、単体実行では全件成功。BL-266の変更とは無関係と切り分け済み（stashして再現）。汚染源のテストファイルは未特定。 | P3 |
 | BL-270 | 中 | `web_tools.py`（`BraveSearchProvider`、`web_search_handler`） | **`done`。** Brave Search APIの402（利用上限到達）を専用検知し、run内では回復しない失敗として以後の呼び出しを短絡・明示的なメッセージへ変換。実ドライラン（2026-08-25 23:29）での障害報告を受け対応。 | P2 |
+| BL-271 | 低 | `web_tools.py`（`ExaSearchProvider`、`get_search_provider`） | **`done`。** Exa Search APIを`CELA_WEB_SEARCH_PROVIDER=exa`で手動選択可能なProviderとして追加。raw httpx実装（SDK不使用）、401/429をBL-270と同型のWebSearchConfigErrorへ変換。 | P3 |
 
 ---
 
@@ -9003,6 +9004,38 @@ BL-266実装完了後、AGENTS.md §17.3の節目でのフルオフラインス�
 - `tests/test_bl184_web_tools.py`に新規5件を追加（402の型変換、他HTTPエラーとの区別、`state`へのメッセージ記録、2回目以降の呼び出しでAPIが呼ばれないことの確認、呼び出し上限チェックより優先されることの確認）。§17.1リバート確認済み（402検知コードの削除、短絡ロジックの削除をそれぞれ個別に確認）。
 - 既存の`test_brave_provider_search_maps_fields`/`test_brave_provider_handles_missing_web_results_key`のフェイクレスポンスに`status_code`属性が無かったため、`resp.status_code`への直接アクセスではなく`getattr(resp, "status_code", None)`を使う防御的な実装へ変更し、既存テストとの非互換を回避。
 - `tests/test_bl184_web_tools.py`全81件、および`-k "web_search or web_tools or bl184"`関連86件で非退行を確認。
+
+---
+
+### BL-271: Exa Search APIを`web_search`の選択可能なProviderとして追加
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P3 |
+| 関連 | BL-184（Provider抽象化の原設計）、BL-270（Brave 402対応、同型のWebSearchConfigError変換パターンをExaの401/429にも適用）、`docs/refs/exa/search_api_notes.md`（2026-08-26取得） |
+
+**内容:**
+
+ユーザーがExa（AI検索特化のSearch API）に登録し、CELAから使えるようにしたいと依頼。公式のPython SDK（`exa-py`）クイックスタートガイドを提供された。
+
+**設計判断（ユーザー承認）:**
+
+1. **raw httpx実装（SDK不使用）**: 既存の`BraveSearchProvider`/`DuckDuckGoSearchProvider`はいずれも`exa-py`のような公式SDKを使わず、raw httpx呼び出しで実装されている。この既存スタイルとの一貫性、および新規pip依存を避けるため、Exaも同様にraw HTTP実装とした。ユーザー提供のSDKクイックスタートには生のREST仕様（エンドポイント・認証ヘッダー形式）が明記されていなかったため、Canonical referenceとして案内された`https://docs.exa.ai/reference/search-api-guide-for-coding-agents`を別途fetchし、`docs/refs/exa/search_api_notes.md`へキャッシュした（AGENTS.md §9）。
+2. **手動切替のみ（自動フォールバックなし）**: BL-270で追加したBrave 402検知の直後だったため、「Brave利用不可時にExaへ自動フォールバックする」設計も選択肢として提示したが、ユーザーは軽量な手動切替（`CELA_WEB_SEARCH_PROVIDER=exa`）を選択した。自動フォールバックはフォールバック順序・両Providerの呼び出し回数上限の扱い等の追加設計が必要になるため、必要になった時点で別途検討する。
+
+**実装（`web_tools.py`）:**
+
+1. `ExaSearchProvider`クラスを新設（`BraveSearchProvider`の直後）。`POST https://api.exa.ai/search`、`Authorization: Bearer $EXA_API_KEY`、リクエストボディ`{"query", "type": "auto", "numResults", "contents": {"highlights": true}}`。
+2. Exaのレスポンスは単一の`snippet`文字列ではなく`highlights`（クエリ関連抜粋の配列）を返すため、CELAの`WebSearchProvider`契約（`{title, url, snippet}`）に合わせて`" / ".join(highlights)`で結合する。
+3. **401（APIキー無効・欠落）・429（レート制限／利用上限超過）を、BL-270の402と同型のパターンでWebSearchConfigErrorへ変換**し、`web_search_handler`の短絡ロジック（BL-270で追加済み、Provider種別に依存しない汎用実装のためExaにも無改修で適用される）へ合流させる。ステータスコード自体はBraveと異なるが、「run内では回復しないプロバイダ側の利用不可」という意味論は共通のため。
+4. `get_search_provider()`に`"exa"`の分岐を追加、未対応プロバイダのエラーメッセージも更新。
+
+**完了条件:**
+
+- `tests/test_bl184_web_tools.py`に新規7件（Provider選択、APIキー未設定、フィールドマッピング・highlights結合、results空時、401/429のWebSearchConfigError変換、他HTTPエラーとの区別）。§17.1リバート確認済み（401/429検知コードの削除で該当2件が失敗することを確認）。
+- 全88件、および`-k "web_search or web_tools or bl184 or bl270"`関連93件で非退行を確認。
+- 新規pip依存は追加していない（raw httpx実装のため`exa-py`のインストール不要）。
 
 ---
 
