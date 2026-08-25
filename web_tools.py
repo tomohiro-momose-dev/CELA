@@ -252,6 +252,23 @@ class BraveSearchProvider:
                 "X-Subscription-Token": api_key,
             },
         )
+        # [BL-270] 402 Payment Requiredは、Brave Search APIの契約上の利用上限（無料枠等）
+        # に到達した場合に返る。他のHTTPエラー（一時的なネットワーク不調等）とは異なり、
+        # 同じrun内でリトライしても回復する見込みが無いため、生のhttpxエラー文字列を
+        # そのままLLMへ返すのではなく、WebSearchConfigError（既に「APIキー未設定」等の
+        # 恒久的な利用不可状態を表現している既存の型）に載せ、web_search_handler側の
+        # 短絡ロジック（一度検知したら以後の呼び出しはAPIを叩かず同じ説明を即座に返す）
+        # へ合流させる。
+        if getattr(resp, "status_code", None) == 402:
+            raise WebSearchConfigError(
+                "web_search is temporarily unavailable: Brave Search APIの利用上限"
+                "（無料枠等）に達したため、402 Payment Requiredが返されました。この上限は"
+                "run内で待っても回復しません。今回のrunでは、read_reference_file"
+                "（過去にweb_fetchで取得・キャッシュ済みのページ本文をkeyword検索、呼び出し"
+                "回数上限を消費しない）で既に調査済みの情報が無いか先に確認し、それでも"
+                "見つからなければ、既に判明している公式サイトURLへweb_fetchを直接呼んで"
+                "代替してください。"
+            )
         resp.raise_for_status()
         payload = resp.json()
         raw_results = (payload.get("web") or {}).get("results") or []
@@ -502,10 +519,19 @@ def _grep_with_context(content: str, pattern: str, context_lines: int = _GREP_CO
 
 def web_search_handler(args: dict, state: dict, config: dict) -> dict:
     """[BL-184] `web_search`ツールのハンドラ。run単位の呼び出し回数上限
-    （`config["max_web_search_calls"]`、既定20）を超えた場合はエラーを返す。"""
+    （`config["max_web_search_calls"]`、既定20）を超えた場合はエラーを返す。
+
+    [BL-270] `WebSearchConfigError`（APIキー未設定・Brave 402等、run内では回復しない
+    系統の失敗）を一度検知したら、`state`にそのメッセージを記録し、以後の呼び出しは
+    実際のHTTPリクエストを送らず同じ説明を即座に返す。402は同じrun内で何度リトライ
+    しても解消しないため、無駄な往復とLLMのiteration消費を避ける。"""
     query = (args.get("query") or "").strip()
     if not query:
         return {"status": "error", "message": "queryは必須です。"}
+
+    _unavailable_message = state.get("web_search_provider_unavailable_message")
+    if _unavailable_message:
+        return {"status": "error", "message": _unavailable_message}
     # [BL-218] 既定を5→10へ引き上げ。実ログで、5件では目的の情報に届かず同じqueryや
     # 近い言い換えで何度もweb_searchを呼び直す（run単位の呼び出し上限を無駄に消費する）
     # 傾向が確認されたため（ユーザー指摘）。上限（10）と揃えることで、通常時は追加の
@@ -528,6 +554,8 @@ def web_search_handler(args: dict, state: dict, config: dict) -> dict:
         provider = get_search_provider()
         results = provider.search(query, max_results)
     except WebSearchConfigError as e:
+        # [BL-270] run内では回復しない系統の失敗として記録し、以後の呼び出しを短絡する。
+        state["web_search_provider_unavailable_message"] = str(e)
         return {"status": "error", "message": str(e)}
     except Exception as e:  # noqa: BLE001 - 外部通信の失敗は種類を問わずエラーレスポンス化する
         return {"status": "error", "message": f"web_search失敗: {e}"}

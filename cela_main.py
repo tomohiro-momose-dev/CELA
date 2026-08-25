@@ -302,7 +302,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = ox_alpha
+model_user = nemotron_3_ultra
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -312,42 +312,42 @@ model_user = ox_alpha
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = ox_alpha # nemotron_3_ultra
+model_orchestrator = nemotron_3_ultra # nemotron_3_ultra
 
 client_expert = client_openrouter
-model_expert = ox_alpha # nemotron_3_ultra
+model_expert = nemotron_3_ultra # nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = ox_alpha
+model_task_planner = nemotron_3_ultra
 
 client_task_plan_reviewer = client_openrouter
-model_task_plan_reviewer = ox_alpha
+model_task_plan_reviewer = nemotron_3_ultra
 
 client_detector_domain = client_openrouter
-model_detector_domain = ox_alpha
+model_detector_domain = nemotron_3_ultra
 client_detector_numeric = client_openrouter
-model_detector_numeric = ox_alpha # ox_alpha
+model_detector_numeric = nemotron_3_ultra # nemotron_3_ultra
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = ox_alpha
+model_decision_extractor = nemotron_3_ultra
 
 client_resource_arbiter = client_openrouter
-model_resource_arbiter = ox_alpha #nemotron_3_ultra
+model_resource_arbiter = nemotron_3_ultra #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = ox_alpha
+model_reflection = nemotron_3_ultra
 
 client_facilitator = client_openrouter
-model_facilitator = ox_alpha
+model_facilitator = nemotron_3_ultra
 
 client_integrator = client_openrouter
-model_integrator = ox_alpha #nemotron_3_ultra
+model_integrator = nemotron_3_ultra #nemotron_3_ultra
 
 client_reviewer_qa = client_openrouter
-model_reviewer_qa = ox_alpha #nemotron_3_ultra
+model_reviewer_qa = nemotron_3_ultra #nemotron_3_ultra
 
 client_goal_essence = client_openrouter
-model_goal_essence = ox_alpha #nemotron_3_ultra
+model_goal_essence = nemotron_3_ultra #nemotron_3_ultra
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -8862,6 +8862,11 @@ class LineageState(TypedDict):
     # 直接インクリメントする（_LAST_PYTHON_CALLS等と異なり、state自体が単一の真実源）。
     web_search_call_count: int
     web_fetch_call_count: int
+    # [BL-270] web_searchがWebSearchConfigError（APIキー未設定・Brave 402等、run内では
+    # 回復しない系統の失敗）を一度返した後の説明メッセージ。web_search_handler（web_tools.py）
+    # がセットし、以後の呼び出しを実際のHTTPリクエストを送らず即座に短絡させる単発ではなく
+    # run内永続のフラグ（空文字なら未検知）。
+    web_search_provider_unavailable_message: str
     # [BL-184] AppConfigのmax_web_search_calls/max_web_fetch_callsをrun開始時にコピーしたもの
     # （max_turns/reflection_intervalと同じ「Appconfig→LineageStateへ複製」パターン）。
     # TOOL_DISPATCHのweb_search/web_fetchハンドラは(args, state)の2引数しか受け取らないため、
@@ -16476,6 +16481,7 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
                 "escalated_issue_first_seen_round": {},
                 "web_search_call_count": 0,
                 "web_fetch_call_count": 0,
+                "web_search_provider_unavailable_message": "",  # [BL-270]
                 "max_web_search_calls": config.get("max_web_search_calls", 30),
                 "max_web_fetch_calls": config.get("max_web_fetch_calls", 30),
                 "road_route_call_count": 0,

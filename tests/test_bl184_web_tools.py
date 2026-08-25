@@ -543,6 +543,100 @@ def test_web_search_handler_provider_not_configured(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# BL-270: Brave Search APIの402 Payment Required（利用上限到達）を明示的に検知し、
+# run内で以後の呼び出しを実際のAPIへ送らず短絡させる。
+# ---------------------------------------------------------------------------
+
+def test_brave_provider_raises_config_error_on_402(monkeypatch):
+    """402は他のHTTPエラーとは異なり、raise_for_status()の汎用例外ではなく、
+    WebSearchConfigError（run内では回復しない系統の失敗を表す既存の型）として
+    明示的に送出されること。"""
+    class _FakePaymentRequiredResponse:
+        status_code = 402
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("402", request=None, response=self)
+
+    monkeypatch.setenv("CELA_BRAVE_SEARCH_API_KEY", "test-key")
+    monkeypatch.setattr(web_tools.httpx, "get", lambda *a, **kw: _FakePaymentRequiredResponse())
+    provider = web_tools.BraveSearchProvider()
+
+    with pytest.raises(web_tools.WebSearchConfigError) as exc_info:
+        provider.search("query", max_results=5)
+    assert "402" in str(exc_info.value)
+    assert "read_reference_file" in str(exc_info.value)
+    assert "web_fetch" in str(exc_info.value)
+
+
+def test_brave_provider_other_http_errors_not_treated_as_config_error(monkeypatch):
+    """[対照] 402以外のHTTPエラー（例: 500）は、従来どおりraise_for_status()由来の
+    汎用例外のままであること（WebSearchConfigErrorへ過剰に一般化しない）。"""
+    class _FakeServerErrorResponse:
+        status_code = 500
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("500", request=None, response=self)
+
+    monkeypatch.setenv("CELA_BRAVE_SEARCH_API_KEY", "test-key")
+    monkeypatch.setattr(web_tools.httpx, "get", lambda *a, **kw: _FakeServerErrorResponse())
+    provider = web_tools.BraveSearchProvider()
+
+    with pytest.raises(httpx.HTTPStatusError):
+        provider.search("query", max_results=5)
+
+
+def test_web_search_handler_records_unavailable_message_on_config_error(monkeypatch):
+    def _raise():
+        raise web_tools.WebSearchConfigError(
+            "web_search is temporarily unavailable: 402 Payment Required"
+        )
+    monkeypatch.setattr(web_tools, "get_search_provider", _raise)
+
+    state = {"web_search_call_count": 0}
+    result = web_tools.web_search_handler({"query": "x"}, state, {})
+
+    assert result["status"] == "error"
+    assert state["web_search_provider_unavailable_message"] == result["message"]
+    # [BL-096同型の失敗] APIへ到達できなかった呼び出しは呼び出し回数を消費しない。
+    assert state["web_search_call_count"] == 0
+
+
+def test_web_search_handler_short_circuits_without_calling_provider_again(monkeypatch):
+    """一度WebSearchConfigErrorが記録された後の2回目の呼び出しは、get_search_provider
+    自体を呼ばず（＝実際のHTTPリクエストを送らず）、同じ説明を即座に返すこと。"""
+    calls = {"count": 0}
+
+    def _get_search_provider_should_not_be_called():
+        calls["count"] += 1
+        raise AssertionError("get_search_providerが呼ばれてはならない")
+
+    monkeypatch.setattr(web_tools, "get_search_provider", _get_search_provider_should_not_be_called)
+
+    state = {
+        "web_search_call_count": 0,
+        "web_search_provider_unavailable_message": (
+            "web_search is temporarily unavailable: 402 Payment Required"
+        ),
+    }
+    result = web_tools.web_search_handler({"query": "another query"}, state, {})
+
+    assert calls["count"] == 0
+    assert result["status"] == "error"
+    assert result["message"] == state["web_search_provider_unavailable_message"]
+
+
+def test_web_search_handler_unavailable_check_happens_before_call_limit_check(monkeypatch):
+    """[優先順位の確認] 呼び出し上限に既に達している状態でも、provider unavailable
+    メッセージが先に返ること（後から見てどちらが原因だったか紛らわしくならないよう、
+    より根本的な失敗要因を優先する）。"""
+    state = {
+        "web_search_call_count": 5,
+        "web_search_provider_unavailable_message": "web_search is temporarily unavailable: 402",
+    }
+    config = {"max_web_search_calls": 5}
+    result = web_tools.web_search_handler({"query": "x"}, state, config)
+    assert result["message"] == state["web_search_provider_unavailable_message"]
+
+
+# ---------------------------------------------------------------------------
 # web_fetch_handler
 # ---------------------------------------------------------------------------
 
