@@ -249,7 +249,7 @@ ling_3_flash = "ling-3.0-flash"
 laguna_S_2_1 ="laguna-s-2.1:free"
 mimo_2_5 = "mimo-v2.5"
 hy3 = "hy3"
-
+ox_alpha="ox-alpha"
 _gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
 _gemini_auditor_key = os.environ.get("GEMINI_API_KEY_AUDITOR", "")
 _deepseek_v4_flash_auditor_key = os.environ.get("DSEEK_V4_FLASH_AUDITOR_KEY", "")
@@ -302,7 +302,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = nemotron_3_ultra
+model_user = ox_alpha
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -312,42 +312,42 @@ model_user = nemotron_3_ultra
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = nemotron_3_ultra # nemotron_3_ultra
+model_orchestrator = ox_alpha # nemotron_3_ultra
 
 client_expert = client_openrouter
-model_expert = nemotron_3_ultra # nemotron_3_ultra
+model_expert = ox_alpha # nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = nemotron_3_ultra
+model_task_planner = ox_alpha
 
 client_task_plan_reviewer = client_openrouter
-model_task_plan_reviewer = nemotron_3_ultra
+model_task_plan_reviewer = ox_alpha
 
 client_detector_domain = client_openrouter
-model_detector_domain = nemotron_3_ultra
+model_detector_domain = ox_alpha
 client_detector_numeric = client_openrouter
-model_detector_numeric = nemotron_3_ultra # nemotron_3_ultra
+model_detector_numeric = ox_alpha # ox_alpha
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = nemotron_3_ultra
+model_decision_extractor = ox_alpha
 
 client_resource_arbiter = client_openrouter
-model_resource_arbiter = nemotron_3_ultra #nemotron_3_ultra
+model_resource_arbiter = ox_alpha #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = nemotron_3_ultra
+model_reflection = ox_alpha
 
 client_facilitator = client_openrouter
-model_facilitator = nemotron_3_ultra
+model_facilitator = ox_alpha
 
 client_integrator = client_openrouter
-model_integrator = nemotron_3_ultra #nemotron_3_ultra
+model_integrator = ox_alpha #nemotron_3_ultra
 
 client_reviewer_qa = client_openrouter
-model_reviewer_qa = nemotron_3_ultra #nemotron_3_ultra
+model_reviewer_qa = ox_alpha #nemotron_3_ultra
 
 client_goal_essence = client_openrouter
-model_goal_essence = nemotron_3_ultra #nemotron_3_ultra
+model_goal_essence = ox_alpha #nemotron_3_ultra
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -8907,6 +8907,14 @@ class LineageState(TypedDict):
     # review_mode="goal_change"を使わせるための単発フラグ。generate_user_utterance_nodeが
     # セットし、detector_nodeが消費・リセットする（expert_consultation_modeと同型のライフサイクル）。
     goal_revision_pending_review: bool
+    # [BL-266] domain_promptがessence_sufficiency_concern=trueを返した直後にTrueとなる、
+    # 次のroute_after_user_decision/route_after_expert_decisionにreflectionへの即時escalationを
+    # 行わせるための単発フラグ。detector_nodeがセットし、ルーティング関数が消費・リセットする。
+    # [CONSTRAINT] _is_detector_redo_requiredの判定要素には絶対に含めないこと——本質充足性の
+    # 懸念は「このターンの発言をやり直させる」差し戻しではなく計画構造の見直しを促す別種の
+    # シグナルであり、pop-guard（直前発言のchat_history取り消し）を誤って発火させてはならない
+    # （AGENTS.md §15.1、BL-262の教訓）。
+    essence_sufficiency_concern_pending: bool
     # [BL-162] goal_revision_pending_review=Trueの間だけ有効な、改定前のゴール文。
     # review_mode="goal_change"監査の判定基準1「旧文が置換ではなく追記として保持されているか」を
     # 評価するために必要だが、従来はgenerate_user_utterance_nodeが_LAST_GOAL_REVISIONから
@@ -10030,9 +10038,24 @@ It serves as the initial planning layer for breaking down complex objectives acr
        なる一次情報の調査・暫定値の提案は行ってよい（write_agreement/confirmed_variables
        にconfidence="provisional"として登録し、最終確定は別タスクに委ねる）」という一文を
        併記してください。
+    16. [BL-266: 本質充足性の網羅チェック（新規）] 下記の■目標セクションに【🎯 本質】
+       （true_essence）が提示されている場合、それは「ゴール文の字面には表れていないが、
+       真に達成すべきこと」を言語化したものです。あなたの分解がゴール文の字面だけを
+       機械的になぞり、本質が示す範囲を見落としていないかを、フェーズ・タスクを書き
+       終える前に自己点検してください。具体的には、本質の記述から「対象となる主体」
+       「対象となる行為・条件」「その主体にとっての制約・前提」を洗い出し、それぞれに
+       対応するタスク・acceptance_criteriaが今の分解案の中に存在するかを1つずつ
+       確認してください。存在しない場合は、新規タスクの追加、または既存タスクの
+       acceptance_criteria/descriptionへの明記によって埋めてください。
+       この点検は「そもそも書かれていない欠落」を対象とし、既存の本質乖離検知
+       （call_detector等、既に立てた計画・数値が本質からずれていないかのドリフト
+       検知）とは異なる観点です。本質の記述に実際には現れていない事項まで拡大
+       解釈して新しい要求を創作しないでください。
 
     ■ 目標: {goal}
     {goal_essence_text}
+    [BL-266] 上記【🎯 本質】が提示されている場合、指示16の網羅性チェックを行ってから
+    以下のJSON配列を出力してください。
 
     Return ONLY JSON array (必ず複数のフェーズとタスクに分割すること):
     [
@@ -11313,6 +11336,17 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"[BL-087 Stage4] 上記【🎯 本質】に照らして、数値・条件設定自体は妥当でも本質から"
         f"乖離していないか（手段の細部の帳尻合わせに終始し、本来達成すべきことを見失っていないか）"
         f"も確認してください。乖離があればconstraint_issueをminor以上に引き上げる根拠にできます。\n\n"
+        f"[BL-266] 上記のドリフト検知（本質からの乖離）とは別に、能動的な充足性チェックも"
+        f"行ってください。ドリフト検知が『今ある計画・成果物の数値や条件が本質からずれて"
+        f"いないか』を見るのに対し、こちらは『本質が要求しているのに、現在のタスク構造・"
+        f"計画全体にそもそも存在しない要素はないか』を見ます。今回のタスクの成果物を"
+        f"手直しするだけでは解消しない、計画の構造自体の欠落に確信を持てる場合のみ、"
+        f"'essence_sufficiency_concern'をtrueにしてください。現在のタスクの記述を少し"
+        f"直せば済む程度の懸念は、通常のconstraint_issueまたはobservationsで扱って"
+        f"ください——判断に迷う・確信が持てない場合はfalseのままにしてください。"
+        f"trueにする場合は'essence_sufficiency_reason'に、本質のどの記述が根拠で、"
+        f"どのフェーズ・タスクにも対応が無いと判断したかを具体的に書いてください"
+        f"（falseの場合は空文字でよい）。\n\n"
         f"【現在タスクのacceptance_criteria】\n{criteria_text}\n\n"
         f"{whiteboard_block}"
         f"【BL-076: 指摘箇所の引用】constraint_issueがminor/majorの場合、上記ホワイトボードの本文から、"
@@ -11338,13 +11372,14 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         )
         + f"【今回評価するターンのやり取り】\n{history_text}\n\n"
         + _scratch_concerns_closure_instruction("observations", escalation_tools="write_issue") +
-        f'\nReturn ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用(無ければ空文字)", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
+        f'\nReturn ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用(無ければ空文字)", "observations": "気づき・懸念（自由記述、無ければ空文字）", "essence_sufficiency_concern": true/false, "essence_sufficiency_reason": "trueの場合、本質のどの記述が計画のどこにも反映されていないか（falseなら空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
         domain_prompt, client=client_detector_domain, model=model_detector_domain, label="Detector (Domain Review)",
         tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線
-        fallback={"constraint_issue": "none", "comment": "", "target_excerpt": "", "observations": ""},
+        fallback={"constraint_issue": "none", "comment": "", "target_excerpt": "", "observations": "",
+                  "essence_sufficiency_concern": False, "essence_sufficiency_reason": ""},
         state=state,
     )
     if domain_parse_failed:
@@ -11353,6 +11388,11 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         domain_comment = "(ドメイン妥当性レビューのJSON解析失敗のためフェイルクローズしました)"
         domain_target_excerpt = ""
         domain_observations = ""
+        # [BL-266] パース失敗時はfalseに倒す。constraint_issue="major"による通常の
+        # フェイルクローズは既に発生しており、essence_sufficiency_concernまで自動的に
+        # trueにすると単なるJSON解析失敗が計画構造の強制見直しへ過大に波及する。
+        domain_essence_concern = False
+        domain_essence_reason = ""
     else:
         print(f"【Detectorの判定結果(JSONパース後・ドメイン妥当性レビュー)】\n{domain_parsed}\n")
         domain_constraint_issue = domain_parsed.get("constraint_issue", "none")
@@ -11361,6 +11401,14 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         domain_comment = domain_parsed.get("comment", "")
         domain_target_excerpt = domain_parsed.get("target_excerpt", "") or ""
         domain_observations = domain_parsed.get("observations", "") or ""
+        # [BL-266] still_aligned/passedと同じ正規化パターン（AGENTS.md §13/§15.1）。
+        # LLMが文字列"true"/"false"を返す場合と、既にJSON boolとしてパース済みの場合の
+        # 両方を正しく解釈する。素朴なbool(x)だと文字列"false"がtruthyでTrueと誤判定される。
+        _essence_val = domain_parsed.get("essence_sufficiency_concern", False)
+        domain_essence_concern = (
+            str(_essence_val).lower() == "true" if isinstance(_essence_val, str) else bool(_essence_val)
+        )
+        domain_essence_reason = domain_parsed.get("essence_sufficiency_reason", "") or ""
 
     # [BL-054] 第2段: 数値監査（検算）パス。先に実施したドメイン妥当性レビューの結果を
     # 提示し、前提そのものに既に指摘があるかを踏まえた上で検算させる。
@@ -11548,7 +11596,15 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         # [SAFETY] D-005: 層2リトライを使い切った場合はフェイルオープン（none）ではなくフェイルクローズ（major）に倒す。
         # F-2.6検算ゲート導入の目的（暗算を信用しない）と、判定データ欠落時のフェイルオープンは相容れないため。
         print("🚨 [Detector] 層2リトライを使い切ってもJSON判定を取得できませんでした。フェイルクローズ(major)します。")
-        return {"risk": "low", "constraint_issue": "major", "comment": "(判定JSON解析失敗のためフェイルクローズしました)", "criteria_status": [], "target_excerpt": domain_target_excerpt, "observations": domain_observations}
+        # [BL-266] 数値監査パス（第2段）のパース失敗は、既に確定済みのdomain側の
+        # essence_sufficiency_concern判定とは無関係な、別種の失敗である。ここで早期returnする際も
+        # domain側の値を消さずに引き継ぐ（消し忘れると、数値監査だけがたまたま失敗した回に
+        # 限って本質充足性の懸念が黙って消える不整合になる、AGENTS.md §15.4）。
+        return {
+            "risk": "low", "constraint_issue": "major", "comment": "(判定JSON解析失敗のためフェイルクローズしました)",
+            "criteria_status": [], "target_excerpt": domain_target_excerpt, "observations": domain_observations,
+            "essence_sufficiency_concern": domain_essence_concern, "essence_sufficiency_reason": domain_essence_reason,
+        }
     print(f"【Detectorの判定結果(JSONパース後・数値監査パス)】\n{parsed}\n")
     risk = parsed.get("risk", "low")
     if risk not in ("low", "medium", "high"):
@@ -11616,6 +11672,9 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
     return {
         "risk": risk, "constraint_issue": constraint_issue, "comment": comment,
         "criteria_status": criteria_status, "target_excerpt": target_excerpt, "observations": observations,
+        # [BL-266] 第2段（数値監査）にはこのチェック自体が存在しないため、第1段の値を素通しする。
+        "essence_sufficiency_concern": domain_essence_concern,
+        "essence_sufficiency_reason": domain_essence_reason,
     }
 
 # [BL-213 F3] decision_extractorの抽出結果に対するスキーマ検証・正規化。
@@ -14013,9 +14072,9 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     この計画自体の質をレビューしてください（個々のタスクの中身の是非ではなく、計画の構造
     そのものが後工程で無駄な手戻りを生まないかを見てください）。
 
-    以下の観点でレビューしてください（1つに偏らず、8つとも同等以上に重視すること。実際に
+    以下の観点でレビューしてください（1つに偏らず、9つとも同等以上に重視すること。実際に
     後工程で最も高くつく手戻りは、数値の端数不一致よりも「タスクの欠落」や「順序矛盾」から
-    生じることが多いため、数値の細かい不整合ばかりを追いかけて2・3・4・5・6・7・8を
+    生じることが多いため、数値の細かい不整合ばかりを追いかけて2・3・4・5・6・7・8・9を
     見落とさないこと）:
     1. 曖昧な表記: 各タスクのacceptance_criteria/descriptionに、AIが読み違えるような曖昧な
        数量・比率・位置の表記がないか（例: 比率と絶対値が並記され、どちらが基準か不明瞭等）。
@@ -14057,6 +14116,15 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
        confirmed_variablesへの登録が伴っていない場合、後続タスクがread_verified_factで
        検索してもこの派生値を発見できず、テキストの記述だけでは実質的に不十分です。
        これも要指摘としてください。
+    9. [BL-266] 本質充足性: 上記の【🎯 本質】（true_essence）が提示されている場合、その
+       記述が示す範囲全体が、今回生成された計画（フェーズ・タスク一覧）でカバーされて
+       いるか確認してください。ゴール文の字面には出てこないが本質が示唆する対象・条件が、
+       どのタスクのacceptance_criteria/descriptionにも一度も現れていない場合は、欠落として
+       指摘してください。これは観点1〜8のような「書かれた記述の曖昧さ・過不足」とは別の
+       観点で、「本質が要求するのに、そもそも計画に存在しない要素」の点検です。本質の記述に
+       実際には現れていない事項まで拡大解釈して要求を作り出さないでください。また
+       call_detector側の本質ドリフト検知（既存計画・成果物の一貫性チェック）とも異なります
+       ——こちらは実行前の計画構造全体の網羅性チェックです。
 
     【重要: 曖昧さの指摘とゴール文にない数値の捏造要求を混同しない】
     ゴール文（目標）自体が与えていない絶対値（例: 総量そのもの）を、taskに無理やり
@@ -14071,7 +14139,8 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
 
     重大な問題（このまま実行すると手戻りがほぼ確実な曖昧表記・タスク欠落・順序矛盾・条件欠落・
     acceptance_criteriaの束ね・実行環境で到達不能な要求・範囲限定文言の調査許可併記漏れ・
-    confirmed_variables未登録）がある場合のみ constraint_issue="major" としてください。
+    confirmed_variables未登録・本質充足性の欠落）がある場合のみ constraint_issue="major"
+    としてください。
     軽微な改善余地はobservationsに
     記載するに留め、"none"としてください（実行前の1回きりのゲートであり、些末な指摘で何度も
     差し戻すと非効率です）。
@@ -14535,6 +14604,29 @@ Manages state updates including risk levels, constraint logging, and decision re
             get_active_conn(), state["run_id"], "detector_auto", _bl096_phase_id, current_task_id,
         )
         print(f"  🗂️ [BL-096] Detectorのobservations（{len(observations)}字）を機械的バックアップとしてissue_logへ自動起票しました: topic={_bl096_topic}")
+
+    # [BL-266] essence_sufficiency_concern=trueをPython側で機械的にissue_logへ起票する。
+    # severity="major"のため即座にstatus="escalated"となり（_write_issue_impl内の不変条件、
+    # D-079/D-080）、既存のescalation_pin（毎ターンUser/Detectorへ表示）・BL-145滞留判定へ
+    # 無改修で乗る。LLM自身にwrite_issue呼び出しを指示しない——ツール呼び出し忘れという
+    # 新たな失敗点を増やさず、topic命名規則をコード側で固定するため。
+    if result.get("essence_sufficiency_concern"):
+        _bl266_phase_id = state.get("current_phase", {}).get("phase_id", "")
+        _bl266_topic = (
+            f"essence_sufficiency_concern_{current_task_id}" if current_task_id
+            else "essence_sufficiency_concern_no_task"
+        )
+        _bl266_reason = result.get("essence_sufficiency_reason", "") or "(理由未記載)"
+        _write_issue_impl(
+            {
+                "action_type": "CREATE", "topic": _bl266_topic, "severity": "major",
+                "description": f"[BL-266] 本質充足性チェックで構造的な欠落の懸念を検知: {_bl266_reason}",
+                "phase_id": _bl266_phase_id, "task_id": current_task_id,
+            },
+            get_active_conn(), state["run_id"], "detector_auto", _bl266_phase_id, current_task_id,
+        )
+        state["essence_sufficiency_concern_pending"] = True  # [BL-266] ルーティングで単発消費
+        print(f"  🧭 [BL-266] 本質充足性の懸念をissue_logへ起票しました: topic={_bl266_topic}")
 
     if result["risk"] == "high":
         print("🛑 [Detector] risk=highを検出しました。state['halt']=Trueで緊急停止します。")
@@ -15440,13 +15532,26 @@ It generates a formal decision based on reflection results, updating the overall
     )
     _escalated_first_seen = state.setdefault("escalated_issue_first_seen_round", {})
     _current_round = state.get("round_count", 0)
+    # [BL-266] essence_sufficiency_concern由来のissue（topic接頭辞で識別）は、Detector側の
+    # domain_promptで既に「今のタスクの手直しでは解消しない構造的欠落」という高い確信度を
+    # 通過済みのシグナルであるため、他の一般的なescalated issue（BL-144既定の3ラウンド）
+    # より短い滞留閾値を適用する。ゼロラウンド（即時強制反映）にはしない——User AIに
+    # 最低1ラウンドはwrite_issue(RESOLVE/DEFER)で誤検知を訂正する機会を残すことが、
+    # 「Detectorの判定を計画へ無断で即座に反映しない」という暴走防止の要件だから。
+    _BL266_ESSENCE_TOPIC_PREFIX = "essence_sufficiency_concern_"
+    _BL266_ESSENCE_STALE_ROUNDS = 1
+    _DEFAULT_STALE_ROUNDS = 3
     _stale_escalated = []
     _current_escalated_ids = set()
     for _issue in _actionable_escalated:
         _iid = _issue["id"]
         _current_escalated_ids.add(_iid)
         _first_round = _escalated_first_seen.setdefault(_iid, _current_round)
-        if _current_round - _first_round >= 3:
+        _stale_threshold = (
+            _BL266_ESSENCE_STALE_ROUNDS if _issue["topic"].startswith(_BL266_ESSENCE_TOPIC_PREFIX)
+            else _DEFAULT_STALE_ROUNDS
+        )
+        if _current_round - _first_round >= _stale_threshold:
             _stale_escalated.append(_issue)
     # 解決・先送り済みで既にescalated一覧から消えたissueは滞留追跡からも削除する
     # （再度escalatedになった場合は新規の滞留として扱う）。
@@ -16001,6 +16106,17 @@ Otherwise, routing to "user_decision_extractor."
             print("\n[route_after_user_decision]------ !!! Halt !!! ------\n")
             return "halt"
 
+        # [BL-266] 本質充足性の懸念は、通常の差し戻しループとは独立した、reflectionへの
+        # 即時escalation。user_decision_extractorを経由済みのため、この発言から抽出すべき
+        # 決定・合意事項は既に処理済みであることが保証されている（detector直後のroute_after_
+        # user_detectorでescalationさせると、決定抽出そのものがスキップされてしまうため
+        # ここで行う）。BL-125の遷移ブロックより優先する——遷移ブロックは既に進行中の
+        # 是正ループだが、本質充足性の懸念はそれとは独立した新規シグナルのため。
+        if state.get("essence_sufficiency_concern_pending"):
+            state["essence_sufficiency_concern_pending"] = False  # 単発消費
+            print("\n[route_after_user_decision]------ BL-266: 本質充足性の懸念を検知したため、reflectionへ即時escalationします ------\n")
+            return "reflection"
+
         # [BL-181] 第2段（機械的な最終防衛線）: BL-125が今回のターンでタスク遷移をブロックした
         # （current_task_idは更新されていない）にもかかわらず、Orchestrator/Expertが会話文脈
         # （Userが既に発言した次タスクの指示）だけを頼りに先走ってしまう事故が実際に発生した
@@ -16038,6 +16154,7 @@ Otherwise, routing to "user_decision_extractor."
             "integrator": "integrator",
             "orchestrator": "orchestrator",
             "generate_user_utterance": "generate_user_utterance",
+            "reflection": "reflection",  # [BL-266]
         }
     )
 
@@ -16093,10 +16210,17 @@ Otherwise, routing to "user_decision_extractor."
         """【SLM要約】
         Decision routing logic determining the next system state (halt, reflection, or user turn) following expert evaluation.
         """
-        if state["halt"]: 
+        if state["halt"]:
             print("\n[route_after_expert_decision]------ !!! Halt !!! ------\n")
             return "halt"
-        
+
+        # [BL-266] 本質充足性の懸念による即時escalation（周期reflection判定より優先）。
+        # expert_decision_extractorを経由済みのため、決定・合意事項の抽出は処理済み。
+        if state.get("essence_sufficiency_concern_pending"):
+            state["essence_sufficiency_concern_pending"] = False
+            print("\n[route_after_expert_decision]------ BL-266: 本質充足性の懸念を検知したため、reflectionへ即時escalationします ------\n")
+            return "reflection"
+
         # リフレクションのタイミング
         # [BL-005対応] turn_countはグラフ内部ループ（route_after_expert_decisionが
         # generate_user_utteranceへ戻り続ける限り）で凍結し得るため、代わりに
@@ -16389,6 +16513,7 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
                 "expert_pending_question": "",
                 "expert_blocking_reason": "",
                 "goal_revision_pending_review": False,
+                "essence_sufficiency_concern_pending": False,  # [BL-266]
                 "plan_revision_reason": "",
                 "plan_revision_issue_ids": [],
                 "plan_revision_count": 0,
