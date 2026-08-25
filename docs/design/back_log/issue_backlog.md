@@ -296,6 +296,7 @@
 | BL-267 | 低 | `cela_main.py`（`_MEMORY_TRAP_GUARD_PARAGRAPH`、`call_expert`／`generate_user_utterance`） | **`done`。** MemTrapBench（arXiv:2608.20202）が指摘する記憶誘発性認知的罠への予防的プロンプトガードを追加。直近44ドライラン監査では実害未確認だが予防的措置として導入。 | P3 |
 | BL-268 | 低 | `cela_main.py`（`call_integrator`の`contradictions`、bool正規化の未対策バグ） | **`open`。** BL-266のbool正規化調査中に発見。`contradictions`が文字列"false"をtruthyでTrueと誤判定しうる既存バグ、および`scope_compliant`/`issues_handled`の未使用フィールドを記録。 | P3 |
 | BL-269 | 低 | `tests/test_r3_smoke.py`（フルスイート実行時のみのグローバルstate汚染） | **`open`（原因未特定）。** フルオフラインスイート実行時のみ4件が失敗、単体実行では全件成功。BL-266の変更とは無関係と切り分け済み（stashして再現）。汚染源のテストファイルは未特定。 | P3 |
+| BL-270 | 中 | `web_tools.py`（`BraveSearchProvider`、`web_search_handler`） | **`done`。** Brave Search APIの402（利用上限到達）を専用検知し、run内では回復しない失敗として以後の呼び出しを短絡・明示的なメッセージへ変換。実ドライラン（2026-08-25 23:29）での障害報告を受け対応。 | P2 |
 
 ---
 
@@ -8973,6 +8974,35 @@ BL-266実装完了後、AGENTS.md §17.3の節目でのフルオフラインス�
 
 - 汚染源の特定（原因不明のまま放置しない、AGENTS.md §16.3）。
 - フルオフラインスイートが単体実行と同じ結果になることの確認。
+
+---
+
+### BL-270: Brave Search APIの402 Payment Required（利用上限到達）が生のHTTPエラーのままLLMへ返り、無駄な再試行を招く
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| 関連 | `web_tools.py`（`BraveSearchProvider`、`web_search_handler`）、BL-184（web_search/web_fetchの原設計）、BL-096（同型のPython側自動処理パターン） |
+
+**内容:**
+
+ユーザーが2026-08-25 23:29のドライラン（`log/2026-08-25/2329/log_no_prompt.md`）で、Brave Search APIの利用上限（無料枠）到達により`web_search`が`402 Payment Required`エラーで失敗し続けたことを報告。当時のコードでは、この失敗が`except Exception as e: return {"status": "error", "message": f"web_search失敗: {e}"}`という汎用catch-allで処理され、`httpx.HTTPStatusError`の生の文字列（`Client error '402 Payment Required' for url '...'`）がそのままLLMへ返っていた。ログを確認すると、Expert AIは複数回同じ402を踏んだ後、自身の推論で`web_fetch`による既知URLへの直接アクセスへ切り替えて対応していたが、これは偶発的な良い判断に依存しており、機構としての保証は無かった。402はrun内でリトライしても回復しない永続的な失敗である点が、一時的なネットワーク不調等の他のHTTPエラーとは性質が異なる。
+
+ユーザーからの指示: 「webサーチをする場合は、必ずまずはキャッシュを探して、それでもwebサーチを行い、402エラーが出た場合は、一時的にwebサーチが使えない旨をプロンプトで説明してください」。
+
+**対応（実装済み）:**
+
+1. **`BraveSearchProvider.search()`**（`web_tools.py`）: `resp.raise_for_status()`の前に`getattr(resp, "status_code", None) == 402`を明示的に検知し、既存の`WebSearchConfigError`（APIキー未設定等、run内では回復しない失敗を表す既存の型、BL-184）へ載せる。メッセージは「Brave Search APIの利用上限に達した」ことと、代替手段（`read_reference_file`で既存キャッシュを確認→それでも無ければ既知URLへの`web_fetch`）を明示する。他のHTTPエラー（500等）は従来どおり汎用例外のまま扱い、過剰に一般化しない。
+2. **`web_search_handler`**（`web_tools.py`）: `WebSearchConfigError`を一度捕捉したら、そのメッセージを`state["web_search_provider_unavailable_message"]`へ記録する。以後の同一run内の呼び出しは、クエリ検証の直後・呼び出し回数上限チェックより先にこのフラグを確認し、実際のHTTP通信を行わず同じ説明を即座に返す（402は待っても解消しないため、無駄な往復とLLMのiteration消費を避ける）。
+3. **`cela_main.py`**: `LineageState`へ`web_search_provider_unavailable_message: str`を追加し、run開始時の初期state辞書で空文字に初期化（`web_search_call_count`等の既存の隣接フィールドと同じ並び）。checkpoint再開時も特別な再同期ロジックは不要（この値自体もstateの一部として自然にcheckpointへ含まれ、resume後も維持される）。
+4. **「まずキャッシュを探す」について**: `web_search`自体の結果をキャッシュする新規サブシステムは追加していない——既存の`read_reference_file`（`web_fetch`でキャッシュ済みのページ本文をkeyword検索、呼び出し回数上限を消費しない）を先に確認する運用は、複数のプロンプト箇所（`call_expert`・`call_detector`・User AI等）に既に「①read_goal_reference②read_reference_file③web_search」という順序で指示済みだったため、新規追加はしていない。402発生時のメッセージ内でこの既存経路への誘導を明示することで対応した。
+
+**完了条件:**
+
+- `tests/test_bl184_web_tools.py`に新規5件を追加（402の型変換、他HTTPエラーとの区別、`state`へのメッセージ記録、2回目以降の呼び出しでAPIが呼ばれないことの確認、呼び出し上限チェックより優先されることの確認）。§17.1リバート確認済み（402検知コードの削除、短絡ロジックの削除をそれぞれ個別に確認）。
+- 既存の`test_brave_provider_search_maps_fields`/`test_brave_provider_handles_missing_web_results_key`のフェイクレスポンスに`status_code`属性が無かったため、`resp.status_code`への直接アクセスではなく`getattr(resp, "status_code", None)`を使う防御的な実装へ変更し、既存テストとの非互換を回避。
+- `tests/test_bl184_web_tools.py`全81件、および`-k "web_search or web_tools or bl184"`関連86件で非退行を確認。
 
 ---
 
