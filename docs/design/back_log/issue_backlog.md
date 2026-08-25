@@ -8830,16 +8830,26 @@ Exploreエージェントの調査により、以下が判明した。
 1. **`call_task_planner`**：分解時、`goal_essence_text`を単なる背景情報ではなく、能動的な網羅性チェックの基準として使うよう指示を追加する（ゴール文に明記された事物だけでなく、本質が示す範囲全体をカバーしているかを自己点検させる）。
 2. **`call_task_plan_reviewer`**：既存8観点に「観点9: 本質充足性——生成された計画が、本質(true_essence)が示す本来の目的に照らして必要な観点・要素を漏れなくカバーしているか」を追加する。
 3. **`call_detector`**：domain_promptに、既存の「本質からの乖離検知」とは別枠で、true_essence基準の能動的な充足性チェック（Layer 3相当）を追加する。この判定は`constraint_issue`とは別の新規フラグ（例: `essence_sufficiency_concern`）で表現し、「今のタスクの手直しでは解消できない、計画（フェーズ・タスク構成）自体の欠落」と判断した場合にのみ立てる。
-4. **ルーティング**：`route_after_user_detector`/`route_after_expert_detector`の先頭（既存の3回連続差し戻し判定と同じ位置）に、`essence_sufficiency_concern`フラグを見て周期を待たず`reflection`へ即時遷移する分岐を追加する（新規ノード・新規エッジは不要、既存分岐への条件追加のみ）。
+4. **ルーティング【実装時に訂正】**：当初案は`route_after_user_detector`/`route_after_expert_detector`（decision_extractorの前）への即時escalation分岐追加だったが、実装計画レビュー段階でこれは実装バグと判明し、`route_after_user_decision`/`route_after_expert_decision`（decision_extractor**後**）へ変更した（詳細は実装サマリ参照）。
 5. **`reflection_node`**：既存のBL-145正当性監査ロジック（現在はstale escalated issueのみ対象）の対象へ、Detector発の`essence_sufficiency_concern`（`write_issue`で記録）も含める。正当と判断したものだけ、既存配線で`plan_revision_reason`へ昇格させる。人間承認ゲートは設けない——正当性監査そのものが暴走防止の役割を担う。
 
-**完了条件（設計時に確定、本BLでは実装しない）:**
+**完了条件（設計時に確定）:**
 
-- `call_task_planner`/`call_task_plan_reviewer`への具体的な指示文言の確定。
-- `essence_sufficiency_concern`フラグの判定基準（既存の`constraint_issue`ドリフト検知との区別を含む）の確定。
-- Reflectorの正当性監査ロジックを、stale escalated issue専用から本質充足性issueも扱えるよう拡張する設計の確定。
-- 回帰テスト方針（§17.1）の確定。
-- 本BLの対応は次回以降のセッションでユーザー承認を得てから着手する。
+- `call_task_planner`/`call_task_plan_reviewer`への具体的な指示文言の確定。→ 実装済み。
+- `essence_sufficiency_concern`フラグの判定基準（既存の`constraint_issue`ドリフト検知との区別を含む）の確定。→ 実装済み。
+- Reflectorの正当性監査ロジックを、stale escalated issue専用から本質充足性issueも扱えるよう拡張する設計の確定。→ 実装済み（滞留閾値の差別化として実現）。
+- 回帰テスト方針（§17.1）の確定。→ 実装済み（3新規テストファイル、計35件）。
+
+**実装サマリ（2026-08-25）:**
+
+Plan Modeで実装計画を作成する過程で、ユーザーから「③パース後の抽出の処理を詳しく解説して」という質問を受けて回答したところ、既存コード（`still_aligned`/`passed`）に、より優れたbool正規化パターンが既に確立されていることが判明し、計画を修正した上で実装した。さらに実装レビュー段階で、Planエージェント原案のルーティング挿入位置が実装バグであることも発見・訂正した（両方ともコード追跡による検証を経た訂正、AGENTS.md §16.2）。
+
+1. **`call_task_planner`**（cela_main.py）: 指示16として本質充足性の網羅チェックを追加。規則の実体は指示16の1箇所にのみ書き、`{goal_essence_text}`直後には指示16への短い参照のみを配置（AGENTS.md §15.1）。
+2. **`call_task_plan_reviewer`**: 観点9として本質充足性チェックを追加（8→9）。見出し・major判定列挙も整合させて更新。JSON出力キーは新設しない（既存の`observations`/`comment`で表現、層3との非対称は意図的——後続の専用処理（issue_log起票）を駆動しないため機械可読キーは不要）。
+3. **`call_detector`のdomain_prompt**: 既存の本質乖離検知（BL-087 Stage4）とは別枠で能動的充足性チェックを追加。JSON出力に`essence_sufficiency_concern`（bool）/`essence_sufficiency_reason`を新設し、①Return文②フォールバック辞書③パース後抽出の3箇所を同時変更（AGENTS.md §15.1）。**bool正規化は当初`bool(x is True)`という独自の厳格判定を計画していたが、既存の`call_reflection`の`still_aligned`・`call_reviewer`の`passed`に、文字列"true"/"false"を大文字小文字問わず正しく解釈する既存の正規化パターンが確立済みと判明し、そちらへ統一した**（単一の真実源、AGENTS.md §15.1）。実装中にもう1点、数値監査パス（第2段）のJSON解析失敗時の早期return（既存コード）がdomain側のessence判定を引き継がずに欠落させる経路を、新規テストが検出・修正した（AGENTS.md §15.4：入口だけでなく全消費経路を確認）。issue_log起票はLLMにwrite_issue呼び出しを指示せず、detector_node側でPython側から機械的に行う（BL-096バックアップパターンを踏襲、ツール呼び出し忘れという失敗点を増やさない）。
+4. **ルーティング【設計訂正】**: Planエージェント原案（`route_after_user_detector`/`route_after_expert_detector`、decision_extractor前）は、発言が受理された（constraint_issueがmajorでない）場合にもessence_sufficiency_concernが立ちうるため、この位置でreflectionへ直行させるとdecision_extractor_nodeを経由せず、その発言から抽出すべき決定・合意事項が丸ごとスキップされる実装バグだった。正しい挿入位置はdecision_extractor実行後の`route_after_user_decision`/`route_after_expert_decision`（`essence_sufficiency_concern_pending`という新規単発消費フラグをTypedDictへ追加、`_is_detector_redo_required`には絶対に含めない設計、BL-262の教訓）。`route_after_user_decision`はこれまで一度もreflectionへ遷移したことが無かったため、宛先マップへの新規追加も必要だった。
+5. **`reflection_node`**: 単に即時escalationするだけではBL-145の3ラウンド固定滞留判定が独立して効き、ユーザーが懸念した遅延がほぼ解消されないと判明したため、`essence_sufficiency_concern_`接頭辞のissueに限り滞留閾値を1ラウンドへ短縮する設計を追加（investigation doc起草時には無かった拡張）。ゼロラウンドにはせず、User AIに最低1ラウンドの訂正機会を残す。
+6. **新規テスト**: `tests/test_bl266_essence_sufficiency_prompts.py`（8件、層1・2）、`tests/test_bl266_essence_sufficiency_detector.py`（13件、層3）、`tests/test_bl266_essence_sufficiency_routing.py`（14件、層4）。§17.1リバート確認済み。既存`tests/test_bl254_task_plan_reviewer_gaps.py`の観点数アサーションを8→9へ更新（意図的な仕様変更に伴う想定内の修正）。フルオフラインスイート1566 passed / 4 failed（後者はBL-266と無関係の既存state汚染、BL-269として別途起票）/ 5 deselected。
 
 ---
 
