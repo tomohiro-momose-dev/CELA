@@ -292,8 +292,10 @@
 | BL-263 | 高 | `cela_main.py`（ホワイトボード改版の収束条件） | **`done`。** ホワイトボードの改版に収束条件がなく、成果物が語彙の磨き込みで延々と推敲され続けていた問題に対し、版数の機械的昇格エスカレーションを追加。 | P1 |
 | BL-264 | 中 | `cela_main.py`（`_LLM_FALLBACK_SENTINEL`、`schedule_task_focus`、`_phase_id_from`） | **`done`。** LLM出力の欠落・不正値によるフォールバックと、意図された既定値としての空文字が区別できない構造的欠陥に対し、専用センチネル値（ID参照・自由記述フィールド）とloud warning（内部state由来の非文字列型フォールバック、Category C）を導入。 | P2 |
 | BL-265 | 中 | `cela_main.py`（`_write_agreement_impl`のread-before-writeゲート、`_LAST_WHITEBOARD_READS`） | **`done`。** `write_agreement`のedits編集にread-before-write機械的ゲートを追加。D-206/D-207・BL-242/D-211が却下した意味論的検知とは異なり「ツール使用順序」という構造的事実のみを判定するとの整理に基づき機械的拒否（案A）を採用。 | P2 |
-| BL-266 | 中 | `cela_main.py`（`call_task_planner`／`call_task_plan_reviewer`／`call_detector`／`reflection_node`、設計のみ） | **`open`（調査・設計完了、実装未着手）。** MemTrapBench型の議論から導出した「自己批判の3層構造」とCELAの既存レビュー機構を突き合わせ、Detectorの本質(true_essence)充足性チェック・4層構成（task_planner/task_plan_reviewer/Detector/Reflection）の設計を策定。グラフルーティング変更を伴うため実装は次回セッション以降。 | P2 |
+| BL-266 | 中 | `cela_main.py`（`call_task_planner`／`call_task_plan_reviewer`／`call_detector`／ルーティング／`reflection_node`） | **`done`。** 「自己批判の3層構造」とCELAの既存レビュー機構を突き合わせ、本質(true_essence)充足性チェックを4層（task_planner/task_plan_reviewer/Detector/Reflection）へ実装。実装中にPlanエージェント原案のルーティング挿入位置の誤り（decision抽出スキップバグ）を発見・訂正。 | P2 |
 | BL-267 | 低 | `cela_main.py`（`_MEMORY_TRAP_GUARD_PARAGRAPH`、`call_expert`／`generate_user_utterance`） | **`done`。** MemTrapBench（arXiv:2608.20202）が指摘する記憶誘発性認知的罠への予防的プロンプトガードを追加。直近44ドライラン監査では実害未確認だが予防的措置として導入。 | P3 |
+| BL-268 | 低 | `cela_main.py`（`call_integrator`の`contradictions`、bool正規化の未対策バグ） | **`open`。** BL-266のbool正規化調査中に発見。`contradictions`が文字列"false"をtruthyでTrueと誤判定しうる既存バグ、および`scope_compliant`/`issues_handled`の未使用フィールドを記録。 | P3 |
+| BL-269 | 低 | `tests/test_r3_smoke.py`（フルスイート実行時のみのグローバルstate汚染） | **`open`（原因未特定）。** フルオフラインスイート実行時のみ4件が失敗、単体実行では全件成功。BL-266の変更とは無関係と切り分け済み（stashして再現）。汚染源のテストファイルは未特定。 | P3 |
 
 ---
 
@@ -8902,6 +8904,75 @@ CELAはこの論文が警告する構造そのものを持つ——`chat_history
 - `call_expert`の静的プロンプトブロック群（BL-195の直後）に1箇所、`generate_user_utterance`のStage1/Stage3/Stage4（承認/修正の両分岐）の計4箇所——`_USER_AI_ROLE_MANDATE`と全く同じ5箇所——へ注入。
 - Detectorへの注入は見送り（当初の完了条件通り、優先度を下げたまま据え置き）。効果測定（過剰反応の有無）は次回以降のドライランでの観察に委ねる。
 - 新規テスト`tests/test_bl267_memory_trap_guard.py`（5件）。§17.1リバート確認済み（call_expert注入を個別に削除し、対象テストが実際に失敗することを確認）。既存`tests/test_bl247_user_ai_role_mandate.py`（3件）非退行。フルオフラインスイート1525 passed / 5 deselected。
+
+---
+
+### BL-268: LLM出力のbool値truthy判定に既存の未対策バグ（`call_integrator`の`contradictions`）と未使用フィールド2件を確認
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（発見・記録のみ、実装未着手） |
+| 優先度 | P3 |
+| 関連 | BL-266（このbool正規化パターンの調査中に発見）、AGENTS.md §13.1（空文字トラップと同種のクラス）、§13.5（クラスとして直す） |
+
+**内容:**
+
+BL-266実装中、`essence_sufficiency_concern`（bool）のパース正規化方式をユーザーから「他のbool値判定にも同じ検査をした方が良いのでは」と問われ、既存コード全体のbool型LLM出力フィールドを棚卸しした。
+
+| フィールド | 使用箇所 | 対策状況 |
+|---|---|---|
+| `still_aligned`（`call_reflection`） | 正規化済み（文字列なら"true"比較、それ以外はbool()） | 健全 |
+| `passed`（`call_reviewer`） | 同上のパターンで正規化済み | 健全 |
+| `contradictions`（`call_integrator`、cela_main.py `integrator_node`内`if result.get("contradictions"):`） | **無防備**。`call_integrator`は`_safe_json_parse`の戻り値をそのままreturnしており、正規化を経ない | **未対策バグ** |
+| `scope_compliant`（`generate_user_utterance` Stage1） | JSON schemaとしてLLMへ出力を要求しているが、コード側で一度も`.get()`されず未使用 | 死んだフィールド（実害なし） |
+| `issues_handled`（`generate_user_utterance` Stage2） | 同上、未使用 | 死んだフィールド（実害なし） |
+| `criteria_status`（`call_detector`数値監査パス） | list全体の型検証のみ。要素を個別にtruthy判定する箇所は見当たらない | 実害未確認 |
+
+`contradictions`は、LLMが`"contradictions": "false"`（文字列）を返すと`bool("false")`が`True`と評価され、実際には矛盾が無いのに「矛盾検出」と誤判定されて成果物が不当に差し戻される可能性がある（AGENTS.md §13.1の空文字トラップと同種の、文字列型bool値のtruthy誤判定クラス）。
+
+**対応（提案、未着手）:**
+
+1. `call_integrator`の`contradictions`を、`still_aligned`/`passed`と同じ正規化パターン（`str(x).lower() == "true" if isinstance(x, str) else bool(x)`）へ統一する。
+2. `scope_compliant`/`issues_handled`は、実際に消費経路を追加するか、そもそもJSON schemaから削除するか（AGENTS.md §15.4：出口の無い入口を放置しない）を判断する。
+3. `criteria_status`の各要素が実際にtruthy判定される消費経路が他に無いか、念のため確認する。
+
+**完了条件:**
+
+- 上記3点いずれかの方針確定とユーザー承認。
+- `contradictions`修正時は、文字列"false"がFalseと正しく解釈されることを示す回帰テスト（AGENTS.md §17.1）を追加する。
+
+---
+
+### BL-269: フルオフラインスイート実行時のみ`test_r3_smoke.py`が失敗する（グローバルstate汚染、原因未特定）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（発見のみ、原因未調査） |
+| 優先度 | P3 |
+| 関連 | AGENTS.md §16.3（原因不明であることを正直に記録する） |
+
+**内容:**
+
+BL-266実装完了後、AGENTS.md §17.3の節目でのフルオフラインスイート実行時、`tests/test_r3_smoke.py`の4件（`test_r3b_t4_user_ai_can_write_all_statuses`のstatus="Approved"/"Approved_with_Conditions"/"Implicitly_Accepted"、`test_r3b_t7_depends_on_ids_visible_in_agreements_context`）が失敗した。
+
+```
+🚫 [write_agreement permission][BL-172] userによるtask_id='task_1_1'へのCREATE（status='Approved'）を拒否しました
+（Expert作成のDeliverableがまだ存在しません）
+```
+
+各テストは`cela_main._CURRENT_TASK_ID = ""`を明示的にセットしているにもかかわらず、エラーメッセージには`task_id='task_1_1'`が現れており、どこか別のテストが残したモジュールグローバル状態（`_CURRENT_TASK_ID`、または関連する何らかのグローバル）が漏れている疑いが強い。
+
+**この問題はBL-266の変更とは無関係であることを確認済み**——`git stash`でBL-266の全変更（`cela_main.py`含む）を退避した状態でも同一の4件が同一のエラーで失敗することを確認した（AGENTS.md §14.1：表面的な時期の一致だけで自分の変更を疑わず、実際に切り分けて検証した）。`tests/test_r3_smoke.py`単体では51件全て成功するため、他のテストファイルとの実行順序・グローバル状態の汚染が原因と推測されるが、汚染源となっているテストファイルは未特定。
+
+**対応（未着手）:**
+
+- `pytest --randomly-seed`等でテスト実行順序を変えながら二分探索し、汚染源のテストファイルを特定する。
+- 原因判明後、該当テストのfixtureに`cela_main._CURRENT_TASK_ID`/`_CURRENT_CALLER_ROLE`等のグローバルのteardownを追加する。
+
+**完了条件:**
+
+- 汚染源の特定（原因不明のまま放置しない、AGENTS.md §16.3）。
+- フルオフラインスイートが単体実行と同じ結果になることの確認。
 
 ---
 
