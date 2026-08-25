@@ -282,21 +282,98 @@ class BraveSearchProvider:
         return results
 
 
+_EXA_API_KEY_ENV_VAR = "EXA_API_KEY"
+
+
+class ExaSearchProvider:
+    """[BL-271] Exa Search API（正式API、AI検索特化、APIキー要）を使う実装。
+    BraveSearchProvider/DuckDuckGoSearchProviderと同じくraw httpx呼び出しで実装し、
+    公式SDK（`exa-py`）は新規依存を避けるため使わない（ユーザー承認）。
+    `CELA_WEB_SEARCH_PROVIDER=exa`で手動選択できる、既定Provider（brave）の代替
+    （BL-270のような自動フォールバックは対象外、Provider抽象化の意図通り手動切替のみ）。
+    REST仕様は`docs/refs/exa/search_api_notes.md`（2026-08-26取得）を参照。
+    """
+
+    _SEARCH_URL = "https://api.exa.ai/search"
+
+    def search(self, query: str, max_results: int) -> list[dict]:
+        api_key = os.environ.get(_EXA_API_KEY_ENV_VAR, "").strip()
+        if not api_key:
+            raise WebSearchConfigError(
+                f"web_search is not configured: 環境変数{_EXA_API_KEY_ENV_VAR}が"
+                "設定されていません。Exa APIキーを取得し設定してください "
+                "（https://dashboard.exa.ai）。"
+            )
+        resp = httpx.post(
+            self._SEARCH_URL,
+            json={
+                "query": query,
+                "type": "auto",
+                "numResults": max(1, min(max_results, 10)),
+                "contents": {"highlights": True},
+            },
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        # [BL-271] 401（APIキー無効・欠落）・429（レート制限／利用上限超過）は、Braveの
+        # 402（BL-270）と同じく「run内では回復しない、プロバイダ側の利用不可」カテゴリ。
+        # HTTPステータスコード自体はBraveと異なるが意味論的に同型のため、同じ
+        # WebSearchConfigError→web_search_handlerの短絡ロジックへ合流させる。
+        _status = getattr(resp, "status_code", None)
+        if _status == 401:
+            raise WebSearchConfigError(
+                "web_search is not configured: Exa Search APIキーが無効です。"
+                f"環境変数{_EXA_API_KEY_ENV_VAR}の値を確認してください"
+                "（https://dashboard.exa.ai）。"
+            )
+        if _status == 429:
+            raise WebSearchConfigError(
+                "web_search is temporarily unavailable: Exa Search APIのレート制限・"
+                "利用上限に達したため、429 Rate limit exceededが返されました。この上限は"
+                "run内で待っても回復しません。今回のrunでは、read_reference_file"
+                "（過去にweb_fetchで取得・キャッシュ済みのページ本文をkeyword検索、呼び出し"
+                "回数上限を消費しない）で既に調査済みの情報が無いか先に確認し、それでも"
+                "見つからなければ、既に判明している公式サイトURLへweb_fetchを直接呼んで"
+                "代替してください。"
+            )
+        resp.raise_for_status()
+        payload = resp.json()
+        raw_results = payload.get("results") or []
+        results = []
+        for r in raw_results[:max_results]:
+            # [BL-271] Exaは単一のsnippet文字列ではなく、クエリ関連抜粋の配列
+            # （highlights）を返す。CELAのWebSearchProvider契約（{title, url, snippet}）
+            # に合わせ、複数件あれば結合する。
+            highlights = r.get("highlights") or []
+            results.append({
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "snippet": " / ".join(h for h in highlights if h),
+            })
+        return results
+
+
 def get_search_provider() -> WebSearchProvider:
     """[BL-184] `CELA_WEB_SEARCH_PROVIDER`環境変数（既定: brave）を見てProviderを選択する
     ファクトリ。当初はDuckDuckGo（非公式スクレイピング、APIキー不要）を既定としていたが、
     実測でBot対策チャレンジに即ブロックされることを確認したため、既定をBrave Search API
     （正式API、APIキー要）へ変更した（`docs/refs/duckduckgo/html_endpoint_notes.md`の
     追記、decision_lineage.md 論点142）。DuckDuckGo実装は`CELA_WEB_SEARCH_PROVIDER=
-    duckduckgo`で引き続き選択可能（Provider抽象化の意図通り）。"""
+    duckduckgo`で引き続き選択可能（Provider抽象化の意図通り）。[BL-271] Exa Search API
+    も`CELA_WEB_SEARCH_PROVIDER=exa`で選択可能（Braveの利用上限到達時の手動代替）。"""
     provider_name = os.environ.get("CELA_WEB_SEARCH_PROVIDER", "brave").strip().lower()
     if provider_name == "brave":
         return BraveSearchProvider()
     if provider_name == "duckduckgo":
         return DuckDuckGoSearchProvider()
+    if provider_name == "exa":
+        return ExaSearchProvider()
     raise WebSearchConfigError(
         f"web_search is not configured: 未対応のプロバイダです（CELA_WEB_SEARCH_PROVIDER="
-        f"{provider_name!r}）。現在実装済みなのは'brave'/'duckduckgo'です。"
+        f"{provider_name!r}）。現在実装済みなのは'brave'/'duckduckgo'/'exa'です。"
     )
 
 

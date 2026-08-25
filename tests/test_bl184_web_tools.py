@@ -208,6 +208,128 @@ def test_brave_provider_handles_missing_web_results_key(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# BL-271: ExaSearchProvider（raw httpx実装、SDK不使用）
+# ---------------------------------------------------------------------------
+
+def test_get_search_provider_can_select_exa(monkeypatch):
+    monkeypatch.setenv("CELA_WEB_SEARCH_PROVIDER", "exa")
+    provider = web_tools.get_search_provider()
+    assert isinstance(provider, web_tools.ExaSearchProvider)
+
+
+def test_exa_provider_requires_api_key(monkeypatch):
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    provider = web_tools.ExaSearchProvider()
+    with pytest.raises(web_tools.WebSearchConfigError):
+        provider.search("query", max_results=5)
+
+
+def test_exa_provider_search_maps_fields_and_joins_highlights(monkeypatch):
+    class _FakeExaResponse:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {
+                "requestId": "r1",
+                "searchType": "auto",
+                "results": [
+                    {
+                        "title": "T1", "url": "https://example.com/1",
+                        "highlights": ["抜粋1", "抜粋2"],
+                    },
+                    {"title": "T2", "url": "https://example.com/2", "highlights": []},
+                ],
+            }
+
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    captured = {}
+
+    def fake_post(url, json=None, timeout=None, headers=None):
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        return _FakeExaResponse()
+
+    monkeypatch.setattr(web_tools.httpx, "post", fake_post)
+    provider = web_tools.ExaSearchProvider()
+    results = provider.search("python", max_results=2)
+
+    assert captured["url"] == "https://api.exa.ai/search"
+    assert captured["headers"]["Authorization"] == "Bearer test-key"
+    assert captured["json"]["query"] == "python"
+    assert captured["json"]["numResults"] == 2
+    assert captured["json"]["contents"] == {"highlights": True}
+    assert len(results) == 2
+    assert results[0] == {"title": "T1", "url": "https://example.com/1", "snippet": "抜粋1 / 抜粋2"}
+    assert results[1] == {"title": "T2", "url": "https://example.com/2", "snippet": ""}
+
+
+def test_exa_provider_handles_missing_results_key(monkeypatch):
+    class _FakeEmptyResponse:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"requestId": "r1"}
+
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(web_tools.httpx, "post", lambda *a, **kw: _FakeEmptyResponse())
+    provider = web_tools.ExaSearchProvider()
+    assert provider.search("x", max_results=5) == []
+
+
+def test_exa_provider_raises_config_error_on_401(monkeypatch):
+    """[BL-271] APIキー無効はWebSearchConfigErrorへ変換され、web_search_handlerの
+    短絡ロジック（BL-270と同型）へ合流すること。"""
+    class _FakeUnauthorizedResponse:
+        status_code = 401
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("401", request=None, response=self)
+
+    monkeypatch.setenv("EXA_API_KEY", "invalid-key")
+    monkeypatch.setattr(web_tools.httpx, "post", lambda *a, **kw: _FakeUnauthorizedResponse())
+    provider = web_tools.ExaSearchProvider()
+
+    with pytest.raises(web_tools.WebSearchConfigError) as exc_info:
+        provider.search("query", max_results=5)
+    assert "401" in str(exc_info.value) or "APIキー" in str(exc_info.value)
+
+
+def test_exa_provider_raises_config_error_on_429(monkeypatch):
+    class _FakeRateLimitedResponse:
+        status_code = 429
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("429", request=None, response=self)
+
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(web_tools.httpx, "post", lambda *a, **kw: _FakeRateLimitedResponse())
+    provider = web_tools.ExaSearchProvider()
+
+    with pytest.raises(web_tools.WebSearchConfigError) as exc_info:
+        provider.search("query", max_results=5)
+    assert "429" in str(exc_info.value)
+    assert "read_reference_file" in str(exc_info.value)
+    assert "web_fetch" in str(exc_info.value)
+
+
+def test_exa_provider_other_http_errors_not_treated_as_config_error(monkeypatch):
+    """[対照] 401/429以外のHTTPエラー（例: 500）はWebSearchConfigErrorへ変換されず、
+    従来どおりraise_for_status()由来の汎用例外のままであること。"""
+    class _FakeServerErrorResponse:
+        status_code = 500
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("500", request=None, response=self)
+
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(web_tools.httpx, "post", lambda *a, **kw: _FakeServerErrorResponse())
+    provider = web_tools.ExaSearchProvider()
+
+    with pytest.raises(httpx.HTTPStatusError):
+        provider.search("query", max_results=5)
+
+
+# ---------------------------------------------------------------------------
 # validate_url_for_fetch（SSRF対策）
 # ---------------------------------------------------------------------------
 
