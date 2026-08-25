@@ -104,6 +104,9 @@ def test_edits_still_resolve_after_short_reason_supersede(db_conn):
                             "task_4_2の承認維持・task_4_3移行の根拠となった承認済み成果物を無効化する。")
 
     cela_main._CURRENT_CALLER_ROLE = "expert"
+    # [BL-265] editsを使うUPDATEはread_whiteboard_excerptでの確認記録を要求する。本テストの
+    # 主眼はBL-212（is_whiteboard判定）のため読み取り済みを直接シミュレートする。
+    cela_main._LAST_WHITEBOARD_READS.add("task_4_2")
     result = cela_main.TOOL_DISPATCH["write_agreement"](
         {
             "action_type": "UPDATE", "status": "Proposed", "topic": topic + "（修正版）",
@@ -134,6 +137,8 @@ def test_chained_short_reason_supersedes_still_resolve(db_conn):
                             "Rejectedとする。前回の承認は無効であり、修正版が再提出されるまでtask_4_3以降へ進めない。")
 
     cela_main._CURRENT_CALLER_ROLE = "expert"
+    # [BL-265] editsを使うUPDATEはread_whiteboard_excerptでの確認記録を要求する。
+    cela_main._LAST_WHITEBOARD_READS.add("task_4_2")
     result = cela_main.TOOL_DISPATCH["write_agreement"](
         {
             "action_type": "UPDATE", "status": "Proposed", "topic": topic + "（再修正版）",
@@ -401,6 +406,8 @@ def test_edits_without_any_supersede_still_work(db_conn):
     topic = _create_deliverable(conn, run_id)
 
     cela_main._CURRENT_CALLER_ROLE = "expert"
+    # [BL-265] editsを使うUPDATEはread_whiteboard_excerptでの確認記録を要求する。
+    cela_main._LAST_WHITEBOARD_READS.add("task_4_2")
     result = cela_main.TOOL_DISPATCH["write_agreement"](
         {
             "action_type": "UPDATE", "status": "Proposed", "topic": topic + "（修正版）",
@@ -414,9 +421,11 @@ def test_edits_without_any_supersede_still_work(db_conn):
 
 
 def test_no_whiteboard_yet_still_reports_not_found(db_conn):
-    """[非退行] whiteboard_draftsが一度も作られていないtask_idに対するUPDATE(edits)は、
-    従来通り「更新対象のホワイトボードが見つかりません」で拒否されること
-    （is_whiteboardをTrueへ誤検出しないこと）。"""
+    """[非退行] whiteboard_draftsが一度も作られていないtask_idに対するUPDATE(edits)は拒否される
+    こと（is_whiteboardをTrueへ誤検出しないこと）。[BL-265] read_whiteboard_excerpt自体もこの
+    task_idでは失敗するはずのため、read-before-writeゲート（4.7）がより早い段階で先に拒否する
+    ことになり、エラーメッセージは「ホワイトボードが見つかりません」から「read_whiteboard_excerpt
+    で確認せずに」へ変わる——どちらの理由であっても拒否される、という結果自体は非退行。"""
     conn, run_id = db_conn
     cela_main._CURRENT_CALLER_ROLE = "user"
     result = cela_main.TOOL_DISPATCH["write_agreement"](
@@ -429,7 +438,7 @@ def test_no_whiteboard_yet_still_reports_not_found(db_conn):
         _state(run_id),
     )
     assert result["success"] is False
-    assert "見つかりません" in result["error"]
+    assert "見つかりません" in result["error"] or "read_whiteboard_excerpt" in result["error"]
 
 
 def test_short_reason_supersede_still_marks_previous_row_superseded(db_conn):

@@ -72,6 +72,9 @@ def test_update_edits_falls_back_to_current_phase_when_phase_id_omitted(db_conn)
     state = {"run_id": run_id, "phases": _PHASES, "current_task_id": "task_1_1",
              "current_phase": _PHASES[0]}
     _create_deliverable(state)
+    # [BL-265] editsを使うUPDATEはread_whiteboard_excerptでの確認記録を要求する。
+    # 本テストの主眼はphase_idフォールバック（BL-161）のため読み取り済みを直接シミュレートする。
+    cela_main._LAST_WHITEBOARD_READS.add("task_1_1")
 
     result = cela_main.TOOL_DISPATCH["write_agreement"](
         {
@@ -101,6 +104,8 @@ def test_update_edits_without_fallback_target_still_succeeds_via_task_id(db_conn
     _create_deliverable(
         {"run_id": run_id, "phases": _PHASES, "current_task_id": "task_1_1", "current_phase": _PHASES[0]}
     )
+    # [BL-265] editsを使うUPDATEはread_whiteboard_excerptでの確認記録を要求する。
+    cela_main._LAST_WHITEBOARD_READS.add("task_1_1")
 
     result = cela_main.TOOL_DISPATCH["write_agreement"](
         {

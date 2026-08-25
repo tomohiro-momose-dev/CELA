@@ -184,6 +184,10 @@ def test_write_agreement_impl_surfaces_warning_for_protected_update(db_conn):
 def test_write_agreement_impl_no_warning_for_successful_edits_update(db_conn):
     conn, run_id = db_conn
     _create_whiteboard_deliverable(conn, run_id)
+    # [BL-265] editsを使うUPDATEは、同一ターン内でread_whiteboard_excerptに成功した記録が
+    # 無いと拒否される（read-before-write機械的ゲート）。このテストはBL-127のwarning挙動が
+    # 主眼のため、読み取り済みを直接シミュレートする。
+    cela_main._LAST_WHITEBOARD_READS.add("task_1_1")
 
     result = cela_main._write_agreement_impl(
         {

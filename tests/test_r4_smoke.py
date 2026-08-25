@@ -177,6 +177,8 @@ def test_write_agreement_deliverable_update_with_edits_applies_diff(db_conn):
         "reason_why": "r", "entry_type": "Deliverable", "phase_id": "phase_1",
     })
     assert create_result["success"] is True
+    # [BL-265] editsを使うUPDATEはread_whiteboard_excerptでの確認記録を要求する。
+    cela_main._LAST_WHITEBOARD_READS.add("task_1_1")
 
     update_result = cela_main.TOOL_DISPATCH["write_agreement"]({
         "action_type": "UPDATE", "status": "Proposed", "topic": "R4差分テスト",
@@ -203,6 +205,9 @@ def test_write_agreement_deliverable_update_with_bad_old_text_fails_without_writ
         "action_type": "CREATE", "status": "Proposed", "topic": "R4異常系テスト",
         "decision_what": "本文" * 150, "reason_why": "r", "entry_type": "Deliverable", "phase_id": "phase_1",
     })
+    # [BL-265] editsを使うUPDATEはread_whiteboard_excerptでの確認記録を要求する。この
+    # テストの主眼はold_text不一致時の挙動であり、read-before-write自体は満たしておく。
+    cela_main._LAST_WHITEBOARD_READS.add("task_1_1")
 
     result = cela_main.TOOL_DISPATCH["write_agreement"]({
         "action_type": "UPDATE", "status": "Proposed", "topic": "R4異常系テスト",

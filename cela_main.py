@@ -249,6 +249,7 @@ ling_3_flash = "ling-3.0-flash"
 laguna_S_2_1 ="laguna-s-2.1:free"
 mimo_2_5 = "mimo-v2.5"
 hy3 = "hy3"
+
 _gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
 _gemini_auditor_key = os.environ.get("GEMINI_API_KEY_AUDITOR", "")
 _deepseek_v4_flash_auditor_key = os.environ.get("DSEEK_V4_FLASH_AUDITOR_KEY", "")
@@ -2296,6 +2297,12 @@ def _read_whiteboard_excerpt_handler(args: dict, state: dict | None = None) -> d
     window_end = min(len(content), end + 1 + context_chars)
     prefix = "…（中略）" if window_start > 0 else ""
     suffix = "…（以下省略）" if window_end < len(content) else ""
+    # [BL-265] 一致した実際の中身を返せた時点でのみ「読んだ」と見なす。keyword不一致で
+    # ok=Falseになったケース（上のreturn群）はエラーメッセージしか返しておらず、Expertは
+    # まだ現在の内容を実際に見ていないため記録しない（記録の緩さがゲートの意味を失わせるため）。
+    if content:
+        global _LAST_WHITEBOARD_READS
+        _LAST_WHITEBOARD_READS.add(task_id)
     return {
         "ok": True,
         "match_type": match_type,
@@ -2311,6 +2318,17 @@ _CURRENT_TASK_ID: str = ""      # R3b: confirmed_variablesのsource_task_id用
 _CURRENT_PHASE_ID: str = ""     # [BL-079] verify_whiteboard_excerptツールのget_latest_whiteboard参照用
 _CURRENT_GOAL_TEXT: str = ""    # [BL-086] revise_goalが編集対象とする現在のgoal本文
 _CURRENT_PHASES: list = []      # [BL-104] read_project_planツールが返すstate["phases"]のコピー
+
+# [BL-264] LLM出力の欠落・不正値によるフォールバックであることを構造的に区別可能にするための
+# 専用センチネル値。AGENTS.md §13.1が警告する通り、空文字は「意図された正当な既定値」（例:
+# revision_reason=""＝初回計画立案）と「LLM出力の異常による代入」の両方に使われており、同じ値
+# である以上どちらか判別できない。ID参照・自由記述フィールド（正当な値域自体が空文字を含み
+# うる、または閉じた集合を持たないためenum外側判定が使えないもの）に限り、本センチネルを
+# フォールバック値として使う（enum値フィールドはBL-213 F3のfatal/minorハイブリッド検証で
+# 別途対応済みのため対象外）。通常のLLM出力・DB採番ID・空文字のいずれとも衝突しない構造
+# （制御文字で挟む）にすることで、`==`比較・ログ出力・DBの行のいずれで見ても異常だと判別
+# できるようにする。第一適用対象は`schedule_task_focus`の`baseline_agreement_id`（BL-191）。
+_LLM_FALLBACK_SENTINEL = "￼__CELA_LLM_FIELD_MISSING__￼"
 
 
 def _new_record_id(prefix: str) -> str:
@@ -3774,6 +3792,33 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
                 "error": f"action_type='{args['action_type']}'にはtarget_topicが必須です（更新対象のtopicを明示してください）",
             }
 
+    # 4.7. [BL-265] read-before-write機械的ゲート。write_agreement(entry_type="Deliverable",
+    # action_type="UPDATE", edits=...)でold_text/new_textの部分パッチを行う場合、対象を一度も
+    # 読まずに記憶・憶測でold_textを組み立てて失敗する事故が繰り返されてきた（BL-080/193/
+    # 211/212）。read_whiteboard_excerptで実際に非空の内容を確認できたtask_idのみ、同一ターン内
+    # でそのホワイトボードへのedits適用を許可する（_LAST_WHITEBOARD_READS参照）。
+    # [ユーザー判断 2026-08-25] D-206/D-207・BL-242/D-211が過去に却下した機械的強制は、
+    # 「モデルの推論内容そのものへの介入」（D-207）や「複数タスクをまたぐ意味論的完全性の
+    # 検知」（D-211、read_deliverable_fileを呼ぶだけ呼んで中身を活かさない"形だけの遵守"を
+    # 検知できない）だった。本ゲートはどちらとも異なり、「特定の対象へのread_whiteboard_excerpt
+    # 呼び出しが、このedits呼び出しより先に実際にあったか」という構造的な事実（ツール使用順序）
+    # のみを機械的に判定する——Detectorのような意味論的な検知ではないため、機械的拒否（案A）を
+    # 採用した。
+    if uses_edits:
+        _edits_tid = args.get("task_id") or task_id
+        if _edits_tid and _edits_tid not in _LAST_WHITEBOARD_READS:
+            print(f"  🚫 [write_agreement guard][BL-265] read-before-write違反を拒否: caller={caller_role}, "
+                  f"task_id={_edits_tid!r}（read_whiteboard_excerptでの確認記録なし）")
+            return {
+                "success": False,
+                "error": (
+                    f"task_id '{_edits_tid}' のホワイトボードをread_whiteboard_excerptで確認せずに"
+                    "editsを適用しようとしました。old_textを記憶・憶測で組み立てず、先に"
+                    "read_whiteboard_excerpt(task_id, keyword=...)で実際の現在の内容を確認してから、"
+                    "その内容に基づいてeditsを組み立て直してください。"
+                ),
+            }
+
     # 5. コミット
     commit_error, protected_warning = _commit_agreement_from_tool(args, conn, run_id, caller_role, task_id, phase_id)
     if commit_error:
@@ -4771,7 +4816,22 @@ def _task_id_from(state: dict | None) -> str:
 
 
 def _phase_id_from(state: dict | None) -> str:
-    return (state.get("current_phase", {}) or {}).get("phase_id") or _CURRENT_PHASE_ID if state else _CURRENT_PHASE_ID
+    """state["current_phase"]からphase_idを解決する。取得できなければモジュールglobal
+    _CURRENT_PHASE_IDへフォールバックする（ツールハンドラがstateを直接参照できない箇所向け）。
+    [BL-264 Category C] この関数はTOOL_DISPATCH経由でwrite_agreement/write_issue/
+    flag_needs_human_inputのphase_id引数を供給する（BL-161の"or"パターンのフォールバック値
+    そのもの）。二段のフォールバックが両方とも空になった場合、静かに空文字を返すと下流の
+    書き込みへphase_id不明のまま伝播するため、loud warningで到達を可視化する。"""
+    if not state:
+        return _CURRENT_PHASE_ID
+    _phase_id = (state.get("current_phase", {}) or {}).get("phase_id")
+    if _phase_id:
+        return _phase_id
+    if not _CURRENT_PHASE_ID:
+        print("  ⚠️ [BL-264] _phase_id_from: state['current_phase']にもモジュールglobal "
+              "_CURRENT_PHASE_IDにもphase_idが無く、空文字を返します（呼び出し元の書き込みへ"
+              "phase_id不明のまま渡る可能性があります）。")
+    return _CURRENT_PHASE_ID
 
 
 def _phases_from(state: dict | None) -> list[dict]:
@@ -5068,6 +5128,15 @@ _LAST_NEW_AGREEMENT_ID: str | None = None
 # 「python_repl未使用をDetectorへ警告する」パターンをread_deliverable_fileにも横展開する。
 _LAST_DELIVERABLE_READ_TASK_IDS: list[str] = []
 
+# [BL-265] 直前のquery_AI呼び出しのツールループ内でread_whiteboard_excerptが実際に成功した
+# （非空の内容を確認できた）task_idの集合。_LAST_DELIVERABLE_READ_TASK_IDSと同じ一時バッファ
+# だが、こちらはwrite_agreement(edits=...)のread-before-write機械的ゲート（4.7、
+# _write_agreement_impl）の判定材料そのものであり、Detector等の警告表示には使わない
+# （消費経路がadvisoryかbindingかで役割が異なるため、既存の_LAST_DELIVERABLE_READ_TASK_IDS
+# とは意図的に分離する）。BL-080/193/211/212（対象を読まずにold_textを記憶・憶測で組み立てて
+# 失敗する事故）の再発防止。
+_LAST_WHITEBOARD_READS: set[str] = set()
+
 
 def get_last_python_calls() -> list[dict]:
     """【SLM要約】
@@ -5080,6 +5149,12 @@ def get_last_deliverable_reads() -> list[str]:
     """[BL-242] 直前のquery_AI呼び出しでread_deliverable_fileがtask_id指定付きで
     実際に成功したtask_idの一覧のコピーを返す。"""
     return list(_LAST_DELIVERABLE_READ_TASK_IDS)
+
+
+def get_last_whiteboard_reads() -> set[str]:
+    """[BL-265] 直前のquery_AI呼び出しでread_whiteboard_excerptが実際に成功した
+    （非空の内容を確認できた）task_idの集合のコピーを返す。"""
+    return set(_LAST_WHITEBOARD_READS)
 
 
 def get_last_write_agreement_succeeded() -> bool:
@@ -5183,9 +5258,10 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
     [BL-131/TOOL_DISPATCH state化] `state`は_query_AI_liveへそのまま透過する（レコード/リプレイの
     キャッシュキーには影響しない）。
     """
-    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION, _LAST_REPETITION_GUARD_TRIPPED, _LAST_DELIVERABLE_READ_TASK_IDS
+    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION, _LAST_REPETITION_GUARD_TRIPPED, _LAST_DELIVERABLE_READ_TASK_IDS, _LAST_WHITEBOARD_READS
     _LAST_PYTHON_CALLS = []
     _LAST_DELIVERABLE_READ_TASK_IDS = []
+    _LAST_WHITEBOARD_READS = set()  # [BL-265]
     _LAST_REPETITION_GUARD_TRIPPED = None  # [BL-231]
     _LAST_WRITE_AGREEMENT_SUCCEEDED = False
     _LAST_WRITE_AGREEMENT_ITEMS = []
@@ -9711,6 +9787,34 @@ _USER_AI_ROLE_MANDATE = (
     "acceptance_criteriaの字面が形式上満たされているかだけでなく、その背後にある意図が"
     "実質的に満たされているかを見てください。\n"
 )
+# [BL-267] MemTrapBench（arXiv:2608.20202）が指摘する記憶誘発性の認知的罠への予防的ガード。
+# D-207によりExpert/Userの生reasoningは常に無条件で次iterationへ引き継がれる設計（情報破壊を
+# 避けるための意図的な選択）であり、これはTrauma型の罠（過去の厳しい差し戻しの記憶が、後続の
+# 無関係なタスクで本来正しい手法を回避させる）が発生しうる土壌になる。同論文の緩和策
+# AdaptiveMemが提示する4リスク（タスク境界の変化・戦略の過剰一般化・trauma由来の回避・
+# 安全前提の漏出）を、CELAの既存語彙（acceptance_criteria、Detectorの指摘、本質対話・
+# エスカレーション）へ翻訳した。ドライラン実データ調査（BL267_investigation.md §3、
+# 2026-08-15〜17の44ラン）では実害は確認されておらず、本ブロックは実害確認を待たない予防的
+# 措置（AGENTS.md §13の精神）。D-207が守ろうとした情報保存の趣旨を損なわないよう、最後に
+# 「正当な過去の指摘は引き続き真剣に受け止めよ」という一文を必ず伴わせる。
+_MEMORY_TRAP_GUARD_PARAGRAPH = (
+    "\n【記憶由来の判断バイアスへの注意】過去のターン・過去のタスクでの経緯（Detectorからの"
+    "指摘、前タスクの制約、仮説的な議論等）は、現在のタスクの判断に自動的に持ち込んでよい"
+    "ものではありません。以下を確認してから、過去の経緯を根拠として使ってください。\n"
+    "1. [タスク境界] 前のタスクで有効だった制約・スコープ・書式を、今のタスクの"
+    "acceptance_criteria/descriptionが明示的に要求していないのに、そのまま引き継いで"
+    "いないか。\n"
+    "2. [戦略の過剰一般化] 以前有効だった手法を、条件が異なる今回の状況にも自動的に"
+    "適用していないか。\n"
+    "3. [過去の否定的指摘の過剰回避] 過去にDetectorから指摘・差し戻しを受けた対象は、"
+    "その時と具体的に何が同じで何が違うかを確認してください。指摘は特定の欠陥"
+    "（例：数値の出典不明）に対するものであり、その欠陥が今回存在しないなら、類似した"
+    "手法自体を理由なく避ける必要はありません。\n"
+    "4. [仮説的前提の混入] 本質対話・エスカレーション議論等で検討された反実仮想的な"
+    "前提を、確定した事実として現在の具体的なタスク遂行へ持ち込んでいないか。\n"
+    "これは記憶を無視してよいという意味ではありません——正当な理由がある過去の指摘"
+    "（同じ欠陥が今回も存在する場合等）は、引き続き真剣に受け止めてください。\n"
+)
 # [BL-115] BL-094（read_verified_fact/read_deliverable_fileでの既存確定値との同期説明）は
 # 当初パラメータ化ヘルパーへの集約を試みたが、tests/test_bl094_read_tool_orientation.pyが
 # 各関数自身のinspect.getsource()に"BL-094"/"read_verified_fact"/"read_deliverable_file"/
@@ -9758,7 +9862,7 @@ It serves as the initial planning layer for breaking down complex objectives acr
 
     [BL-101: read_plan_draftで前回のホワイトボードを確認してから再分解する（重要）]
     上記の指摘に`[task_id]`が付いている項目については、いきなりゴール文から作り直すのではなく、
-    まずread_plan_draft(task_id="...")で、そのtask_idの「フェーズ・タスク表」ホワイトボード
+    まずread_plan_draft(task_id="...")で、そのtask_idの「タスク表」ホワイトボード
     （plan_drafts）の最新版を読んでください。これはあなた自身が前回書いた記述そのものであり、
     task_plan_reviewerが「## レビュワーからの指摘（要修正）」として直接書き込んだ個別指摘も
     含まれています。指摘されていないフェーズ・タスクは、内容を維持し不必要に書き換えないで
@@ -10271,6 +10375,8 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "たまたま近い値になること自体は問題ではありませんが、算出過程を示さず実例の値を"
         "そのまま使うことは認められません。\n"
     )
+
+    system_prompt += _MEMORY_TRAP_GUARD_PARAGRAPH
 
     system_prompt += (
         "\n【BL-204: 課題に登場する事物の事実はレジストリで管理する】\n"
@@ -12591,6 +12697,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"のみを担当してください。承認判断・issueの記録・次の指示は後続の別ステージで行うため、"
             f"ここでは行わないでください。\n\n"
             f"{_USER_AI_ROLE_MANDATE}"
+            f"{_MEMORY_TRAP_GUARD_PARAGRAPH}"
             f"【目標】{user_goal}\n"
             f"{goal_essence_text}\n"
             f"【検算とドメインレビューの役割分担】数値の機械的検算（合計・比率・閾値比較等）は既に"
@@ -12702,6 +12809,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"Agent AIの成果物を承認するかどうかだけを判断してください。次タスクへの指示はまだ"
             f"行わないでください（後続の第4段で行います）。\n\n"
             f"{_USER_AI_ROLE_MANDATE}"
+            f"{_MEMORY_TRAP_GUARD_PARAGRAPH}"
             f"【第1段（レビュー）の結果】{review_comment}\n"
             f"【第2段（issue確認）の結果】issues_handled等の対応済み、残存懸念: {remaining_concerns or '(なし)'}\n\n"
             f"【発注者としてのスタンス】相手が「制約が厳しい」と主張してきた場合、それが「動かせない"
@@ -12812,6 +12920,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
                 f"あなたの役割は、Task Plannerが作成した計画に従い、Agent AIへ**1度に1つずつ**"
                 f"次のタスクを指示することです（一気に複数指示すると相手が混乱するため厳禁）。\n\n"
                 f"{_USER_AI_ROLE_MANDATE}"
+                f"{_MEMORY_TRAP_GUARD_PARAGRAPH}"
                 f"【目標】{user_goal}\n"
                 f"{goal_essence_text}\n"
                 f"📊 [プロジェクト進行計画]\n{json.dumps(state.get('phases', []), ensure_ascii=False, indent=2)}\n\n"
@@ -12854,6 +12963,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
                 f"第4段（最終段）です。第3段の判断（{approval_status}）により、今回は承認せず、"
                 f"Agent AIへ現タスクの修正指示を出します。\n\n"
                 f"{_USER_AI_ROLE_MANDATE}"
+                f"{_MEMORY_TRAP_GUARD_PARAGRAPH}"
                 f"【目標】{user_goal}\n"
                 f"{goal_essence_text}\n"
                 f"【却下・保留の理由（第3段）】{approval_reason}\n"
@@ -14713,11 +14823,23 @@ def _apply_backward_redirect(state: LineageState, redirect: dict) -> None:
         return
     current_task_id = _effective_current_task_id_from(state)
     current_phase = state.get("current_phase", {})
+    if not current_phase:
+        # [BL-264 Category C] この関数はラン開始後・フェーズ確定後にのみ呼ばれるはずであり、
+        # current_phaseが空になりうるのは「フェーズ未確定」という正当な理由ではなく、state
+        # 初期化・伝播自体が壊れている異常（BL-024と同系統）を意味する。§13.2のfail-closed
+        # 方針に倣い、他の分岐と同じ⚠️ログで即座に気づけるようにする（黙って空文字を積まない）。
+        print(f"  ⚠️ [BL-264] redirect_backward適用時にcurrent_phaseが空でした（task_id='{current_task_id}'）。"
+              f"state初期化・伝播の異常の可能性があります。phase_idは空文字のまま記録します。")
+    _baseline_agreement_id = redirect.get("baseline_agreement_id") or _LLM_FALLBACK_SENTINEL
+    if _baseline_agreement_id == _LLM_FALLBACK_SENTINEL:
+        print(f"  ⚠️ [BL-264] schedule_task_focus(redirect_backward)がbaseline_agreement_idを"
+              f"省略しました（task_id='{target_task_id}'）。センチネル値で記録し、正当なagreement_id"
+              f"と誤って一致しないようにします。")
     stack.append({
         "task_id": current_task_id, "phase_id": current_phase.get("phase_id", ""),
         "reason": redirect.get("reason", ""), "pushed_at_round": state.get("round_count", 0),
         "focused_task_id": target_task_id,
-        "baseline_agreement_id": redirect.get("baseline_agreement_id", ""),
+        "baseline_agreement_id": _baseline_agreement_id,
     })
     state["task_focus_stack"] = stack
     state["current_task_id"] = target_task_id
@@ -14738,13 +14860,19 @@ def _apply_joint_focus(state: LineageState, redirect: dict) -> None:
     if not _find_phase_containing_task(state.get("phases", []), companion_task_id):
         print(f"  ⚠️ [BL-191] 存在しないtask_id '{companion_task_id}' へのjoint_focus要求を無視しました。")
         return
+    _baseline_agreement_id = redirect.get("baseline_agreement_id") or _LLM_FALLBACK_SENTINEL
+    if _baseline_agreement_id == _LLM_FALLBACK_SENTINEL:
+        # [BL-264] _apply_backward_redirectと同じ理由。センチネル値で記録し、正当な
+        # agreement_idと誤って一致しないようにする。
+        print(f"  ⚠️ [BL-264] schedule_task_focus(joint_focus)がbaseline_agreement_idを"
+              f"省略しました（task_id='{companion_task_id}'）。センチネル値で記録します。")
     state["task_focus_companion"] = {
         "companion_task_id": companion_task_id,
         "companion_phase_id": redirect.get("companion_phase_id", ""),
         "primary_task_id": _effective_current_task_id_from(state),
         "reason": redirect.get("reason", ""),
         "declared_at_round": state.get("round_count", 0),
-        "baseline_agreement_id": redirect.get("baseline_agreement_id", ""),
+        "baseline_agreement_id": _baseline_agreement_id,
     }
     print(f"  🔗 [BL-191] task_focus_companionを設定しました: {companion_task_id}")
 
