@@ -8803,10 +8803,10 @@ Exploreエージェントの調査により、以下が判明した。
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（調査完了・設計提案あり、実装未着手） |
+| 状態 | `done`（4層すべて実装済み、詳細下記） |
 | 優先度 | P2 |
-| 調査記録 | `docs/design/back_log/BL-266/BL266_investigation.md`（全文・要約なし） |
-| 関連 | BL-087 Stage3（goal_essence_node/true_essenceの導入元）、BL-240/D-209（Detectorの能動的ドメイン確認指示、本件が土台にする既存パターン）、BL-198/BL-204（同種の能動的監査）、BL-188（Expert主張の受動的裏取り、本件が区別する対比対象）、BL-145（Reflectorの正当性監査によるplan_revision_reason昇格、本件が再利用する既存配線）、BL-096/BL-144（reflectionへの即時escalation経路、本件が同型で拡張する既存分岐）、BL-253/BL-254（task_plan_reviewerの8観点、本件が9番目を追加検討する対象）、AGENTS.md §16.1（軽い代替案の提示） |
+| 調査記録 | `docs/design/back_log/BL-266/BL266_investigation.md`（全文・要約なし）、実装計画は同一Plan Modeセッションの成果物（`C:\Users\t-mom\.claude\plans\ok-bl-delightful-origami.md`、本文書に実装サマリとして統合済み） |
+| 関連 | BL-087 Stage3（goal_essence_node/true_essenceの導入元）、BL-240/D-209（Detectorの能動的ドメイン確認指示、本件が土台にする既存パターン）、BL-198/BL-204（同種の能動的監査）、BL-188（Expert主張の受動的裏取り、本件が区別する対比対象）、BL-145（Reflectorの正当性監査によるplan_revision_reason昇格、本件が再利用する既存配線）、BL-096/BL-144（reflectionへの即時escalation経路、本件が同型で拡張する既存分岐）、BL-253/BL-254（task_plan_reviewerの8→9観点）、BL-262（pop-guard非干渉の教訓、essence_sufficiency_concern_pendingを_is_detector_redo_requiredへ含めない設計に反映）、BL-268（実装中に発見した既存の別欠陥、本件のスコープ外として分離）、AGENTS.md §16.1（軽い代替案の提示）、§16.2（レビュー所見のコード照合） |
 
 **内容:**
 
