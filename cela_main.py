@@ -349,6 +349,11 @@ model_reviewer_qa = ox_alpha #nemotron_3_ultra
 client_goal_essence = client_openrouter
 model_goal_essence = ox_alpha #nemotron_3_ultra
 
+# [BL-274] 対話型HIL（--interactive-hil）の単発Q&A応答生成用。グラフ実行を伴わない
+# スタンドアロンCLI呼び出しのため、他ノードと同じBL-189パターンで専用変数を持たせる。
+client_hil_qa = client_openrouter
+model_hil_qa = ox_alpha
+
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
 STRUCTURED_OUTPUT_LABEL_KEYWORDS = ("detector", "decision extractor", "reflection", "review", "orchestrator")
@@ -2267,8 +2272,21 @@ def _parse_citations_field(raw) -> list:
 
 
 def _read_agreement_handler(args: dict, state: dict | None = None) -> dict:
-    """[BL-279] `read_agreement`ツールの実体。`_resolve_deliverable_pointer`と同じDB逆引き
-    パターンを踏襲するが、意図的に以下を変える：
+    """[BL-279] `read_agreement`ツールの実体。グラフ実行中のツール呼び出し専用（グローバルの
+    get_active_conn()/_CURRENT_RUN_ID経由でconn/run_idを解決する）。検索ロジック本体は
+    `_query_agreements_core`（[BL-274]でconn/run_idを明示引数に取る形へ抽出、スタンドアロン
+    CLIからも同一ロジックを再利用できるようにした、AGENTS.md §15.1）に委譲する。
+    """
+    task_id = (args.get("task_id") or "").strip()
+    topic_keyword = (args.get("topic_keyword") or "").strip()
+    entry_type_filter = (args.get("entry_type") or "").strip()
+    return _query_agreements_core(get_active_conn(), _CURRENT_RUN_ID, task_id, topic_keyword, entry_type_filter)
+
+
+def _query_agreements_core(conn: sqlite3.Connection, run_id: str, task_id: str,
+                            topic_keyword: str, entry_type_filter: str) -> dict:
+    """[BL-279/BL-274] `read_agreement`ツールとBL-274の対話型HIL Q&Aの両方が使う共通検索ロジック。
+    `_resolve_deliverable_pointer`と同じDB逆引きパターンを踏襲するが、意図的に以下を変える：
     - 返り値は常にリスト形式。task_idのみ指定時は「最新1件」ではなく該当する全件を返す
     （1タスクが複数の独立したDecisionを持ちうるため、Deliverable=1タスク1版という
     read_deliverable_fileの前提が成り立たない）。
@@ -2278,9 +2296,9 @@ def _read_agreement_handler(args: dict, state: dict | None = None) -> dict:
     - entry_type既定はDecision/Directiveのみ（Deliverableはread_deliverable_fileが
     既に担当、読み取り経路の重複を避ける）。
     """
-    task_id = (args.get("task_id") or "").strip()
-    topic_keyword = (args.get("topic_keyword") or "").strip()
-    entry_type_filter = (args.get("entry_type") or "").strip()
+    task_id = (task_id or "").strip()
+    topic_keyword = (topic_keyword or "").strip()
+    entry_type_filter = (entry_type_filter or "").strip()
     if not task_id and not topic_keyword:
         return {"status": "error", "message": "task_id、topic_keywordのいずれかを指定してください。"}
     if entry_type_filter and entry_type_filter not in ("Decision", "Directive", "Deliverable"):
@@ -2288,8 +2306,6 @@ def _read_agreement_handler(args: dict, state: dict | None = None) -> dict:
                 "message": f"entry_typeはDecision/Directive/Deliverableのいずれかです: {entry_type_filter!r}"}
     allowed_entry_types = {entry_type_filter} if entry_type_filter else {"Decision", "Directive"}
 
-    conn = get_active_conn()
-    run_id = _CURRENT_RUN_ID
     agreements = get_agreements_from_db(conn, run_id)
     # [BL-279] status=="Superseded"は_build_agreements_contextの毎ターン表示にも出ない
     # （ambientに見えているものだけをこのツールでも見せる一貫性）。
@@ -6584,6 +6600,19 @@ def init_db(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_issue_run_topic ON issue_log(run_id, topic);
     CREATE INDEX IF NOT EXISTS idx_issue_run_status ON issue_log(run_id, status);
 
+    -- [BL-274] 対話型HIL（--interactive-hil）の質問・回答の監査証跡。1つのissueに
+    -- 複数回の質問が起こりうる（1:N）ため、issue_logへの列追加ではなく別テーブルとする。
+    CREATE TABLE IF NOT EXISTS human_qa_log (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        issue_topic TEXT NOT NULL,
+        question TEXT NOT NULL,
+        answer TEXT NOT NULL,
+        asked_at REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_human_qa_run_topic ON human_qa_log(run_id, issue_topic);
+
     -- [BL-126 Stage A] state["goal"]の全文履歴を版管理する（whiteboard_drafts/plan_draftsと
     -- 同型のappend-onlyバージョニング）。goalはrun_idにつき単一の文書であり複数task_idを
     -- 持たないため、phase_id/task_idは持たずrun_id単独で最新版を検索する
@@ -8384,6 +8413,63 @@ def _answer_human_input(conn: sqlite3.Connection, run_id: str, topic: str, value
     print(f"  🙋 [answer-human-input] topic={topic} を variable_name={row['human_variable_name']}="
           f"{value}{unit}（confirmed, by=human_operator）として記録し、issueを解決しました。")
     return {"success": True, "variable_name": row["human_variable_name"]}
+
+
+def _answer_human_question(conn: sqlite3.Connection, run_id: str, topic: str, question: str) -> dict:
+    """[BL-274] 人間が保留中issueについて自由文で質問し、AIがDB情報（issue_log/agreements/
+    verified_facts）に基づいて回答する。グラフ・checkpointには一切触れない単発LLM呼び出し
+    （query_AIをスタンドアロンCLIプロセスから直接呼ぶ）。質問・回答は監査証跡として
+    human_qa_logへ永続化する（printのみで終わらせない、CELAの「記録が資産」という設計思想）。
+    """
+    row = conn.execute(
+        "SELECT id, task_id, phase_id, severity, human_research_prompt, description "
+        "FROM issue_log WHERE run_id=? AND topic=? AND human_research_prompt != '' "
+        "AND status != 'resolved'",
+        (run_id, topic)
+    ).fetchone()
+    if row is None:
+        return {"success": False, "error": f"topic='{topic}'に該当する未回答issue（human_research_prompt付き）が見つかりません"}
+
+    agreements_result = _query_agreements_core(conn, run_id, task_id=row["task_id"],
+                                                topic_keyword="", entry_type_filter="")
+    agreements = agreements_result.get("agreements", []) if agreements_result.get("status") == "ok" else []
+    facts = get_verified_facts_from_db(conn, run_id, topic=topic)
+    if not facts:
+        tokens = _tokenize_topic_keyword(topic)
+        if tokens:
+            facts = get_verified_facts_from_db_any_token(conn, run_id, tokens)
+
+    agreements_block = "\n".join(
+        f"- [{a['entry_type']}] {a['topic']}: {a['decision_what']} (理由: {a['reason_why']})"
+        for a in agreements
+    ) or "(該当なし)"
+    facts_block = "\n".join(
+        f"- {f.get('variable_name')} = {f.get('value')}{f.get('unit', '')} (理由: {f.get('reason', '')})"
+        for f in facts
+    ) or "(該当なし)"
+
+    prompt = (
+        "あなたはCELAというAIオーケストレーションシステムの監査補助です。人間の運用者が、"
+        "保留中の確認事項について質問しています。以下のDB情報だけを根拠に、簡潔に日本語で"
+        "回答してください。DB情報に答えがない場合は、推測で埋めず「DB情報からは判断できません」"
+        "と正直に答えてください。\n\n"
+        f"【保留中の確認事項】\ntopic: {topic}\nseverity: {row['severity']}\n"
+        f"task_id: {row['task_id']} / phase_id: {row['phase_id']}\n"
+        f"確認依頼文: {row['human_research_prompt']}\n背景: {row['description']}\n\n"
+        f"【関連する過去の意思決定（Decision/Directive）】\n{agreements_block}\n\n"
+        f"【関連する確定値（verified_facts）】\n{facts_block}\n\n"
+        f"【人間からの質問】\n{question}"
+    )
+    answer = query_AI([{"role": "user", "content": prompt}], client=client_hil_qa,
+                       model=model_hil_qa, label="interactive_hil_qa")
+    now = time.time()
+    conn.execute(
+        "INSERT INTO human_qa_log (id, run_id, issue_id, issue_topic, question, answer, asked_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (str(uuid.uuid4()), run_id, row["id"], topic, question, answer, now)
+    )
+    conn.commit()
+    return {"success": True, "answer": answer}
 
 
 def _build_human_input_answered_notice(conn: sqlite3.Connection, run_id: str) -> str:
@@ -17160,6 +17246,82 @@ def list_checkpoints(run_id: str) -> None:
         checkpointer_conn.close()
 
 
+def _run_interactive_hil(conn: sqlite3.Connection, run_id: str,
+                          input_fn=input, print_fn=print) -> None:
+    """[BL-274] 対話型HIL REPL（`--interactive-hil RUN_ID`向け）。runの動作状態に関わらず
+    いつでも別プロセスから起動できる（--pending-human-inputと同じ設計哲学）。LangGraphの
+    state/checkpointには一切触れない、issue_log/human_qa_log/verified_factsへのDB直接操作。
+
+    [CONSTRAINT] input_fn/print_fnを注入可能にしているのはテスト容易性のため（実stdinを
+    モックせず、スクリプト化された応答リストで単体テストできるようにする）。
+    """
+    while True:
+        rows = _flag_needs_human_input_report(conn, run_id)
+        if not rows:
+            print_fn("保留中のissueはありません。終了します。")
+            return
+        print_fn(f"\n保留中のissue {len(rows)}件:")
+        for i, r in enumerate(rows):
+            print_fn(f"  [{i}] ({r['severity']}) {r['topic']}: {r['human_research_prompt'][:60]}")
+        try:
+            sel = input_fn("番号を選択してください（qで終了）: ").strip()
+        except (EOFError, StopIteration):
+            return
+        if sel.lower() == "q":
+            return
+        if not sel.isdigit() or not (0 <= int(sel) < len(rows)):
+            print_fn("無効な番号です。")
+            continue
+        topic = rows[int(sel)]["topic"]
+        _interactive_hil_issue_loop(conn, run_id, topic, input_fn, print_fn)
+
+
+def _interactive_hil_issue_loop(conn: sqlite3.Connection, run_id: str, topic: str,
+                                 input_fn, print_fn) -> None:
+    """[BL-274] 選択された1つのissueについて、質問（何度でも可）→承認/却下までを進める。
+    承認/却下の実処理は新規実装せず、既存の`_answer_human_input`をそのまま呼ぶ
+    （AGENTS.md §16.5、既存配線の再利用）。「却下」はvalue='rejected'という既存の文字列規約
+    （_create_goal_escalation_hil_gateのhuman_research_prompt文言が既に人間へ案内している）
+    をそのまま踏襲する。
+    """
+    while True:
+        try:
+            q = input_fn("質問（空Enterで承認/却下へ、'b'で一覧に戻る、'q'で終了）: ").strip()
+        except (EOFError, StopIteration):
+            raise SystemExit(0)
+        if q.lower() == "q":
+            raise SystemExit(0)
+        if q.lower() == "b":
+            return
+        if q == "":
+            break
+        result = _answer_human_question(conn, run_id, topic, q)
+        if result["success"]:
+            print_fn(f"🤖 {result['answer']}")
+        else:
+            print_fn(f"⚠️ {result['error']}")
+
+    try:
+        decision = input_fn("承認しますか？ (approve/reject/skip): ").strip().lower()
+    except (EOFError, StopIteration):
+        raise SystemExit(0)
+    if decision == "approve":
+        value = input_fn("確定値 (value): ").strip()
+        unit = input_fn("単位（省略可）: ").strip()
+        source = input_fn("出典（省略可）: ").strip()
+        comment = input_fn("コメント（省略可）: ").strip()
+        result = _answer_human_input(conn, run_id, topic, value, unit, source, comment)
+    elif decision == "reject":
+        comment = input_fn("却下理由コメント: ").strip()
+        result = _answer_human_input(conn, run_id, topic, "rejected", "", "human_operator", comment)
+    else:
+        return
+    if result["success"]:
+        print_fn(f"✅ topic={topic} を記録しました。")
+    else:
+        print_fn(f"⚠️ {result['error']}")
+
+
 if __name__ == "__main__":
     # [BL-105] --resume <run_id> で一時停止したドライランを再開できる。
     import argparse
@@ -17196,6 +17358,13 @@ if __name__ == "__main__":
     _cli_parser.add_argument("--unit", default="", help="--answer-human-inputで書き込む確定値の単位。")
     _cli_parser.add_argument("--source", default="", help="--answer-human-inputの出典（誰に確認したか等）。")
     _cli_parser.add_argument("--comment", default="", help="--answer-human-inputの自由記載コメント（issue解決時の申し送りとして記録）。")
+    # [BL-274] 保留中issueについて対話的に質問し、AIがDB情報に基づき回答した上で承認/却下する。
+    # --pending-human-input/--answer-human-inputと同じ設計哲学（runの動作状態に関わらずいつでも
+    # 別プロセスから実行でき、LangGraphのstate/checkpointには一切触れない）。
+    _cli_parser.add_argument(
+        "--interactive-hil", metavar="RUN_ID", default=None,
+        help="指定run_idの保留中issueについて対話的に質問し、AIがDB情報に基づき回答した上で承認/却下する。",
+    )
     # [BL-222] 人間監査用レポート。runの動作状態に関わらずいつでも別ターミナルから実行できる
     # （--pending-human-inputと同じ設計）。継続的に眺めたい場合はシェル側でwatch等を使う。
     _cli_parser.add_argument(
@@ -17218,6 +17387,11 @@ if __name__ == "__main__":
     # （例: ≈）でUnicodeEncodeErrorが発生していたため、utf-8へ強制する。
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # [BL-274] --interactive-hilは人間が日本語を直接キーボード入力する唯一のCLIパス。
+    # Windowsのデフォルトコンソール入力エンコーディング（cp932）でも安全に受け取れるよう、
+    # stdout同様stdinもutf-8へ強制する。
+    if hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
 
     if _cli_args.list_checkpoints:
         # [BL-174] 純粋な閲覧用コマンドのため、ai_vs_ai_loop本体もMultiLoggerによる
@@ -17255,6 +17429,13 @@ if __name__ == "__main__":
         if not _result["success"]:
             print(f"エラー: {_result['error']}")
             sys.exit(1)
+        sys.exit(0)
+
+    if _cli_args.interactive_hil:
+        _conn = get_db_connection()
+        init_db(_conn)
+        _run_interactive_hil(_conn, _cli_args.interactive_hil)
+        _conn.close()
         sys.exit(0)
 
     if _cli_args.audit_report:
