@@ -302,7 +302,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = nemotron_3_ultra
+model_user = ox_alpha
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -312,42 +312,42 @@ model_user = nemotron_3_ultra
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = nemotron_3_ultra # nemotron_3_ultra
+model_orchestrator = ox_alpha # nemotron_3_ultra
 
 client_expert = client_openrouter
-model_expert = nemotron_3_ultra # nemotron_3_ultra
+model_expert = ox_alpha # nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = nemotron_3_ultra
+model_task_planner = ox_alpha
 
 client_task_plan_reviewer = client_openrouter
-model_task_plan_reviewer = nemotron_3_ultra
+model_task_plan_reviewer = ox_alpha
 
 client_detector_domain = client_openrouter
-model_detector_domain = nemotron_3_ultra
+model_detector_domain = ox_alpha
 client_detector_numeric = client_openrouter
-model_detector_numeric = nemotron_3_ultra # nemotron_3_ultra
+model_detector_numeric = ox_alpha # nemotron_3_ultra
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = nemotron_3_ultra
+model_decision_extractor = ox_alpha
 
 client_resource_arbiter = client_openrouter
-model_resource_arbiter = nemotron_3_ultra #nemotron_3_ultra
+model_resource_arbiter = ox_alpha #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = nemotron_3_ultra
+model_reflection = ox_alpha
 
 client_facilitator = client_openrouter
-model_facilitator = nemotron_3_ultra
+model_facilitator = ox_alpha
 
 client_integrator = client_openrouter
-model_integrator = nemotron_3_ultra #nemotron_3_ultra
+model_integrator = ox_alpha #nemotron_3_ultra
 
 client_reviewer_qa = client_openrouter
-model_reviewer_qa = nemotron_3_ultra #nemotron_3_ultra
+model_reviewer_qa = ox_alpha #nemotron_3_ultra
 
 client_goal_essence = client_openrouter
-model_goal_essence = nemotron_3_ultra #nemotron_3_ultra
+model_goal_essence = ox_alpha #nemotron_3_ultra
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -4000,6 +4000,17 @@ def _find_similar_open_issues(conn: sqlite3.Connection, run_id: str, topic: str,
     return candidates[:3]
 
 
+def _is_human_only_issue(row: dict | None) -> bool:
+    """[BL-236拡張] human_research_prompt非空＝人間（--answer-human-input）にしか
+    解決できないHILゲート行であることの機械的判定。AIロールのRESOLVE/DEFERから
+    保護するために使う（AGENTS.md §13.4：同じ状態への書き込み経路は全て同じ不変条件を守る）。
+    実ドライラン（log/2026-08-14/1825）で、BL-236のHILゲートissueをUser AIが
+    write_issue(RESOLVE)で自己解決し、goal_escalations/verified_factsは未解決のまま
+    --pending-human-inputからも見えなくなる事故が確認された。
+    """
+    return bool(row and row.get("human_research_prompt"))
+
+
 def _write_issue_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str,
                        phase_id: str = "", task_id: str = "", state: dict | None = None) -> dict:
     """[BL-096] write_issue_toolの実体。CREATE=起票・再発、RESOLVE=解決、DEFER=明示的な先送り（BL-136）。
@@ -4119,6 +4130,16 @@ def _write_issue_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_
             return {"success": False, "error": "defer_reason（DEFER時必須）が指定されていません"}
         if not existing:
             return {"success": False, "error": f"topic='{topic}'に該当する未解決issueが見つかりません"}
+        if _is_human_only_issue(existing):
+            return {
+                "success": False,
+                "error": (
+                    f"topic='{topic}'は人間の回答（human_research_prompt付き）でしか解決できない"
+                    "issueです。write_issue(DEFER)で別タスクへ先送りすることはできません"
+                    "（人間にしか解決できない懸念を、存在しないAIタスクの責務にすり替えることに"
+                    "なるため）。人間が--answer-human-inputで回答するまで待ってください。"
+                ),
+            }
 
         task_id_to_phase_id: dict[str, str] = {}
         task_id_to_task: dict[str, dict] = {}
@@ -4248,6 +4269,16 @@ def _write_issue_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_
         return {"success": False, "error": "resolution_note（RESOLVE時必須）が指定されていません"}
     if not existing:
         return {"success": False, "error": f"topic='{topic}'に該当する未解決issueが見つかりません"}
+    if _is_human_only_issue(existing):
+        return {
+            "success": False,
+            "error": (
+                f"topic='{topic}'は人間の回答（human_research_prompt付き）でしか解決できない"
+                "issueです。write_issue(RESOLVE)では解決できません。人間が"
+                "--answer-human-input で回答するまで待ってください。read_issuesで"
+                "human_research_promptの内容を確認できます。"
+            ),
+        }
     conn.execute(
         "UPDATE issue_log SET status='resolved', resolved_by=?, resolved_at=?, resolution_note=? "
         "WHERE id=? AND run_id=?",
@@ -5105,6 +5136,12 @@ _LAST_REASONING_TEXT: str = ""
 # query_AI()呼び出しごとにリセットされる（_LAST_WRITE_AGREEMENT_SUCCEEDEDと同型）。
 _LAST_GOAL_REVISION: dict | None = None
 
+# [BL-236拡張] 直前のquery_AI呼び出しのツールループ内でescalate_premise_concernが
+# 成功した場合、その{escalation_id, caller_role, concern_summary}を記録する。
+# ツールハンドラ（_escalate_premise_concern_tool_impl）はLangGraph stateへ直接触れられない
+# ため、_LAST_GOAL_REVISIONと同じブリッジパターンで運ぶ。query_AI()呼び出しごとにリセットされる。
+_LAST_PREMISE_ESCALATION: dict | None = None
+
 # [BL-126 Stage D] 直前のquery_AI呼び出しのツールループ内でwrite_agreement
 # (entry_type="EssenceProposal")が成功した場合、その{topic, status, action_type, reason_why}を
 # 記録する（_LAST_GOAL_REVISIONと同じパターン）。facilitator_node/generate_user_utterance_node
@@ -5198,6 +5235,15 @@ def get_last_goal_revision() -> dict | None:
     return dict(_LAST_GOAL_REVISION) if _LAST_GOAL_REVISION else None
 
 
+def get_last_premise_escalation() -> dict | None:
+    """[BL-236拡張] 直前のquery_AI呼び出しのツールループ内でescalate_premise_concernが
+    成功した場合、その{escalation_id, caller_role, concern_summary}を返す。
+    generate_user_utterance_node/expert_node/facilitator_nodeが
+    state["paused_for_premise_escalation"]へ反映するために使う。
+    """
+    return dict(_LAST_PREMISE_ESCALATION) if _LAST_PREMISE_ESCALATION else None
+
+
 def get_last_ask_user_question() -> dict | None:
     """[BL-130] 直前のquery_AI呼び出しのツールループ内でask_user_questionが成功した場合、
     その{question_text, blocking_reason}を返す。expert_nodeがstateへ反映するために使う。
@@ -5258,7 +5304,7 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
     [BL-131/TOOL_DISPATCH state化] `state`は_query_AI_liveへそのまま透過する（レコード/リプレイの
     キャッシュキーには影響しない）。
     """
-    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION, _LAST_REPETITION_GUARD_TRIPPED, _LAST_DELIVERABLE_READ_TASK_IDS, _LAST_WHITEBOARD_READS
+    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_PREMISE_ESCALATION, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION, _LAST_REPETITION_GUARD_TRIPPED, _LAST_DELIVERABLE_READ_TASK_IDS, _LAST_WHITEBOARD_READS
     _LAST_PYTHON_CALLS = []
     _LAST_DELIVERABLE_READ_TASK_IDS = []
     _LAST_WHITEBOARD_READS = set()  # [BL-265]
@@ -5269,6 +5315,7 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
     _LAST_WHITEBOARD_EDIT = None
     _LAST_REASONING_TEXT = ""
     _LAST_GOAL_REVISION = None
+    _LAST_PREMISE_ESCALATION = None  # [BL-236拡張]
     _LAST_ASK_USER_QUESTION = None
     _LAST_ESSENCE_PROPOSAL = None
     _LAST_SCHEDULING_DECISION = None  # [BL-191]
@@ -5874,6 +5921,16 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                                             # [BL-186] 過去タスク再検証の強制plan_revision引き継ぎ用。
                                             "plan_revision_reason": result.get("plan_revision_reason") or "",
                                             "plan_revision_issue_ids": result.get("plan_revision_issue_ids") or [],
+                                        }
+                                elif tc.function.name == "escalate_premise_concern":
+                                    # [BL-236拡張] success=Falseの場合は絶対に反映しない
+                                    # （AGENTS.md §13、revise_goalの消費パターンと同じ二重ガード）。
+                                    if isinstance(result, dict) and result.get("success"):
+                                        global _LAST_PREMISE_ESCALATION
+                                        _LAST_PREMISE_ESCALATION = {
+                                            "escalation_id": result.get("escalation_id"),
+                                            "caller_role": _CURRENT_CALLER_ROLE,
+                                            "concern_summary": args.get("concern_summary", ""),
                                         }
                                 elif tc.function.name == "write_issue":
                                     # [BL-158] detector_nodeがUser AIのターンを機械的に差し戻すか
@@ -8949,6 +9006,15 @@ class LineageState(TypedDict):
     # 成功していれば、その内容（get_last_essence_proposal）をノード関数がここへ書き写す
     # （ツールハンドラはstateへ直接触れられないため、他のブリッジ変数と同じパターン）。
     last_essence_proposal: dict | None
+    # [BL-236拡張] escalate_premise_concernが成功した場合、generate_user_utterance_node/
+    # expert_node/facilitator_nodeがここをTrueにする。halt（halt_node）と異なり単発消費
+    # フラグではない——--resumeでHIL回答（_get_goal_escalation_hil_decision）が確認できるまで、
+    # 何度runを再開してもTrueであり続ける「グラフ全体の一時停止」を表す永続フラグ。
+    # リセットはrun_ai_vs_ai_loopのresumeガードが人間の回答済みを確認した直後のみ行う。
+    paused_for_premise_escalation: bool
+    # [BL-236拡張] 上記フラグがTrueの間、どのescalation_id（goal_escalationsテーブル）が
+    # 未決定のままrunをブロックしているかを保持する。空文字列＝未設定。
+    pending_premise_escalation_id: str
 
 class Appconfig(TypedDict):
     pattern: int
@@ -12724,9 +12790,10 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         _stage_goal_revision = None
         _stage_essence_proposal = None
         _stage_scheduling_decision = None  # [BL-191]
+        _stage_premise_escalation = None  # [BL-236拡張]
 
         def _absorb_stage_trackers():
-            nonlocal _stage_wrote_agreement, _stage_wrote_issue_resolution, _stage_reasoning_text, _stage_goal_revision, _stage_essence_proposal, _stage_scheduling_decision
+            nonlocal _stage_wrote_agreement, _stage_wrote_issue_resolution, _stage_reasoning_text, _stage_goal_revision, _stage_essence_proposal, _stage_scheduling_decision, _stage_premise_escalation
             _stage_wrote_agreement = _stage_wrote_agreement or get_last_write_agreement_succeeded()
             _stage_wrote_issue_resolution = _stage_wrote_issue_resolution or get_last_write_issue_resolve_or_defer_succeeded()
             _stage_reasoning_text = get_last_reasoning_text() or _stage_reasoning_text
@@ -12736,6 +12803,10 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             # される_LAST_SCHEDULING_DECISIONを、他の_stage_*トラッカーと同じOR/後勝ちパターンで
             # 集約する。
             _stage_scheduling_decision = get_last_scheduling_decision() or _stage_scheduling_decision
+            # [BL-236拡張] escalate_premise_concernはStage1-4のどの段からも呼べるため、他の
+            # _stage_*トラッカーと同じOR/後勝ちパターンで集約する。これを忘れると、例えば
+            # Stage2で提起された懸念がStage3/4のquery_AI呼び出しでリセットされ静かに消える。
+            _stage_premise_escalation = get_last_premise_escalation() or _stage_premise_escalation
 
         _scope_ctx = _build_task_scope_context(state, _conn)
         current_task_json = _scope_ctx["current_task_json"]
@@ -13088,13 +13159,14 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
 
         # [BL-177 制約2] 集約したトラッカーをグローバルへ書き戻す（generate_user_utterance_nodeの
         # 既存の読み取りコードは無変更で正しく動作する）。
-        global _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION
+        global _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION, _LAST_PREMISE_ESCALATION
         _LAST_WRITE_AGREEMENT_SUCCEEDED = _stage_wrote_agreement
         _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED = _stage_wrote_issue_resolution
         _LAST_REASONING_TEXT = _stage_reasoning_text
         _LAST_GOAL_REVISION = _stage_goal_revision
         _LAST_ESSENCE_PROPOSAL = _stage_essence_proposal
         _LAST_SCHEDULING_DECISION = _stage_scheduling_decision  # [BL-191]
+        _LAST_PREMISE_ESCALATION = _stage_premise_escalation  # [BL-236拡張]
         return content
 
     # [BL-104] プロンプトキャッシュのヒット率向上のため、内容が変わらない固定の指示文を
@@ -13626,6 +13698,14 @@ def _is_detector_redo_required(state: dict) -> bool:
     return state.get("constraint_issue") == "major" or bool(state.get("halt"))
 
 
+def _should_pause_for_human(state: dict) -> bool:
+    """[BL-236拡張] escalate_premise_concernによりグラフ全体の一時停止が要求されているか。
+    [CONSTRAINT] haltより優先度が低い——呼び出し側5箇所すべてが必ずstate["halt"]を先に
+    チェックしてから本関数を呼ぶこと（AGENTS.md §15.1、既存のhalt-first構造に合わせる）。
+    """
+    return bool(state.get("paused_for_premise_escalation"))
+
+
 def generate_user_utterance_node(state: LineageState) -> LineageState:
     """【SLM要約】
     Generates the user's next utterance based on system state, managing conversation history and retries following constraint violations.
@@ -13684,6 +13764,15 @@ def generate_user_utterance_node(state: LineageState) -> LineageState:
             else:
                 print("  ⚠️ [BL-186] plan_revision_reasonが既に別要因でセット済みのため、"
                       "今回は次回reflectionでの再評価に譲ります。")
+    # [BL-236拡張] escalate_premise_concernが今ターン成功していれば、グラフ全体を一時停止する。
+    # revise_goal等の他ブリッジと異なり、このフラグは今ターンで消費・リセットしない
+    # （--resumeでHIL回答が確認できるまでTrueであり続ける永続フラグ、state宣言のコメント参照）。
+    _premise_escalation = get_last_premise_escalation()
+    if _premise_escalation:
+        state["paused_for_premise_escalation"] = True
+        state["pending_premise_escalation_id"] = _premise_escalation["escalation_id"]
+        print(f"⏸️ [BL-236拡張] escalation_id={_premise_escalation['escalation_id']}の提起により、"
+              f"次のルーティングチェックポイントでグラフの実行を一時停止します。")
     # [BL-126 Stage D] 今ターンでwrite_agreement(entry_type="EssenceProposal")が成功していれば
     # stateへ橋渡しする（facilitator_nodeがこのターンでの収束判定に使う。ツールハンドラは
     # stateへ直接触れられないため、他のブリッジ変数と同じパターン）。
@@ -14441,6 +14530,13 @@ Updates system state with the expert's output, decisions, and conversational his
     state["expert_blocking_reason"] = _ask_q["blocking_reason"] if _ask_q else ""
     if _ask_q:
         print(f"  🗨️ [BL-130] Expertがask_user_questionを呼びました。expert_consultation_mode=Trueにします: {_ask_q['question_text']}")
+    # [BL-236拡張] Expertがescalate_premise_concernを呼んだ場合も同様に一時停止する。
+    _premise_escalation = get_last_premise_escalation()
+    if _premise_escalation:
+        state["paused_for_premise_escalation"] = True
+        state["pending_premise_escalation_id"] = _premise_escalation["escalation_id"]
+        print(f"⏸️ [BL-236拡張] escalation_id={_premise_escalation['escalation_id']}の提起により、"
+              f"次のルーティングチェックポイントでグラフの実行を一時停止します。")
     print(f"\n------ 完了 ------")
     # [BL-103] why=生テキスト先頭100文字の機械的truncationは劣化版要約だったため、
     # BL-093で既に必須化されているthinkの最終decided/why（無ければsummary）に置き換える。
@@ -15726,6 +15822,14 @@ def facilitator_node(state: LineageState) -> LineageState:
         state["essence_dialogue_round"] = state.get("essence_dialogue_round", 0) + 1
         print(f"  💬 [Facilitator] Essence Dialogue継続中: round={state['essence_dialogue_round']}")
 
+    # [BL-236拡張] Facilitatorがescalate_premise_concernを呼んだ場合も同様に一時停止する。
+    _premise_escalation = get_last_premise_escalation()
+    if _premise_escalation:
+        state["paused_for_premise_escalation"] = True
+        state["pending_premise_escalation_id"] = _premise_escalation["escalation_id"]
+        print(f"⏸️ [BL-236拡張] escalation_id={_premise_escalation['escalation_id']}の提起により、"
+              f"次のルーティングチェックポイントでグラフの実行を一時停止します。")
+
     if state["chat_history"] and state["chat_history"][-1]["role"] == "assistant":
         state["chat_history"][-1]["content"] += (
             f"\n\n---\n【ファシリテーターからの補足】\n{feedback}"
@@ -15997,6 +16101,29 @@ def halt_node(state: LineageState) -> LineageState:
     return state
 
 
+def pause_for_human_node(state: LineageState) -> LineageState:
+    """[BL-236拡張] escalate_premise_concernの成功を検知した直後、グラフの実行を一時停止する。
+    halt_nodeと同型だが意味は全く異なる——haltは不可逆な終端（risk=high等）、こちらは
+    「人間のHIL回答（--answer-human-input）を待つだけの可逆な一時停止」であり、--resumeで
+    通常フローへ復帰できる。
+    """
+    _escalation_id = state.get("pending_premise_escalation_id", "")
+    _conn = get_active_conn()
+    _escalation = get_goal_escalation(_conn, state["run_id"], _escalation_id) if _escalation_id else None
+    _summary = _escalation["concern_summary"] if _escalation else "(詳細不明)"
+    print(f"\n⏸️⏸️⏸️ [Pause] グラフの実行を一時停止します（turn_count={state.get('turn_count', '?')}）。")
+    print(f"    escalation_id={_escalation_id}: {_summary}")
+    print(f"    人間が --answer-human-input で承認/却下を回答した後、"
+          f"python cela_main.py --resume {state['run_id']} で再開してください。")
+    decision = make_decision(
+        who="system", what="人間のHIL回答待ちのため一時停止",
+        why=f"escalate_premise_concern（escalation_id={_escalation_id}）が未決定のため、"
+            f"グラフ全体の進行を停止します。",
+    )
+    db_append_decision(decision, _conn, state["run_id"])
+    return state
+
+
 # ---------------------------------------------------------------------------
 # 5. 分岐ロジック & グラフ構築
 # ---------------------------------------------------------------------------
@@ -16033,6 +16160,7 @@ def build_graph(checkpointer: BaseCheckpointSaver | None = None):
     graph.add_node("arbiter", arbiter_node)
     graph.add_node("reviewer", reviewer_node)
     graph.add_node("halt", halt_node)
+    graph.add_node("pause_for_human", pause_for_human_node)
 
     # ---------------------------------------------------------
     # エッジの接続とルーティング
@@ -16111,6 +16239,10 @@ Otherwise, routing to "user_decision_extractor."
             print("\n[route_after_user_decision]------ !!! Halt !!! ------\n")
             return "halt"
 
+        if _should_pause_for_human(state):
+            print("\n[route_after_user_decision]------ !!! BL-236拡張: 前提エスカレーションによる一時停止 !!! ------\n")
+            return "pause_for_human"
+
         # [BL-266] 本質充足性の懸念は、通常の差し戻しループとは独立した、reflectionへの
         # 即時escalation。user_decision_extractorを経由済みのため、この発言から抽出すべき
         # 決定・合意事項は既に処理済みであることが保証されている（detector直後のroute_after_
@@ -16156,6 +16288,7 @@ Otherwise, routing to "user_decision_extractor."
         route_after_user_decision,
         {
             "halt": "halt",
+            "pause_for_human": "pause_for_human",  # [BL-236拡張]
             "integrator": "integrator",
             "orchestrator": "orchestrator",
             "generate_user_utterance": "generate_user_utterance",
@@ -16219,6 +16352,10 @@ Otherwise, routing to "user_decision_extractor."
             print("\n[route_after_expert_decision]------ !!! Halt !!! ------\n")
             return "halt"
 
+        if _should_pause_for_human(state):
+            print("\n[route_after_expert_decision]------ !!! BL-236拡張: 前提エスカレーションによる一時停止 !!! ------\n")
+            return "pause_for_human"
+
         # [BL-266] 本質充足性の懸念による即時escalation（周期reflection判定より優先）。
         # expert_decision_extractorを経由済みのため、決定・合意事項の抽出は処理済み。
         if state.get("essence_sufficiency_concern_pending"):
@@ -16241,7 +16378,7 @@ Otherwise, routing to "user_decision_extractor."
 
     graph.add_conditional_edges(
         "expert_decision_extractor", route_after_expert_decision,
-        {"halt": "halt", "reflection": "reflection", "generate_user_utterance": "generate_user_utterance"}
+        {"halt": "halt", "pause_for_human": "pause_for_human", "reflection": "reflection", "generate_user_utterance": "generate_user_utterance"}
     )
 
 
@@ -16249,10 +16386,14 @@ Otherwise, routing to "user_decision_extractor."
         """【SLM要約】
         Determining the next state transition after a "reflection" step based on current system status flags and discussion outcomes.
         """
-        if state["halt"]: 
+        if state["halt"]:
             print("\n[route_after_reflection]------ !!! Halt !!! ------\n")
             return "halt"
-        
+
+        if _should_pause_for_human(state):
+            print("\n[route_after_reflection]------ !!! BL-236拡張: 前提エスカレーションによる一時停止 !!! ------\n")
+            return "pause_for_human"
+
         # 完了宣言が出た場合は、すぐにIntegratorへ
         if state.get("ready_for_review"):
             print("\n[route_after_reflection]------ integratorに渡します(ready_for_review) ------\n")
@@ -16270,7 +16411,7 @@ Otherwise, routing to "user_decision_extractor."
     graph.add_conditional_edges(
         "reflection",
         route_after_reflection,
-        {"halt": "halt", "integrator": "integrator", "facilitator": "facilitator", "end_turn": END}
+        {"halt": "halt", "pause_for_human": "pause_for_human", "integrator": "integrator", "facilitator": "facilitator", "end_turn": END}
     )
 
     def route_after_integrator(state: LineageState):
@@ -16307,38 +16448,45 @@ Otherwise, routing to "user_decision_extractor."
         """【SLM要約】
         Decision point following the 'facilitator' state, determining flow to either 'halt' or proceeding to the next turn ('end_turn').
         """
-        if state["halt"]: 
+        if state["halt"]:
             print("\n[route_after_facilitator]------ !!! Halt !!! ------\n")
             return "halt"
+        if _should_pause_for_human(state):
+            print("\n[route_after_facilitator]------ !!! BL-236拡張: 前提エスカレーションによる一時停止 !!! ------\n")
+            return "pause_for_human"
         print("\n[route_after_facilitator]------ 次ターンの開始 ------\n")
         return "end_turn"
-        
+
     graph.add_conditional_edges(
         "facilitator",
         route_after_facilitator,
-        {"halt": "halt", "end_turn": END}
+        {"halt": "halt", "pause_for_human": "pause_for_human", "end_turn": END}
     )
 
     def route_after_reviewer(state: LineageState):
         """【SLM要約】
         Determining the next state transition after a review step, directing flow to halt, end, or continue orchestration.
         """
-        if state["halt"]: 
+        if state["halt"]:
             print("\n[route_after_reviewer]------ !!! Halt !!! ------\n")
             return "halt"
-        if state.get("is_completed"): 
+        if _should_pause_for_human(state):
+            print("\n[route_after_reviewer]------ !!! BL-236拡張: 前提エスカレーションによる一時停止 !!! ------\n")
+            return "pause_for_human"
+        if state.get("is_completed"):
             print("\n[route_after_reviewer]------ レビュー完了(is_completed) ------\n")
             return "end"
         print("\n[route_after_reviewer]------ 次のターンへ進む ------\n")
         return "orchestrator"
-        
+
     graph.add_conditional_edges(
         "reviewer",
         route_after_reviewer,
-        {"halt": "halt", "end": END, "orchestrator": "orchestrator"}
+        {"halt": "halt", "pause_for_human": "pause_for_human", "end": END, "orchestrator": "orchestrator"}
     )
     
     graph.add_edge("halt", END)
+    graph.add_edge("pause_for_human", END)
     return graph.compile(checkpointer=checkpointer)
 
 # ---------------------------------------------------------------------------
@@ -16536,12 +16684,40 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
                 "essence_dialogue_max_rounds": 5,
                 "essence_dialogue_topic": "",
                 "last_essence_proposal": None,
+                "paused_for_premise_escalation": False,
+                "pending_premise_escalation_id": "",
             }
 
         global _CURRENT_RUN_ID
         _CURRENT_RUN_ID = run_id
         _DB_CONN = get_db_connection(db_path)
         init_db(_DB_CONN)
+
+        # [BL-236拡張] haltと異なり、paused_for_premise_escalationは可逆な一時停止。
+        # HIL回答（_get_goal_escalation_hil_decision）が確認できて初めて再開を許可する。
+        # pause_for_human_nodeはhalt_nodeと同じくadd_edge(..., END)で無条件にENDへ向かうため、
+        # このフラグがTrueのcheckpointは必ずラウンド境界（snapshot.next空）で停止していた
+        # 状態であり、BL-203の教訓（pending_resume_drain経路でローカルstateが伝播しない問題）
+        # はここには当てはまらない。ローカルstateの単純な書き換えだけで安全にresumeできる。
+        if resume_run_id and state.get("paused_for_premise_escalation"):
+            _pending_escalation_id = state.get("pending_premise_escalation_id", "")
+            _hil_decision = (
+                _get_goal_escalation_hil_decision(_DB_CONN, run_id, _pending_escalation_id)
+                if _pending_escalation_id else ""
+            )
+            if not _hil_decision:
+                print(f"\n⏸️ [Resume/PAUSE] escalation_id={_pending_escalation_id}は"
+                      f"まだ人間の回答待ちです。")
+                print(f"    先に python cela_main.py --answer-human-input {run_id} "
+                      f"--topic <topic> --value approved|rejected で回答してください。")
+                print("============================================================")
+                print("🏁 評価ループが終了しました。（再開時点で未回答のため一時停止を継続）")
+                print("============================================================")
+                return  # [BL-236拡張] _DB_CONNのクローズは末尾のfinally節が保証する
+            print(f"✅ [Resume/PAUSE] escalation_id={_pending_escalation_id}への人間の回答"
+                  f"（{_hil_decision}）を確認しました。一時停止を解除して再開します。")
+            state["paused_for_premise_escalation"] = False
+            state["pending_premise_escalation_id"] = ""
 
         mode_str = "【ステートレス（決定事項DBによる知識永続化）】" if config["is_stateless_mode"] else "【ステートフル（生ログ全蓄積）】"
 
@@ -16641,6 +16817,13 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
 
             if state["halt"]:
                 print(f"\n🚨 [HALT] システム停止シグナルが送信されました。 (ステータス: {state['discussion_status']})")
+                break
+
+            if state.get("paused_for_premise_escalation"):
+                print(f"\n⏸️ [PAUSE] 前提エスカレーション（escalation_id="
+                      f"{state.get('pending_premise_escalation_id')}）により一時停止しました。")
+                print(f"    人間が --answer-human-input で回答した後、"
+                      f"python cela_main.py --resume {run_id} で再開してください。")
                 break
 
             current_turn += 1

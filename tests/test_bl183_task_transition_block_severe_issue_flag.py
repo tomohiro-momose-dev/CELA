@@ -59,7 +59,12 @@ def _extract_route_after_user_decision():
     # インデントを除去してモジュールトップレベル関数として実行する
     lines = func_src.splitlines()
     dedented = "\n".join(line[4:] if line.startswith("    ") else line for line in lines)
-    namespace: dict = {"LineageState": cela_main.LineageState}
+    # [BL-236拡張] route_after_user_decisionはモジュールレベル関数_should_pause_for_humanも
+    # 参照するようになったため、孤立実行用の名前空間へも注入する（LineageStateと同じ理由）。
+    namespace: dict = {
+        "LineageState": cela_main.LineageState,
+        "_should_pause_for_human": cela_main._should_pause_for_human,
+    }
     exec(compile(dedented, "<route_after_user_decision>", "exec"), namespace)
     return namespace["route_after_user_decision"]
 
