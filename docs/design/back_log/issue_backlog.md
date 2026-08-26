@@ -298,6 +298,11 @@
 | BL-269 | 低 | `tests/test_r3_smoke.py`（フルスイート実行時のみのグローバルstate汚染） | **`open`（原因未特定）。** フルオフラインスイート実行時のみ4件が失敗、単体実行では全件成功。BL-266の変更とは無関係と切り分け済み（stashして再現）。汚染源のテストファイルは未特定。 | P3 |
 | BL-270 | 中 | `web_tools.py`（`BraveSearchProvider`、`web_search_handler`） | **`done`。** Brave Search APIの402（利用上限到達）を専用検知し、run内では回復しない失敗として以後の呼び出しを短絡・明示的なメッセージへ変換。実ドライラン（2026-08-25 23:29）での障害報告を受け対応。 | P2 |
 | BL-271 | 低 | `web_tools.py`（`ExaSearchProvider`、`get_search_provider`） | **`done`。** Exa Search APIを`CELA_WEB_SEARCH_PROVIDER=exa`で手動選択可能なProviderとして追加。raw httpx実装（SDK不使用）、401/429をBL-270と同型のWebSearchConfigErrorへ変換。 | P3 |
+| BL-272 | 高 | `cela_main.py`（`_write_issue_impl`のRESOLVE/DEFER分岐、`_is_human_only_issue`） | **`done`。** write_issue(RESOLVE/DEFER)が人間専用issue（human_research_prompt付き）を自己解決・自己先送りできてしまう欠陥を修正。実ドライランでBL-236 HILゲートが偽装解決されていたことを受け対応。 | P1 |
+| BL-273 | 高 | `cela_main.py`（`pause_for_human_node`、5ルーティング関数、`run_ai_vs_ai_loop`のresumeガード） | **`done`。** escalate_premise_concern成功時にグラフ実行を一時停止し、`--answer-human-input`回答後に`--resume`で再開できるようにした。ゴール文内部矛盾のエスカレーション後もrunが進み続けていた実害を受け対応。 | P1 |
+| BL-274 | 低 | （設計未着手） | `open`。HILを対話型（人間の質問→AI回答→承認/却下）にする大きめの新機能。 | P3 |
+| BL-275 | 低 | （設計未着手） | `open`。Ctrl+C的な人間の随時介入を次のUser AIプロンプトへ反映する機能。 | P3 |
+| BL-276 | 低 | （設計未着手） | `open`。ログへのタイムスタンプ付与による実行時間追跡。 | P3 |
 
 ---
 
@@ -9036,6 +9041,104 @@ BL-266実装完了後、AGENTS.md §17.3の節目でのフルオフラインス�
 - `tests/test_bl184_web_tools.py`に新規7件（Provider選択、APIキー未設定、フィールドマッピング・highlights結合、results空時、401/429のWebSearchConfigError変換、他HTTPエラーとの区別）。§17.1リバート確認済み（401/429検知コードの削除で該当2件が失敗することを確認）。
 - 全88件、および`-k "web_search or web_tools or bl184 or bl270"`関連93件で非退行を確認。
 - 新規pip依存は追加していない（raw httpx実装のため`exa-py`のインストール不要）。
+
+---
+
+### BL-272: write_issue(RESOLVE/DEFER)が人間専用issue（human_research_prompt付き）をAIロールが自己解決・自己先送りできてしまう欠陥
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-217（human_research_prompt機構の原設計）、BL-236（escalate_premise_concernのHILゲート、本欠陥の実害箇所）、BL-096（issue_log機構）、AGENTS.md §13.4/§13.5、BL-273（同じ調査から派生した一時停止機能） |
+
+**内容:**
+
+ユーザーが別チャットでの調査により、実ドライラン（`log/2026-08-14/1825`、`log/2026-08-26/0031`）のDBを直接確認し発見した：BL-236のHILゲートissue（`topic=goal_escalation_hil_ESC-...`）が`issue_log`上は`status='resolved'`（`resolved_by='user'`）になっていたが、これはUser AIが`write_issue(action_type="RESOLVE")`で自己解決したものであり、`--answer-human-input`経由の`resolved_by='human_operator'`ではなかった。実際には`goal_escalations`テーブルの該当行は今も`status='Open'`、`verified_facts`にも承認値は一度も書き込まれておらず、その後の`revise_goal`呼び出しは3回とも「HIL未承認」で拒否され続けていた。にもかかわらず`--pending-human-input`は「実地調査待ちのissueはありません」と表示し、運用者はこのエスカレーションが未決着であることに気づけなかった。
+
+コードで再現性を確認した：`_write_issue_impl`のRESOLVE分岐は`resolution_note`の存在と`existing`（`SELECT *`で取得済み、`human_research_prompt`列を含む）の存在しかチェックしておらず、`existing["human_research_prompt"]`が非空（＝人間しか解決してはいけない行）かどうかを一切見ていなかった。DEFER分岐も同型の欠落があり（AGENTS.md §13.5「クラスとして直す」）、DEFERも人間専用issueをすり抜けてBL-096/144停滞判定・BL-125遷移ゲートから見えなくできてしまう状態だった。
+
+**対応（実装済み）:**
+
+モジュールレベル共有ヘルパー`_is_human_only_issue(row)`を新設し、RESOLVE・DEFER両分岐（ACKNOWLEDGEはstatus/defer_to_task_idを変更しないため対象外）で`human_research_prompt`非空の行を拒否するガードを追加した。`_answer_human_input`（CLI経由、`--answer-human-input`）は`_write_issue_impl`を一切経由しない独立実装のため無影響。
+
+**完了条件（達成済み）:**
+
+- 新規`tests/test_bl236_human_only_issue_guard.py`（10件）：単体（`_is_human_only_issue`）、RESOLVE/DEFERの拒否・対照（通常issueは従来通り成功）、`_answer_human_input`の非退行、実ドライラン事故シナリオの再現（escalate_premise_concern→自己RESOLVE拒否→revise_goal引き続き拒否）をend-to-endで検証。§17.1リバート確認済み（RESOLVE/DEFER各ガード削除で該当テストが失敗）。
+- 既存`test_bl096_issue_log.py`/`test_bl136_*`/`test_bl194_*`/`test_bl217_*`含め147件で非退行を確認。
+
+---
+
+### BL-273: escalate_premise_concern成功時にグラフ実行を一時停止し、人間の回答（--answer-human-input）を待ってから--resumeで再開できるようにする
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-236（escalate_premise_concernの原設計、本BLが拡張する対象）、BL-086（`_LAST_GOAL_REVISION`ブリッジパターンの原設計）、BL-203（resumeガードの`app.update_state()`却下の経緯、本BLが依拠する前提）、BL-262（ルーティング関数のソース検査パターン）、BL-266（層1-4の全消費経路確認の教訓の再適用）、BL-272（同じ調査から派生した人間専用issueガード修正） |
+
+**内容:**
+
+`escalate_premise_concern`（BL-236）は成功時にHILゲートをissue_logへ起票し`revise_goal`の実適用のみをブロックするが、グラフの実行自体は止まらなかった。実ドライラン（`log/2026-08-26/0031/`）で、「12時間運行（7:30〜19:30）」制約と「年間市補填額4,000万円以内」制約が現実的なあらゆる運行体制でも同時に成立しないというゴール文内部矛盾をUser AIが検知し提起したが、グラフは止まらず、その後もタスクが多数完了し統合フェーズ（phase_5）の成果物まで作られてしまった。ユーザーがレビューでこれを発見し、「重大な未決定事項がある間はrun自体を一時停止すべき」と判断した。
+
+Explore調査で`state["halt"]`の流用は不採用と判断した：`graph.add_edge("halt", END)`が条件分岐無しの固定エッジであり、`run_ai_vs_ai_loop`のresumeガードが「halt済みチェックポイントは再開せず即終了する」という不可逆前提で書かれているため（BL-203の`app.update_state()`却下の経緯とも整合させる必要があった）。
+
+**対応（実装済み）:**
+
+1. 新規state永続フラグ`paused_for_premise_escalation`（bool）・`pending_premise_escalation_id`（str）を`LineageState`へ追加（単発消費フラグではなく、resumeでHIL回答が確認できるまで真であり続ける）。
+2. `_LAST_GOAL_REVISION`と同型のブリッジ`_LAST_PREMISE_ESCALATION`を新設。`generate_user_utterance`のBL-177 4段階パイプラインには`_stage_premise_escalation`によるステージ横断集約を追加（**これを怠るとStage2の懸念がStage3/4のquery_AI呼び出しでリセットされ静かに消える**、BL-266で経験した全消費経路確認漏れと同じ事故クラス）。
+3. 消費箇所は`generate_user_utterance_node`・`expert_node`・`facilitator_node`の3箇所（`escalate_premise_concern`はexpert/user/facilitatorの3ロールから呼べるため、`revise_goal`のuser限定1箇所とは非対称）。
+4. 新規ノード`pause_for_human_node`（`halt_node`と同型、`add_edge(..., END)`で無条件終端だが意味は「可逆な一時停止」）を追加。
+5. 共有述語`_should_pause_for_human`を新設し、5つのルーティング関数（`route_after_user_decision`/`route_after_expert_decision`/`route_after_reflection`/`route_after_facilitator`/`route_after_reviewer`）それぞれで、既存のhalt判定の直後・他の判定より前に追加（優先順位: halt > pause）。
+6. `run_ai_vs_ai_loop`のresumeガードで、HIL回答（`_get_goal_escalation_hil_decision`）が確認できるまで再開を拒否し、確認できたらフラグをリセットして通常resumeへ合流する。`pause_for_human_node`が常にラウンド境界（`snapshot.next`空）で停止するため、BL-203の「`pending_resume_drain`経路でローカルstateが伝播しない」問題には該当しない。
+
+**完了条件（達成済み）:**
+
+- 新規`tests/test_bl236_premise_escalation_pause.py`（23件）：`_should_pause_for_human`単体、3ノードのブリッジ配線・実挙動、BL-177ステージ集約、5ルーティング関数のhalt優先順位・宛先マップ、`pause_for_human`ノード登録、resumeガード（未回答拒否・回答済み再開・halt優先）、通常ループのbreak判定。§17.1リバート確認済み（resumeガード削除・1ルーティング関数のpause判定削除でそれぞれ該当テストが失敗）。
+- 既存の孤立exec型ソース検査テスト（`test_bl183_task_transition_block_severe_issue_flag.py`）が`_should_pause_for_human`の名前解決に失敗する退行を検出・修正（実行用名前空間への注入）。
+- フルオフラインスイート1611 passed / 4 failed（BL-269の既存state汚染、本BLと無関係）/ 5 deselected。
+
+---
+
+### BL-274: HILを対話型にする（人間の質問・相談→AIがDB情報に基づき回答→人間が承認/却下）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（未着手、設計もこれから） |
+| 優先度 | P3 |
+| 関連 | BL-236/BL-273（現行の一方向HILゲート、本BLが拡張する対象） |
+
+**内容:**
+
+現状のHILは「AIが懸念を提起→人間が承認/却下のみ回答」という一方向。ユーザーは「人間が現在の進行に基づき質問・相談し、AIがDBに保存された情報（意思決定・値・ログなど）に基づいて回答し、その後に人間が申請事項を承認/却下する」という対話型のやり取りを希望している。CLIの対話ループ・DB情報に基づく回答生成の仕組みなど新規要素が多く、大きめの設計が必要なため、BL-273とは別に本BLとして起票のみ行う（実装未着手）。
+
+---
+
+### BL-275: 人間がCtrl+Cのようにいつでも介入でき、その指示を次のUser AIプロンプトへ反映する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（未着手、設計もこれから） |
+| 優先度 | P3 |
+| 関連 | BL-273（一時停止機構、割り込みのトリガーとして関連しうる） |
+
+**内容:**
+
+ユーザーが希望：run実行中、Ctrl+Cのように人間がいつでも介入し、人間の指示（質問・修正指示等）を次のUser AIのプロンプトへ注入できるようにしたい。設計未着手。
+
+---
+
+### BL-276: ログにタイムスタンプを付与し実行時間を追えるようにする
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（未着手、設計もこれから） |
+| 優先度 | P3 |
+| 関連 | なし |
+
+**内容:**
+
+ユーザーが希望：現在のログ出力（`log_no_prompt.md`/`log_with_prompt.md`）には各行の実行時刻が記録されておらず、どのステップにどれだけ時間がかかったかを事後的に追跡できない。各ログ行（またはノード単位）にタイムスタンプを付与する機能。設計未着手。
 
 ---
 
