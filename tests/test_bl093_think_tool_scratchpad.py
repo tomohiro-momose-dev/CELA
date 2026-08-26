@@ -253,15 +253,17 @@ def test_bl126_stage_d_call_facilitator_is_tool_loop_capable():
 def test_bl148_call_orchestrator_is_tool_loop_capable():
     """[BL-148] call_orchestratorはcurrent_task_id/計画/成果物を能動的に確認できるよう、
     読み取り専用ツール（read_project_plan/read_deliverable_file/read_verified_fact/think）を
-    持つツールループパスへ変更された（BL-109からの意図的な差し戻し）。専門家選定メタデータの
-    生成以外の役割は持たず状態も変更しないため、write_agreement等の書き込み系ツールは
-    意図的に持たないことをレグレッションガードとして固定する。"""
+    持つツールループパスへ変更された（BL-109からの意図的な差し戻し）。
+    [BL-280] 専門家選定自体が複数候補からの分岐点であるため、意思決定系譜の記録用に
+    write_agreementを追加した（BL-148当時の「書き込み系ツールは一切持たない」という設計を
+    上書きする意図的な変更）。escalate_premise_concern等それ以外の書き込み系ツールは
+    引き続き持たないことをレグレッションガードとして固定する。"""
     src = inspect.getsource(cela_main.call_orchestrator)
     assert "THINK_TOOL" in src
     assert "READ_PROJECT_PLAN_TOOL" in src
     assert "READ_DELIVERABLE_FILE_TOOL" in src
     assert "READ_VERIFIED_FACT_TOOL" in src
-    assert "WRITE_AGREEMENT_TOOL" not in src
+    assert "WRITE_AGREEMENT_TOOL" in src
     assert "ESCALATE_PREMISE_CONCERN_TOOL" not in src
 
 

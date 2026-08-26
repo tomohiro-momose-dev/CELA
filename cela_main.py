@@ -355,13 +355,13 @@ STRUCTURED_OUTPUT_LABEL_KEYWORDS = ("detector", "decision extractor", "reflectio
 
 
 MAX_TOKENS_BY_ROLE = {
-    "expert": 64000,
-    "user": 64000,
-    "detector": 64000,
-    "reflection": 64000,
-    "review": 64000,
-    "decision extractor": 64000,
-    "orchestrator": 64000,
+    "expert": 48000,
+    "user": 48000,
+    "detector": 48000,
+    "reflection": 48000,
+    "review": 48000,
+    "decision extractor": 48000,
+    "orchestrator": 48000,
 }
 
 def get_max_tokens(label: str) -> int:
@@ -1120,7 +1120,15 @@ WRITE_ENTITY_ATTRIBUTE_TOOL = {
                 "value": {"type": "string", "description": "The value."},
                 "unit": {"type": "string", "description": "Unit if applicable, e.g. 'm', '人'."},
                 "confidence": {"type": "string", "enum": ["confirmed", "provisional"], "default": "provisional"},
-                "reason": {"type": "string", "description": "How you obtained or derived this value."},
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "How you obtained or derived this value -- required, non-empty. [BL-277] If you "
+                        "chose this value among multiple candidates, state which ones you did NOT adopt "
+                        "and why -- e.g. 'because of <some reason>, dropped candidate X and adopted Y "
+                        "instead'."
+                    ),
+                },
                 "citations": {
                     "type": "array",
                     "description": "Sources. REQUIRED when confidence='confirmed'.",
@@ -1133,7 +1141,7 @@ WRITE_ENTITY_ATTRIBUTE_TOOL = {
                     },
                 },
             },
-            "required": ["entity", "attr_name", "value"],
+            "required": ["entity", "attr_name", "value", "reason"],
         },
     },
 }
@@ -1939,6 +1947,13 @@ def _write_entity_attribute_handler(args: dict, state: dict | None = None) -> di
                 "message": f"confidenceは{list(_ENTITY_CONFIDENCE_VALUES)}のいずれかです。"
                            f"工学的仮定・導出値であることは、confidenceではなく"
                            f"citationsのtype=\"expert_calculation\"で表してください。"}
+    # [BL-277] reasonを無条件で非空必須化する。「意味的に空が妥当なケース」を空文字列だけから
+    # 機械判定する方法がないため例外は設けない（値の取得方法は常に何かしら記述可能）。
+    reason = (args.get("reason") or "").strip()
+    if not reason:
+        return {"status": "error",
+                "message": "reason（値の取得方法。複数候補があった場合はその選定理由）は必須です。"
+                           "空文字列は不可です。"}
     citations = args.get("citations") or []
     # [BL-204] confirmedを名乗るなら出典が要る（BL-041「暫定値を確定扱いにしない」の延長）。
     if confidence == "confirmed" and not citations:
@@ -1948,7 +1963,7 @@ def _write_entity_attribute_handler(args: dict, state: dict | None = None) -> di
 
     is_new_attr = upsert_entity_attribute(
         conn, run_id, ent["entity_id"], attr_name, args.get("value"),
-        args.get("unit", "") or "", confidence, citations, args.get("reason", "") or "",
+        args.get("unit", "") or "", confidence, citations, reason,
         _task_id_from(state), _phase_id_from(state), _CURRENT_CALLER_ROLE,
     )
     result = {"status": "ok", "entity_id": ent["entity_id"],
@@ -2367,11 +2382,19 @@ WRITE_AGREEMENT_TOOL = {
             "primary page before citing it as settled. "
             "Expert can only use status='Proposed'. "
             "User AI can use all statuses. "
-            "Detector/Reviewer/Arbiter/Integrator can only use status='Rejected'. "
+            "[BL-280] Detector/Reviewer/Arbiter/Integrator/task_plan_reviewer/Reflection can use "
+            "status='Rejected' (to override/negate a prior record) or status='Reviewed' (to record "
+            "an affirmative finding -- 'I audited this and found no issue, for these reasons' -- "
+            "without claiming approval authority; final approval remains User AI's role alone). "
             "[BL-095] task_planner/goal_essence_analyst can only use status='Proposed' (to record "
             "their own planning/essence-analysis rationale as entry_type='Decision', queryable later "
-            "via read_verified_fact/read_deliverable_file). task_plan_reviewer can only use "
-            "status='Rejected' (same audit role as Detector/Reviewer). "
+            "via read_verified_fact/read_deliverable_file). "
+            "[BL-280] Orchestrator can only use status='Proposed' (to record its own routing/"
+            "selection rationale as entry_type='Decision'). "
+            "[BL-277/BL-280] Whenever your reasoning branches -- you choose among multiple "
+            "candidates, reject an alternative, or accept/reject a premise -- recording it here is "
+            "mandatory, not optional: an unrecorded branch point cannot be traced later by you or "
+            "anyone else. "
             "[BL-110] Optionally call `think` (with a `summary`) alongside this or any other tool call "
             "to record your reasoning -- it is no longer required, and other tool calls are no "
             "longer rejected for omitting it."
@@ -2385,7 +2408,7 @@ WRITE_AGREEMENT_TOOL = {
                 },
                 "status": {
                     "type": "string",
-                    "enum": ["Proposed", "Approved", "Approved_with_Conditions", "Rejected", "Implicitly_Accepted"]
+                    "enum": ["Proposed", "Approved", "Approved_with_Conditions", "Rejected", "Implicitly_Accepted", "Reviewed"]
                 },
                 "topic": {"type": "string", "description": "Brief heading"},
                 "decision_what": {
@@ -2400,7 +2423,11 @@ WRITE_AGREEMENT_TOOL = {
                     "description": (
                         "Why adopted or rejected. [BL-050] For UPDATE/SUPERSEDE: must explicitly state what "
                         "changed from the previous value and why (not just why the new value itself is valid) "
-                        "-- e.g. '3->2 because task_4_1 found budget insufficient for 3', not just '2 is enough'."
+                        "-- e.g. '3->2 because task_4_1 found budget insufficient for 3', not just '2 is enough'. "
+                        "[BL-277] If you chose among multiple candidates -- whether found via search or "
+                        "considered internally -- name the ones you did NOT adopt and why -- e.g. 'because of "
+                        "<some reason>, dropped candidate X and adopted Y instead'. If the choice resolves one "
+                        "constraint at the cost of another, state that trade-off explicitly."
                     )
                 },
                 "evidence": {"type": "string", "description": "Objective evidence (F-2.6: include Python REPL results for numeric claims)"},
@@ -2426,7 +2453,19 @@ WRITE_AGREEMENT_TOOL = {
                 },
                 "entry_type": {
                     "type": "string",
-                    "enum": ["Decision", "Directive", "Deliverable"]
+                    "enum": ["Decision", "Directive", "Deliverable"],
+                    "description": (
+                        "[BL-280] Deliverable: the task's actual output content (goes into the whiteboard "
+                        "file's body). Directive: an instruction from User AI to Expert. Decision: a judgment "
+                        "call, a choice among options, or a rejected alternative that does not itself belong "
+                        "in a deliverable's body -- e.g. 'because of <some reason>, dropped candidate X and "
+                        "adopted Y instead'. [BL-277] Whenever your reasoning branches -- you choose among "
+                        "multiple candidates, reject an alternative, or accept/reject a premise -- record it "
+                        "via entry_type='Decision'. This is mandatory: an unrecorded branch point cannot be "
+                        "traced later. Note reason_why for Deliverable entries is NOT written into the "
+                        "whiteboard body (only decision_what/edits are) -- if your reasoning needs to survive "
+                        "independently, use entry_type='Decision'."
+                    )
                 },
                 "phase_id": {"type": "string"},
                 "task_id": {"type": "string"},
@@ -3257,17 +3296,26 @@ def _check_write_permission(args: dict, caller_role: str, conn: sqlite3.Connecti
     ALLOWED_STATUS_BY_ROLE = {
         "expert": {"Proposed"},
         "user": {"Proposed", "Approved", "Approved_with_Conditions", "Rejected", "Implicitly_Accepted"},
-        "detector": {"Rejected"},
-        "reviewer": {"Rejected"},
-        "arbiter": {"Rejected"},
-        "integrator": {"Rejected"},
+        # [BL-280] "Reviewed"は「監査し、問題なしと判断した」という肯定的所見を表す新status。
+        # Approved系（承認）を名乗らせない既存方針（発注者たるUser AI専用）は維持したまま、
+        # 監査系ロールが自らの肯定的判断も分岐点として記録できるようにする。
+        "detector": {"Rejected", "Reviewed"},
+        "reviewer": {"Rejected", "Reviewed"},
+        "arbiter": {"Rejected", "Reviewed"},
+        "integrator": {"Rejected", "Reviewed"},
         "task_planner": {"Proposed"},
         "goal_essence_analyst": {"Proposed"},
-        "task_plan_reviewer": {"Rejected"},
+        "task_plan_reviewer": {"Rejected", "Reviewed"},
         # [BL-126 Stage D] Facilitatorは本質対話の開始提起（entry_type="EssenceProposal"）を
         # Proposedとしてのみ記録できる（task_planner/goal_essence_analystと同型：最終承認は
         # 発注者であるUser AIの役目であり、Facilitator自身がApprovedを名乗ることはない）。
         "facilitator": {"Proposed"},
+        # [BL-280] reflectionはdetector等と同じ監査ロール。従来はWRITE_AGREEMENT_TOOL自体を
+        # 持たずこの表にキーも無かった（呼んでも常に拒否される状態）。
+        "reflection": {"Rejected", "Reviewed"},
+        # [BL-280] orchestratorは従来WRITE_AGREEMENT_TOOLを意図的に持たなかった（BL-148）。
+        # task_planner/goal_essence_analystと同型で、自らの選定理由をProposedとして記録する。
+        "orchestrator": {"Proposed"},
     }
     status = args.get("status")
     allowed = ALLOWED_STATUS_BY_ROLE.get(caller_role, set())
@@ -3709,7 +3757,7 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
 
     # 2. enum値チェック
     valid_actions = {"CREATE", "UPDATE", "SUPERSEDE"}
-    valid_statuses = {"Proposed", "Approved", "Approved_with_Conditions", "Rejected", "Implicitly_Accepted"}
+    valid_statuses = {"Proposed", "Approved", "Approved_with_Conditions", "Rejected", "Implicitly_Accepted", "Reviewed"}
     # [BL-126 Stage D/§2.1] "EssenceProposal"はFacilitatorが本質対話の開始/収束確定を提起する
     # ための専用entry_type。新規ツールは起こさず、既存のagreementsテーブル・権限チェックの
     # 枠組みをそのまま再利用する（topic/reason_why/evidenceが「何を・なぜ本質から問い直すか」に
@@ -9489,6 +9537,27 @@ def _build_detector_observations_block(state: LineageState, limit: int = 3) -> s
     )
 
 
+def _build_decision_lineage_directive(status_hint: str) -> str:
+    """[BL-280/BL-277] 意思決定系譜(Decision Lineage)の記録を全ロール共通で必須化する指示文。
+    単一箇所を全ノードが呼ぶことで、文言のドリフト（AGENTS.md §15.1）を防ぐ。
+    [CONSTRAINT] 「望ましい」ではなく「必ず記録する」という必須の要求として書くこと——
+    BL-280の調査で「原則を書くだけでは実行されない、具体的な行為要求にして初めて機能する」
+    （BL-095との対比）ことが確認済みのため、努力目標の言い回しへ弱めない。
+    """
+    return (
+        "\n📌 【BL-280/BL-277: 意思決定の記録は必須です】\n"
+        "あなたの発言・判断によって以降の動作が分岐する場合（複数の選択肢/候補/方針の中から"
+        "一つを選ぶ、ある案を却下する、ある前提を採用または棄却する等）、その分岐点と理由を"
+        f"write_agreement(entry_type=\"Decision\", status={status_hint}, action_type=\"CREATE\")"
+        "で必ず記録してください。これは推奨ではなく必須の行為です——記録しなければ、なぜその"
+        "分岐が起きたかは誰にも（あなた自身にも後で）分かりません。意思決定の保存はCELAに"
+        "とって最も重要な資産です。\n"
+        "reason_whyには、選ばなかった選択肢・却下した候補とその理由、他の制約とのトレード"
+        "オフがあればそれも明記してください（例：「○○という理由で、Xの採用をやめ、代わりに"
+        "Yへ切り替えた」のように、却下した対象と理由の両方を書く）。\n"
+    )
+
+
 def _build_task_scope_context(state: LineageState, conn: sqlite3.Connection) -> dict:
     """[CONSTRAINT] BL-023/BL-025: 現在タスクのスコープ情報（acceptance_criteria・依存タスクの確定値・
     未充足項目）を`generate_user_utterance`と`call_expert`の両方で共有するためのヘルパー。
@@ -10128,6 +10197,10 @@ It serves as the initial planning layer for breaking down complex objectives acr
     [BL-266] 上記【🎯 本質】が提示されている場合、指示16の網羅性チェックを行ってから
     以下のJSON配列を出力してください。
 
+    {_build_decision_lineage_directive('"Proposed"')}
+    （指示10のwrite_agreement呼び出しは、この一般原則のうち「フェーズ・タスク分割の判断根拠」
+    という特定の場面を必ず満たすための、既に確定した具体的な手順です。両者は矛盾しません。）
+
     Return ONLY JSON array (必ず複数のフェーズとタスクに分割すること):
     [
         {{
@@ -10300,8 +10373,10 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
         【重要】上記の対話文脈がどのタスクについて話しているように読めても、専門家選定・focus_guidanceは
         必ず【現在のタスク】欄のcurrent_task_idを基準にしてください。\n
         【重要】あなたが使えるツールはread_project_plan・read_deliverable_file・read_verified_fact・
-        thinkです。{_THINK_TRAILER_SENTENCE}\n
+        write_agreement・thinkです。{_THINK_TRAILER_SENTENCE}\n
         {_scratch_concerns_closure_instruction("reason")}\n
+        \n
+        {_build_decision_lineage_directive('"Proposed"')}\n
         \n
         Return ONLY JSON: {{"expert": "（生成した専門家の肩書き）", "reason": "...", "focus_guidance": "（このタスク固有の着眼点・注意点、無ければ空文字）"}}'
         """
@@ -10311,12 +10386,17 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
     _CURRENT_TASK_ID = _effective_current_task_id_from(state)
     _reset_think_scratchpad()  # [BL-093]
     # [BL-148] 単発JSON応答からツールループへ変更。current_task_context（プロンプト埋め込み）に
-    # 加え、詳細確認用の読み取り専用ツールを付与する。Orchestratorの出力は専門家選定メタデータ
-    # のみで状態を変更しないため、write_agreement等の書き込み系ツールは意図的に与えない
-    # （`_check_write_permission`のロール表にも"orchestrator"は存在しない）。
+    # 加え、詳細確認用の読み取り専用ツールを付与する。
+    # [BL-280] 従来はOrchestratorの出力は専門家選定メタデータのみで状態を変更しないとして
+    # write_agreement等の書き込み系ツールを意図的に与えていなかった（`_check_write_permission`
+    # のロール表にも"orchestrator"は存在しなかった）。しかし専門家選定自体が「複数の候補の中から
+    # 一つを選ぶ」分岐点であり、その選定理由・却下した代替案はdecisionsテーブル（`make_decision`、
+    # 1ターン1件のサマリ）にしか残らずagreementsのlineageには入らなかった。ALLOWED_STATUS_BY_ROLEへ
+    # "orchestrator": {"Proposed"}を追加し、write_agreement(entry_type="Decision")での能動的な
+    # 記録を許可・必須化する（decisionsテーブルへの記録は床として維持したまま、その上に重ねる）。
     res = query_AI(
         [{"role": "user", "content": prompt}], client=client_orchestrator, model=model_orchestrator, label="Orchestrator",
-        tools=[READ_PROJECT_PLAN_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_VERIFIED_FACT_TOOL, THINK_TOOL],
+        tools=[READ_PROJECT_PLAN_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_VERIFIED_FACT_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL],
         state=state,
     )
     _orchestrator_fallback = {"expert": "", "reason": "", "focus_guidance": ""}
@@ -10497,6 +10577,8 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "ゴール文に無い事物をweb_search等で新たに発見した場合のみ、register_entityで"
         "出典を添えて登録してください。\n"
     )
+
+    system_prompt += _build_decision_lineage_directive('"Proposed"')
 
     system_prompt += (
         "\n【BL-198: 実測できる地理データは実測する】\n"
@@ -10864,6 +10946,11 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "[BL-205] read_entityは名前を持つ事物専用です。対象を持たない単独の値は"
         "read_verified_factを使い、read_entityをentity未指定の「一覧確認」目的で"
         "多用しないでください（一覧は名前のみで属性を含みません）。\n"
+    )
+
+    light_system_prompt += _build_decision_lineage_directive('"Proposed"')
+
+    light_system_prompt += (
         "[BL-198: 実測できる地理データは実測する] 地点の標高、2点間の直線距離、住所の緯度経度、"
         "道路距離・所要時間は、上記の専用ツール（gsi_geocode→gsi_get_elevation／"
         "gsi_calc_distance_bearing／calc_road_route）で実際に取得できます。これらを推測したり、"
@@ -11394,6 +11481,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"web_search・web_fetch・read_reference_file・read_goal_reference・read_entity・verify_entity_geo・gsi_geocode・"
         f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
+        f"{_build_decision_lineage_directive('\"Rejected\"（懸念を指摘する場合）または\"Reviewed\"（問題なしと判断した場合）')}\n"
         f"{_get_frozen_agreements_text(get_active_conn(), state['run_id'])}"
         f"【BL-086: 🔒Freeze済み項目の扱い】上記に🔒が付いている項目があれば、それは人間の発注者が"
         f"既に審議の上で承認した意図的な例外です。同じ論点をmajor/minorの根拠にしないでください"
@@ -11608,6 +11696,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"web_search・web_fetch・read_reference_file・read_goal_reference・read_entity・verify_entity_geo・gsi_geocode・"
         f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
+        f"{_build_decision_lineage_directive('\"Rejected\"（懸念を指摘する場合）または\"Reviewed\"（問題なしと判断した場合）')}\n"
 
         f"System Goal: {goal}\n"
         f"{_get_goal_essence_text(get_active_conn(), state['run_id'])}\n"
@@ -12137,6 +12226,8 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goa
     {_TRACE_LINEAGE_USAGE_PARAGRAPH}
     {_scratch_concerns_closure_instruction("rationale")}
 
+    {_build_decision_lineage_directive('"Rejected"（懸念を指摘する場合）または"Reviewed"（問題なしと判断した場合）')}
+
     【ゴール変容の検知（★R5 GoalShiftEvent）】
     提示する再配分案が、当初の制約（このリソースのtotal_cap自体）を
     変更する必要があると判断した場合、requires_goal_constraint_change: true を
@@ -12364,7 +12455,9 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
        判断が特定の事物の主張に関わる場合、レジストリの記録と食い違っていないか確認してください。
        [BL-205] read_entityは名前を持つ事物専用です。対象を持たない単独の値はここでは
        扱いません（このパスにread_verified_factはありません）。
-       【重要】あなたが使えるツールはread_reference_file・read_entityです。
+       【重要】あなたが使えるツールはread_reference_file・read_entity・write_agreementです。
+
+       {_build_decision_lineage_directive('"Rejected"（懸念を指摘する場合）または"Reviewed"（問題なしと判断した場合）')}
 
         Return ONLY JSON in the exact format below:
         {{
@@ -12382,6 +12475,12 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
     # BL-089の層2リトライ（_query_and_parse_with_retry）を適用し、真にパースし続けられない
     # 場合にのみ、従来通りstagnantへフェイルクローズする（stagnant自体は「安全側は差し戻し」
     # という方針として引き続き妥当なため、フォールバック値そのものは変更しない）。
+    # [BL-280] Reflectionはdetector等と同じ監査ロールとして扱う。write_agreement呼び出しの
+    # 権限チェック（ALLOWED_STATUS_BY_ROLE["reflection"]）はcaller_role="reflection"を前提と
+    # するため、ここで明示的に設定する（未設定だと直前ノードのroleが残留するバグ構造——
+    # BL-096コメント参照、同型の事故がdetectorで過去に実際に発生している）。
+    global _CURRENT_CALLER_ROLE
+    _CURRENT_CALLER_ROLE = "reflection"  # [BL-280]
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_reflection, model=model_reflection, label="Reflection",
@@ -12390,7 +12489,9 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
         # read_reference_fileのみ追加する（新規の外部通信は発生させない、既存キャッシュの参照専用）。
         # [BL-204] read_entityも同じ理由（読み取り専用・外部通信なし・呼び出し予算を消費しない）
         # で追加する。
-        tools=[READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL],
+        # [BL-280] write_agreement（entry_type="Decision"）を追加し、他の監査ロールと同様に
+        # 分岐点の記録を必須化する（ALLOWED_STATUS_BY_ROLE["reflection"]で権限管理）。
+        tools=[READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, WRITE_AGREEMENT_TOOL],
         fallback={"still_aligned": False, "discussion_status": "stagnant", "note": "Parse error."},
         state=state,
     )
@@ -12443,6 +12544,11 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     【重要】あなたが使えるツールはthink・escalate_premise_concern・write_agreement・
     read_reference_file・read_entityです。
     {_scratch_concerns_closure_instruction("これから生成する対話メッセージ本文", escalation_tools="escalate_premise_concern")}
+
+    {_build_decision_lineage_directive('"Proposed"')}
+    （上記のwrite_agreement(entry_type="EssenceProposal")は本質対話の結論確定という特定の場面の
+    既存の手順です。それ以外の分岐点——どちらの選択肢を推す方向で対話を進めるか等——についても
+    この一般原則が及びます。）
 
     ■ プロジェクトの目標(Goal): {goal}
     {goal_essence_text}
@@ -12536,6 +12642,11 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     read_reference_file・read_entityです。
     {_scratch_concerns_closure_instruction("これから生成する対話メッセージ本文", escalation_tools="escalate_premise_concern")}
 
+    {_build_decision_lineage_directive('"Proposed"')}
+    （上記のwrite_agreement(entry_type="EssenceProposal")は本質対話の結論確定という特定の場面の
+    既存の手順です。それ以外の分岐点——どちらの選択肢を推す方向で対話を進めるか等——についても
+    この一般原則が及びます。）
+
     ■ プロジェクトの目標(Goal): {goal}
     {goal_essence_text}
     {reflection_block}
@@ -12590,6 +12701,8 @@ def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "", st
     write_agreement・trace_lineage・thinkです。{_THINK_TRAILER_SENTENCE}
     {_TRACE_LINEAGE_USAGE_PARAGRAPH}
     {_scratch_concerns_closure_instruction("details")}
+
+    {_build_decision_lineage_directive('"Rejected"（懸念を指摘する場合）または"Reviewed"（問題なしと判断した場合）')}
 
     ■ 目標: {goal}
     {goal_essence_text}
@@ -12706,6 +12819,8 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
     write_agreement・read_entity・trace_lineage・thinkです。{_THINK_TRAILER_SENTENCE}
     {_TRACE_LINEAGE_USAGE_PARAGRAPH}
     {_scratch_concerns_closure_instruction("feedback")}
+
+    {_build_decision_lineage_directive('"Rejected"（懸念を指摘する場合）または"Reviewed"（問題なしと判断した場合）')}
 
     ■ 達成すべき【目標(Goal)】:
     {goal}
@@ -13483,6 +13598,8 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         + _TRACE_LINEAGE_USAGE_PARAGRAPH + "\n"
     )
 
+    system_prompt_trailing += _build_decision_lineage_directive("任意（Approved等含む全status）")
+
     previous_user_input = state.get("user_input", "(取得不可)")
 
     # [BL-185] エスカレーション再開通知・タスク遷移ブロック通知は、決定事項DB等と同じ
@@ -13875,11 +13992,13 @@ def call_goal_essence_analyst(goal: str, state: dict | None = None) -> dict:
     正しい確認結果です）。もし何らかの理由で既に確定値・過去の成果物が存在する場合は、
     それを無視して独自に矛盾する仮定を置かないよう、iter=1で一度read_verified_factを
     呼んで確認してください。
-    [BL-095: write_agreementで検討過程を残す（任意）] true_essence/feasibility_notesの2フィールド
+    [BL-280: write_agreementで検討過程を残す（必須）] true_essence/feasibility_notesの2フィールド
     に収まらない検討過程（他に考えたが採用しなかった本質の言語化案とその却下理由等）があれば、
     write_agreement（entry_type="Decision", status="Proposed", action_type="CREATE",
-    topic="goal_essence_analysis"）で任意に記録できます。true_essence/feasibility_notes自体は
-    既にgoal_essenceテーブルに保存され全ノードへ常時注入されるため、これは必須ではありません。
+    topic="goal_essence_analysis"）で必ず記録してください。true_essence/feasibility_notes自体は
+    既にgoal_essenceテーブルに保存され全ノードへ常時注入されますが、それらのフィールドに収まらない
+    「なぜ他の本質の言語化案を採用しなかったか」という分岐点は、記録しなければ失われます。
+    {_build_decision_lineage_directive('"Proposed"')}
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
     write_agreement・thinkです。{_THINK_TRAILER_SENTENCE}
     {_scratch_concerns_closure_instruction("feasibility_notes")}
@@ -14304,6 +14423,8 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     diff_plan_draft_versions・write_agreement・web_search・web_fetch・read_reference_file・
     read_entity・thinkです。{_THINK_TRAILER_SENTENCE}
     {_scratch_concerns_closure_instruction("observations")}
+
+    {_build_decision_lineage_directive('"Rejected"（判断根拠を無効化する場合）または"Reviewed"（計画に問題なしと判断した場合）')}
 
     ■ 目標: {goal}
     {goal_essence_text}

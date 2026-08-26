@@ -144,7 +144,7 @@ def test_write_attribute_accepts_canonical_name(db_conn):
     result = cela_main.TOOL_DISPATCH["write_entity_attribute"](
         {"entity": "公立諏訪東京理科大学", "attr_name": "address",
          "value": "長野県茅野市豊平5000-1", "confidence": "confirmed",
-         "citations": [{"type": "goal_text", "detail": "ゴール文"}]}, {})
+         "citations": [{"type": "goal_text", "detail": "ゴール文"}], "reason": "ゴール文に明記された住所"}, {})
     assert result["status"] == "ok"
 
 
@@ -203,7 +203,8 @@ def test_confirmed_requires_citations(db_conn):
     conn, run_id = db_conn
     _seed_goal_entities(conn, run_id)
     result = cela_main.TOOL_DISPATCH["write_entity_attribute"](
-        {"entity": "茅野駅", "attr_name": "y", "value": "1", "confidence": "confirmed"}, {})
+        {"entity": "茅野駅", "attr_name": "y", "value": "1", "confidence": "confirmed",
+         "reason": "テスト用の値"}, {})
     assert result["status"] == "error"
 
 
@@ -213,7 +214,7 @@ def test_provisional_without_citations_is_allowed(db_conn):
     conn, run_id = db_conn
     _seed_goal_entities(conn, run_id)
     result = cela_main.TOOL_DISPATCH["write_entity_attribute"](
-        {"entity": "茅野駅", "attr_name": "y", "value": "1"}, {})
+        {"entity": "茅野駅", "attr_name": "y", "value": "1", "reason": "テスト用の値"}, {})
     assert result["status"] == "ok"
 
 
@@ -236,7 +237,7 @@ def test_read_entity_returns_all_attributes(db_conn):
     _seed_goal_entities(conn, run_id)
     for an, v in [("address", "A"), ("coordinates", "35.9,138.1"), ("elevation_m", "796")]:
         cela_main.TOOL_DISPATCH["write_entity_attribute"](
-            {"entity": "茅野駅", "attr_name": an, "value": v}, {})
+            {"entity": "茅野駅", "attr_name": an, "value": v, "reason": "テスト用の値"}, {})
     result = cela_main.TOOL_DISPATCH["read_entity"]({"entity": "茅野駅"}, {})
     assert {a["attr_name"] for a in result["attributes"]} == {"address", "coordinates", "elevation_m"}
 
@@ -252,14 +253,14 @@ def test_new_attribute_name_echoes_existing_names(db_conn):
     conn, run_id = db_conn
     _seed_goal_entities(conn, run_id)
     cela_main.TOOL_DISPATCH["write_entity_attribute"](
-        {"entity": "茅野駅", "attr_name": "coordinates", "value": "35.9,138.1"}, {})
+        {"entity": "茅野駅", "attr_name": "coordinates", "value": "35.9,138.1", "reason": "テスト用の値"}, {})
     result = cela_main.TOOL_DISPATCH["write_entity_attribute"](
-        {"entity": "茅野駅", "attr_name": "coordinate", "value": "35.9,138.1"}, {})
+        {"entity": "茅野駅", "attr_name": "coordinate", "value": "35.9,138.1", "reason": "テスト用の値"}, {})
     assert result.get("created_new_attribute") is True
     assert "coordinates" in result["all_attribute_names"]
     # 既存属性の更新では一覧を返さない（毎回返すとノイズになるため）
     again = cela_main.TOOL_DISPATCH["write_entity_attribute"](
-        {"entity": "茅野駅", "attr_name": "coordinates", "value": "36.0,138.2"}, {})
+        {"entity": "茅野駅", "attr_name": "coordinates", "value": "36.0,138.2", "reason": "テスト用の値"}, {})
     assert "created_new_attribute" not in again
 
 
@@ -283,7 +284,7 @@ def test_verify_entity_geo_detects_area_centroid_mismatch(db_conn, monkeypatch):
     for an, v in [("address", "長野県茅野市豊平5000-1"),
                   ("coordinates", "36.008595, 138.295898")]:
         cela_main.TOOL_DISPATCH["write_entity_attribute"](
-            {"entity": "公立諏訪東京理科大学", "attr_name": an, "value": v}, {})
+            {"entity": "公立諏訪東京理科大学", "attr_name": an, "value": v, "reason": "テスト用の値"}, {})
     monkeypatch.setattr(
         cela_main.geo_tools, "gsi_geocode_handler",
         lambda args, state, config: {"results": [{
@@ -302,7 +303,7 @@ def test_verify_entity_geo_reports_consistent_when_close(db_conn, monkeypatch):
     for an, v in [("address", "長野県茅野市豊平5000-1"),
                   ("coordinates", "36.009003, 138.184799")]:
         cela_main.TOOL_DISPATCH["write_entity_attribute"](
-            {"entity": "公立諏訪東京理科大学", "attr_name": an, "value": v}, {})
+            {"entity": "公立諏訪東京理科大学", "attr_name": an, "value": v, "reason": "テスト用の値"}, {})
     monkeypatch.setattr(
         cela_main.geo_tools, "gsi_geocode_handler",
         lambda args, state, config: {"results": [{
