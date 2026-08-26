@@ -3219,6 +3219,34 @@
 
 ---
 
+### D-230: BL-272 — write_issue(RESOLVE/DEFER)へ人間専用issue（human_research_prompt付き）の拒否ガードを追加する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-26 |
+| 状態 | `decided` |
+| 決定者 | t-momose（別チャットでの独立調査によりDBの不整合を発見・報告）、Claude（コードでの再現確認・実装） |
+| **決定理由** | ユーザーが別チャットでの調査により、実ドライラン（`log/2026-08-14/1825`、`log/2026-08-26/0031`）のDBを直接確認し、BL-236のHILゲートissueがUser AIによる`write_issue(RESOLVE)`で自己解決され（`resolved_by='user'`）、実際には`goal_escalations`が`status='Open'`のまま・`verified_facts`未書き込みという偽装解決状態になっていたことを発見した。`--pending-human-input`もこの偽装を検知できず「実地調査待ちのissueはありません」と表示していた。コードで確認すると、`_write_issue_impl`のRESOLVE分岐は`existing["human_research_prompt"]`の非空チェックを一切行っておらず、DEFER分岐にも同型の欠落があった（AGENTS.md §13.5「クラスとして直す」）。これはBL-236のHILゲートという安全機構自体を無効化する重大な欠陥のため、両分岐へ拒否ガードを追加する以外の選択肢は検討しなかった（ACKNOWLEDGEはstatus/defer_to_task_idを変更しないため対象外とした）。 |
+| 決定内容 | モジュールレベル共有ヘルパー`_is_human_only_issue(row)`を新設し、`_write_issue_impl`のRESOLVE・DEFER両分岐で`human_research_prompt`非空の行を拒否する。`_answer_human_input`（CLI経由、`--answer-human-input`）は`_write_issue_impl`を一切経由しない独立実装のため無影響。 |
+| 影響 | `cela_main.py`（`_is_human_only_issue`、`_write_issue_impl`のRESOLVE/DEFER分岐）、新規`tests/test_bl236_human_only_issue_guard.py`（10件）。 |
+| 関連 BL | BL-272（本件）、BL-217（human_research_prompt機構の原設計）、BL-236（本欠陥の実害箇所） |
+
+---
+
+### D-231: BL-273 — escalate_premise_concernの一時停止に既存`halt`フラグを流用せず、新規の可逆フラグを導入する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-26 |
+| 状態 | `decided` |
+| 決定者 | t-momose（実ドライランでの問題発見、一時停止機能の必要性を提起）、Claude（Explore調査・設計・実装） |
+| **決定理由** | ユーザーが実ドライラン（`log/2026-08-26/0031/`）で、ゴール文内部矛盾のescalate_premise_concern提起後もグラフの実行が止まらず、統合フェーズの成果物まで作られてしまったことを発見し、「run自体を一時停止すべき」と判断した。既存の`state["halt"]`フラグを流用する案を検討したが、Explore調査により①`graph.add_edge("halt", END)`が条件分岐無しの固定エッジであること、②`run_ai_vs_ai_loop`のresumeガードが「halt済みチェックポイントは再開せず即終了する」という不可逆前提で書かれていること（BL-121）、の2点が「halt＝終端」という設計を強く裏付けており、そのまま流用すると`--resume`で再開しようとした瞬間に拒否されてしまうと判明した。また`app.update_state()`によるcheckpoint書き戻しはBL-203で既にREJECTED済みの手法であり、本件でも採用しなかった（`pause_for_human_node`が`halt_node`と同型に無条件でENDへ向かうよう設計したため、そもそも必要なかった）。 |
+| 決定内容 | 新規の永続フラグ`paused_for_premise_escalation`・`pending_premise_escalation_id`を`LineageState`へ追加し、`halt`とは独立した専用の一時停止ノード`pause_for_human_node`・共有述語`_should_pause_for_human`・resumeガード拡張を実装する。優先順位は`halt` > `paused_for_premise_escalation`（両方Trueの場合は既存のhalt処理が勝つ）。 |
+| 影響 | `cela_main.py`（`LineageState`宣言、`_LAST_PREMISE_ESCALATION`ブリッジ、`generate_user_utterance`のBL-177ステージ集約、`generate_user_utterance_node`/`expert_node`/`facilitator_node`、`pause_for_human_node`、5つのルーティング関数、`run_ai_vs_ai_loop`）、新規`tests/test_bl236_premise_escalation_pause.py`（23件）、既存`tests/test_bl183_task_transition_block_severe_issue_flag.py`の孤立exec型テストヘルパーを修正（新規参照名の名前空間注入）。 |
+| 関連 BL | BL-273（本件）、BL-236（escalate_premise_concernの原設計）、BL-203（`app.update_state()`却下・resumeガード不可逆前提の原設計）、BL-086（ブリッジパターンの原設計） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
