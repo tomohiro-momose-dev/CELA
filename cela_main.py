@@ -694,6 +694,9 @@ READ_DELIVERABLE_FILE_TOOL = {
             "from the agreements database for you. Only pass file_path if you already have the "
             "exact path (e.g. copied verbatim from a 'FILE_PATH:...' value shown elsewhere). "
             "Returns the file content as text. "
+            "[BL-279] This tool is for entry_type='Deliverable' only. For entry_type='Decision'/"
+            "'Directive' (e.g. a past judgment call, not a task's actual output), use "
+            "read_agreement instead -- this tool will not find those. "
             "[BL-110] Optionally call `think` (with a `summary`) alongside this or any other tool call "
             "to record your reasoning -- it is no longer required, and other tool calls are no "
             "longer rejected for omitting it."
@@ -712,6 +715,47 @@ READ_DELIVERABLE_FILE_TOOL = {
                 "file_path": {
                     "type": "string",
                     "description": "Exact full path to the deliverable file, only if already known verbatim."
+                }
+            }
+        }
+    }
+}
+
+READ_AGREEMENT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_agreement",
+        "description": (
+            "[BL-279] Read the full, untruncated content (decision_what/reason_why/citations/"
+            "evidence) of past Decision/Directive agreement(s) -- not the 100/150-char preview "
+            "shown in the agreements DB summary every turn. Use this when that ambient summary "
+            "isn't enough to judge something (e.g. before adopting/rejecting a related choice, or "
+            "when evaluating whether a documented selection rationale is adequate). "
+            "Pass task_id to get ALL Decision/Directive entries recorded under that specific task "
+            "(a task can have several -- this is not a single 'latest version' lookup like "
+            "read_deliverable_file, and it only returns entries recorded under that exact task_id, "
+            "not entries from tasks it depends on). Pass topic_keyword to search by topic text "
+            "instead -- needed for task-independent entries (e.g. task_planner's own phase-design "
+            "rationale, which has no task_id). "
+            "For entry_type='Deliverable', use read_deliverable_file instead -- this tool's "
+            "decision_what for Deliverable entries is usually just an internal storage pointer, "
+            "not the actual content."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Return all matching entries recorded under this exact task_id."
+                },
+                "topic_keyword": {
+                    "type": "string",
+                    "description": "Search by topic text (phrase match, falls back to token-OR match on failure)."
+                },
+                "entry_type": {
+                    "type": "string",
+                    "enum": ["Decision", "Directive", "Deliverable"],
+                    "description": "Optional filter. Omit to search Decision+Directive (the default)."
                 }
             }
         }
@@ -2206,6 +2250,84 @@ def _read_deliverable_file_handler(args: dict, state: dict | None = None) -> dic
         return content[:10000]  # 大量出力防止
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+def _parse_citations_field(raw) -> list:
+    """[BL-279] agreements.citations列（生のJSON文字列、DEFAULT '[]'）を防御的にパースする。
+    _build_agreements_contextの表示用パースと同じロジックを共有ヘルパーへ抽出した
+    （AGENTS.md §15.1、コピペ3箇所目を防ぐ）。不正なJSON文字列でもクラッシュせず[]を返す。
+    """
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw) if raw else []
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return raw if isinstance(raw, list) else []
+
+
+def _read_agreement_handler(args: dict, state: dict | None = None) -> dict:
+    """[BL-279] `read_agreement`ツールの実体。`_resolve_deliverable_pointer`と同じDB逆引き
+    パターンを踏襲するが、意図的に以下を変える：
+    - 返り値は常にリスト形式。task_idのみ指定時は「最新1件」ではなく該当する全件を返す
+    （1タスクが複数の独立したDecisionを持ちうるため、Deliverable=1タスク1版という
+    read_deliverable_fileの前提が成り立たない）。
+    - task_id一致は「そのtask_id自身が記録したagreement」のみを対象とする（同一タスク内
+    検索）。依存先タスクのagreementまで自動的に引き込む機構ではない（ユーザー判断、
+    書き込み時の前方参照登録は依存関係の保守コストが大きく見送った）。
+    - entry_type既定はDecision/Directiveのみ（Deliverableはread_deliverable_fileが
+    既に担当、読み取り経路の重複を避ける）。
+    """
+    task_id = (args.get("task_id") or "").strip()
+    topic_keyword = (args.get("topic_keyword") or "").strip()
+    entry_type_filter = (args.get("entry_type") or "").strip()
+    if not task_id and not topic_keyword:
+        return {"status": "error", "message": "task_id、topic_keywordのいずれかを指定してください。"}
+    if entry_type_filter and entry_type_filter not in ("Decision", "Directive", "Deliverable"):
+        return {"status": "error",
+                "message": f"entry_typeはDecision/Directive/Deliverableのいずれかです: {entry_type_filter!r}"}
+    allowed_entry_types = {entry_type_filter} if entry_type_filter else {"Decision", "Directive"}
+
+    conn = get_active_conn()
+    run_id = _CURRENT_RUN_ID
+    agreements = get_agreements_from_db(conn, run_id)
+    # [BL-279] status=="Superseded"は_build_agreements_contextの毎ターン表示にも出ない
+    # （ambientに見えているものだけをこのツールでも見せる一貫性）。
+    pool = [
+        a for a in agreements
+        if a.get("entry_type") in allowed_entry_types and a.get("status") != "Superseded"
+    ]
+    if task_id:
+        candidates = [a for a in pool if a.get("task_id") == task_id]
+    else:
+        candidates = [a for a in pool if topic_keyword in str(a.get("topic", ""))]
+        if not candidates:
+            tokens = _tokenize_topic_keyword(topic_keyword)
+            if tokens:
+                candidates = [a for a in pool if any(t in str(a.get("topic", "")) for t in tokens)]
+    if not candidates:
+        return {
+            "status": "not_found",
+            "message": (
+                f"task_id={task_id!r} topic_keyword={topic_keyword!r} "
+                f"entry_type={sorted(allowed_entry_types)} に該当するagreementが見つかりませんでした。"
+            ),
+        }
+    candidates.sort(key=lambda a: a.get("id", 0))
+    return {
+        "status": "ok",
+        "count": len(candidates),
+        "agreements": [
+            {
+                "id": a.get("id"), "entry_type": a.get("entry_type"), "action_type": a.get("action_type"),
+                "agreement_status": a.get("status"), "topic": a.get("topic"),
+                "decision_what": a.get("decision_what"), "reason_why": a.get("reason_why"),
+                "citations": _parse_citations_field(a.get("citations")), "evidence": a.get("evidence"),
+                "task_id": a.get("task_id"), "phase_id": a.get("phase_id"),
+            }
+            for a in candidates
+        ],
+    }
 
 
 def _verify_whiteboard_excerpt_handler(args: dict) -> dict:
@@ -5078,6 +5200,7 @@ TOOL_DISPATCH = {
     "python_repl": lambda args, state=None: _run_python_repl(args),
     "read_verified_fact": lambda args, state=None: _read_verified_fact_handler(args),
     "read_deliverable_file": lambda args, state=None: _read_deliverable_file_handler(args, state),
+    "read_agreement": lambda args, state=None: _read_agreement_handler(args, state),
     "verify_whiteboard_excerpt": lambda args, state=None: _verify_whiteboard_excerpt_handler(args),
     "read_whiteboard_excerpt": lambda args, state=None: _read_whiteboard_excerpt_handler(args, state),
     "diff_plan_draft_versions": lambda args, state=None: _diff_plan_draft_versions_handler(args),
@@ -9200,15 +9323,8 @@ Filters out superseded or directive items and applies status-based formatting/la
         evidence_suffix = f"（根拠: {evidence_preview}）" if evidence_preview else ""
         # [BL-188] citationsもevidenceと同じく表示へ反映する（書き込まれるのみで表示に一切
         # 反映されない状態は、evidence自身がBL-064で一度経験済みの同型の失敗パターン）。
-        citations_raw = a.get('citations')
-        if isinstance(citations_raw, str):
-            try:
-                citations_list = json.loads(citations_raw) if citations_raw else []
-            except json.JSONDecodeError:
-                citations_list = []
-        else:
-            citations_list = citations_raw or []
-        if isinstance(citations_list, list) and citations_list:
+        citations_list = _parse_citations_field(a.get('citations'))
+        if citations_list:
             citation_strs = []
             for c in citations_list[:3]:
                 if isinstance(c, dict):
@@ -10142,8 +10258,9 @@ It serves as the initial planning layer for breaking down complex objectives acr
        read_verified_factを使い、read_entityをentity未指定の「とりあえず一覧」目的で
        多用しないでください。
        【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
-       read_plan_draft・write_agreement・web_search・web_fetch・read_reference_file・
-       read_entity・think
+       read_agreement（entry_type="Decision"/"Directive"の全文はこちら、read_deliverable_fileは
+       entry_type="Deliverable"専用）・read_plan_draft・write_agreement・web_search・web_fetch・
+       read_reference_file・read_entity・think
        です。{_THINK_TRAILER_SENTENCE}
     13. [BL-196: 実行環境に無い専用処理能力の行使をacceptance_criteriaに要求しない] acceptance_criteria/
        descriptionに「実測データの収集・抽出・生成」を書く際は、Expertが実際に使えるツール
@@ -10271,7 +10388,7 @@ It serves as the initial planning layer for breaking down complex objectives acr
     _reset_think_scratchpad()  # [BL-093]
     phases, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_task_planner, model=model_task_planner, label="Task Planner",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_PLAN_DRAFT_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], fallback=fallback_phase,
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_PLAN_DRAFT_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], fallback=fallback_phase,
         state=state,
     )
     if parse_failed:
@@ -10372,7 +10489,8 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
         \n
         【重要】上記の対話文脈がどのタスクについて話しているように読めても、専門家選定・focus_guidanceは
         必ず【現在のタスク】欄のcurrent_task_idを基準にしてください。\n
-        【重要】あなたが使えるツールはread_project_plan・read_deliverable_file・read_verified_fact・
+        【重要】あなたが使えるツールはread_project_plan・read_deliverable_file・read_agreement
+        （entry_type="Decision"/"Directive"の全文はこちら）・read_verified_fact・
         write_agreement・thinkです。{_THINK_TRAILER_SENTENCE}\n
         {_scratch_concerns_closure_instruction("reason")}\n
         \n
@@ -10396,7 +10514,7 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
     # 記録を許可・必須化する（decisionsテーブルへの記録は床として維持したまま、その上に重ねる）。
     res = query_AI(
         [{"role": "user", "content": prompt}], client=client_orchestrator, model=model_orchestrator, label="Orchestrator",
-        tools=[READ_PROJECT_PLAN_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_VERIFIED_FACT_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL],
+        tools=[READ_PROJECT_PLAN_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_VERIFIED_FACT_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL],
         state=state,
     )
     _orchestrator_fallback = {"expert": "", "reason": "", "focus_guidance": ""}
@@ -10930,6 +11048,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "write_agreementのconfirmed_variablesでconfidence=\"provisional\"として記録してください"
         "（他タスクの制約とまだ突き合わせが済んでいないため）。\n"
         "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
+        "read_agreement（entry_type=\"Decision\"/\"Directive\"の全文はこちら）・"
         "read_project_plan・write_agreement・escalate_premise_concern・ask_user_question・"
         "web_search・web_fetch・read_reference_file・read_goal_reference・register_entity・write_entity_attribute・read_entity・gsi_geocode・"
         "gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・thinkです。\n"
@@ -11011,6 +11130,10 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "始めてください】。確認せずに自分で新しい数値を仮定すると、他タスクの確定値と矛盾する"
         "リスクがあります。思考の途中で「これは他タスクで既に扱われていたかもしれない」という"
         "気づきがあれば、その都度これらのツールで確認し、独自の仮定で上書きしないでください。\n"
+        "[BL-279] 【必須：iter=1で一度は、read_agreement(task_id=現在のtask_id)を呼び、"
+        "このタスクに紐づく過去のDecision/Directive（複数候補からの選定理由や判断根拠等）が"
+        "無いか確認してください】。決定事項DBの毎ターン表示は100字要約に切り詰められており、"
+        "この確認で全文を見て初めて、過去の判断と矛盾しない作業ができます。\n"
         "[BL-093] thinkツールで検討過程を残せます。自然に考えた理由づけの生文章は、thinkを使わ"
         "なければ次のiterationには引き継がれません（tool_callsの記録だけが残ります）。thinkを"
         "呼ぶと、その理由づけは次回以降のtool結果として全履歴ごと返され、雪だるま式に引き継がれ"
@@ -11053,7 +11176,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     _CURRENT_TASK_ID = _effective_current_task_id_from(state)
     _reset_think_scratchpad()  # [BL-093]
     return query_AI(messages, client=client_expert, model=model_expert, label=f"Expert:{expert_name}",
-                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, REGISTER_ENTITY_TOOL, WRITE_ENTITY_ATTRIBUTE_TOOL, READ_ENTITY_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)  # [BL-228] Expertは唯一trace_lineageが未配線だった
+                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, REGISTER_ENTITY_TOOL, WRITE_ENTITY_ATTRIBUTE_TOOL, READ_ENTITY_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)  # [BL-228] Expertは唯一trace_lineageが未配線だった
 
 
 #def call_detector(goal: str, user_input: str, expert_output: str, decisions: list[Decision], current_phase: dict) -> dict:
@@ -11476,7 +11599,8 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"（gsi_geocodeは住所ジオコーダで施設名を無視するため、「◯◯町 △△病院」で引くと"
         f"大字の代表点が返ります。標高が周辺の市街地と不自然に食い違う拠点があれば、"
         f"番地までの住所でgsi_geocodeを引き直して照合してください）。\n\n"
-        f"【重要】あなたが使えるツールはread_verified_fact・read_deliverable_file・"
+        f"【重要】あなたが使えるツールはread_verified_fact・read_deliverable_file・read_agreement"
+        f"（entry_type=\"Decision\"/\"Directive\"の全文はこちら）・"
         f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・"
         f"web_search・web_fetch・read_reference_file・read_goal_reference・read_entity・verify_entity_geo・gsi_geocode・"
         f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・thinkです。"
@@ -11519,7 +11643,10 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"量・範囲として十分か評価してください（本質ドリフト・本質充足性チェックと同じ"
         f"「本質記述と照らし合わせる」パターンです）。基準はあるが本質の要求水準に対し明らかに"
         f"不十分と判断できる場合のみminor以上の根拠にしてください——判断に迷う場合は"
-        f"根拠不十分としてmajorにしないこと。\n"
+        f"根拠不十分としてmajorにしないこと。[BL-279] 決定事項DBに表示されている"
+        f"reason_whyは100字に切り詰められた要約です。この要約だけでは十分性を判定できない"
+        f"場合は、read_agreement(task_id=... または topic_keyword=...)で全文を確認してから"
+        f"判定してください。\n"
         f"複数候補からの選定自体が今回のタスクで行われていない場合、この観点は該当なしと"
         f"してconstraint_issueの根拠にしないでください。\n\n"
         f"【現在タスクのacceptance_criteria】\n{criteria_text}\n\n"
@@ -11552,7 +11679,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
     _reset_think_scratchpad()  # [BL-093]
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
         domain_prompt, client=client_detector_domain, model=model_detector_domain, label="Detector (Domain Review)",
-        tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線
+        tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線
         fallback={"constraint_issue": "none", "comment": "", "target_excerpt": "", "observations": "",
                   "essence_sufficiency_concern": False, "essence_sufficiency_reason": ""},
         state=state,
@@ -11708,6 +11835,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"返ります。拠点の標高が周辺の市街地と不自然に食い違う場合、拠点名がゴール文の表記と"
         f"一致しているかを確認し、番地までの住所でgsi_geocodeを引き直して座標を照合してください。\n\n"
         f"【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
+        f"read_agreement（entry_type=\"Decision\"/\"Directive\"の全文はこちら）・"
         f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・"
         f"web_search・web_fetch・read_reference_file・read_goal_reference・read_entity・verify_entity_geo・gsi_geocode・"
         f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・thinkです。"
@@ -11765,7 +11893,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_detector_numeric, model=model_detector_numeric, label="Detector",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
         state=state,
     )
     if parse_failed:
@@ -12238,6 +12366,7 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goa
     同期してから再配分案を検討してください】。確認せずに独自の前提で再配分すると、既存の
     確定事項と矛盾するリスクがあります。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
+    read_agreement（entry_type="Decision"/"Directive"の全文はこちら）・
     write_agreement・trace_lineage・thinkです。{_THINK_TRAILER_SENTENCE}
     {_TRACE_LINEAGE_USAGE_PARAGRAPH}
     {_scratch_concerns_closure_instruction("rationale")}
@@ -12272,7 +12401,7 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goa
     _CURRENT_CALLER_ROLE = "arbiter"
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    res = query_AI([{"role": "user", "content": prompt}], client=client_resource_arbiter, model=model_resource_arbiter, label="Resource Arbiter", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
+    res = query_AI([{"role": "user", "content": prompt}], client=client_resource_arbiter, model=model_resource_arbiter, label="Resource Arbiter", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
     _arbiter_fallback = {}
     parsed = _safe_json_parse(res, fallback=_arbiter_fallback)
     if parsed is _arbiter_fallback:
@@ -12714,6 +12843,7 @@ def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "", st
     read_verified_factで確認し、複数タスクにまたがる数値の前提が実際に一致しているかを
     チェックしてから矛盾判定を行ってください】。\n
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
+    read_agreement（entry_type="Decision"/"Directive"の全文はこちら）・
     write_agreement・trace_lineage・thinkです。{_THINK_TRAILER_SENTENCE}
     {_TRACE_LINEAGE_USAGE_PARAGRAPH}
     {_scratch_concerns_closure_instruction("details")}
@@ -12737,7 +12867,7 @@ def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "", st
     _CURRENT_CALLER_ROLE = "integrator"
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    res = query_AI([{"role": "user", "content": prompt}], client=client_integrator, model=model_integrator, label="Integrator", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
+    res = query_AI([{"role": "user", "content": prompt}], client=client_integrator, model=model_integrator, label="Integrator", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
     _integrator_fallback = {"contradictions": False, "affected_phases": [], "details": ""}
     parsed = _safe_json_parse(res, fallback=_integrator_fallback)
     if parsed is _integrator_fallback:
@@ -12832,6 +12962,7 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
     突き合わせて確認できます。[BL-205] read_entityは名前を持つ事物専用です。対象を持たない
     単独の値（予算上限等）はread_verified_factを使ってください。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
+    read_agreement（entry_type="Decision"/"Directive"の全文はこちら）・
     write_agreement・read_entity・trace_lineage・thinkです。{_THINK_TRAILER_SENTENCE}
     {_TRACE_LINEAGE_USAGE_PARAGRAPH}
     {_scratch_concerns_closure_instruction("feedback")}
@@ -12858,7 +12989,7 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_reviewer_qa, model=model_reviewer_qa, label="Reviewer QA",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"},
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"},
         state=state,
     )
     if parse_failed:
@@ -12991,7 +13122,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"記録と突き合わせて確認できます。[BL-205] read_entityは名前を持つ事物専用です。"
             f"対象を持たない単独の値はread_verified_factを使ってください。\n\n"
             f"【今回レビューする直近のやり取り】\n{stage_history_text}\n\n"
-            f"【重要】あなたが使えるツールはread_verified_fact・read_deliverable_file・python_repl・"
+            f"【重要】あなたが使えるツールはread_verified_fact・read_deliverable_file・read_agreement・python_repl・"
             f"read_entity・trace_lineage・thinkです。{_THINK_TRAILER_SENTENCE}\n"
             f"{_TRACE_LINEAGE_USAGE_PARAGRAPH}\n"
             f"{_scratch_concerns_closure_instruction('domain_concerns')}\n"
@@ -13001,7 +13132,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         _reset_think_scratchpad()
         review_parsed, review_parse_failed = _query_and_parse_with_retry(
             review_prompt, client=client_user, model=model_user, label="User AI (Stage1: レビュー)",
-            tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, PYTHON_REPL_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],
+            tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, PYTHON_REPL_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],
             fallback={"domain_concerns": "", "scope_compliant": True, "review_comment": ""},
             state=state,
         )
@@ -13591,6 +13722,10 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         "を呼び、他タスクで既に確定・仮定された値と食い違う指示を出そうとしていないか確認して"
         "ください】。思考中に「これは前のタスクで既に決まっていたはずでは」という疑問が浮かんだ"
         "場合も、その都度これらのツールで確認してください。\n"
+        "[BL-279] 【必須：iter=1で一度は、read_agreement(task_id=現在のtask_id)を呼び、"
+        "このタスクに紐づく過去のDecision/Directiveが無いか確認してください】。決定事項DBの"
+        "毎ターン表示は100字要約に切り詰められており、この確認で全文を見て初めて、過去の"
+        "判断と矛盾しない指示が出せます。\n"
         "\n【BL-093: thinkツールで検討過程を残す】" + _BL093_THINK_VALUE_PARAGRAPH + "\n"
         "\n[BL-096: write_issue/read_issuesで軽微な懸念・訂正指示を引き継ぐ]\n"
         "Expertへ訂正指示を出す際、それが後続タスクでも忘れてはならない指示であれば、"
@@ -13608,6 +13743,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         "単独の値（予算上限等）はread_verified_factを使い、read_entityをentity未指定の"
         "「一覧確認」目的で多用しないでください。\n"
         "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
+        "read_agreement（entry_type=\"Decision\"/\"Directive\"の全文はこちら）・"
         "write_agreement・escalate_premise_concern・resolve_premise_concern・revise_goal・"
         "freeze_agreement・write_issue・read_issues・read_entity・trace_lineage・thinkです。"
         + _THINK_TRAILER_SENTENCE + "\n"
@@ -13728,7 +13864,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")  # [BL-096] write_issueのphase_id用
     _CURRENT_GOAL_TEXT = user_goal  # [BL-086] revise_goalの編集対象
     _reset_think_scratchpad()  # [BL-093]
-    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
+    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
 
     if content is None or content.strip() == "" or content == "(APIから空の応答が返されました)":
         for retry in range(3):
@@ -13739,7 +13875,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")
             _CURRENT_GOAL_TEXT = user_goal
             _reset_think_scratchpad()  # [BL-093]
-            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
+            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
             if content and content.strip() and content != "(APIから空の応答が返されました)":
                 break
         else:
@@ -14016,6 +14152,7 @@ def call_goal_essence_analyst(goal: str, state: dict | None = None) -> dict:
     「なぜ他の本質の言語化案を採用しなかったか」という分岐点は、記録しなければ失われます。
     {_build_decision_lineage_directive('"Proposed"')}
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
+    read_agreement（entry_type="Decision"/"Directive"の全文はこちら）・
     write_agreement・thinkです。{_THINK_TRAILER_SENTENCE}
     {_scratch_concerns_closure_instruction("feasibility_notes")}
 
@@ -14032,7 +14169,7 @@ def call_goal_essence_analyst(goal: str, state: dict | None = None) -> dict:
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_goal_essence, model=model_goal_essence, label="Goal Essence Analyst",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],
         fallback={"true_essence": goal, "feasibility_notes": "(JSONパース失敗のため見立てなし)"},
         state=state,
     )
@@ -14436,6 +14573,8 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     記録と突き合わせて確認できます。[BL-205] read_entityは名前を持つ事物専用です。
     対象を持たない単独の値はread_verified_factを使ってください。
     【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
+    read_agreement（entry_type="Decision"/"Directive"の全文はこちら。task_plannerが記録した
+    phase_design_rationale等はここへ埋め込み済みのため通常は再取得不要）・
     diff_plan_draft_versions・write_agreement・web_search・web_fetch・read_reference_file・
     read_entity・thinkです。{_THINK_TRAILER_SENTENCE}
     {_scratch_concerns_closure_instruction("observations")}
@@ -14466,7 +14605,7 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     _reset_think_scratchpad()  # [BL-093]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_task_plan_reviewer, model=model_task_plan_reviewer, label="Task Plan Reviewer",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],
+        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],
         fallback={"risk": "low", "constraint_issue": "none", "comment": "(JSONパース失敗のためnone扱い)",
                   "observations": "", "per_task_comments": []},
         state=state,
