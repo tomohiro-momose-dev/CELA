@@ -1059,6 +1059,15 @@ WEB_SEARCH_TOOL = {
             "in full is worth more than ten more snippets, and this also wastes your call budget. "
             "web_fetch now also extracts PDFs directly (common for government/municipal primary "
             "sources), so do not skip a promising .pdf result and search again instead. "
+            "[BL-291] Before including a specific named entity (a facility, vendor, product, "
+            "technology, standard, person, organization, etc.) in the FIRST query for a category, "
+            "stop. If that name doesn't already appear in the goal text, prior citations, or "
+            "registered entities, and you're recalling it purely from your own training knowledge, "
+            "treat it as an unverified hypothesis, not a fact. This applies especially when the goal "
+            "or acceptance_criteria implies multiple instances exist in that category (words like "
+            "'multiple', 'various', 'several', 'options', etc.) -- your first query for that category "
+            "should use neutral/generic terms only, to discover the full candidate set. Save "
+            "named-entity queries for the narrowing phase after you've surveyed what's actually there. "
             "Run-scoped call limit applies (see error message if exceeded). "
             "[BL-110] Optionally call `think` (with a `summary`) alongside this or any other tool call "
             "to record your reasoning -- it is no longer required, and other tool calls are no "
@@ -10536,6 +10545,11 @@ _BL192_DIRECTIVE_QUALITY_BLOCK = (
     "行ってよい」という一文を併記してください。これが無いと、Agent AIは項目を単に"
     "『未確定』のまま放置して後続タスクへ丸投げし、結局どのタスクでも一次情報が"
     "一度も調べられないまま進行するリスクがあります。\n"
+    "⑥【BL-292: 規模適合性は定量的カバレッジで判断させる】何らかのリソース（拠点数・容量・"
+    "人員・予算等）の充足性・十分性が論点になるタスクでは、「複数ある」「一定数確保した」と"
+    "いった定性的な存在確認だけをacceptance_criteriaの完了条件にせず、対象規模（人口・"
+    "需要量・処理件数・負荷等）に対する定量的なカバレッジ・比率計算を指示文またはacceptance_"
+    "criteriaで明示的に要求してください。\n"
 )
 # [BL-247] User AIの役割そのものを明文化する共通ブロック。ユーザー指摘：「ユーザーAIの役割は、
 # 目標・フェーズ・タスクの意図を読み取り、その意図から何を具体化させるか／させなければ
@@ -10552,6 +10566,10 @@ _USER_AI_ROLE_MANDATE = (
     "具体的に出し、レビュー・承認判断も同じ意図に照らして行ってください——"
     "acceptance_criteriaの字面が形式上満たされているかだけでなく、その背後にある意図が"
     "実質的に満たされているかを見てください。\n"
+    "[BL-292] 特にリソース（拠点数・容量・人員・予算等）の規模適合性が論点の場合、「複数ある」"
+    "「一定数確保した」といった定性的な事実だけで実質的に満たされていると判断せず、対象規模"
+    "（人口・需要量・処理件数・負荷等）に対する定量的なカバレッジ・比率が示されているかを"
+    "確認してください。\n"
 )
 # [BL-267] MemTrapBench（arXiv:2608.20202）が指摘する記憶誘発性の認知的罠への予防的ガード。
 # D-207によりExpert/Userの生reasoningは常に無条件で次iterationへ引き継がれる設計（情報破壊を
@@ -10664,6 +10682,10 @@ It serves as the initial planning layer for breaking down complex objectives acr
          あれば、3個以内という条件を満たしていても分割の対象としてください（実ドライランで、
          acceptance_criteria3個以内という条件は満たしながら、1個の基準の中に独立した複数の
          シナリオ設計・複数対象の分析が隠れており、1タスクの成果物が過大になる事例を確認）。
+         [BL-292] 何らかのリソース（拠点数・容量・人員・予算等）の充足性・十分性が論点になる
+         タスクでは、「複数ある」「一定数確保した」といった定性的な存在確認だけを完了条件と
+         せず、対象規模（人口・需要量・処理件数・負荷等）に対する定量的なカバレッジ・比率
+         計算をacceptance_criteriaで明示的に要求してください。
        - depends_on: このタスクが前提として使う他タスクのtask_idを配列で指定してください
          （前提がなければ空配列）。
        - owns_variables: このタスクで初めて確定させる共有変数名を配列で指定してください
@@ -11146,6 +11168,9 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     system_prompt += (
         "\n【F-2.6 機械的検算ゲート（必須）】\n"
         "数値的根拠を提示する際は python_repl ツールで計算を実行し、結果を明示すること。暗算での提示は禁止します。\n"
+        "[BL-292] 何らかのリソース（拠点数・容量・人員・予算等）が対象規模（人口・需要量・処理件数・"
+        "負荷等）に対し十分かを論じる場合、「複数ある」「一定数確保した」といった定性的な事実だけで"
+        "なく、対象規模に対する定量的なカバレッジ・比率をpython_replで計算し、成果物に明記してください。\n"
     )
 
     system_prompt += (
@@ -12168,6 +12193,14 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"判定してください。\n"
         f"複数候補からの選定自体が今回のタスクで行われていない場合、この観点は該当なしと"
         f"してconstraint_issueの根拠にしないでください。\n\n"
+        f"[BL-292: 規模適合性チェック] 上記の選定妥当性チェックとは別に、今回のタスクが「何らかの"
+        f"リソース（拠点数・容量・人員・予算等）が対象規模（人口・需要量・処理件数・負荷等）に"
+        f"対して十分か」という規模適合性の主張を含むか確認してください。含む場合、その十分性が"
+        f"定量的なカバレッジ・比率計算（python_repl等）で裏付けられているか、それとも「複数ある」"
+        f"等の定性的な事実の提示に留まっているかを判定し、後者の場合のみ"
+        f"'quantitative_sufficiency_concern'をtrueにしてください。'quantitative_sufficiency_reason'"
+        f"には、どの主張が・どの規模指標に対して未検証かを具体的に書いてください（falseの場合は"
+        f"空文字）。規模適合性の主張自体が今回のタスクに存在しない場合はfalseのままにしてください。\n\n"
         f"【現在タスクのacceptance_criteria】\n{criteria_text}\n\n"
         f"{whiteboard_block}"
         f"【BL-076: 指摘箇所の引用】constraint_issueがminor/majorの場合、上記ホワイトボードの本文から、"
@@ -12193,7 +12226,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         )
         + f"【今回評価するターンのやり取り】\n{history_text}\n\n"
         + _scratch_concerns_closure_instruction("observations", escalation_tools="write_issue") +
-        f'\nReturn ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用(無ければ空文字)", "observations": "気づき・懸念（自由記述、無ければ空文字）", "essence_sufficiency_concern": true/false, "essence_sufficiency_reason": "trueの場合、本質のどの記述が計画のどこにも反映されていないか（falseなら空文字）"}}'
+        f'\nReturn ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用(無ければ空文字)", "observations": "気づき・懸念（自由記述、無ければ空文字）", "essence_sufficiency_concern": true/false, "essence_sufficiency_reason": "trueの場合、本質のどの記述が計画のどこにも反映されていないか（falseなら空文字）", "quantitative_sufficiency_concern": true/false, "quantitative_sufficiency_reason": "trueの場合、どの規模適合性の主張がどの規模指標に対して未検証か（falseなら空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
     _detector_domain_tools = [READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線
@@ -12201,7 +12234,8 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         domain_prompt, client=client_detector_domain, model=model_detector_domain, label="Detector (Domain Review)",
         tools=_detector_domain_tools,
         fallback={"constraint_issue": "none", "comment": "", "target_excerpt": "", "observations": "",
-                  "essence_sufficiency_concern": False, "essence_sufficiency_reason": ""},
+                  "essence_sufficiency_concern": False, "essence_sufficiency_reason": "",
+                  "quantitative_sufficiency_concern": False, "quantitative_sufficiency_reason": ""},
         state=state,
     )
     if not domain_parse_failed:
@@ -12219,6 +12253,11 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         # trueにすると単なるJSON解析失敗が計画構造の強制見直しへ過大に波及する。
         domain_essence_concern = False
         domain_essence_reason = ""
+        # [BL-292] essence_sufficiency_concernと同じ理由で、JSON解析失敗とは無関係な
+        # 規模適合性の懸念を自動的にtrueにしない。constraint_issue="major"のフェイルクローズで
+        # 既に差し戻し扱いになるため、二重に懸念を立てる必要はない。
+        domain_quant_concern = False
+        domain_quant_reason = ""
     else:
         print(f"【Detectorの判定結果(JSONパース後・ドメイン妥当性レビュー)】\n{domain_parsed}\n")
         domain_constraint_issue = domain_parsed.get("constraint_issue", "none")
@@ -12235,6 +12274,21 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
             str(_essence_val).lower() == "true" if isinstance(_essence_val, str) else bool(_essence_val)
         )
         domain_essence_reason = domain_parsed.get("essence_sufficiency_reason", "") or ""
+        # [BL-292] essence_sufficiency_concernと同型の正規化（文字列"true"/"false"とJSON bool両対応）。
+        _quant_val = domain_parsed.get("quantitative_sufficiency_concern", False)
+        domain_quant_concern = (
+            str(_quant_val).lower() == "true" if isinstance(_quant_val, str) else bool(_quant_val)
+        )
+        domain_quant_reason = domain_parsed.get("quantitative_sufficiency_reason", "") or ""
+        # [BL-292] 機械的floor enforcement（AGENTS.md §15.3）: LLMがquantitative_sufficiency_concernを
+        # trueにしたにもかかわらず、constraint_issue側への反映を忘れる（none のまま残す）ケースへの
+        # フェイルセーフ。essence_sufficiency_concernは別の下流（計画再構成）へ流れるため意図的に
+        # constraint_issueと独立させているが、本フィールドは「今回の成果物の検証不足」という
+        # BL-278と同種の性質のため、constraint_issueと連動させるのが妥当。
+        if domain_quant_concern and domain_constraint_issue == "none":
+            print("  ⚠️ [Detector][BL-292] quantitative_sufficiency_concern=trueですが"
+                  "constraint_issue=noneのままだったため、機械的にminorへ引き上げました。")
+            domain_constraint_issue = "minor"
 
     # [BL-054] 第2段: 数値監査（検算）パス。先に実施したドメイン妥当性レビューの結果を
     # 提示し、前提そのものに既に指摘があるかを踏まえた上で検算させる。
@@ -12244,6 +12298,12 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"この前提・設計の妥当性レビュー結果を踏まえた上で、以下の数値の機械的検算を行ってください。"
         f"レビューで前提自体に矛盾が指摘されている場合、その前提を鵜呑みにした検算だけで"
         f"none/minorとせず、関連する数値評価にもその点を反映してください。\n\n"
+        + (
+            f"[BL-292] ドメイン妥当性レビューが規模適合性の未検証を指摘しています"
+            f"（理由: {domain_quant_reason}）。該当する定量計算をpython_replで独立に実行し、"
+            f"Agentの算出値と一致するか確認してください。\n\n"
+            if domain_quant_concern else ""
+        )
     )
 
     # [BL-104] プロンプトキャッシュのヒット率向上のため、domain_promptと同じ原則で並び替える:
@@ -12437,6 +12497,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
             "risk": "low", "constraint_issue": "major", "comment": "(判定JSON解析失敗のためフェイルクローズしました)",
             "criteria_status": [], "target_excerpt": domain_target_excerpt, "observations": domain_observations,
             "essence_sufficiency_concern": domain_essence_concern, "essence_sufficiency_reason": domain_essence_reason,
+            "quantitative_sufficiency_concern": domain_quant_concern, "quantitative_sufficiency_reason": domain_quant_reason,
         }
     print(f"【Detectorの判定結果(JSONパース後・数値監査パス)】\n{parsed}\n")
     risk = parsed.get("risk", "low")
@@ -12508,6 +12569,10 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         # [BL-266] 第2段（数値監査）にはこのチェック自体が存在しないため、第1段の値を素通しする。
         "essence_sufficiency_concern": domain_essence_concern,
         "essence_sufficiency_reason": domain_essence_reason,
+        # [BL-292] 第2段（数値監査）は検算を行うのみで、判定の集約先は増やさない
+        # （BL-266と同じ「第2段にはこのチェック自体が存在しない」方針）。第1段の値を素通しする。
+        "quantitative_sufficiency_concern": domain_quant_concern,
+        "quantitative_sufficiency_reason": domain_quant_reason,
     }
 
 # [BL-213 F3] decision_extractorの抽出結果に対するスキーマ検証・正規化。
@@ -13494,6 +13559,13 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
     特に、目標が「いかなる場合でも」「必ず」「死守」等の例外を許さない表現である場合、
     確率的な達成率（例: 92%、95%等）の提示だけでは要件を満たしたとみなさず、残存リスクへの
     対応策が「すべてのケースをカバーする」設計になっているかを厳密に確認してください。
+
+    【🚨 規模適合性の再検証チェック 🚨】
+    最終成果物中に、何らかのリソース（拠点数・容量・人員・予算等）が対象規模（人口・需要量・
+    処理件数・負荷等）に対して十分であるという主張が含まれる場合、それが定量的なカバレッジ・
+    比率計算で裏付けられているか確認してください。「複数ある」「十分確保した」等の定性的な
+    記述のみで済まされている場合は、passed: false とし、feedbackに定量計算の追加を具体的に
+    指示してください。
 
     【F-2.6 機械的検算ゲート（必須）】成果物中の数値的主張（予算・数量・比率等）について、
     承認（passed:true）前に python_repl ツールで再計算し、矛盾がないことを確認すること。
