@@ -428,10 +428,24 @@ def test_user_ai_all_four_stages_gain_read_entity():
     """[BL-204] generate_user_utterance内の4経路（Stage1レビュー・Stage3承認判断・
     Stage4修正指示・非Stage4の初回ターン等）全てにread_entityを付与する。特にStage3/4は
     BL-197（過剰な実測要求）の発生源そのものであり、要求前にレジストリを確認できることが
-    直接的な再発防止になる。"""
+    直接的な再発防止になる。
+    [BL-283] Stage3・非Stage4のツール一覧が呼び出し直前の変数（`_stage3_tools`/
+    `_user_ai_main_tools`）へ抽出され、非Stage4はリトライ経路と共有する1つの変数に
+    まとめられた（初回・リトライで一覧が独立して書かれなくなったため、単純な出現回数
+    カウントはもう成立しない——むしろ同一変数を共有する方が初回とリトライのツール
+    一覧が乖離しない、という意味で退行ではなく強化）。各経路のlabel付近の
+    windowにREAD_ENTITY_TOOLが現れるかで判定する。"""
     src = inspect.getsource(cela_main.generate_user_utterance)
-    # Stage1 + Stage3 + Stage4(リトライ含め2箇所) + 非Stage4(リトライ含め2箇所) = 6箇所
-    assert src.count("READ_ENTITY_TOOL") == 6
+    for landmark in [
+        'label="User AI (Stage1: レビュー)"',
+        'label="User AI (Stage3: 統合承認判断)"',
+        'label="User AI (Stage4)"',
+        'label="User AI"',
+    ]:
+        assert landmark in src, f"{landmark} が見つかりません"
+        idx = src.index(landmark)
+        window = src[max(0, idx - 400):idx + 400]
+        assert "READ_ENTITY_TOOL" in window, f"{landmark} 周辺にREAD_ENTITY_TOOLが見つかりません"
 
 
 def test_excluded_nodes_do_not_gain_read_entity():

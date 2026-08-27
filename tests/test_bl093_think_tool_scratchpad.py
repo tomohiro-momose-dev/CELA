@@ -214,14 +214,16 @@ def test_all_nodes_wire_think_tool_and_reset(func_name):
 def test_call_detector_domain_review_pass_also_wires_think_tool():
     """[BL-093] ドメイン妥当性レビュー（tools=None→[THINK_TOOL]）も全ノード対象化に含まれる。
     [BL-204] tools=[...]の一覧はBL-198/199/204等で継続的にツールが追加されており、
-    固定の文字数窓では脆くなる。窓サイズではなく、labelの直後に現れるtools=[...]の
-    1行そのものにTHINK_TOOLが含まれるかで判定する。"""
+    固定の文字数窓では脆くなる。
+    [BL-283] ツール一覧が呼び出し直前の変数（例: `_detector_domain_tools = [...]`）へ
+    抽出されたため、`tools=[`直後の1行だけを見る判定はもう成立しない。labelの前後の
+    windowにTHINK_TOOLが現れるかで判定する（変数抽出・インライン列挙のどちらでも通る）。"""
     src = inspect.getsource(cela_main.call_detector)
     assert 'label="Detector (Domain Review)"' in src
     domain_call_idx = src.index('label="Detector (Domain Review)"')
-    tools_line_start = src.index("tools=[", domain_call_idx)
-    tools_line_end = src.index("]", tools_line_start)
-    assert "THINK_TOOL" in src[tools_line_start:tools_line_end]
+    window_start = max(0, domain_call_idx - 400)
+    window_end = min(len(src), domain_call_idx + 400)
+    assert "THINK_TOOL" in src[window_start:window_end]
 
 
 def test_bl109_single_shot_judgment_nodes_reverted_to_tools_none():

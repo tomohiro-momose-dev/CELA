@@ -665,6 +665,60 @@ def test_web_search_handler_provider_not_configured(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# BL-282: log/2026-08-26/2334で、task_1_4到達時点でweb_search呼び出し上限（当時100/run）
+# が枯渇し、以降の全タスクでweb_searchが使えなくなる実害を確認した。
+# max_resultsの既定/上限を10→15へ、max_web_search_callsの既定を100→200へ引き上げた。
+# ---------------------------------------------------------------------------
+
+def test_web_search_handler_default_max_results_is_15(monkeypatch):
+    captured = {}
+
+    class _FakeProvider:
+        def search(self, query, max_results):
+            captured["max_results"] = max_results
+            return []
+
+    monkeypatch.setattr(web_tools, "get_search_provider", lambda: _FakeProvider())
+    web_tools.web_search_handler({"query": "x"}, {"web_search_call_count": 0}, {})
+    assert captured["max_results"] == 15
+
+
+def test_web_search_handler_clamps_max_results_to_15(monkeypatch):
+    captured = {}
+
+    class _FakeProvider:
+        def search(self, query, max_results):
+            captured["max_results"] = max_results
+            return []
+
+    monkeypatch.setattr(web_tools, "get_search_provider", lambda: _FakeProvider())
+    web_tools.web_search_handler({"query": "x", "max_results": 50}, {"web_search_call_count": 0}, {})
+    assert captured["max_results"] == 15
+
+
+def test_default_max_web_search_calls_fallback_is_200():
+    assert web_tools._DEFAULT_MAX_WEB_SEARCH_CALLS == 200
+
+
+def test_web_search_handler_uses_200_fallback_limit_when_config_missing(monkeypatch):
+    class _FakeProvider:
+        def search(self, query, max_results):
+            return []
+
+    monkeypatch.setattr(web_tools, "get_search_provider", lambda: _FakeProvider())
+    state = {"web_search_call_count": 150}
+    result = web_tools.web_search_handler({"query": "x"}, state, {})
+    assert "results" in result, "config未指定時、既定上限200未満なので拒否されてはならない"
+
+
+def test_cli_default_max_web_search_calls_is_200():
+    import inspect
+    import cela_main
+    src = inspect.getsource(cela_main)
+    assert '"max_web_search_calls": 200,' in src
+
+
+# ---------------------------------------------------------------------------
 # BL-270: Brave Search APIの402 Payment Required（利用上限到達）を明示的に検知し、
 # run内で以後の呼び出しを実際のAPIへ送らず短絡させる。
 # ---------------------------------------------------------------------------

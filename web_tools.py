@@ -88,7 +88,7 @@ _MARKITDOWN = MarkItDown()
 # 自動解決は行わないため（実データで確認済み）、後処理で解決する。
 _MARKDOWN_LINK_RE = re.compile(r"\]\(([^)\s]+)")
 
-_DEFAULT_MAX_WEB_SEARCH_CALLS = 20
+_DEFAULT_MAX_WEB_SEARCH_CALLS = 200  # [BL-282] configにキーが無い場合の最終フォールバック。CLI既定(200)と揃える。
 _DEFAULT_MAX_WEB_FETCH_CALLS = 20
 
 
@@ -611,13 +611,18 @@ def web_search_handler(args: dict, state: dict, config: dict) -> dict:
         return {"status": "error", "message": _unavailable_message}
     # [BL-218] 既定を5→10へ引き上げ。実ログで、5件では目的の情報に届かず同じqueryや
     # 近い言い換えで何度もweb_searchを呼び直す（run単位の呼び出し上限を無駄に消費する）
-    # 傾向が確認されたため（ユーザー指摘）。上限（10）と揃えることで、通常時は追加の
-    # 呼び出し判断をモデルに委ねず最初から候補を広く見せる。
-    max_results = args.get("max_results", 10)
+    # 傾向が確認されたため（ユーザー指摘）。
+    # [BL-282] 10→15へ再度引き上げ。長時間runの実ログレビューで、依然として同じqueryの
+    # 言い換え再検索が多発し、run単位のweb_search呼び出し上限を早々に枯渇させている
+    # ことが判明したため（ユーザー指摘）。上限（15）と揃えることで、通常時は追加の
+    # 呼び出し判断をモデルに委ねず最初から候補を広く見せる。なおExa Providerは
+    # ベンダーAPI仕様上numResultsが1-10までしか受け付けないため、Exa選択時は
+    # 15を指定しても実際には10件に制限される（get_search_provider内で別途clamp）。
+    max_results = args.get("max_results", 15)
     try:
-        max_results = max(1, min(int(max_results), 10))
+        max_results = max(1, min(int(max_results), 15))
     except (TypeError, ValueError):
-        max_results = 10
+        max_results = 15
 
     count = state.get("web_search_call_count", 0)
     limit = config.get("max_web_search_calls", _DEFAULT_MAX_WEB_SEARCH_CALLS)

@@ -249,7 +249,8 @@ ling_3_flash = "ling-3.0-flash"
 laguna_S_2_1 ="laguna-s-2.1:free"
 mimo_2_5 = "mimo-v2.5"
 hy3 = "hy3"
-ox_alpha="ox-alpha"
+ox_alpha="stealth/ox-alpha"
+glm_5_2 = "glm-5.2:free"
 _gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
 _gemini_auditor_key = os.environ.get("GEMINI_API_KEY_AUDITOR", "")
 _deepseek_v4_flash_auditor_key = os.environ.get("DSEEK_V4_FLASH_AUDITOR_KEY", "")
@@ -302,7 +303,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = ox_alpha
+model_user = nemotron_3_ultra
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -312,47 +313,47 @@ model_user = ox_alpha
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = ox_alpha # nemotron_3_ultra
+model_orchestrator = nemotron_3_ultra # nemotron_3_ultra
 
 client_expert = client_openrouter
-model_expert = ox_alpha # nemotron_3_ultra
+model_expert = nemotron_3_ultra # nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = ox_alpha
+model_task_planner = nemotron_3_ultra
 
 client_task_plan_reviewer = client_openrouter
-model_task_plan_reviewer = ox_alpha
+model_task_plan_reviewer = nemotron_3_ultra
 
 client_detector_domain = client_openrouter
-model_detector_domain = ox_alpha
+model_detector_domain = nemotron_3_ultra # nemotron_3_ultra
 client_detector_numeric = client_openrouter
-model_detector_numeric = ox_alpha # nemotron_3_ultra
+model_detector_numeric = nemotron_3_ultra # nemotron_3_ultra
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = ox_alpha
+model_decision_extractor = nemotron_3_ultra
 
 client_resource_arbiter = client_openrouter
-model_resource_arbiter = ox_alpha #nemotron_3_ultra
+model_resource_arbiter = nemotron_3_ultra #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = ox_alpha
+model_reflection = nemotron_3_ultra
 
 client_facilitator = client_openrouter
-model_facilitator = ox_alpha
+model_facilitator = nemotron_3_ultra
 
 client_integrator = client_openrouter
-model_integrator = ox_alpha #nemotron_3_ultra
+model_integrator = nemotron_3_ultra #nemotron_3_ultra
 
 client_reviewer_qa = client_openrouter
-model_reviewer_qa = ox_alpha #nemotron_3_ultra
+model_reviewer_qa = nemotron_3_ultra #nemotron_3_ultra
 
 client_goal_essence = client_openrouter
-model_goal_essence = ox_alpha #nemotron_3_ultra
+model_goal_essence = nemotron_3_ultra #nemotron_3_ultra
 
 # [BL-274] 対話型HIL（--interactive-hil）の単発Q&A応答生成用。グラフ実行を伴わない
 # スタンドアロンCLI呼び出しのため、他ノードと同じBL-189パターンで専用変数を持たせる。
 client_hil_qa = client_openrouter
-model_hil_qa = ox_alpha
+model_hil_qa = nemotron_3_ultra
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -1005,7 +1006,7 @@ WEB_SEARCH_TOOL = {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query text."},
-                "max_results": {"type": "integer", "description": "Max results to return (1-10, default 10)."},
+                "max_results": {"type": "integer", "description": "Max results to return (1-15, default 15). Note: the Exa provider caps at 10 regardless (vendor API limit)."},
             },
             "required": ["query"],
         },
@@ -1702,7 +1703,16 @@ THINK_TOOL = {
                 },
                 "decided": {
                     "type": "string",
-                    "description": "What you decided in this step, if anything."
+                    "description": (
+                        "What you decided in this step, if anything. [BL-283] This is NOT the "
+                        "persistent Decision Lineage (the `agreements` table, readable by other "
+                        "tasks/turns via `read_agreement`) -- like `scratch_concerns`, it is "
+                        "discarded the moment this tool-call loop ends. If your decision here is a "
+                        "branching point (you chose among multiple options/candidates, adopted or "
+                        "rejected a premise, etc.), you must ALSO call "
+                        "write_agreement(entry_type=\"Decision\") -- writing it here does not "
+                        "count as recording it."
+                    )
                 },
                 "why": {
                     "type": "string",
@@ -3516,6 +3526,7 @@ def _check_issue_permission(args: dict, caller_role: str) -> str | None:
         "decision_extractor_auto": {"CREATE"},  # [BL-154] decision_extractor_nodeのPython側自動起票専用
         "revise_goal_auto": {"CREATE"},  # [BL-163] revise_goal成功時のPython側自動起票専用
         "whiteboard_version_auto": {"CREATE"},  # [BL-263] 改版数が閾値に達した際のPython側自動起票専用
+        "decision_lineage_gap_auto": {"CREATE"},  # [BL-283] 差し戻し後もDecision記録漏れが疑われる場合のPython側自動起票専用
     }
     action_type = args.get("action_type")
     allowed = ALLOWED_ISSUE_ACTIONS_BY_ROLE.get(caller_role, set())
@@ -5190,7 +5201,7 @@ _RUNTIME_TOOL_LIMIT_KEYS = (
 def _resume_config_overrides_from(config: dict) -> dict:
     """[BL-203] AppConfigから実行時設定4フィールドを取り出す（既定値はLineageState初期化と同値）。"""
     return {
-        "max_web_search_calls": config.get("max_web_search_calls", 30),
+        "max_web_search_calls": config.get("max_web_search_calls", 200),
         "max_web_fetch_calls": config.get("max_web_fetch_calls", 30),
         "max_road_route_calls": config.get("max_road_route_calls", 30),
         "goal_reference_dir": config.get("goal_reference_dir", ""),
@@ -6404,6 +6415,118 @@ def _query_and_parse_with_retry(
         _res_preview = (res or "")[:300]
         print(f"⚠️ [{label}] JSON判定パース失敗を検知（生レスポンス冒頭300字: {_res_preview!r}）。層2リトライ {attempt + 1}/{max_retries}...")
     return fallback, True
+
+
+def _pending_decision_candidates() -> list[dict]:
+    """[BL-283] 今回のツールループでthinkにdecided+rejected両方が記録されたが、
+    write_agreement(entry_type="Decision")として書き切れていない分の候補を返す。
+    1件ずつの厳密な対応付け（曖昧一致）は行わず件数比較のみに留める（BL-232のitem完全一致
+    マージと同じ理由：誤った同一視によるサイレントな取りこぼしを避けるため、過剰検知の方が
+    過少検知より安全側）。`_THINK_REASONING_LOG`/`_LAST_WRITE_AGREEMENT_ITEMS`はいずれも
+    ノード呼び出し単位（前者は`_reset_think_scratchpad()`、後者は`query_AI()`呼び出しごと）で
+    リセットされる既存のグローバルのため、新規の状態追跡は不要。
+    """
+    decision_like = [
+        e for e in _THINK_REASONING_LOG
+        if (e.get("decided") or "").strip() and (e.get("rejected") or "").strip()
+    ]
+    decision_writes = sum(1 for item in _LAST_WRITE_AGREEMENT_ITEMS if item.get("entry_type") == "Decision")
+    return decision_like[decision_writes:] if len(decision_like) > decision_writes else []
+
+
+def _build_decision_gap_correction_note(pending: list[dict]) -> str:
+    """[BL-283] `_pending_decision_candidates`が返した候補を、モデルへの差し戻し文へ整形する。"""
+    candidates_text = "\n".join(
+        f"- 決定: {p['decided']} / 理由: {p.get('why', '')} / 却下: {p['rejected']} / 却下理由: {p.get('rejected_why', '')}"
+        for p in pending
+    )
+    return (
+        "[BL-283 SYSTEM NOTICE] あなたが直前にthinkへ記録した以下の分岐点は、"
+        "write_agreement(entry_type=\"Decision\")としてまだ記録されていません。\n"
+        f"{candidates_text}\n"
+        "これらについてwrite_agreement(entry_type=\"Decision\")を呼んでから、"
+        "改めて最終回答を出してください。"
+    )
+
+
+def _record_decision_lineage_gap_issue(label: str, pending: list[dict], retry_writes: int, state: dict | None) -> None:
+    """[BL-283] 1回の差し戻し後もなお不足する場合、issue_log（major、既存のdetector_auto等と
+    同型のPython側自動起票専用ロール）へ機械的に記録する。severity="major"は_write_issue_impl
+    の不変条件によりstatus="escalated"となり、既存のescalation_pin表示・BL-181遷移ブロックへ
+    無改修で乗る（BL-096/BL-266と同じ設計判断）。
+    """
+    if not state:
+        return
+    conn = get_active_conn()
+    run_id = state.get("run_id", _CURRENT_RUN_ID)
+    task_id = _CURRENT_TASK_ID or state.get("current_task_id", "")
+    phase_id = state.get("current_phase", {}).get("phase_id", "")
+    topic = f"decision_lineage_gap_{_CURRENT_CALLER_ROLE}_{task_id or 'no_task'}"
+    description = (
+        f"[BL-283] {label}がthinkに記録した分岐点{len(pending)}件のうち、"
+        f"差し戻し後もwrite_agreement(entry_type='Decision')が{retry_writes}件しか確認できませんでした。"
+        "未記録の可能性がある分岐点:\n" +
+        "\n".join(f"- 決定: {p['decided']} / 却下: {p['rejected']}" for p in pending)
+    )
+    _write_issue_impl(
+        {"action_type": "CREATE", "topic": topic, "severity": "major",
+         "description": description, "phase_id": phase_id, "task_id": task_id},
+        conn, run_id, "decision_lineage_gap_auto", phase_id, task_id,
+    )
+    print(f"  🚨 [BL-283] {label}: 差し戻し後も分岐点の記録漏れが疑われるためissue_logへmajor起票しました: topic={topic}")
+
+
+def _enforce_decision_lineage_freetext(
+    messages: list[dict], content: str, client: OpenAI, model: str, label: str,
+    tools: list[dict], state: dict | None, light_system_prompt: str | None = None,
+) -> str:
+    """[BL-283] 自由文出力ノード（call_expert/orchestrator/resource_arbiter/integrator/
+    facilitator/generate_user_utterance）向け。query_AIの最終回答を、Decisionの記録漏れが
+    無いか機械的に検査したうえで返す。AIが任意に呼ぶ許可申請ツールにはしない
+    （AI依存という同じ弱点を抱えるため、ユーザー指摘）。差し戻しは1回のみ、その後は
+    再検証してissue_log（major）へ記録するかを決めるだけで、多段階の反復検証はしない
+    （_LAST_WRITE_AGREEMENT_ITEMSがquery_AI呼び出しごとにリセットされるため、反復検証は
+    初回分とリトライ分の誤った累積比較を生みやすい）。
+    """
+    pending = _pending_decision_candidates()
+    if not pending:
+        return content
+    retry_messages = messages + [
+        {"role": "assistant", "content": content},
+        {"role": "user", "content": _build_decision_gap_correction_note(pending)},
+    ]
+    retried_content = query_AI(retry_messages, client=client, model=model, label=f"{label}(BL-283差し戻し)",
+                                tools=tools, light_system_prompt=light_system_prompt, state=state)
+    retry_writes = sum(1 for item in _LAST_WRITE_AGREEMENT_ITEMS if item.get("entry_type") == "Decision")
+    if retry_writes < len(pending):
+        _record_decision_lineage_gap_issue(label, pending, retry_writes, state)
+    return retried_content
+
+
+def _enforce_decision_lineage_json(
+    prompt: str, parsed: dict | list, client: OpenAI, model: str, label: str,
+    tools: list[dict], state: dict | None,
+) -> dict | list:
+    """[BL-283] `_query_and_parse_with_retry`経由のJSON出力ノード（task_planner/detector×2/
+    reflection/reviewer/goal_essence_analyst/task_plan_reviewer）向け。`_enforce_decision_lineage_freetext`
+    と同じ方針・同じ1回差し戻しポリシーだが、JSON再パースを伴う点のみ異なる。task_plannerの
+    戻り値はdictではなくlist（フェーズ配列）のため、型はdict|listを許容する。
+    """
+    pending = _pending_decision_candidates()
+    if not pending:
+        return parsed
+    retry_prompt = (
+        f"{prompt}\n\n【あなたの直前の出力】\n{json.dumps(parsed, ensure_ascii=False)}\n\n"
+        f"{_build_decision_gap_correction_note(pending)}\n"
+        "write_agreementを呼んだ後、同じ形式のJSONを最初から出力し直してください。"
+    )
+    retried_res = query_AI([{"role": "user", "content": retry_prompt}], client=client, model=model,
+                            label=f"{label}(BL-283差し戻し)", tools=tools, state=state)
+    retried_parsed = _safe_json_parse(retried_res, fallback=parsed)
+    retry_writes = sum(1 for item in _LAST_WRITE_AGREEMENT_ITEMS if item.get("entry_type") == "Decision")
+    if retry_writes < len(pending):
+        _record_decision_lineage_gap_issue(label, pending, retry_writes, state)
+    return retried_parsed
 
 # ---------------------------------------------------------------------------
 # 0. SQLite永続化層（R1、設計書§2・§3.6、impl_Plan §2〜§5準拠）
@@ -9757,6 +9880,9 @@ def _build_decision_lineage_directive(status_hint: str) -> str:
         "reason_whyには、選ばなかった選択肢・却下した候補とその理由、他の制約とのトレード"
         "オフがあればそれも明記してください（例：「○○という理由で、Xの採用をやめ、代わりに"
         "Yへ切り替えた」のように、却下した対象と理由の両方を書く）。\n"
+        "[BL-283] thinkのdecided/rejectedに書くだけでは記録したことになりません——thinkは"
+        "このツールループが終わると消える一時メモであり、write_agreementのDecision Lineage"
+        "（他タスク・他ターンからread_agreementで参照できる）とは別物です。\n"
     )
 
 
@@ -10472,13 +10598,18 @@ It serves as the initial planning layer for breaking down complex objectives acr
     _CURRENT_CALLER_ROLE = "task_planner"  # [BL-095]
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
+    _task_planner_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_PLAN_DRAFT_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
     phases, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_task_planner, model=model_task_planner, label="Task Planner",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_PLAN_DRAFT_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], fallback=fallback_phase,
+        tools=_task_planner_tools, fallback=fallback_phase,
         state=state,
     )
     if parse_failed:
         print("🚨 [Task Planner] JSON分解結果の取得に失敗しました。縮退計画にフォールバックします。")
+    else:
+        phases = _enforce_decision_lineage_json(prompt, phases, client=client_task_planner,
+                                                 model=model_task_planner, label="Task Planner",
+                                                 tools=_task_planner_tools, state=state)
     return phases
 
 def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
@@ -10598,11 +10729,16 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
     # 1ターン1件のサマリ）にしか残らずagreementsのlineageには入らなかった。ALLOWED_STATUS_BY_ROLEへ
     # "orchestrator": {"Proposed"}を追加し、write_agreement(entry_type="Decision")での能動的な
     # 記録を許可・必須化する（decisionsテーブルへの記録は床として維持したまま、その上に重ねる）。
+    _orchestrator_messages = [{"role": "user", "content": prompt}]
+    _orchestrator_tools = [READ_PROJECT_PLAN_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_VERIFIED_FACT_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL]
     res = query_AI(
-        [{"role": "user", "content": prompt}], client=client_orchestrator, model=model_orchestrator, label="Orchestrator",
-        tools=[READ_PROJECT_PLAN_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_VERIFIED_FACT_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL],
+        _orchestrator_messages, client=client_orchestrator, model=model_orchestrator, label="Orchestrator",
+        tools=_orchestrator_tools,
         state=state,
     )
+    res = _enforce_decision_lineage_freetext(_orchestrator_messages, res, client=client_orchestrator,
+                                              model=model_orchestrator, label="Orchestrator",
+                                              tools=_orchestrator_tools, state=state)
     _orchestrator_fallback = {"expert": "", "reason": "", "focus_guidance": ""}
     parsed = _safe_json_parse(res, fallback=_orchestrator_fallback)
     if parsed is _orchestrator_fallback:
@@ -11261,8 +11397,12 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     _CURRENT_CALLER_ROLE = "expert"
     _CURRENT_TASK_ID = _effective_current_task_id_from(state)
     _reset_think_scratchpad()  # [BL-093]
-    return query_AI(messages, client=client_expert, model=model_expert, label=f"Expert:{expert_name}",
-                     tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, REGISTER_ENTITY_TOOL, WRITE_ENTITY_ATTRIBUTE_TOOL, READ_ENTITY_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], light_system_prompt=light_system_prompt, state=state)  # [BL-228] Expertは唯一trace_lineageが未配線だった
+    _expert_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, REGISTER_ENTITY_TOOL, WRITE_ENTITY_ATTRIBUTE_TOOL, READ_ENTITY_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]  # [BL-228] Expertは唯一trace_lineageが未配線だった
+    _expert_content = query_AI(messages, client=client_expert, model=model_expert, label=f"Expert:{expert_name}",
+                     tools=_expert_tools, light_system_prompt=light_system_prompt, state=state)
+    return _enforce_decision_lineage_freetext(messages, _expert_content, client=client_expert, model=model_expert,
+                                               label=f"Expert:{expert_name}", tools=_expert_tools,
+                                               state=state, light_system_prompt=light_system_prompt)
 
 
 #def call_detector(goal: str, user_input: str, expert_output: str, decisions: list[Decision], current_phase: dict) -> dict:
@@ -11763,13 +11903,18 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f'\nReturn ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用(無ければ空文字)", "observations": "気づき・懸念（自由記述、無ければ空文字）", "essence_sufficiency_concern": true/false, "essence_sufficiency_reason": "trueの場合、本質のどの記述が計画のどこにも反映されていないか（falseなら空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
+    _detector_domain_tools = [READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
         domain_prompt, client=client_detector_domain, model=model_detector_domain, label="Detector (Domain Review)",
-        tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線
+        tools=_detector_domain_tools,
         fallback={"constraint_issue": "none", "comment": "", "target_excerpt": "", "observations": "",
                   "essence_sufficiency_concern": False, "essence_sufficiency_reason": ""},
         state=state,
     )
+    if not domain_parse_failed:
+        domain_parsed = _enforce_decision_lineage_json(domain_prompt, domain_parsed, client=client_detector_domain,
+                                                         model=model_detector_domain, label="Detector (Domain Review)",
+                                                         tools=_detector_domain_tools, state=state)
     if domain_parse_failed:
         print("🚨 [Detector] ドメイン妥当性レビューのJSON判定取得に失敗しました。フェイルクローズ(major)します。")
         domain_constraint_issue = "major"
@@ -11977,11 +12122,16 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由", "criteria_status": [true/false, ...], "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用（無ければ空文字）", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
+    _detector_numeric_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_detector_numeric, model=model_detector_numeric, label="Detector",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
+        tools=_detector_numeric_tools, fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
         state=state,
     )
+    if not parse_failed:
+        parsed = _enforce_decision_lineage_json(prompt, parsed, client=client_detector_numeric,
+                                                 model=model_detector_numeric, label="Detector",
+                                                 tools=_detector_numeric_tools, state=state)
     if parse_failed:
         # [SAFETY] D-005: 層2リトライを使い切った場合はフェイルオープン（none）ではなくフェイルクローズ（major）に倒す。
         # F-2.6検算ゲート導入の目的（暗算を信用しない）と、判定データ欠落時のフェイルオープンは相容れないため。
@@ -12487,7 +12637,12 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goa
     _CURRENT_CALLER_ROLE = "arbiter"
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    res = query_AI([{"role": "user", "content": prompt}], client=client_resource_arbiter, model=model_resource_arbiter, label="Resource Arbiter", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
+    _arbiter_messages = [{"role": "user", "content": prompt}]
+    _arbiter_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
+    res = query_AI(_arbiter_messages, client=client_resource_arbiter, model=model_resource_arbiter, label="Resource Arbiter", tools=_arbiter_tools, state=state)
+    res = _enforce_decision_lineage_freetext(_arbiter_messages, res, client=client_resource_arbiter,
+                                              model=model_resource_arbiter, label="Resource Arbiter",
+                                              tools=_arbiter_tools, state=state)
     _arbiter_fallback = {}
     parsed = _safe_json_parse(res, fallback=_arbiter_fallback)
     if parsed is _arbiter_fallback:
@@ -12713,6 +12868,7 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
     global _CURRENT_CALLER_ROLE
     _CURRENT_CALLER_ROLE = "reflection"  # [BL-280]
     _reset_think_scratchpad()  # [BL-093]
+    _reflection_tools = [READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, WRITE_AGREEMENT_TOOL]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_reflection, model=model_reflection, label="Reflection",
         # [BL-184] BL-109でtools=None（単発判定、think無し）にした方針は維持しつつ、
@@ -12722,10 +12878,16 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
         # で追加する。
         # [BL-280] write_agreement（entry_type="Decision"）を追加し、他の監査ロールと同様に
         # 分岐点の記録を必須化する（ALLOWED_STATUS_BY_ROLE["reflection"]で権限管理）。
-        tools=[READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, WRITE_AGREEMENT_TOOL],
+        tools=_reflection_tools,
         fallback={"still_aligned": False, "discussion_status": "stagnant", "note": "Parse error."},
         state=state,
     )
+    if not parse_failed:
+        # [BL-283] Reflectionはthink未配線（BL-109の単発判定方針）のため_pending_decision_candidates
+        # は常に空となり実質no-op。将来thinkが追加された場合に備え他ノードと同一の配線にしておく。
+        parsed = _enforce_decision_lineage_json(prompt, parsed, client=client_reflection,
+                                                 model=model_reflection, label="Reflection",
+                                                 tools=_reflection_tools, state=state)
     if parse_failed:
         print("🚨 [Reflection] JSON判定の取得に失敗しました。安全のためフェイルクローズ(stagnant)します。")
     aligned_val = parsed.get("still_aligned", True)
@@ -12898,10 +13060,15 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     _CURRENT_CALLER_ROLE = "facilitator"
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    return query_AI(
-        [{"role": "user", "content": prompt}], client=client_facilitator, model=model_facilitator, label="Facilitator",
-        tools=[THINK_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, WRITE_AGREEMENT_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL], state=state,
+    _facilitator_messages = [{"role": "user", "content": prompt}]
+    _facilitator_tools = [THINK_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, WRITE_AGREEMENT_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL]
+    _facilitator_content = query_AI(
+        _facilitator_messages, client=client_facilitator, model=model_facilitator, label="Facilitator",
+        tools=_facilitator_tools, state=state,
     )
+    return _enforce_decision_lineage_freetext(_facilitator_messages, _facilitator_content, client=client_facilitator,
+                                               model=model_facilitator, label="Facilitator",
+                                               tools=_facilitator_tools, state=state)
 
 def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "", state: dict | None = None) -> dict:
     """【SLM要約】
@@ -12953,7 +13120,12 @@ def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "", st
     _CURRENT_CALLER_ROLE = "integrator"
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    res = query_AI([{"role": "user", "content": prompt}], client=client_integrator, model=model_integrator, label="Integrator", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
+    _integrator_messages = [{"role": "user", "content": prompt}]
+    _integrator_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
+    res = query_AI(_integrator_messages, client=client_integrator, model=model_integrator, label="Integrator", tools=_integrator_tools, state=state)
+    res = _enforce_decision_lineage_freetext(_integrator_messages, res, client=client_integrator,
+                                              model=model_integrator, label="Integrator",
+                                              tools=_integrator_tools, state=state)
     _integrator_fallback = {"contradictions": False, "affected_phases": [], "details": ""}
     parsed = _safe_json_parse(res, fallback=_integrator_fallback)
     if parsed is _integrator_fallback:
@@ -13073,11 +13245,16 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
     _CURRENT_CALLER_ROLE = "reviewer"
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
+    _reviewer_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_reviewer_qa, model=model_reviewer_qa, label="Reviewer QA",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"},
+        tools=_reviewer_tools, fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"},
         state=state,
     )
+    if not parse_failed:
+        parsed = _enforce_decision_lineage_json(prompt, parsed, client=client_reviewer_qa,
+                                                 model=model_reviewer_qa, label="Reviewer QA",
+                                                 tools=_reviewer_tools, state=state)
     if parse_failed:
         # [SAFETY] D-005: 層2リトライを使い切った場合はフェイルクローズ（passed=False、差し戻し）に倒す。
         print("🚨 [Reviewer QA] 層2リトライを使い切ってもJSON判定を取得できませんでした。フェイルクローズ(passed=False)します。")
@@ -13347,14 +13524,20 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         _approval_mismatch_notice = ""
         approval_status = "Pending"
         approval_reason = ""
+        _stage3_tools = [WRITE_AGREEMENT_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
         for _approval_attempt in range(3):
             _reset_think_scratchpad()
+            _stage3_prompt = approval_prompt_base + _approval_mismatch_notice
             approval_parsed, approval_parse_failed = _query_and_parse_with_retry(
-                approval_prompt_base + _approval_mismatch_notice, client=client_user, model=model_user,
-                label="User AI (Stage3: 統合承認判断)", tools=[WRITE_AGREEMENT_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],
+                _stage3_prompt, client=client_user, model=model_user,
+                label="User AI (Stage3: 統合承認判断)", tools=_stage3_tools,
                 fallback={"approval_status": "Pending", "approval_reason": ""}, state=state,
             )
             _absorb_stage_trackers()
+            if not approval_parse_failed:
+                approval_parsed = _enforce_decision_lineage_json(_stage3_prompt, approval_parsed, client=client_user,
+                                                                  model=model_user, label="User AI (Stage3: 統合承認判断)",
+                                                                  tools=_stage3_tools, state=state)
             if approval_parse_failed:
                 approval_status = "Pending"
                 approval_reason = "(承認判断のJSON解析に失敗しました)"
@@ -13949,8 +14132,9 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     _CURRENT_TASK_ID = _effective_current_task_id_from(state)
     _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")  # [BL-096] write_issueのphase_id用
     _CURRENT_GOAL_TEXT = user_goal  # [BL-086] revise_goalの編集対象
+    _user_ai_main_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
     _reset_think_scratchpad()  # [BL-093]
-    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
+    content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=_user_ai_main_tools, state=state)
 
     if content is None or content.strip() == "" or content == "(APIから空の応答が返されました)":
         for retry in range(3):
@@ -13961,12 +14145,14 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")
             _CURRENT_GOAL_TEXT = user_goal
             _reset_think_scratchpad()  # [BL-093]
-            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL], state=state)
+            content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=_user_ai_main_tools, state=state)
             if content and content.strip() and content != "(APIから空の応答が返されました)":
                 break
         else:
             raise RuntimeError("User AIの応答取得に3回連続で失敗しました。実行を中断します。")
-    
+
+    content = _enforce_decision_lineage_freetext(messages, content, client=client_user, model=model_user,
+                                                  label="User AI", tools=_user_ai_main_tools, state=state)
     return content
 
 def check_global_constraint_overrun(state: LineageState) -> list[dict]:
@@ -14253,14 +14439,19 @@ def call_goal_essence_analyst(goal: str, state: dict | None = None) -> dict:
     _CURRENT_CALLER_ROLE = "goal_essence_analyst"  # [BL-095]
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
+    _goal_essence_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_goal_essence, model=model_goal_essence, label="Goal Essence Analyst",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],
+        tools=_goal_essence_tools,
         fallback={"true_essence": goal, "feasibility_notes": "(JSONパース失敗のため見立てなし)"},
         state=state,
     )
     if parse_failed:
         print("🚨 [Goal Essence Analyst] JSON結果の取得に失敗しました。ゴール文そのままにフォールバックします。")
+    else:
+        parsed = _enforce_decision_lineage_json(prompt, parsed, client=client_goal_essence,
+                                                 model=model_goal_essence, label="Goal Essence Analyst",
+                                                 tools=_goal_essence_tools, state=state)
     return parsed
 
 
@@ -14689,13 +14880,18 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     _CURRENT_CALLER_ROLE = "task_plan_reviewer"  # [BL-095]
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
+    _task_plan_reviewer_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_task_plan_reviewer, model=model_task_plan_reviewer, label="Task Plan Reviewer",
-        tools=[PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],
+        tools=_task_plan_reviewer_tools,
         fallback={"risk": "low", "constraint_issue": "none", "comment": "(JSONパース失敗のためnone扱い)",
                   "observations": "", "per_task_comments": []},
         state=state,
     )
+    if not parse_failed:
+        parsed = _enforce_decision_lineage_json(prompt, parsed, client=client_task_plan_reviewer,
+                                                 model=model_task_plan_reviewer, label="Task Plan Reviewer",
+                                                 tools=_task_plan_reviewer_tools, state=state)
     if parse_failed:
         print("🚨 [Task Plan Reviewer] JSON判定の取得に失敗しました。安全のためフェイルクローズ(major)します。")
         return {
@@ -16992,7 +17188,7 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
                 "web_search_call_count": 0,
                 "web_fetch_call_count": 0,
                 "web_search_provider_unavailable_message": "",  # [BL-270]
-                "max_web_search_calls": config.get("max_web_search_calls", 30),
+                "max_web_search_calls": config.get("max_web_search_calls", 200),
                 "max_web_fetch_calls": config.get("max_web_fetch_calls", 30),
                 "road_route_call_count": 0,
                 "max_road_route_calls": config.get("max_road_route_calls", 30),
@@ -17477,8 +17673,12 @@ if __name__ == "__main__":
         # docs/refs/chino_city/chino_city_data.mdに既にある施設住所・座標を知らずweb_searchで
         # 再検索し、30回/runの上限を使い果たしていたことが判明。read_goal_reference導入後も、
         # 参照データに無い項目（施設の郵便番号住所等）は正当にweb_searchが必要になるため、
-        # 上限自体も30→50へ緩和する（ユーザー承認済み、AGENTS.md §7）。
-        "max_web_search_calls": 100,
+        # 上限自体も段階的に緩和してきた（30→50→100）。
+        # [BL-282] log/2026-08-26/2334（茅野市バスrun）で、task_1_4到達時点で100/100まで
+        # 枯渇し、残り全タスクでweb_searchが使えなくなる実害を確認。100→200へ再緩和
+        # （ユーザー承認済み、AGENTS.md §7）。同時にmax_results既定も10→15へ引き上げ、
+        # 1回の呼び出しで得られる候補を増やし同一query言い換えの再検索を減らす。
+        "max_web_search_calls": 200,
         "max_web_fetch_calls": 100,
         "max_road_route_calls": 100,
         "goal_reference_dir": "docs/refs/chino_city",
