@@ -57,12 +57,15 @@ def test_apply_and_get_latest_whiteboard_roundtrip(db_conn):
     v1 = cela_main.apply_whiteboard_patch(conn, run_id, "phase_1", "task_1_1", "内容V1", "expert", "初版")
     assert v1 == 1
     latest = cela_main.get_latest_whiteboard(conn, run_id, "phase_1", "task_1_1")
-    assert latest == {"version": 1, "content": "内容V1"}
+    # [BL-289] author_role/edit_summary/timestamp/draft_idも返るようになった
+    assert latest["version"] == 1 and latest["content"] == "内容V1"
+    assert latest["author_role"] == "expert" and latest["edit_summary"] == "初版"
 
     v2 = cela_main.apply_whiteboard_patch(conn, run_id, "phase_1", "task_1_1", "内容V2", "expert", "修正")
     assert v2 == 2
     latest2 = cela_main.get_latest_whiteboard(conn, run_id, "phase_1", "task_1_1")
-    assert latest2 == {"version": 2, "content": "内容V2"}
+    assert latest2["version"] == 2 and latest2["content"] == "内容V2"
+    assert latest2["author_role"] == "expert" and latest2["edit_summary"] == "修正"
 
 
 # ===========================================================================
@@ -161,7 +164,8 @@ def test_write_agreement_deliverable_create_saves_to_whiteboard_v1(db_conn):
     assert row["decision_what"] == "WHITEBOARD:phase_1:task_1_1"
 
     wb = cela_main.get_latest_whiteboard(conn, run_id, "phase_1", "task_1_1")
-    assert wb == {"version": 1, "content": long_content}
+    # [BL-289] author_role/edit_summary/timestamp/draft_idも返るようになった
+    assert wb["version"] == 1 and wb["content"] == long_content
 
 
 def test_write_agreement_deliverable_update_with_edits_applies_diff(db_conn):
@@ -306,11 +310,12 @@ def test_read_deliverable_file_resolves_whiteboard_pointer_by_task_id(db_conn):
         "decision_what": "Z" * 300, "reason_why": "r", "entry_type": "Deliverable", "phase_id": "phase_1",
     })
 
+    # [BL-289] ホワイトボード経路はdict化された
     content = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"task_id": "task_1_1"})
-    assert isinstance(content, str) and content.startswith("Z" * 10)
+    assert isinstance(content, dict) and content["content"].startswith("Z" * 10)
 
     content_by_topic = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"topic_keyword": "R4読み取り"})
-    assert isinstance(content_by_topic, str) and content_by_topic.startswith("Z" * 10)
+    assert isinstance(content_by_topic, dict) and content_by_topic["content"].startswith("Z" * 10)
 
 
 # ===========================================================================

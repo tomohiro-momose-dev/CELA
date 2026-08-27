@@ -143,7 +143,7 @@ def test_r3a_t4_read_deliverable_file_path_validation():
         f.write("hello r3a")
     try:
         ok = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"file_path": legit_path})
-        assert ok == "hello r3a"
+        assert ok == {"content": "hello r3a"}  # [BL-289] file_path経路はdict化された
 
         traversal = cela_main.TOOL_DISPATCH["read_deliverable_file"]({
             "file_path": os.path.join(test_dir, "..", "..", "cela_main.py")
@@ -567,11 +567,12 @@ def test_bl040_read_deliverable_file_lookup_by_task_id(db_conn):
 
         # [BL-147] task_id指定時は計画への実在チェックが先に走るため、state経由でpending_task_idsを渡す。
         read_state = {"pending_task_ids": ["task_1_1"]}
+        # [BL-289] ホワイトボード経路はdict化された
         by_task_id = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"task_id": "task_1_1"}, read_state)
-        assert isinstance(by_task_id, str) and by_task_id.startswith("Z" * 10)
+        assert isinstance(by_task_id, dict) and by_task_id["content"].startswith("Z" * 10)
 
         by_topic = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"topic_keyword": "BL040"})
-        assert isinstance(by_topic, str) and by_topic.startswith("Z" * 10)
+        assert isinstance(by_topic, dict) and by_topic["content"].startswith("Z" * 10)
 
         # [BL-147] 計画にもpending_task_idsにも実在しないtask_idは、成果物の有無を見る前に
         # 「計画に存在しない」エラーで拒否されるようになった（従来はnot_foundとして素通りしていた）。

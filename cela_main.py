@@ -98,13 +98,34 @@ class MultiLogger:
         start_msg = f"# Execution Log Started at: {now.strftime('%Y-%m-%d %H:%M:%S')} JST\n\n"
         self.file_with_prompt.write(start_msg)
         self.file_no_prompt.write(start_msg)
-        
+
+        # [BL-276] ログファイル（log_with_prompt.md/log_no_prompt.md、ターミナル表示は対象外）の
+        # 各行頭へ実行時刻を付与し、事後的に各ステップの所要時間を追跡できるようにする。
+        # start_msgは改行で終わっているため、次のwrite()から双方とも行頭状態で始まる。
+        self._at_line_start_with = True
+        self._at_line_start_no = True
+
         self.is_prompt_mode = False
         print("📝 ログの出力設定を完了しました:")
         print("   - [ターミナル表示]   : プロンプト非表示")
         print(f"   - [プロンプトあり] : {self.filename_with}")
         print(f"   - [プロンプトなし] : {self.filename_no}")
         print("============================================================\n")
+
+    def _stamp_for_file(self, message: str, at_line_start: bool) -> tuple[str, bool]:
+        """[BL-276] このwrite()呼び出しが行頭から始まる場合のみ、メッセージ先頭へ
+        `[HH:MM:SS]`のタイムスタンプを付与する。print()は1回の呼び出しで本体テキストと
+        end('\\n')を別々のwrite()としてこのクラスへ渡すため、埋め込まれた改行1つ1つに
+        毎回付け直すのではなく「この呼び出し自体が行頭から始まるか」だけで判定する
+        （巨大な複数行JSON dumpの内部にまで挿入されて可読性を落とすのを避けるため）。
+        戻り値は(ファイルへ書く文字列, 次回呼び出し時の行頭状態)。
+        """
+        if not message:
+            return message, at_line_start
+        stamped = message
+        if at_line_start:
+            stamped = datetime.datetime.now(JST).strftime("[%H:%M:%S] ") + message
+        return stamped, message.endswith("\n")
 
     def write(self, message):
         """【SLM要約】
@@ -115,15 +136,21 @@ class MultiLogger:
         # ずれて見える原因）。streamingの逐次printも含め毎回のwrite()直後にflushし、
         # ターミナル表示とほぼ同期させる（頻度は高いが、対話的なドライラン用途では
         # 性能より即時性を優先する）。
+        # [BL-276] file_with_prompt/file_no_promptはis_prompt_modeにより受け取る内容が
+        # 分岐する（file_with_promptのみが受け取るメッセージがある）ため、行頭状態は
+        # それぞれ独立に追跡する。ターミナル表示は対象外（生のmessageをそのまま出す）。
         if self.is_prompt_mode:
-            self.file_with_prompt.write(message)
+            stamped_with, self._at_line_start_with = self._stamp_for_file(message, self._at_line_start_with)
+            self.file_with_prompt.write(stamped_with)
             self.file_with_prompt.flush()
         else:
             self.terminal.write(message)
             self.terminal.flush()
-            self.file_with_prompt.write(message)
+            stamped_with, self._at_line_start_with = self._stamp_for_file(message, self._at_line_start_with)
+            self.file_with_prompt.write(stamped_with)
             self.file_with_prompt.flush()
-            self.file_no_prompt.write(message)
+            stamped_no, self._at_line_start_no = self._stamp_for_file(message, self._at_line_start_no)
+            self.file_no_prompt.write(stamped_no)
             self.file_no_prompt.flush()
 
     def flush(self):
@@ -244,13 +271,13 @@ gemma_local = "gemma4-it:e4b"
 deepseek_v4_flash = "deepseek-v4-flash-0731"
 nemotron_3_super = "nemotron-3-super-120b-a12b:free"
 nemotron_3_ultra = "nemotron-3-ultra-550b-a55b:free"
+nemotron_3_5_lightning = "nemotron-3.5-lightning:free"
 gpt_5_6_luna = "gpt-5.6-luna"
 ling_3_flash = "ling-3.0-flash"
 laguna_S_2_1 ="laguna-s-2.1:free"
 mimo_2_5 = "mimo-v2.5"
 hy3 = "hy3"
-ox_alpha="stealth/ox-alpha"
-glm_5_2 = "glm-5.2:free"
+glm_5_3_flash = "glm-5.3-flash"
 _gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
 _gemini_auditor_key = os.environ.get("GEMINI_API_KEY_AUDITOR", "")
 _deepseek_v4_flash_auditor_key = os.environ.get("DSEEK_V4_FLASH_AUDITOR_KEY", "")
@@ -303,7 +330,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = nemotron_3_super
+model_user = glm_5_3_flash
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -313,47 +340,47 @@ model_user = nemotron_3_super
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = nemotron_3_super # nemotron_3_ultra
+model_orchestrator = glm_5_3_flash # nemotron_3_ultra
 
 client_expert = client_openrouter
-model_expert = nemotron_3_super # nemotron_3_ultra
+model_expert = glm_5_3_flash # nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = nemotron_3_super
+model_task_planner = glm_5_3_flash
 
 client_task_plan_reviewer = client_openrouter
-model_task_plan_reviewer = nemotron_3_super
+model_task_plan_reviewer = glm_5_3_flash
 
 client_detector_domain = client_openrouter
-model_detector_domain = nemotron_3_super # nemotron_3_ultra
+model_detector_domain = glm_5_3_flash # nemotron_3_ultra
 client_detector_numeric = client_openrouter
-model_detector_numeric = nemotron_3_super # nemotron_3_ultra
+model_detector_numeric = glm_5_3_flash # nemotron_3_ultra
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = nemotron_3_super
+model_decision_extractor = glm_5_3_flash
 
 client_resource_arbiter = client_openrouter
-model_resource_arbiter = nemotron_3_super #nemotron_3_ultra
+model_resource_arbiter = glm_5_3_flash #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = nemotron_3_super
+model_reflection = glm_5_3_flash
 
 client_facilitator = client_openrouter
-model_facilitator = nemotron_3_super
+model_facilitator = glm_5_3_flash
 
 client_integrator = client_openrouter
-model_integrator = nemotron_3_super #nemotron_3_ultra
+model_integrator = glm_5_3_flash #nemotron_3_ultra
 
 client_reviewer_qa = client_openrouter
-model_reviewer_qa = nemotron_3_super #nemotron_3_ultra
+model_reviewer_qa = glm_5_3_flash #nemotron_3_ultra
 
 client_goal_essence = client_openrouter
-model_goal_essence = nemotron_3_super #nemotron_3_ultra
+model_goal_essence = glm_5_3_flash #nemotron_3_ultra
 
 # [BL-274] 対話型HIL（--interactive-hil）の単発Q&A応答生成用。グラフ実行を伴わない
 # スタンドアロンCLI呼び出しのため、他ノードと同じBL-189パターンで専用変数を持たせる。
 client_hil_qa = client_openrouter
-model_hil_qa = nemotron_3_super
+model_hil_qa = glm_5_3_flash
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -361,9 +388,9 @@ STRUCTURED_OUTPUT_LABEL_KEYWORDS = ("detector", "decision extractor", "reflectio
 
 
 MAX_TOKENS_BY_ROLE = {
-    "expert": 64000,
+    "expert": 100000,
     "user": 64000,
-    "detector": 64000,
+    "detector": 100000,
     "reflection": 64000,
     "review": 64000,
     "decision extractor": 64000,
@@ -378,7 +405,7 @@ def get_max_tokens(label: str) -> int:
     for keyword, tokens in MAX_TOKENS_BY_ROLE.items():
         if keyword in label_lower:
             return tokens
-    return 64000  # デフォルト
+    return 100000  # デフォルト
 
 
 # ---------------------------------------------------------------------------
@@ -699,7 +726,9 @@ READ_DELIVERABLE_FILE_TOOL = {
             "Prefer task_id or topic_keyword: the tool will look up the actual saved file path "
             "from the agreements database for you. Only pass file_path if you already have the "
             "exact path (e.g. copied verbatim from a 'FILE_PATH:...' value shown elsewhere). "
-            "Returns the file content as text. "
+            "Returns {content, author_role, edit_summary, timestamp, draft_id} when the source is a "
+            "whiteboard-backed deliverable (author_role/edit_summary/timestamp/draft_id describe who "
+            "wrote this version and why -- BL-289); {content} only when read via a raw file_path. "
             "[BL-279] This tool is for entry_type='Deliverable' only. For entry_type='Decision'/"
             "'Directive' (e.g. a past judgment call, not a task's actual output), use "
             "read_agreement instead -- this tool will not find those. "
@@ -762,6 +791,39 @@ READ_AGREEMENT_TOOL = {
                     "type": "string",
                     "enum": ["Decision", "Directive", "Deliverable"],
                     "description": "Optional filter. Omit to search Decision+Directive (the default)."
+                }
+            }
+        }
+    }
+}
+
+# [BL-290] goal_escalationsテーブルを読む専用ツール。従来read_agreementと違い、escalate_premise_concern
+# で提起された懸念（concern_summary/implicated_constraint/why_conflicts/suggested_reframe）を読み返す
+# 手段が皆無だった（ambient pinはconcern_summaryのみを短く常時表示するのみ）。read_agreement（BL-279）と
+# 同型の設計だが、goal_escalationsは1行=1件のためentry_typeフィルタ等は不要。
+READ_ESCALATION_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_escalation",
+        "description": (
+            "[BL-290] Read the full detail of a goal-premise escalation raised via "
+            "escalate_premise_concern (concern_summary/implicated_constraint/why_conflicts/"
+            "suggested_reframe/status/resolution_reason) -- not just the concern_summary shown "
+            "in the ambient status pin every turn. implicated_constraint/why_conflicts/"
+            "suggested_reframe are otherwise never surfaced again after the turn they were raised. "
+            "Pass escalation_id (shown bracketed in the ambient pin, e.g. '[ESC-...]') for an exact "
+            "lookup, or task_id to list all escalations raised under that task."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "escalation_id": {
+                    "type": "string",
+                    "description": "Exact escalation_id, e.g. from the ambient pin."
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "List all escalations raised under this task_id."
                 }
             }
         }
@@ -2210,13 +2272,18 @@ def _resolve_deliverable_pointer(task_id: str, topic_keyword: str) -> str | None
     return best["decision_what"]
 
 
-def _read_deliverable_file_handler(args: dict, state: dict | None = None) -> dict | str:
+def _read_deliverable_file_handler(args: dict, state: dict | None = None) -> dict:
     """[F-3.8] Deliverableファイル読み取りツールのハンドラ。
     ★修正（レビュー指摘③）: pathlib.Path.resolve()によるディレクトリ包含チェックで
     Windowsパス区切り・パストラバーサル防止の両方を対応する。
     ★修正（レビュー指摘H1、二重JSONエンコード対応）: エラー/not_found時はjson.dumps済み
     文字列ではなく生のdictを返す（理由は_read_verified_fact_handlerのコメント参照）。
-    成功時のファイル内容（プレーン文字列）は元々二重エンコードの問題がないためそのまま。
+    ★修正（BL-289）: 成功時も従来はプレーン文字列（ホワイトボード経路はcontentのみ）を
+    返しており、whiteboard_draftsが持つauthor_role/edit_summary/timestamp/draft_idが
+    呼び出し元に一切渡っていなかった。ツール結果は呼び出し元でどのみち
+    `json.dumps(result, ...)`されるため（_query_AI_live）、文字列をdict化しても
+    二重エンコードにはならない。ホワイトボード経路はメタデータ込みのdict、
+    ファイルパス経路はメタデータを持たないため{"content": ...}のみのdictを返す。
     ★修正（BL-040）: 実ドライランでfile_path直接指定が約68%の割合でnot_foundになっていた
     （タイムスタンプ付きファイル名をAIが予測できないため）。task_id/topic_keywordによる
     DB逆引きを優先させ、file_pathは既に正確なパスが分かっている場合のみのフォールバックとする。
@@ -2253,7 +2320,11 @@ def _read_deliverable_file_handler(args: dict, state: dict | None = None) -> dic
             if wb:
                 if task_id:
                     _LAST_DELIVERABLE_READ_TASK_IDS.append(task_id)
-                return wb["content"][:10000]
+                return {
+                    "content": wb["content"][:10000],
+                    "author_role": wb.get("author_role"), "edit_summary": wb.get("edit_summary"),
+                    "timestamp": wb.get("timestamp"), "draft_id": wb.get("draft_id"),
+                }
             print(f"  ⚠️ [read_deliverable_file] ホワイトボードが見つかりません: phase={wb_phase_id}, task={wb_task_id}")
             return {"status": "not_found", "message": f"ホワイトボードが見つかりません: phase={wb_phase_id}, task={wb_task_id}"}
         elif resolved and resolved.startswith("FILE_PATH:"):
@@ -2275,7 +2346,7 @@ def _read_deliverable_file_handler(args: dict, state: dict | None = None) -> dic
         content = resolved.read_text(encoding="utf-8")
         if task_id:
             _LAST_DELIVERABLE_READ_TASK_IDS.append(task_id)
-        return content[:10000]  # 大量出力防止
+        return {"content": content[:10000]}  # 大量出力防止
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -2294,6 +2365,33 @@ def _parse_citations_field(raw) -> list:
     return raw if isinstance(raw, list) else []
 
 
+def _parse_depends_on_field(raw) -> list:
+    """[BL-288] agreements.depends_on列（生のJSON文字列、DEFAULT '[]'）を防御的にパースする。
+    _parse_citations_fieldと同型（不正なJSON文字列でもクラッシュせず[]を返す）。
+    """
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw) if raw else []
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return raw if isinstance(raw, list) else []
+
+
+def _parse_resource_claims_field(raw) -> dict:
+    """[BL-288] agreements.resource_claims列（生のJSON文字列、DEFAULT '{}'）を防御的にパースする。
+    _aggregate_global_constraintsが個別に行っていたtry/exceptと同じロジックを共有ヘルパー化
+    （AGENTS.md §15.1）。旧形式（平坦な{name: 数値}）や壊れたJSONでもクラッシュせず{}を返す。
+    """
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return raw if isinstance(raw, dict) else {}
+
+
 def _read_agreement_handler(args: dict, state: dict | None = None) -> dict:
     """[BL-279] `read_agreement`ツールの実体。グラフ実行中のツール呼び出し専用（グローバルの
     get_active_conn()/_CURRENT_RUN_ID経由でconn/run_idを解決する）。検索ロジック本体は
@@ -2304,6 +2402,27 @@ def _read_agreement_handler(args: dict, state: dict | None = None) -> dict:
     topic_keyword = (args.get("topic_keyword") or "").strip()
     entry_type_filter = (args.get("entry_type") or "").strip()
     return _query_agreements_core(get_active_conn(), _CURRENT_RUN_ID, task_id, topic_keyword, entry_type_filter)
+
+
+def _read_escalation_handler(args: dict) -> dict:
+    """[BL-290] read_escalationツールの実体。read_agreement（BL-279）と同型の設計だが、
+    goal_escalationsは1行=1件のためentry_typeフィルタ等は不要な単純な設計。
+    """
+    escalation_id = (args.get("escalation_id") or "").strip()
+    task_id = (args.get("task_id") or "").strip()
+    if not escalation_id and not task_id:
+        return {"status": "error", "message": "escalation_id、task_idのいずれかを指定してください。"}
+    conn = get_active_conn()
+    run_id = _CURRENT_RUN_ID
+    if escalation_id:
+        row = get_goal_escalation(conn, run_id, escalation_id)
+        if not row:
+            return {"status": "not_found", "message": f"escalation_id={escalation_id!r} が見つかりませんでした。"}
+        return {"status": "ok", "count": 1, "escalations": [row]}
+    rows = get_goal_escalations_by_task_id(conn, run_id, task_id)
+    if not rows:
+        return {"status": "not_found", "message": f"task_id={task_id!r} に該当するエスカレーションが見つかりませんでした。"}
+    return {"status": "ok", "count": len(rows), "escalations": rows}
 
 
 def _query_agreements_core(conn: sqlite3.Connection, run_id: str, task_id: str,
@@ -2363,6 +2482,20 @@ def _query_agreements_core(conn: sqlite3.Connection, run_id: str, task_id: str,
                 "decision_what": a.get("decision_what"), "reason_why": a.get("reason_why"),
                 "citations": _parse_citations_field(a.get("citations")), "evidence": a.get("evidence"),
                 "task_id": a.get("task_id"), "phase_id": a.get("phase_id"),
+                # [BL-288] 以下6キーが欠落しており、read_agreementの本来の目的（「なぜこの判断に
+                # 至ったかを能動的に読み返せるようにする」、BL-279）に対して実質半分の価値しか
+                # 提供できていなかった（ユーザー指摘によりagreementsテーブルの全カラムと突き合わせて
+                # 発覚）。proposed_by/internal_thought_processはBL-279の目的そのものに直結し、
+                # depends_onは系譜追跡という同じ目的に沿う。run_idのみは単一run内で情報価値が
+                # 無いため意図的に省略する。
+                "proposed_by": a.get("proposed_by"),
+                # [R5 F-3.7] status=="Rejected"の場合のみ、その却下判定の生の思考過程全文が
+                # 保存されている（_write_agreement_impl参照）。それ以外はNULL。
+                "internal_thought_process": a.get("internal_thought_process"),
+                "depends_on": _parse_depends_on_field(a.get("depends_on")),
+                "resource_claims": _parse_resource_claims_field(a.get("resource_claims")),
+                "timestamp": a.get("timestamp"),
+                "is_frozen": bool(a.get("is_frozen")),
             }
             for a in candidates
         ],
@@ -2954,6 +3087,16 @@ def get_open_goal_escalations(conn: sqlite3.Connection, run_id: str) -> list[dic
     """[BL-086] status='Open'の全エスカレーションを提起順に返す。"""
     rows = conn.execute(
         "SELECT * FROM goal_escalations WHERE run_id=? AND status='Open' ORDER BY created_at ASC", (run_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_goal_escalations_by_task_id(conn: sqlite3.Connection, run_id: str, task_id: str) -> list[dict]:
+    """[BL-290] 指定task_idで提起された全エスカレーション（statusを問わず）を提起順に返す。
+    read_escalationツールがtask_id検索時に使う。"""
+    rows = conn.execute(
+        "SELECT * FROM goal_escalations WHERE run_id=? AND task_id=? ORDER BY created_at ASC",
+        (run_id, task_id)
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -5241,6 +5384,7 @@ TOOL_DISPATCH = {
     "read_verified_fact": lambda args, state=None: _read_verified_fact_handler(args),
     "read_deliverable_file": lambda args, state=None: _read_deliverable_file_handler(args, state),
     "read_agreement": lambda args, state=None: _read_agreement_handler(args, state),
+    "read_escalation": lambda args, state=None: _read_escalation_handler(args),
     "verify_whiteboard_excerpt": lambda args, state=None: _verify_whiteboard_excerpt_handler(args),
     "read_whiteboard_excerpt": lambda args, state=None: _read_whiteboard_excerpt_handler(args, state),
     "diff_plan_draft_versions": lambda args, state=None: _diff_plan_draft_versions_handler(args),
@@ -5646,6 +5790,22 @@ class _StreamMessage:
 # トレードオフがある。
 _LOOP_GUARD_REPETITION_WINDOW = 10
 
+# [BL-287] ツール呼び出し引数の完全一致反復を検知する閾値（AGENTS.md §7 重要定数）。
+# web_search等の外部APIはほぼ決定論的なため、同一引数の再呼び出しは原因（デコード崩壊か、
+# モデルの誤った再試行判断か）を問わず無価値と断定できる。自由文の言い直し
+# （_LOOP_GUARD_REPETITION_WINDOW、進捗との区別が曖昧なため閾値を高く取る）とは性質が
+# 異なるため、専用の閾値と専用の対応（即時強制終了ではなく、まず訂正ナッジで自己修復を
+# 試みる）とする。log/2026-08-27/1634で、Expertが同一web_searchクエリを8回連続で
+# 繰り返し、閾値10への引き上げにより検知が遅れ（16イテレーション）、この崩壊が4回連続
+# 発生してrun全体のweb_search呼び出しの74%（59/80回）を空費したことが判明（2026-08-27
+# ユーザー承認）。
+# [BL-231との数学的関係] ツールループはtool_callsが空の応答で即座に正常終了するため、
+# 反復ウィンドウに入る全iterationは必ずtool_callsを持つ。combined_hash（テキスト+
+# plan_sigの結合）がN回一致するなら、その部分文字列であるplan_sigも必ずN回一致する。
+# 本閾値(3) < _LOOP_GUARD_REPETITION_WINDOW(10)であるため、本チェックは既存のBL-231
+# 終了ロジックより常に先に発火する。既存ロジックはコードを変更せず、万一の保険として残す。
+_TOOL_CALL_REPEAT_NUDGE_THRESHOLD = 3
+
 # [BL-231] 生成崩壊（同一文の逐語的な反復）そのものをデコード時に抑制するための反復ペナルティ
 # （AGENTS.md §7 重要定数: 2026-08-15 ユーザー承認値0.3）。目安は通常0.1〜0.5で、
 # 高く設定しすぎると文法が崩れるため、上限寄りではなく中央値に設定している。
@@ -5762,6 +5922,8 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
     # 影響なく、この初期化は変更しない。
     loop_messages: list[dict] = list(messages)
     _recent_combined_hashes: list[str] = []  # [BL-231] 直近iterationの結合ハッシュ（APIエラーリトライをまたいで保持）
+    _recent_tool_plan_sigs: list[str] = []  # [BL-287] 直近iterationのツール呼び出し計画署名（テキスト除く）
+    _tool_repeat_nudge_used = False  # [BL-287] この呼び出し内で訂正ナッジを既に使ったか（1回のみ、BL-283と同型の方針）
     tool_calls_used = 0
     python_calls_log: list[dict] = []  # BL-033: 実行したpython_replのcode/resultを蓄積
     reasoning_parts_all: list[str] = []  # [R5 F-2.1] 全iterationのreasoningを蓄積
@@ -6012,6 +6174,42 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                     ] if tool_call_accum else None
                     msg = _StreamMessage("".join(content_parts) or None, tool_calls_list)
 
+                    # [BL-287] ツール呼び出し引数の完全一致反復の検知（自由文反復より専用・厳格）。
+                    # web_search等は決定論的なため、同一引数の再呼び出しは無価値と機械的に断定できる。
+                    # まず訂正ナッジで自己修復を試み（1回のみ）、それでも繰り返す場合のみ強制終了する。
+                    _current_tool_plan_sig = _bl231_plan_sig(getattr(msg, "tool_calls", None))
+                    if _current_tool_plan_sig:
+                        _recent_tool_plan_sigs.append(_current_tool_plan_sig)
+                        if len(_recent_tool_plan_sigs) > _TOOL_CALL_REPEAT_NUDGE_THRESHOLD:
+                            _recent_tool_plan_sigs.pop(0)
+                        _tool_call_repeating = (
+                            len(_recent_tool_plan_sigs) >= _TOOL_CALL_REPEAT_NUDGE_THRESHOLD
+                            and len(set(_recent_tool_plan_sigs[-_TOOL_CALL_REPEAT_NUDGE_THRESHOLD:])) == 1
+                        )
+                    else:
+                        _recent_tool_plan_sigs = []
+                        _tool_call_repeating = False
+
+                    _pending_tool_repeat_nudge = None
+                    if _tool_call_repeating:
+                        _repeated_tool_names = ", ".join(sorted({tc.function.name for tc in (msg.tool_calls or [])}))
+                        if _tool_repeat_nudge_used:
+                            print(f"🛑 [{label}] BL-287ツール呼び出し反復ガード発動: 訂正ナッジ後も同一引数のツール呼び出し（{_repeated_tool_names}）が続いたため強制終了します（iter={iteration}）。")
+                            _LAST_REPETITION_GUARD_TRIPPED = {
+                                "label": label, "iteration": iteration, "run_id": _CURRENT_RUN_ID,
+                                "trigger": "tool_call_repeat_after_nudge",
+                                "last_output_head": f"(同一引数のツール呼び出し反復: {_repeated_tool_names})",
+                            }
+                            return "(BL-287ツール呼び出し反復ガード: 訂正ナッジ後も同一引数のツール呼び出しが続いたため強制終了しましたが、有効な出力がありませんでした)"
+                        _tool_repeat_nudge_used = True
+                        _pending_tool_repeat_nudge = (
+                            f"[SYSTEM NOTICE] 直前と全く同じ引数でのツール呼び出し（{_repeated_tool_names}）が"
+                            f"{_TOOL_CALL_REPEAT_NUDGE_THRESHOLD}回連続しています。web_search等の外部情報源は決定論的なため、"
+                            "同一引数を再送しても新しい情報は得られません。別のキーワード・別の切り口で検索し直すか、"
+                            "この論点は現時点で得られている情報から仮定を明記した上で先へ進んでください。"
+                        )
+                        print(f"  ⚠️ [{label}] ツール呼び出し引数の完全一致反復を検知（{_repeated_tool_names}、iter={iteration}）。訂正ナッジを注入します。")
+
                     # [BL-231] 生成崩壊検知: 同一出力（正規化テキスト＋ツール呼び出し計画）が連続
                     # WINDOW 回現れたら、MAX_TOOL_ITER(=50)までburnせずツールループを強制終了する
                     # （§15.3 機械的検証・非収束RuntimeErrorによる出力消失の回避）。
@@ -6234,6 +6432,8 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                             )
                         loop_messages.append({"role": "user", "content": notice})
                         print(f"  ⏳ [{label}] ツール呼び出し残り回数が僅少です（残り{remaining_iters}回、iter={iteration}）。SYSTEM NOTICEを注入しました。")
+                    if _pending_tool_repeat_nudge:
+                        loop_messages.append({"role": "user", "content": _pending_tool_repeat_nudge})
                     create_kwargs["messages"] = loop_messages
                 # [CONSTRAINT] 非収束は一時的なAPI障害ではなく設計上の異常事態。下記exceptをAPIError系に
                 # 絞ることで、このRuntimeErrorは握りつぶされずログに原因が一目でわかる形で伝播する（D-009）。
@@ -7266,7 +7466,10 @@ def _traverse_lineage(
     direction='backward' は「start_ref が何に立脚しているか」（to_ref=start_ref の from_ref を遡る）、
     'forward' は「start_ref から何が導出されたか」（from_ref=start_ref の to_ref を辿る）。'both' は両方向。
     visited set でサイクル安全（SQLite 再帰CTE にはサイクル検知が無く、任意文字列 ref で経路を壊すため）。
-    戻り値は {ref, direction, depth, reason, relation_type, created_at} の dict 列。
+    戻り値は {id, ref, direction, depth, reason, relation_type, created_by, created_at,
+    source_task_id, source_phase_id} の dict 列（BL-289で created_by/source_task_id/
+    source_phase_id/id を追加——従来relation_edgesの列が読み込まれていながら
+    _trace_lineage_handlerの返り値からは捨てられていた）。
     """
     if max_depth <= 0:
         return []
@@ -7290,29 +7493,35 @@ def _traverse_lineage(
         visited.add((ref, d))
         if d == "backward":
             rows = conn.execute(
-                f"SELECT from_ref, relation_type, reason, created_at FROM relation_edges "
+                f"SELECT id, from_ref, relation_type, reason, created_by, created_at, "
+                f"source_task_id, source_phase_id FROM relation_edges "
                 f"WHERE run_id=? AND to_ref=?{type_clause}",
                 [run_id, ref] + type_params,
             ).fetchall()
-            for from_ref, rtype, reason, created_at in rows:
+            for edge_id, from_ref, rtype, reason, created_by, created_at, source_task_id, source_phase_id in rows:
                 if depth <= max_depth:
                     found.append({
-                        "ref": from_ref, "direction": "backward", "depth": depth,
-                        "relation_type": rtype, "reason": reason, "created_at": created_at,
+                        "id": edge_id, "ref": from_ref, "direction": "backward", "depth": depth,
+                        "relation_type": rtype, "reason": reason, "created_by": created_by,
+                        "created_at": created_at, "source_task_id": source_task_id,
+                        "source_phase_id": source_phase_id,
                     })
                 if depth < max_depth:
                     stack.append((from_ref, "backward", depth + 1))
         else:
             rows = conn.execute(
-                f"SELECT to_ref, relation_type, reason, created_at FROM relation_edges "
+                f"SELECT id, to_ref, relation_type, reason, created_by, created_at, "
+                f"source_task_id, source_phase_id FROM relation_edges "
                 f"WHERE run_id=? AND from_ref=?{type_clause}",
                 [run_id, ref] + type_params,
             ).fetchall()
-            for to_ref, rtype, reason, created_at in rows:
+            for edge_id, to_ref, rtype, reason, created_by, created_at, source_task_id, source_phase_id in rows:
                 if depth <= max_depth:
                     found.append({
-                        "ref": to_ref, "direction": "forward", "depth": depth,
-                        "relation_type": rtype, "reason": reason, "created_at": created_at,
+                        "id": edge_id, "ref": to_ref, "direction": "forward", "depth": depth,
+                        "relation_type": rtype, "reason": reason, "created_by": created_by,
+                        "created_at": created_at, "source_task_id": source_task_id,
+                        "source_phase_id": source_phase_id,
                     })
                 if depth < max_depth:
                     stack.append((to_ref, "forward", depth + 1))
@@ -7480,9 +7689,14 @@ def _trace_lineage_handler(args: dict, state: dict | None = None) -> dict:
     found = _traverse_lineage(conn, run_id, ref, direction, max_depth)
     resolved = [
         {
-            "ref": e["ref"], "direction": e["direction"], "depth": e["depth"],
+            "id": e["id"], "ref": e["ref"], "direction": e["direction"], "depth": e["depth"],
             "relation_type": e["relation_type"], "reason": e["reason"],
             "detail": _resolve_ref_line(conn, run_id, e["ref"]),
+            # [BL-289] created_by/created_at/source_task_id/source_phase_idが従来
+            # relation_edgesから読み込まれていながら捨てられており、「なぜこの系譜線が
+            # 引かれたか」を辿るツール自体が線を引いた主体・時期・文脈を返していなかった。
+            "created_by": e["created_by"], "created_at": e["created_at"],
+            "source_task_id": e["source_task_id"], "source_phase_id": e["source_phase_id"],
         }
         for e in found
     ]
@@ -7563,8 +7777,8 @@ def get_latest_whiteboard(conn: sqlite3.Connection, run_id: str, phase_id: str, 
     保存されているphase_idが食い違う場合は、計画ミス・引数ミスの兆候として警告のみ行う。
     """
     row = conn.execute(
-        "SELECT version, content, phase_id AS stored_phase_id FROM whiteboard_drafts "
-        "WHERE run_id=? AND task_id=? ORDER BY version DESC LIMIT 1",
+        "SELECT draft_id, version, content, phase_id AS stored_phase_id, author_role, edit_summary, timestamp "
+        "FROM whiteboard_drafts WHERE run_id=? AND task_id=? ORDER BY version DESC LIMIT 1",
         (run_id, task_id)
     ).fetchone()
     if row is None:
@@ -7573,7 +7787,10 @@ def get_latest_whiteboard(conn: sqlite3.Connection, run_id: str, phase_id: str, 
         print(f"  ⚠️ [Whiteboard phase_id不一致] task_id='{task_id}'の既存版はphase_id="
               f"'{row['stored_phase_id']}'で保存されていますが、今回'{phase_id}'が渡されました。"
               f"task_idの命名規約により正しい版として扱いますが、呼び出し元の引数を確認してください。")
-    return {"version": row["version"], "content": row["content"]}
+    return {
+        "draft_id": row["draft_id"], "version": row["version"], "content": row["content"],
+        "author_role": row["author_role"], "edit_summary": row["edit_summary"], "timestamp": row["timestamp"],
+    }
 
 
 def _write_whiteboard_to_file(phase_id: str, task_id: str, version: int, content: str,
@@ -7721,11 +7938,17 @@ def get_latest_plan_draft_by_task_id(conn: sqlite3.Connection, run_id: str, task
     異なるphase_idにまたがる場合はNoneではなく最新版を返しつつ、呼び出し側のログで気づけるよう
     phase_idも結果に含める。"""
     row = conn.execute(
-        "SELECT phase_id, version, content FROM plan_drafts "
+        "SELECT draft_id, phase_id, version, content, author_role, edit_summary, timestamp FROM plan_drafts "
         "WHERE run_id=? AND task_id=? ORDER BY version DESC LIMIT 1",
         (run_id, task_id)
     ).fetchone()
-    return {"phase_id": row["phase_id"], "version": row["version"], "content": row["content"]} if row else None
+    if not row:
+        return None
+    return {
+        "draft_id": row["draft_id"], "phase_id": row["phase_id"], "version": row["version"],
+        "content": row["content"], "author_role": row["author_role"],
+        "edit_summary": row["edit_summary"], "timestamp": row["timestamp"],
+    }
 
 
 def apply_plan_patch(conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str,
@@ -10666,7 +10889,7 @@ It serves as the initial planning layer for breaking down complex objectives acr
     _CURRENT_CALLER_ROLE = "task_planner"  # [BL-095]
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    _task_planner_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_PLAN_DRAFT_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
+    _task_planner_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, READ_PLAN_DRAFT_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
     phases, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_task_planner, model=model_task_planner, label="Task Planner",
         tools=_task_planner_tools, fallback=fallback_phase,
@@ -10798,7 +11021,7 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
     # "orchestrator": {"Proposed"}を追加し、write_agreement(entry_type="Decision")での能動的な
     # 記録を許可・必須化する（decisionsテーブルへの記録は床として維持したまま、その上に重ねる）。
     _orchestrator_messages = [{"role": "user", "content": prompt}]
-    _orchestrator_tools = [READ_PROJECT_PLAN_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_VERIFIED_FACT_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL]
+    _orchestrator_tools = [READ_PROJECT_PLAN_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, READ_VERIFIED_FACT_TOOL, WRITE_AGREEMENT_TOOL, THINK_TOOL]
     res = query_AI(
         _orchestrator_messages, client=client_orchestrator, model=model_orchestrator, label="Orchestrator",
         tools=_orchestrator_tools,
@@ -11467,7 +11690,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     _CURRENT_CALLER_ROLE = "expert"
     _CURRENT_TASK_ID = _effective_current_task_id_from(state)
     _reset_think_scratchpad()  # [BL-093]
-    _expert_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, REGISTER_ENTITY_TOOL, WRITE_ENTITY_ATTRIBUTE_TOOL, READ_ENTITY_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]  # [BL-228] Expertは唯一trace_lineageが未配線だった
+    _expert_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, REGISTER_ENTITY_TOOL, WRITE_ENTITY_ATTRIBUTE_TOOL, READ_ENTITY_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]  # [BL-228] Expertは唯一trace_lineageが未配線だった
     _expert_content = query_AI(messages, client=client_expert, model=model_expert, label=f"Expert:{expert_name}",
                      tools=_expert_tools, light_system_prompt=light_system_prompt, state=state)
     return _enforce_decision_lineage_freetext(messages, _expert_content, client=client_expert, model=model_expert,
@@ -11973,7 +12196,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f'\nReturn ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用(無ければ空文字)", "observations": "気づき・懸念（自由記述、無ければ空文字）", "essence_sufficiency_concern": true/false, "essence_sufficiency_reason": "trueの場合、本質のどの記述が計画のどこにも反映されていないか（falseなら空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
-    _detector_domain_tools = [READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線
+    _detector_domain_tools = [READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
         domain_prompt, client=client_detector_domain, model=model_detector_domain, label="Detector (Domain Review)",
         tools=_detector_domain_tools,
@@ -12192,7 +12415,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由", "criteria_status": [true/false, ...], "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用（無ければ空文字）", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
-    _detector_numeric_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
+    _detector_numeric_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_detector_numeric, model=model_detector_numeric, label="Detector",
         tools=_detector_numeric_tools, fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
@@ -12708,7 +12931,7 @@ def call_resource_arbiter(goal: str, overrun: dict, phases_info: list[dict], goa
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
     _arbiter_messages = [{"role": "user", "content": prompt}]
-    _arbiter_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
+    _arbiter_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
     res = query_AI(_arbiter_messages, client=client_resource_arbiter, model=model_resource_arbiter, label="Resource Arbiter", tools=_arbiter_tools, state=state)
     res = _enforce_decision_lineage_freetext(_arbiter_messages, res, client=client_resource_arbiter,
                                               model=model_resource_arbiter, label="Resource Arbiter",
@@ -13191,7 +13414,7 @@ def call_integrator(goal: str, merged_text: str, goal_essence_text: str = "", st
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
     _integrator_messages = [{"role": "user", "content": prompt}]
-    _integrator_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
+    _integrator_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
     res = query_AI(_integrator_messages, client=client_integrator, model=model_integrator, label="Integrator", tools=_integrator_tools, state=state)
     res = _enforce_decision_lineage_freetext(_integrator_messages, res, client=client_integrator,
                                               model=model_integrator, label="Integrator",
@@ -13315,7 +13538,7 @@ def call_reviewer(goal: str, deliverable_text: str, goal_essence_text: str = "",
     _CURRENT_CALLER_ROLE = "reviewer"
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    _reviewer_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
+    _reviewer_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_reviewer_qa, model=model_reviewer_qa, label="Reviewer QA",
         tools=_reviewer_tools, fallback={"passed": False, "feedback": "JSONフォーマットエラーのため差し戻します。"},
@@ -13465,7 +13688,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         _reset_think_scratchpad()
         review_parsed, review_parse_failed = _query_and_parse_with_retry(
             review_prompt, client=client_user, model=model_user, label="User AI (Stage1: レビュー)",
-            tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, PYTHON_REPL_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],
+            tools=[READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, PYTHON_REPL_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL],
             fallback={"domain_concerns": "", "scope_compliant": True, "review_comment": ""},
             state=state,
         )
@@ -14203,7 +14426,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     _CURRENT_TASK_ID = _effective_current_task_id_from(state)
     _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")  # [BL-096] write_issueのphase_id用
     _CURRENT_GOAL_TEXT = user_goal  # [BL-086] revise_goalの編集対象
-    _user_ai_main_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
+    _user_ai_main_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
     _reset_think_scratchpad()  # [BL-093]
     content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=_user_ai_main_tools, state=state)
 
@@ -14510,7 +14733,7 @@ def call_goal_essence_analyst(goal: str, state: dict | None = None) -> dict:
     _CURRENT_CALLER_ROLE = "goal_essence_analyst"  # [BL-095]
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    _goal_essence_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
+    _goal_essence_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_goal_essence, model=model_goal_essence, label="Goal Essence Analyst",
         tools=_goal_essence_tools,
@@ -14951,7 +15174,7 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     _CURRENT_CALLER_ROLE = "task_plan_reviewer"  # [BL-095]
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    _task_plan_reviewer_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
+    _task_plan_reviewer_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_task_plan_reviewer, model=model_task_plan_reviewer, label="Task Plan Reviewer",
         tools=_task_plan_reviewer_tools,

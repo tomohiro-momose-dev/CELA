@@ -74,7 +74,8 @@ def test_successful_read_records_task_id(db_conn):
 
     result = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"task_id": "task_5_4"}, state)
 
-    assert isinstance(result, str)
+    # [BL-289] ホワイトボード経路はdict化された
+    assert isinstance(result, dict)
     assert cela_main.get_last_deliverable_reads() == ["task_5_4"]
 
 

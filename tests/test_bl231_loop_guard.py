@@ -95,7 +95,15 @@ def _run(factory):
 # ---- テスト ----
 
 def test_bl231_guard_trips_on_repeated_identical_output():
-    """同一 content＋同一 plan を繰り返すと WINDOW(=3) 回で強制終了し、50 往復しない。"""
+    """[BL-287更新] 同一content＋同一planを繰り返すシナリオは、BL-287導入後は
+    BL-231本体（_LOOP_GUARD_REPETITION_WINDOW=10）より先にBL-287
+    （_TOOL_CALL_REPEAT_NUDGE_THRESHOLD=3、訂正ナッジ→1回不変なら強制終了）に
+    検知される。数学的関係（tests/test_bl287_tool_repeat_nudge.pyのdocstring参照）:
+    combined_hashがN回一致するならその部分文字列であるplan_sigも必ずN回一致するため、
+    閾値の小さいBL-287が常に先に発火する。BL-231本体のロジックはコード上に残っているが
+    （万一の保険）、この種の完全一致反復シナリオでは実質到達不能になる。
+    3回目でナッジ、4回目（ナッジ後も同一のため）で強制終了 = create呼び出し4回。
+    """
     def factory(n):
         return _chunks("Let me do these calls.", [("loop_guard_test_tool", {})])
 
@@ -103,13 +111,15 @@ def test_bl231_guard_trips_on_repeated_identical_output():
 
     # ガード発動により RuntimeError(非収束) を上げずに返ること
     assert isinstance(result, str)
-    assert result == "Let me do these calls."
-    # 早期停止: create は WINDOW 回（=3）のみ（50 往復していない）
-    assert create_calls == cela_main._LOOP_GUARD_REPETITION_WINDOW
+    assert "BL-287" in result
+    # 早期停止: create は4回のみ（ナッジ発動iter=3 + 確認iter=4）、50往復はもちろん
+    # 旧BL-231の10回にも達しない。
+    assert create_calls == cela_main._TOOL_CALL_REPEAT_NUDGE_THRESHOLD + 1
     # 可観測性フラグがセットされていること
     assert flag is not None
     assert flag["label"] == "detector"
-    assert flag["iteration"] == cela_main._LOOP_GUARD_REPETITION_WINDOW
+    assert flag["trigger"] == "tool_call_repeat_after_nudge"
+    assert flag["iteration"] == cela_main._TOOL_CALL_REPEAT_NUDGE_THRESHOLD + 1
 
 
 def test_bl231_guard_does_not_false_trip_on_healthy_loop():

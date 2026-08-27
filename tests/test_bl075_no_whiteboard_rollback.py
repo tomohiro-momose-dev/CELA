@@ -74,7 +74,8 @@ def test_bl075_expert_node_does_not_revert_whiteboard_content_on_major(db_conn, 
     cela_main.apply_whiteboard_patch(conn, run_id, "phase_2", "task_2_3", "有給10日版（修正済み）", "expert", "労基法違反修正")
 
     before = cela_main.get_latest_whiteboard(conn, run_id, "phase_2", "task_2_3")
-    assert before == {"version": 2, "content": "有給10日版（修正済み）"}
+    # [BL-289] author_role/edit_summary/timestamp/draft_idも返るようになった
+    assert before["version"] == 2 and before["content"] == "有給10日版（修正済み）"
 
     monkeypatch.setattr(cela_main, "call_expert", lambda expert_name, state, config: "修正案です")
     monkeypatch.setattr(cela_main, "config", {}, raising=False)

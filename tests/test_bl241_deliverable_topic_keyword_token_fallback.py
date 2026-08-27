@@ -82,8 +82,9 @@ def test_task_id_given_ignores_topic_keyword_mismatch_entirely(db_conn):
     result = cela_main.TOOL_DISPATCH["read_deliverable_file"](
         {"task_id": "task_5_4", "topic_keyword": "冬季 除雪 通信障害"}, state,
     )
-    assert isinstance(result, str), f"not_foundのまま: {result}"
-    assert "task_5_4の成果物本文" in result
+    # [BL-289] ホワイトボード経路はdict化された
+    assert isinstance(result, dict), f"not_foundのまま: {result}"
+    assert "task_5_4の成果物本文" in result["content"]
 
 
 def test_task_id_given_without_topic_keyword_still_works(db_conn):
@@ -98,8 +99,9 @@ def test_task_id_given_without_topic_keyword_still_works(db_conn):
     result = cela_main.TOOL_DISPATCH["read_deliverable_file"](
         {"task_id": "task_5_4"}, state,
     )
-    assert isinstance(result, str)
-    assert "task_5_4の成果物本文" in result
+    # [BL-289] ホワイトボード経路はdict化された
+    assert isinstance(result, dict)
+    assert "task_5_4の成果物本文" in result["content"]
 
 
 def test_topic_keyword_only_exact_phrase_match_without_task_id(db_conn):
@@ -114,8 +116,9 @@ def test_topic_keyword_only_exact_phrase_match_without_task_id(db_conn):
     result = cela_main.TOOL_DISPATCH["read_deliverable_file"](
         {"topic_keyword": "財務統合判定"}, state,
     )
-    assert isinstance(result, str)
-    assert "task_5_4の成果物本文" in result
+    # [BL-289] ホワイトボード経路はdict化された
+    assert isinstance(result, dict)
+    assert "task_5_4の成果物本文" in result["content"]
 
 
 def test_topic_keyword_only_token_fallback_without_task_id(db_conn):
@@ -131,8 +134,9 @@ def test_topic_keyword_only_token_fallback_without_task_id(db_conn):
     result = cela_main.TOOL_DISPATCH["read_deliverable_file"](
         {"topic_keyword": "費用 運賃 赤字補填 統合判定"}, state,
     )
-    assert isinstance(result, str), f"not_foundのまま: {result}"
-    assert "task_5_4の成果物本文" in result
+    # [BL-289] ホワイトボード経路はdict化された
+    assert isinstance(result, dict), f"not_foundのまま: {result}"
+    assert "task_5_4の成果物本文" in result["content"]
 
 
 def test_topic_keyword_only_no_matching_tokens_returns_not_found(db_conn):
