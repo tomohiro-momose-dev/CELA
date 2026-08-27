@@ -47,8 +47,10 @@ def db_conn(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _reset_think_and_agreement_globals():
-    """[BL-283] 各テストの前後で_THINK_REASONING_LOG/_LAST_WRITE_AGREEMENT_ITEMSを
-    クリーンな状態に戻す（他テストからの汚染防止）。"""
+    """[BL-283][BL-284] 各テストの前後で_THINK_REASONING_LOG/_LAST_WRITE_AGREEMENT_ITEMS/
+    _NODE_CALL_DECISION_WRITE_COUNTをクリーンな状態に戻す（他テストからの汚染防止）。
+    _reset_think_scratchpad()が_NODE_CALL_DECISION_WRITE_COUNTも0に戻すため、
+    明示的な代入は不要（BL-284で追加）。"""
     cela_main._reset_think_scratchpad()
     cela_main._LAST_WRITE_AGREEMENT_ITEMS = []
     yield
@@ -85,23 +87,56 @@ def test_pending_candidates_counts_against_decision_writes():
         _think_entry(decided="A", rejected="A'"),
         _think_entry(decided="B", rejected="B'"),
     ]
-    cela_main._LAST_WRITE_AGREEMENT_ITEMS = [{"entry_type": "Decision", "task_id": "t"}]
+    cela_main._NODE_CALL_DECISION_WRITE_COUNT = 1
     pending = cela_main._pending_decision_candidates()
     assert len(pending) == 1
     assert pending[0]["decided"] == "B"
 
 
-def test_pending_candidates_ignores_non_decision_entry_types():
-    cela_main._THINK_REASONING_LOG = [_think_entry(decided="A", rejected="A'")]
-    cela_main._LAST_WRITE_AGREEMENT_ITEMS = [{"entry_type": "Deliverable", "task_id": "t"}]
-    pending = cela_main._pending_decision_candidates()
-    assert len(pending) == 1
-
-
 def test_pending_candidates_empty_when_writes_cover_all():
     cela_main._THINK_REASONING_LOG = [_think_entry(decided="A", rejected="A'")]
-    cela_main._LAST_WRITE_AGREEMENT_ITEMS = [{"entry_type": "Decision", "task_id": "t"}]
+    cela_main._NODE_CALL_DECISION_WRITE_COUNT = 1
     assert cela_main._pending_decision_candidates() == []
+
+
+def test_pending_candidates_uses_node_call_scoped_count_not_last_query_ai_call():
+    """[BL-284] 回帰テスト: `_query_and_parse_with_retry`のJSON解析リトライやBL-231
+    ループガード再試行は同一ノード呼び出し内でquery_AI()を複数回呼ぶため、`_LAST_WRITE_
+    AGREEMENT_ITEMS`は直近の1回分（ここでは0件）にリセットされる一方、`_THINK_REASONING_LOG`
+    は破棄済みの過去試行分も含めてノード呼び出し全体で累積する（実ログ log/2026-08-27/1212
+    で確認: goal_essence_analystがBL-231ループガードで2回差し戻された後の3回目成功時、
+    実際には2件Decisionを記録済みなのに、旧実装は`_LAST_WRITE_AGREEMENT_ITEMS`単体の
+    0件と比較してしまい、6件全てを『記録漏れ』と誤検知した）。このテストは`_NODE_CALL_
+    DECISION_WRITE_COUNT`（ノード呼び出し単位で累積）を分母に使うことで、直近の
+    query_AI()呼び出し単体が0件でも正しく差分だけを返すことを確認する。
+    このテストを、修正前の実装（decision_writes = sum(_LAST_WRITE_AGREEMENT_ITEMS内のDecision件数)）
+    に戻すと、pendingが6件（誤検知）になり失敗する。
+    """
+    cela_main._THINK_REASONING_LOG = [
+        _think_entry(decided=f"D{i}", rejected=f"R{i}") for i in range(6)
+    ]
+    cela_main._LAST_WRITE_AGREEMENT_ITEMS = []  # 直近のquery_AI呼び出し単体では書き込みゼロ
+    cela_main._NODE_CALL_DECISION_WRITE_COUNT = 2  # だがノード呼び出し全体では2件書き込み済み
+    pending = cela_main._pending_decision_candidates()
+    assert len(pending) == 4
+
+
+def test_reset_think_scratchpad_also_resets_node_call_decision_write_count():
+    """[BL-284] _NODE_CALL_DECISION_WRITE_COUNTは_THINK_REASONING_LOGと同じ寿命
+    （ノード呼び出し単位）でリセットされる。"""
+    cela_main._NODE_CALL_DECISION_WRITE_COUNT = 5
+    cela_main._reset_think_scratchpad()
+    assert cela_main._NODE_CALL_DECISION_WRITE_COUNT == 0
+
+
+def test_write_agreement_dispatch_increments_node_call_decision_write_count_only_for_decision():
+    """[BL-284] write_agreement成功時のディスパッチ箇所（query_AI内部）で、
+    entry_type=="Decision"の場合のみ_NODE_CALL_DECISION_WRITE_COUNTを増分する
+    ソースになっていることを確認する（実際のツールループ全体をモックするコストが高いため、
+    BL-259系の既存テストと同じくソース検査で担保する）。"""
+    src = inspect.getsource(cela_main._query_AI_live)
+    assert '_NODE_CALL_DECISION_WRITE_COUNT += 1' in src
+    assert 'args.get("entry_type", "Decision") == "Decision"' in src
 
 
 # ---------------------------------------------------------------------------

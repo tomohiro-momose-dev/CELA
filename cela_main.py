@@ -303,7 +303,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = nemotron_3_ultra
+model_user = nemotron_3_super
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -313,47 +313,47 @@ model_user = nemotron_3_ultra
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = nemotron_3_ultra # nemotron_3_ultra
+model_orchestrator = nemotron_3_super # nemotron_3_ultra
 
 client_expert = client_openrouter
-model_expert = nemotron_3_ultra # nemotron_3_ultra
+model_expert = nemotron_3_super # nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = nemotron_3_ultra
+model_task_planner = nemotron_3_super
 
 client_task_plan_reviewer = client_openrouter
-model_task_plan_reviewer = nemotron_3_ultra
+model_task_plan_reviewer = nemotron_3_super
 
 client_detector_domain = client_openrouter
-model_detector_domain = nemotron_3_ultra # nemotron_3_ultra
+model_detector_domain = nemotron_3_super # nemotron_3_ultra
 client_detector_numeric = client_openrouter
-model_detector_numeric = nemotron_3_ultra # nemotron_3_ultra
+model_detector_numeric = nemotron_3_super # nemotron_3_ultra
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = nemotron_3_ultra
+model_decision_extractor = nemotron_3_super
 
 client_resource_arbiter = client_openrouter
-model_resource_arbiter = nemotron_3_ultra #nemotron_3_ultra
+model_resource_arbiter = nemotron_3_super #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = nemotron_3_ultra
+model_reflection = nemotron_3_super
 
 client_facilitator = client_openrouter
-model_facilitator = nemotron_3_ultra
+model_facilitator = nemotron_3_super
 
 client_integrator = client_openrouter
-model_integrator = nemotron_3_ultra #nemotron_3_ultra
+model_integrator = nemotron_3_super #nemotron_3_ultra
 
 client_reviewer_qa = client_openrouter
-model_reviewer_qa = nemotron_3_ultra #nemotron_3_ultra
+model_reviewer_qa = nemotron_3_super #nemotron_3_ultra
 
 client_goal_essence = client_openrouter
-model_goal_essence = nemotron_3_ultra #nemotron_3_ultra
+model_goal_essence = nemotron_3_super #nemotron_3_ultra
 
 # [BL-274] 対話型HIL（--interactive-hil）の単発Q&A応答生成用。グラフ実行を伴わない
 # スタンドアロンCLI呼び出しのため、他ノードと同じBL-189パターンで専用変数を持たせる。
 client_hil_qa = client_openrouter
-model_hil_qa = nemotron_3_ultra
+model_hil_qa = nemotron_3_super
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -361,13 +361,13 @@ STRUCTURED_OUTPUT_LABEL_KEYWORDS = ("detector", "decision extractor", "reflectio
 
 
 MAX_TOKENS_BY_ROLE = {
-    "expert": 48000,
-    "user": 48000,
-    "detector": 48000,
-    "reflection": 48000,
-    "review": 48000,
-    "decision extractor": 48000,
-    "orchestrator": 48000,
+    "expert": 64000,
+    "user": 64000,
+    "detector": 64000,
+    "reflection": 64000,
+    "review": 64000,
+    "decision extractor": 64000,
+    "orchestrator": 64000,
 }
 
 def get_max_tokens(label: str) -> int:
@@ -1793,17 +1793,30 @@ _THINK_TODO: list[dict] = []
 _THINK_SCRATCH_CONCERNS: list[dict] = []
 _THINK_NOTES: list[str] = []
 
+# [BL-284] `_THINK_REASONING_LOG`と同じ「ノード呼び出し単位」でリセットされるDecision書き込み
+# 累積カウンタ。`_LAST_WRITE_AGREEMENT_ITEMS`は`query_AI()`呼び出しごと（=ノード内部の
+# JSON解析リトライやBL-231ループガード再試行のたびに）リセットされてしまうため、
+# `_pending_decision_candidates`がそれと`_THINK_REASONING_LOG`（ノード呼び出し全体で累積）を
+# 直接比較すると、内部リトライを挟んだノード呼び出しで必ずスコープ不一致による誤検知が起きる
+# （実ログ log/2026-08-27/1212 で確認: goal_essence_analystがBL-231ループガードで2回
+# 差し戻された後の3回目成功時、実際には記録漏れが無いのにmajor issueが誤起票された）。
+# この専用カウンタは`query_AI()`単位ではなく`_reset_think_scratchpad()`と同じ寿命で管理する
+# ことで、`_pending_decision_candidates`の分子・分母のスコープを一致させる。
+_NODE_CALL_DECISION_WRITE_COUNT: int = 0
+
 
 def _reset_think_scratchpad() -> None:
     """[BL-093] リセットを忘れると前のノード呼び出しのtodo/scratch_concerns/notesが漏れ込むため、
     thinkツールを付与する各ノード関数の呼び出し開始時に必ず呼ぶ。
+    [BL-284] `_NODE_CALL_DECISION_WRITE_COUNT`も同じ寿命（ノード呼び出し単位）でリセットする。
     """
-    global _CURRENT_TOOL_LOOP_ITERATION, _THINK_REASONING_LOG, _THINK_TODO, _THINK_SCRATCH_CONCERNS, _THINK_NOTES
+    global _CURRENT_TOOL_LOOP_ITERATION, _THINK_REASONING_LOG, _THINK_TODO, _THINK_SCRATCH_CONCERNS, _THINK_NOTES, _NODE_CALL_DECISION_WRITE_COUNT
     _CURRENT_TOOL_LOOP_ITERATION = 0
     _THINK_REASONING_LOG = []
     _THINK_TODO = []
     _THINK_SCRATCH_CONCERNS = []
     _THINK_NOTES = []
+    _NODE_CALL_DECISION_WRITE_COUNT = 0
 
 
 # [BL-232] think の todo / scratch_concerns が取りうる status。スキーマ上は enum だが、
@@ -5622,9 +5635,16 @@ class _StreamMessage:
         return d
 
 
-# [BL-231] 生成崩壊検知の連続同一出力閾値（AGENTS.md §7 重要定数: 提案値3、ユーザー承認要）。
+# [BL-231→BL-284] 生成崩壊検知の連続同一出力閾値（AGENTS.md §7 重要定数）。
 # 連続して同一結合ハッシュ（正規化テキスト＋ツール計画）がこの回数出たら崩壊とみなし、ツールループを強制終了する。
-_LOOP_GUARD_REPETITION_WINDOW = 3
+# 当初3（2026-08-14ユーザー承認）。log/2026-08-27/1212のレビューで、goal_essence_analystが
+# 3回の閾値で強制終了された箇所を再確認したところ、ユーザーの判断では「真の生成崩壊」と
+# 断定できる反復ではなかった（3回程度の類似した言い回しの繰り返しは、モデルが同じ結論に
+# 複数回到達し直しているだけで、収束不能な崩壊とは限らない）ため、閾値を10へ引き上げる
+# （2026-08-27ユーザー承認）。閾値を上げるほど誤検知（正常収束中の一時的な繰り返しを
+# 崩壊と誤判定）は減るが、真の崩壊時にMAX_TOOL_ITER(=50)へ近づくまでの猶予も長くなる
+# トレードオフがある。
+_LOOP_GUARD_REPETITION_WINDOW = 10
 
 # [BL-231] 生成崩壊（同一文の逐語的な反復）そのものをデコード時に抑制するための反復ペナルティ
 # （AGENTS.md §7 重要定数: 2026-08-15 ユーザー承認値0.3）。目安は通常0.1〜0.5で、
@@ -6081,8 +6101,14 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                                 # なので、_safe_json_parseで再パースせず直接判定できる。
                                 if tc.function.name == "write_agreement":
                                     if isinstance(result, dict) and result.get("success"):
-                                        global _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS
+                                        global _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS, _NODE_CALL_DECISION_WRITE_COUNT
                                         _LAST_WRITE_AGREEMENT_SUCCEEDED = True
+                                        # [BL-284] ノード呼び出し単位で累積するDecision書き込み数。
+                                        # `_LAST_WRITE_AGREEMENT_ITEMS`はquery_AI()呼び出しごとに
+                                        # リセットされるため、それとは別スコープでカウントする
+                                        # （_pending_decision_candidates参照）。
+                                        if args.get("entry_type", "Decision") == "Decision":
+                                            _NODE_CALL_DECISION_WRITE_COUNT += 1
                                         # [BL-223] 項目単位のdecision_extractor重複判定用に、
                                         # _commit_agreement_from_toolと同じtask_idフォールバック
                                         # 規則（args優先、無ければ呼び出し元の現在タスク）を踏襲する。
@@ -6422,15 +6448,23 @@ def _pending_decision_candidates() -> list[dict]:
     write_agreement(entry_type="Decision")として書き切れていない分の候補を返す。
     1件ずつの厳密な対応付け（曖昧一致）は行わず件数比較のみに留める（BL-232のitem完全一致
     マージと同じ理由：誤った同一視によるサイレントな取りこぼしを避けるため、過剰検知の方が
-    過少検知より安全側）。`_THINK_REASONING_LOG`/`_LAST_WRITE_AGREEMENT_ITEMS`はいずれも
-    ノード呼び出し単位（前者は`_reset_think_scratchpad()`、後者は`query_AI()`呼び出しごと）で
-    リセットされる既存のグローバルのため、新規の状態追跡は不要。
+    過少検知より安全側）。
+
+    [BL-284] 分子（decision_like、`_THINK_REASONING_LOG`から算出）はノード呼び出し全体
+    （`_reset_think_scratchpad()`で1回だけリセット）で累積するのに対し、`_LAST_WRITE_AGREEMENT_ITEMS`
+    は`query_AI()`呼び出しごとにリセットされる。`_query_and_parse_with_retry`のJSON解析
+    リトライやBL-231ループガード再試行はいずれも同一ノード呼び出し内でquery_AI()を複数回
+    呼ぶため、旧実装（`_LAST_WRITE_AGREEMENT_ITEMS`を直接件数比較）では分子・分母のスコープが
+    一致せず、内部リトライを挟んだ成功時に必ず誤検知した（実ログ log/2026-08-27/1212:
+    goal_essence_analystがBL-231ループガードで2回差し戻された後の3回目成功時、実際には
+    記録漏れが無いのにmajor issueが誤起票された）。分母は`_THINK_REASONING_LOG`と同じ寿命の
+    `_NODE_CALL_DECISION_WRITE_COUNT`を使う。
     """
     decision_like = [
         e for e in _THINK_REASONING_LOG
         if (e.get("decided") or "").strip() and (e.get("rejected") or "").strip()
     ]
-    decision_writes = sum(1 for item in _LAST_WRITE_AGREEMENT_ITEMS if item.get("entry_type") == "Decision")
+    decision_writes = _NODE_CALL_DECISION_WRITE_COUNT
     return decision_like[decision_writes:] if len(decision_like) > decision_writes else []
 
 
@@ -9862,6 +9896,39 @@ def _build_detector_observations_block(state: LineageState, limit: int = 3) -> s
     )
 
 
+def _build_stateless_architecture_primer() -> str:
+    """[BL-285] CELAのノード構成・状態管理の「仕組み」を概念レベルで説明する共有ブロック。
+
+    従来のプロンプト（`_build_decision_lineage_directive`等）は「write_agreementで記録しろ」
+    という手続き的な指示は与えていたが、「なぜそうしなければならないか」という仕組み側の
+    説明（LangGraphのステートレスなノード構成、thinkや生reasoningがツールループ終了時に
+    消えること）は与えていなかった。log/2026-08-27/1237で、この手続き的指示だけからでも
+    task_plannerが「導出変数をconfirmed_variablesとして登録することを説明欄に明記し、
+    下流タスクがread_verified_factで参照できるようにする」という、指示されていない
+    消費経路の設計まで自発的に行っていたことをユーザーが確認した。この観察を踏まえ、
+    仕組み自体を説明すれば同様の汎化的な応用がより安定して起きるのではという仮説の下、
+    まずtask_planner一箇所にのみ試験導入する（他ノードへの展開は効果を見てから判断、
+    ユーザー指示）。単一箇所で全ノードが呼べるよう共有関数化し、文言のドリフト
+    （AGENTS.md §15.1）を防ぐ。
+    """
+    return (
+        "\n🏗️ 【CELAの仕組み: なぜDBへの記録が必要なのか】\n"
+        "CELAはLangGraphの状態機械で、あなた（このノード）の呼び出しは他のノード（Expert・"
+        "Detector・Reviewer等）や、同じノードの別タスク・別ターンの呼び出しとは会話文脈を"
+        "一切共有しない、独立した1回のAI呼び出しです（ステートレス）。あなたが今回書いた"
+        "think・生reasoning・このツールループ内だけのやり取りは、このツールループが終わった"
+        "瞬間に本質的に失われ、次の呼び出しには一切引き継がれません。\n"
+        "次の呼び出しに引き継がれる情報は、(a) LangGraph自体が管理する構造化されたstate"
+        "フィールド（あなたが直接書き込むものではありません）と、(b) あなたが明示的にDBへ"
+        "書いた記録（write_agreement/write_issue/write_entity_attribute等）の2種類だけです。"
+        "つまり、他のノード・他のタスクに何かを伝えたい、後で参照可能にしたい判断・数値・"
+        "懸念があるなら、それをDBに書く以外の手段はありません。書かなければ、その情報は"
+        "誰にも（あなた自身の次の呼び出しにさえ）二度と分かりません。\n"
+        "read_verified_fact/read_agreement/read_deliverable_file/read_issue/read_entity等は、"
+        "この仕組みでDBへ書かれた記録を後から検索・参照するための窓口です。\n"
+    )
+
+
 def _build_decision_lineage_directive(status_hint: str) -> str:
     """[BL-280/BL-277] 意思決定系譜(Decision Lineage)の記録を全ロール共通で必須化する指示文。
     単一箇所を全ノードが呼ぶことで、文言のドリフト（AGENTS.md §15.1）を防ぐ。
@@ -10349,6 +10416,7 @@ It serves as the initial planning layer for breaking down complex objectives acr
     )
 
     prompt = f"""
+    {_build_stateless_architecture_primer()}
     {revision_block}
     {reviewer_feedback_block}
     以下の目標を、独立して議論・検証可能な「フェーズ」に分解し、
@@ -10919,6 +10987,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     )
 
     system_prompt += _build_decision_lineage_directive('"Proposed"')
+    system_prompt += _build_stateless_architecture_primer()
 
     system_prompt += (
         "\n【BL-198: 実測できる地理データは実測する】\n"
@@ -11290,6 +11359,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     )
 
     light_system_prompt += _build_decision_lineage_directive('"Proposed"')
+    light_system_prompt += _build_stateless_architecture_primer()
 
     light_system_prompt += (
         "[BL-198: 実測できる地理データは実測する] 地点の標高、2点間の直線距離、住所の緯度経度、"
@@ -14020,6 +14090,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     )
 
     system_prompt_trailing += _build_decision_lineage_directive("任意（Approved等含む全status）")
+    system_prompt_trailing += _build_stateless_architecture_primer()
 
     previous_user_input = state.get("user_input", "(取得不可)")
 
