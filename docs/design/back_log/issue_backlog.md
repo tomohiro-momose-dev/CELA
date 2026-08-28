@@ -322,6 +322,7 @@
 | BL-293 | 高 | `cela_main.py`（`_build_escalation_pin_text`／`_get_forced_escalated_issues_text`への`caller_role`引数追加、計4呼び出し箇所） | **`done`。** ユーザーが複数モデルでの反復ドライラン中、同一パターンの生成崩壊（同様な文節の反復）が複数の異なるモデルで再現することに気づき調査を依頼。`log/2026-08-28/0649`で、DetectorのDomain Reviewが「User AIのDecision記録漏れエスカレーション（BL-283自動起票）はドメイン妥当性の話か、自分の職掌外か」という判定不能な自問をthinkingで6回以上繰り返しmax_tokens打ち切りに至る崩壊を確認。BL-283の自動エスカレーションが、本来「起こした当人が自己解決すべき」性質にもかかわらず既存の汎用`escalation_pin`チャネル経由で全ロールへ「要対応」表示されており、「エスカレーションには要対応」と「自分の職掌はドメイン妥当性のみ」という両立しない指示の板挟みが原因と特定（ツール呼び出し反復ガードの対象外＝純テキスト推論の無限循環）。ユーザー依頼による総点検で、さらに強い行為強制を行う`_get_forced_escalated_issues_text`（BL-136、User AI向け）にも同型の欠陥を発見し併せて修正。`decision_lineage_gap_*`トピックを、起こした当人のロールにのみ表示するよう両チャネルとも機械的にフィルタした。 | P1 |
 | BL-294 | 高 | `cela_main.py`（`verified_facts`/`entity_attributes`へ`audited_by`/`audited_at`列追加、新規`mark_fact_audited`ツール、`_build_unaudited_facts_text`、task_plan_reviewer観点10、call_task_planner／WRITE_AGREEMENT_TOOLの自己確認文言） | **`done`。** `log/2026-08-28/1023`の生成崩壊（Expertが35分超の単一ターン内で数値矛盾を堂々巡り）を遡ると、`log/2026-08-27/2345`でtask_plannerがweb_search結果の「構成比（自主返納者全体に占める75歳以上の割合）」を「返納率」と誤読し`confidence="confirmed"`で登録した単一の誤登録が真因だった（ユーザー指摘「78.3がいつ、だれが、どこから持ってきた数字か？」により特定）。confirmed_variables/entity属性に「誰が定義を出典と照合したか」を記録する監査機構が無かったことが構造的原因。verified_facts/entity_attributesへaudited_by/audited_at列を追加（値変化時のみUPSERTのCASE式でリセット）、task_plan_reviewerに定義監査の観点を追加、Detectorが未監査differential（audited_by IS NULL）を機械的に検知して監査するようdomain_promptへ組み込んだ。 | P1 |
 | BL-295 | 高 | `cela_main.py`（新規`_bounded_deliberation_instruction`、call_detector Pass 1/Pass 2、generate_user_utterance計2箇所、BL-292 quantitative_sufficiency_concernの既定値文言） | **`done`。** `log/2026-08-28/1313`でDetectorが「observationsをwrite_issueで永続化すべきか」という裁量判断を打ち切り規定無しに30回以上往復し停止（ユーザーがCtrl+Cで一時停止）。BL-293（役割の板挟み）・BL-294（マンデート値と検証結果の衝突）とは異なる3つ目の生成崩壊トリガーと特定。既にPass 2に実証済みだった「判定のブレ防止（3回多数決方式）」を汎用ヘルパー化し、Pass 1のwrite_issue永続化判断・User AIのRESOLVE/DEFER/ACKNOWLEDGE選択（2箇所）へ横展開。Exploreエージェントの横断調査で見つかったquantitative_sufficiency_concernの非対称（姉妹フィールドessence_sufficiency_concernの既定値文言欠如）も併せて解消した。 | P1 |
+| BL-296 | 高 | `cela_main.py`（新規`_missing_data_estimation_instruction`、call_expert・`_USER_AI_ROLE_MANDATE`・call_detector計3箇所） | **`done`。** `log/2026-08-28/1535`でExpertが公式統計に存在しない値（免許返納市単位累計）の推計中、「もっと誠実な方法があるはず」と同一の推計サイクルを9分半・15回以上繰り返し停止（ユーザーがCtrl+Cで一時停止）。BL-293/294/295とは異なる4つ目の生成崩壊トリガー（推計の精緻化に終わりが無い完璧主義ループ）と特定。実務標準の推計手法5種（代理指標の比例配分・類似事例の転用・フェルミ推定的分解・レンジ提示・前提の明示的記録）と満足化規定を導入し、Expert（producer視点：1つ選んだら確定）・User AI/Detector（auditor視点：文書化された推計を理由なく差し戻さない）双方へ横展開した。 | P1 |
 
 ---
 
@@ -9938,6 +9939,37 @@ BL-266の`_BL266_ESSENCE_TOPIC_PREFIX`によるトピック接頭辞フィルタ
 実LLM呼び出しでの効果確認は次回ドライラン待ち: ①Pass 1のwrite_issue永続化判断で同種の堂々巡りが再発しないか、②Pass 2の既存3回多数決方式の挙動が維持されているか、③User AIのRESOLVE/DEFER/ACKNOWLEDGE選択で同種の堂々巡りが無いか。
 
 参照: `tests/test_bl295_bounded_deliberation.py`、`docs/design/back_log/BL-295/BL295_basic_design.md`、`log/2026-08-28/1313/log_no_prompt.md`、`docs/design/decision_log.md` D-250。
+
+### BL-296: 公表されていない値の推計に「1つの妥当な方法で確定させる」満足化規定を導入
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-293/BL-294/BL-295（同種の生成崩壊、いずれも別の欠陥クラス）、BL-041（confirmed/provisional区別の原設計、本BLが拡張した箇所）、BL-292（`_USER_AI_ROLE_MANDATE`拡張の先例パターン踏襲元） |
+
+**経緯:**
+
+`log/2026-08-28/1535`（Ctrl+Cで一時停止済み）で、Expert（task_1_1、免許返納累計件数）が「茅野市単位の累計は公式統計に存在しない」状況に直面し、iter=6の単一生成ターン内で9分半・15回以上、「長野県の構成比から按分推計する→仮定が重すぎるので却下→もっと誠実な方法があるはずと言い直す→運転経歴証明書は年間件数であって累計ではないと気づき振り出しに戻る」という同一サイクルを繰り返し、ツール呼び出しも出力確定も行わないまま停止した。なお同ログでは、BL-294の効果も部分的に確認できた——Expertは長野県警察統計の78.3%を今回は正しく「構成比」として認識し、`confirmed`として誤登録しなかった。
+
+これはBL-293（役割の板挟み）・BL-294（マンデート値と検証結果の衝突）・BL-295（二択・三択の裁量判断に打ち切り規定が無い）のいずれとも異なる4つ目の生成崩壊パターンで、「推計の精緻化に終わりが無い（完璧主義ループ）」というもの。ユーザーへ「公表されていない値を推計する一般的な方法は？」と問われ、実務標準の5手法（代理指標の比例配分・類似事例の転用・フェルミ推定的分解・レンジ/感度分析での提示・前提の明示的記録）を回答したところ、これを満足化規定としてBL化する方針が承認された。ユーザーからは、Expertだけでなく**User AIとDetectorにも同種の必要性がある**との指摘があった。
+
+**根本原因（コードで確認）:**
+
+`call_expert`の既存BL-041ブロック（確定値と暫定値の区別）は、confidence選択をcross-task制約衝突／User承認の有無でしか判定しておらず、「そもそも公式統計が存在しない場合どうするか」には一切触れていなかった。`generate_user_utterance`には該当する指示が皆無（file全体で「公式統計」の文字列は0件）。`call_detector`もconfirmed/provisionalのラベル妥当性や引用の実在性はチェックするが（BL-094/BL-188）、「推計手法そのものが妥当か」を評価する仕組みは存在しなかった。BL-295の3回多数決方式はカテゴリカルな結論（trial1/2/3）の多数決には合うが、今回のような連続的な手法の洗練ループには構造的に適合しない。
+
+**対応内容（2026-08-28）:**
+
+新規共有ヘルパー`_missing_data_estimation_instruction(perspective)`を追加（`_bounded_deliberation_instruction`の近く）。`perspective`引数で「自ら推計する側（producer）」と「他者の推計を審査・許可する側（auditor）」で結び文を切り替える（`_verification_throttle_warning`の`output_form`引数と同型のパターン）。
+
+- **producer視点**（`call_expert`のBL-041ブロックへ追加）: 5手法のいずれか1つを選び前提を明記した時点で確定させ、「もっと誠実な方法」を求めて再導出し続けないよう指示。
+- **auditor視点**（`_USER_AI_ROLE_MANDATE`、`call_detector`のBL-188根拠実在性チェック直後へ追加）: 相手が5手法のいずれかを使い前提を明記して確定させた値を、それだけを理由に差し戻したり再提出を求めたりしないよう指示。手法自体が不合理か前提未記載の場合のみ指摘対象とする。`_USER_AI_ROLE_MANDATE`はStage1（レビュー）・Stage4（指示作成）双方に自動配線されるため、単一箇所への追加でUser AIの両場面をカバーする。
+
+**テスト**: `tests/test_bl296_missing_data_estimation.py`（新規12件）: 5手法がproducer/auditor両方に含まれること、perspective別の結び文の切り替え確認（producer固有・auditor固有の文言が互いに混入していないこと）、デフォルトがproducerであること、call_expert/`_USER_AI_ROLE_MANDATE`/call_detectorそれぞれへの適用・挿入位置の確認、BL-295の3回多数決方式ヘルパーとの非衝突確認。AGENTS.md §17.1（`cela_main.py`全体をgit stashで巻き戻し、新規12件中11件が失敗することを確認——1件は`_USER_AI_ROLE_MANDATE`定数参照自体の回帰確認でありBL-296以前から存在するため引き続き成功——後、復元してdiffが完全一致することを確認）。
+
+実LLM呼び出しでの効果確認は次回ドライラン待ち: ①Expertが公式統計の無い値に直面した際、1つの手法を選んで確定できるか、②User AIがExpertの文書化された推計を不当に差し戻さないか、③Detectorが同様の推計をmajorとして誤って差し戻さないか。現在一時停止中のrun（`log/2026-08-28/1535`）を`--resume`するか打ち切るかは本BLとは別にユーザー判断待ち。
+
+参照: `tests/test_bl296_missing_data_estimation.py`、`docs/design/back_log/BL-296/BL296_basic_design.md`、`log/2026-08-28/1535/log_no_prompt.md`、`docs/design/decision_log.md` D-251。
 
 ---
 
