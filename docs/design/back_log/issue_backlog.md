@@ -9965,7 +9965,7 @@ BL-266の`_BL266_ESSENCE_TOPIC_PREFIX`によるトピック接頭辞フィルタ
 - **producer視点**（`call_expert`のBL-041ブロックへ追加）: 5手法のいずれか1つを選び前提を明記した時点で確定させ、「もっと誠実な方法」を求めて再導出し続けないよう指示。
 - **auditor視点**（`_USER_AI_ROLE_MANDATE`、`call_detector`のBL-188根拠実在性チェック直後へ追加）: 相手が5手法のいずれかを使い前提を明記して確定させた値を、それだけを理由に差し戻したり再提出を求めたりしないよう指示。手法自体が不合理か前提未記載の場合のみ指摘対象とする。`_USER_AI_ROLE_MANDATE`はStage1（レビュー）・Stage4（指示作成）双方に自動配線されるため、単一箇所への追加でUser AIの両場面をカバーする。
 
-**テスト**: `tests/test_bl296_missing_data_estimation.py`（新規12件）: 5手法がproducer/auditor両方に含まれること、perspective別の結び文の切り替え確認（producer固有・auditor固有の文言が互いに混入していないこと）、デフォルトがproducerであること、call_expert/`_USER_AI_ROLE_MANDATE`/call_detectorそれぞれへの適用・挿入位置の確認、BL-295の3回多数決方式ヘルパーとの非衝突確認。AGENTS.md §17.1（`cela_main.py`全体をgit stashで巻き戻し、新規12件中11件が失敗することを確認——1件は`_USER_AI_ROLE_MANDATE`定数参照自体の回帰確認でありBL-296以前から存在するため引き続き成功——後、復元してdiffが完全一致することを確認）。
+**テスト**: `tests/test_bl296_missing_data_estimation.py`（新規12件）: 5手法がproducer/auditor両方に含まれること、perspective別の結び文の切り替え確認（producer固有・auditor固有の文言が互いに混入していないこと）、デフォルトがproducerであること、call_expert/`_USER_AI_ROLE_MANDATE`/call_detectorそれぞれへの適用・挿入位置の確認、BL-295の3回多数決方式ヘルパーとの非衝突確認。AGENTS.md §17.1（`cela_main.py`全体をgit stashで巻き戻し、新規12件中11件が失敗することを確認——1件は`_USER_AI_ROLE_MANDATE`定数参照自体の回帰確認でありBL-296以前から存在するため引き続き成功——後、復元してdiffが完全一致することを確認）。フルオフラインスイート1900 passed（既知のBL-269 4件のみ残存、新規失敗なし）。
 
 実LLM呼び出しでの効果確認は次回ドライラン待ち: ①Expertが公式統計の無い値に直面した際、1つの手法を選んで確定できるか、②User AIがExpertの文書化された推計を不当に差し戻さないか、③Detectorが同様の推計をmajorとして誤って差し戻さないか。現在一時停止中のrun（`log/2026-08-28/1535`）を`--resume`するか打ち切るかは本BLとは別にユーザー判断待ち。
 
