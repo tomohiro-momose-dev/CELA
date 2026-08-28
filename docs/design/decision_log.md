@@ -3483,6 +3483,18 @@
 | 影響 | `cela_main.py`（`_ensure_audited_columns`新設＋呼び出し配線、`upsert_verified_fact`/`upsert_entity_attribute`のCASE式追加、`MARK_FACT_AUDITED_TOOL`＋`_mark_fact_audited_impl`＋`TOOL_DISPATCH`登録、`_build_unaudited_facts_text`新設、`call_task_plan_reviewer`の観点10追加＋観点数表記9→10更新、`call_detector`のdomain_prompt組み込み＋利用可能ツール一覧更新、`WRITE_AGREEMENT_TOOL`/`call_task_planner`への自己確認文言追加、計12箇所）、`tests/test_bl294_definitional_audit.py`（新規31件）、`tests/test_bl254_task_plan_reviewer_gaps.py`・`tests/test_bl266_essence_sufficiency_prompts.py`（既存の観点数カウントテストを9→10へ追随修正）。AGENTS.md §17.1確認済み（cela_main.py全体をgit stashで2回に分けて巻き戻し、新規31件全件および観点数カウント2件が失敗することを確認後、diffが完全一致することを確認して復元）。フルオフラインスイート1875 passed（既知のBL-269汚染4件のみ）。実LLM呼び出しでの効果確認（task_plan_reviewer/Detectorが実際に定義監査を行い、同種の78.3%相当の誤登録を捕捉できるか）は次回ドライラン待ち。 |
 | 関連 BL | BL-294（本件）、BL-204（entity命名の出典検証という姉妹パターン）、BL-224（UPSERT＋stale伝播のCASE式踏襲元）、BL-266/BL-292（能動的ツール提供だけでは不十分という教訓の踏襲元）、BL-095/BL-248（SUPERSEDEによる直接訂正の先例） |
 
+### D-250: BL-295 — 裁量判断の打ち切り規定（3回多数決方式）を汎用ヘルパー化し、Pass 2以外にも横展開する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-28 |
+| 状態 | `decided` |
+| 決定者 | t-momose（「1313ログを参照、detevtorが生成崩壊」という報告、「BL化して対応の検討を」という依頼、「3回多数決方式を共通ヘルパー化（推奨）」という選択回答） |
+| **決定理由** | `log/2026-08-28/1313`で、Detectorが`constraint_issue=none`の判定自体は正しく完了させた直後、「observationsに書いた気づきをwrite_issueで永続化すべきか」という別の裁量判断で41秒間・30回以上同一の二択を往復し停止した（ユーザーがCtrl+Cで手動一時停止）。これはBL-293（役割の板挟み）・BL-294（マンデート値と検証結果の衝突）とは異なる3つ目の生成崩壊トリガーで、「裁量判断を求める指示に、判断が割れた場合の打ち切り規定が伴っていない」というパターン。調査の結果、Detector Pass 2には既に「判定のブレ防止（3回多数決方式）」という実証済みの打ち切り機構が存在したが、constraint_issueのmajor/minor境界判定にしかスコープされておらずPass 1には無かった。当初はより軽量な「`_verification_throttle_warning`へ一文追加するだけ」の案を検討したが、Pass 2自身が単なる注意書きでは不十分と判断し3回多数決方式を別途導入した経緯があり、同じ弱さを抱える可能性が高いと判断し、実証済みの3回多数決方式を汎用ヘルパーとして切り出す方針をユーザーが選択した。 |
+| 決定内容 | Pass 2の3回多数決方式ブロック（`cela_main.py:12575-12580`時点）を`_bounded_deliberation_instruction(judgment_description)`として汎用ヘルパー化（`_verification_throttle_warning`の近くに新設）。Pass 2自体はこのヘルパー呼び出しへ置換し、直後の`_verification_throttle_warning`とほぼ内容が重複していた手書きブロック（§15.1違反）も共有ヘルパー呼び出しへ置換した。Pass 1（domain_prompt）のBL-096永続化判断（診断されたバグ本体）へ新規ヘルパーを適用。Exploreエージェントによる横断調査で見つかった追加2箇所——①`generate_user_utterance`のwrite_issue action_type選択（RESOLVE/DEFER/ACKNOWLEDGE、Stage2/Stage4の計2箇所）、②BL-292 `quantitative_sufficiency_concern`が姉妹フィールドBL-266 `essence_sufficiency_concern`の「判断に迷う場合はfalseのまま」という既定値の逃げ道を欠いていた非対称——も併せて修正した（後者は3回多数決方式ではなく姉妹フィールドと同じ既定値パターンを踏襲、軽量修正）。他の裁量判断箇所（confidence選択、escalate_premise_concern判断、task_plan_reviewerの10観点判定）は既存の閉じた基準を持つため対象外とした。 |
+| 影響 | `cela_main.py`（`_bounded_deliberation_instruction`新設、call_detector Pass 2の置換2箇所、Pass 1への追加1箇所、generate_user_utteranceへの追加2箇所、quantitative_sufficiency_concernの既定値文言追加、計6箇所）、`tests/test_bl295_bounded_deliberation.py`（新規13件）、`tests/test_bl089_anti_repetition_instructions.py`（既存1件を呼び出し式マーカー方式へ追随修正、BL-256と同型）。AGENTS.md §17.1確認済み（cela_main.py全体をgit stashで巻き戻し、新規13件＋既存1件の計14件全てが失敗することを確認後、diffが完全一致することを確認して復元）。実LLM呼び出しでの効果確認（Pass 1のwrite_issue永続化判断・User AIのRESOLVE/DEFER/ACKNOWLEDGE選択で同種の堂々巡りが再発しないか）は次回ドライラン待ち。 |
+| 関連 BL | BL-295（本件）、BL-293/BL-294（同種の生成崩壊、別の欠陥クラス）、BL-266/BL-292（quantitative_sufficiency_concern非対称の当事者）、BL-089/BL-256（`_verification_throttle_warning`の既存集約パターンの踏襲元） |
+
 ---
 
 ## 決定の記録ルール
