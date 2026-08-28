@@ -161,6 +161,45 @@ def test_record_decision_lineage_gap_issue_writes_major_escalated(db_conn):
     assert row["task_id"] == "task_1_1"
 
 
+def test_record_decision_lineage_gap_issue_description_includes_why_and_rejected_why(db_conn):
+    """[BL-293] ステートレス性により次ターンは生のthinkログへ戻れないため、自己解決
+    （escalation_pin/forced_textで再表示されたdescriptionを読んでwrite_agreement(Decision)を
+    書き直す）はこのdescriptionに残された情報だけが頼りである。従来はdecided/rejectedのみを
+    保存しており、同じpendingを使う_build_decision_gap_correction_note（同一ターン内の即時
+    差し戻し）がwhy/rejected_whyも含めているのと非対称だった（AGENTS.md §15.1）。
+    【リバート検出】description構築からwhy/rejected_whyを外すと失敗する。"""
+    conn, run_id = db_conn
+    cela_main._CURRENT_CALLER_ROLE = "expert"
+    cela_main._CURRENT_TASK_ID = "task_1_1"
+    state = {"run_id": run_id, "current_task_id": "task_1_1", "current_phase": {"phase_id": "phase_1"}}
+    pending = [{"decided": "A案を採用", "why": "コスト最小のため", "rejected": "B案", "rejected_why": "予算超過のため"}]
+    cela_main._record_decision_lineage_gap_issue("Expert:test", pending, 0, state)
+    row = conn.execute(
+        "SELECT description FROM issue_log WHERE run_id=? AND topic LIKE 'decision_lineage_gap_%'",
+        (run_id,)
+    ).fetchone()
+    assert row is not None
+    assert "コスト最小のため" in row["description"]
+    assert "予算超過のため" in row["description"]
+
+
+def test_record_decision_lineage_gap_issue_description_tolerates_missing_why_fields(db_conn):
+    """why/rejected_whyが無いpending（呼び出し元によっては省略され得る）でも例外を出さず、
+    空文字として扱われること。"""
+    conn, run_id = db_conn
+    cela_main._CURRENT_CALLER_ROLE = "expert"
+    cela_main._CURRENT_TASK_ID = "task_1_1"
+    state = {"run_id": run_id, "current_task_id": "task_1_1", "current_phase": {"phase_id": "phase_1"}}
+    pending = [{"decided": "A", "rejected": "B"}]  # why/rejected_whyキー自体が無い
+    cela_main._record_decision_lineage_gap_issue("Expert:test", pending, 0, state)
+    row = conn.execute(
+        "SELECT description FROM issue_log WHERE run_id=? AND topic LIKE 'decision_lineage_gap_%'",
+        (run_id,)
+    ).fetchone()
+    assert row is not None
+    assert "決定: A" in row["description"]
+
+
 def test_record_decision_lineage_gap_issue_noop_without_state():
     # stateがNoneの場合は例外を出さず何もしない（get_active_conn等を呼ばない）
     cela_main._record_decision_lineage_gap_issue("Expert:test", [{"decided": "A", "rejected": "B"}], 0, None)

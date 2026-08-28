@@ -267,6 +267,7 @@ import os
 deepseek = "deepseek-r1-0528:8b"
 gemini_2_5 = "gemini-2.5-flash-lite"
 gemini_3_1 = "gemini-3.1-flash-lite"
+gemini_3_7 = "gemini-3.7-flash"
 gemma_local = "gemma4-it:e4b"
 deepseek_v4_flash = "deepseek-v4-flash-0731"
 nemotron_3_super = "nemotron-3-super-120b-a12b:free"
@@ -330,7 +331,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user = glm_5_3_flash
+model_user =    hy3
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -340,47 +341,47 @@ model_user = glm_5_3_flash
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = glm_5_3_flash # nemotron_3_ultra
+model_orchestrator = hy3 # nemotron_3_ultra
 
 client_expert = client_openrouter
-model_expert = glm_5_3_flash # nemotron_3_ultra
+model_expert = hy3 # nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = glm_5_3_flash
+model_task_planner = nemotron_3_ultra # nemotron_3_ultra
 
 client_task_plan_reviewer = client_openrouter
-model_task_plan_reviewer = glm_5_3_flash
+model_task_plan_reviewer = nemotron_3_ultra # nemotron_3_ultra
 
 client_detector_domain = client_openrouter
-model_detector_domain = glm_5_3_flash # nemotron_3_ultra
+model_detector_domain = hy3 # nemotron_3_ultra
 client_detector_numeric = client_openrouter
-model_detector_numeric = glm_5_3_flash # nemotron_3_ultra
+model_detector_numeric = hy3 # nemotron_3_ultra
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = glm_5_3_flash
+model_decision_extractor = hy3
 
 client_resource_arbiter = client_openrouter
-model_resource_arbiter = glm_5_3_flash #nemotron_3_ultra
+model_resource_arbiter = hy3 #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = glm_5_3_flash
+model_reflection = hy3
 
 client_facilitator = client_openrouter
-model_facilitator = glm_5_3_flash
+model_facilitator = hy3
 
 client_integrator = client_openrouter
-model_integrator = glm_5_3_flash #nemotron_3_ultra
+model_integrator = hy3 #nemotron_3_ultra
 
 client_reviewer_qa = client_openrouter
-model_reviewer_qa = glm_5_3_flash #nemotron_3_ultra
+model_reviewer_qa = hy3 #nemotron_3_ultra
 
 client_goal_essence = client_openrouter
-model_goal_essence = glm_5_3_flash #nemotron_3_ultra
+model_goal_essence = hy3 #nemotron_3_ultra
 
 # [BL-274] 対話型HIL（--interactive-hil）の単発Q&A応答生成用。グラフ実行を伴わない
 # スタンドアロンCLI呼び出しのため、他ノードと同じBL-189パターンで専用変数を持たせる。
 client_hil_qa = client_openrouter
-model_hil_qa = glm_5_3_flash
+model_hil_qa = hy3
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -905,6 +906,49 @@ WRITE_ISSUE_TOOL = {
                 }
             },
             "required": ["action_type", "topic"]
+        }
+    }
+}
+
+# [BL-294] task_planner等が一括登録するconfirmed_variables/entity属性は、変数名が意味する定義と
+# citations出典本文の実際の定義が食い違っていても機械的には検知できない（実例: 「返納率」として
+# 登録した値が、出典では「返納者全体に占める割合（構成比）」だった。BL-294_basic_design.md参照）。
+# task_plan_reviewer（初回計画レビュー）とDetector（Domain Review、Expert/User AIによるDB更新の
+# 直後）が定義を出典と突き合わせて検証したことを、値そのものとは独立した監査記録として残す。
+MARK_FACT_AUDITED_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "mark_fact_audited",
+        "description": (
+            "[BL-294] verified_facts/entity属性の1件について、「変数名/属性名が意味する定義と、"
+            "citationsに挙げた出典本文の実際の記述が一致するか」を検証したことを記録します。"
+            "このツールは値そのものを書き換えません——定義が出典と食い違っている場合は、"
+            "**先に**write_agreement（confirmed_variablesの再登録、action_type='SUPERSEDE'推奨）"
+            "またはwrite_entity_attributeで正しい値へ訂正してから、audit_result='corrected'で"
+            "このツールを呼んでください。定義が一致していた場合はaudit_result='confirmed_correct'を"
+            "呼んでください。task_plan_reviewer/detectorのみ使用できます。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": "監査対象。verified_factsは'fact:<variable_name>'、entity属性は"
+                                    "'entity:<entity_id>:<attr_name>'の形式（read_verified_fact/"
+                                    "read_entityで確認した名前をそのまま使う）。"
+                },
+                "audit_result": {
+                    "type": "string", "enum": ["confirmed_correct", "corrected"],
+                    "description": "confirmed_correct=定義は出典と一致していた。corrected=不一致を"
+                                    "見つけ、このツールを呼ぶ前に既に値を訂正した。"
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "必須。何を確認し、出典本文のどの記述と照合したか（correctedの場合は"
+                                    "何がどう食い違っていたかも）。"
+                }
+            },
+            "required": ["ref", "audit_result", "reason"]
         }
     }
 }
@@ -2808,6 +2852,13 @@ WRITE_AGREEMENT_TOOL = {
                         "value — it means 'proceeded with this value for now', not 'this is unverified/wrong'. "
                         "[BL-041] Default to 'provisional' unless this value is an absolute constraint given "
                         "directly in the goal, or the User has explicitly approved it as final. "
+                        "[BL-294] Before setting confidence='confirmed', check that the definition implied by "
+                        "variable_name (e.g. what is the denominator for a 'rate') actually matches what the "
+                        "citations source states -- not just that the source mentions similar keywords. A "
+                        "source stating 'the share of X that is Y' (a composition ratio) is NOT the same "
+                        "statistic as 'the rate at which Y occurs among X' (an occurrence rate), even when both "
+                        "surface in the same search results for the same keywords. Do not transcribe a number "
+                        "as confirmed just because it appeared near your search terms. "
                         "[BL-258] This is the ONLY path that writes to verified_facts. Writing a regular "
                         "CREATE/UPDATE entry whose topic/decision_what merely describes or names an "
                         "owns_variables variable does NOT register it -- verified_facts stays empty and "
@@ -4917,7 +4968,7 @@ def _get_actionable_escalated_issues(conn: sqlite3.Connection, run_id: str,
 
 
 def _build_escalation_pin_text(conn: sqlite3.Connection, run_id: str, current_task_id: str = "",
-                                round_count: int = 0) -> str:
+                                round_count: int = 0, caller_role: str = "") -> str:
     """[BL-103] issue_logのescalated行を、recency（chat_history_window/expert_history_window）
     に関係なく常時hydrate_contextへ差し込むための整形テキストを返す（無ければ空文字）。
     facilitatorのフィードバックはchat_history末尾に追記されるだけで窓を過ぎると消えるため
@@ -4928,8 +4979,23 @@ def _build_escalation_pin_text(conn: sqlite3.Connection, run_id: str, current_ta
     「⚠️要対応」という見出し（呼び出し元）の意味を正しくするため——DEFER済み分は
     _build_deferred_issue_pin_textへ、ACKNOWLEDGE中の分は_build_acknowledged_issue_pin_text
     へそれぞれ分離し、いずれも非「要対応」の別トーンで表示する。
+    [BL-293] `decision_lineage_gap_{role}_{task_id}`（BL-283の自動起票、`_record_decision_lineage_gap_issue`
+    参照）は「その役割自身が次のターンで未記録の決定をwrite_agreementせよ」という自己向けの
+    催促であり、他ロール（特にDetectorのDomain Review、本来ドメイン妥当性のみを審査する）が
+    見ても解決できる立場になく、「要対応」ラベルと自分の職掌の板挟みで判定不能なままthinking
+    ループへ入り、max_tokens打ち切りに至る生成崩壊を実ログ（log/2026-08-28/0649）で確認した。
+    caller_role（呼び出し元自身のロール文字列、例："detector"）を渡すと、当該roleが自ら
+    起こした記録漏れ（トピック接頭辞が一致するもの）のみ残し、他ロール起因の記録漏れは
+    このpinから除外する。caller_role未指定（空文字）の場合は従来通り全件を通す
+    （呼び出し側の移行漏れで挙動が変わらないよう、フェイルセーフとしてフィルタなし側へ倒す）。
     """
     escalated = _get_actionable_escalated_issues(conn, run_id, current_task_id, round_count=round_count)
+    if caller_role:
+        escalated = [
+            i for i in escalated
+            if not i["topic"].startswith("decision_lineage_gap_")
+            or i["topic"].startswith(f"decision_lineage_gap_{caller_role}_")
+        ]
     if not escalated:
         return ""
     return "\n".join(
@@ -5422,6 +5488,9 @@ TOOL_DISPATCH = {
     ),
     "flag_needs_human_input": lambda args, state=None: _flag_needs_human_input_tool_impl(
         args, get_active_conn(), _run_id_from(state), _CURRENT_CALLER_ROLE, _phase_id_from(state), _task_id_from(state)
+    ),
+    "mark_fact_audited": lambda args, state=None: _mark_fact_audited_impl(
+        args, get_active_conn(), _run_id_from(state), _CURRENT_CALLER_ROLE
     ),
     "schedule_task_focus": lambda args, state=None: _schedule_task_focus_tool_impl(
         args, get_active_conn(), _run_id_from(state), _CURRENT_CALLER_ROLE, state
@@ -6705,11 +6774,23 @@ def _record_decision_lineage_gap_issue(label: str, pending: list[dict], retry_wr
     task_id = _CURRENT_TASK_ID or state.get("current_task_id", "")
     phase_id = state.get("current_phase", {}).get("phase_id", "")
     topic = f"decision_lineage_gap_{_CURRENT_CALLER_ROLE}_{task_id or 'no_task'}"
+    # [BL-293] why/rejected_whyも保存する。次ターンの自己解決（escalation_pin/forced_textで
+    # 再表示されたこのdescriptionを読んでwrite_agreement(Decision)を書き直す）はステートレス性
+    # により生のthinkログへは戻れず、ここに書き残した内容だけが頼りである。従来はdecided/
+    # rejectedのみを保存しており、_build_decision_gap_correction_note（同一ターン内の即時
+    # 差し戻し、直下）が同じpendingからwhy/rejected_whyも含めているのと非対称だった
+    # （AGENTS.md §15.1）。理由が欠落したまま次ターンへ渡ると、書き直されるDecisionも
+    # reason_whyの薄い形骸的な記録になり、decision lineageの本来の目的（なぜその分岐が
+    # 起きたか）を達成できない。
     description = (
         f"[BL-283] {label}がthinkに記録した分岐点{len(pending)}件のうち、"
         f"差し戻し後もwrite_agreement(entry_type='Decision')が{retry_writes}件しか確認できませんでした。"
         "未記録の可能性がある分岐点:\n" +
-        "\n".join(f"- 決定: {p['decided']} / 却下: {p['rejected']}" for p in pending)
+        "\n".join(
+            f"- 決定: {p['decided']} / 理由: {p.get('why', '')} / "
+            f"却下: {p['rejected']} / 却下理由: {p.get('rejected_why', '')}"
+            for p in pending
+        )
     )
     _write_issue_impl(
         {"action_type": "CREATE", "topic": topic, "severity": "major",
@@ -7069,6 +7150,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_agreements_task_id_column(conn)
     _ensure_agreements_citations_column(conn)
     _ensure_verified_facts_r3a_columns(conn)
+    _ensure_audited_columns(conn)
     _ensure_issue_log_defer_column(conn)
     _ensure_issue_log_acknowledge_columns(conn)
     _ensure_issue_log_human_input_columns(conn)
@@ -7196,6 +7278,25 @@ def _ensure_verified_facts_r3a_columns(conn: sqlite3.Connection) -> None:
     if "confidence" not in cols:
         print("  🛠️ [schema migration] verified_factsへconfidence列を追加します（F-3.9/R3a）。")
         conn.execute("ALTER TABLE verified_facts ADD COLUMN confidence TEXT DEFAULT 'confirmed'")
+    conn.commit()
+
+
+def _ensure_audited_columns(conn: sqlite3.Connection) -> None:
+    """[BL-294] verified_facts/entity_attributesへ「誰が・いつ値の定義を出典に照らして
+    独立検証したか」を記録するaudited_by/audited_at列を追加する。既存のconfirmed_by/
+    confirmed_at（誰が値を書いたか）とは別軸——値の登録者自身は定義の妥当性を検証したとは
+    限らないため（BL-294の発端: task_plannerが検索意図と異なる定義の数値を検索キーワードの
+    近さだけでconfirmedとして登録した誤りが、以後の全タスク再実行に伝播し生成崩壊を招いた）。
+    _ensure_verified_facts_r3a_columnsと同型のPRAGMA table_infoガード付きマイグレーション。
+    """
+    for table in ("verified_facts", "entity_attributes"):
+        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if "audited_by" not in cols:
+            print(f"  🛠️ [schema migration] {table}へaudited_by列を追加します（BL-294）。")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN audited_by TEXT DEFAULT NULL")
+        if "audited_at" not in cols:
+            print(f"  🛠️ [schema migration] {table}へaudited_at列を追加します（BL-294）。")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN audited_at REAL DEFAULT NULL")
     conn.commit()
 
 
@@ -7358,6 +7459,48 @@ def _resolve_ref_table(query: str, run_id: str, ref: str) -> bool:
         row = query("SELECT 1 FROM detector_reviews WHERE id=? AND run_id=?", (rid, run_id)).fetchone()
         return row is not None
     return False
+
+
+def _mark_fact_audited_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str) -> dict:
+    """[BL-294] mark_fact_auditedツールの実体。task_plan_reviewer/detectorのみ許可
+    （BL-096のwrite_issue権限チェックと同型のロール制限）。verified_facts/entity_attributesの
+    audited_by/audited_atを更新するのみで、値そのものは書き換えない（値の訂正は既存の
+    write_agreement/write_entity_attributeが担う——単一責務、§15.1）。ref存在検証は
+    BL-224の既存ヘルパー_resolve_ref_tableを再利用する。
+    """
+    if caller_role not in ("task_plan_reviewer", "detector"):
+        return {"success": False,
+                "error": f"mark_fact_auditedはtask_plan_reviewer/detectorのみ使用できます（caller_role={caller_role}）"}
+
+    ref = args.get("ref") or ""
+    audit_result = args.get("audit_result")
+    reason = args.get("reason") or ""
+    if audit_result not in ("confirmed_correct", "corrected"):
+        return {"success": False, "error": f"不正なaudit_result: {audit_result}"}
+    if not reason:
+        return {"success": False, "error": "reasonは必須です"}
+    if not (ref.startswith("fact:") or ref.startswith("entity:")):
+        return {"success": False, "error": f"mark_fact_auditedはfact:/entity:形式のrefのみ対象です: {ref}"}
+    if not _resolve_ref_table(conn.execute, run_id, ref):
+        return {"success": False, "error": f"refが実在する行を指していません: {ref}"}
+
+    now = time.time()
+    if ref.startswith("fact:"):
+        var_name = ref[len("fact:"):]
+        conn.execute(
+            "UPDATE verified_facts SET audited_by=?, audited_at=? WHERE run_id=? AND variable_name=?",
+            (caller_role, now, run_id, var_name),
+        )
+    else:
+        eid, attr = ref[len("entity:"):].split(":", 1)
+        conn.execute(
+            "UPDATE entity_attributes SET audited_by=?, audited_at=? WHERE run_id=? AND entity_id=? AND attr_name=?",
+            (caller_role, now, run_id, eid, attr),
+        )
+    conn.commit()
+    print(f"  ✅ [mark_fact_audited][BL-294] {ref} を監査済みとして記録しました"
+          f"（by={caller_role}, result={audit_result}）: {reason[:80]}")
+    return {"success": True, "ref": ref, "audited_by": caller_role, "audit_result": audit_result}
 
 
 def _write_relation_edge(
@@ -8321,6 +8464,63 @@ def _get_frozen_agreements_text(conn: sqlite3.Connection, run_id: str) -> str:
     return "【🔒 Freeze済み（人間の発注者が審議の上で承認した恒久的な例外）】\n" + "\n".join(lines) + "\n"
 
 
+def _build_unaudited_facts_text(conn: sqlite3.Connection, run_id: str, state: LineageState) -> str:
+    """[BL-294] 現在タスクに関連するverified_facts/entity_attributesのうち、まだ誰にも
+    定義監査（audited_by IS NULL）を受けていないものを機械的に抽出し、Detectorのdomain_promptへ
+    直接埋め込む。受動的なツール提供（read_verified_fact等）だけでは監査の実行が保証されない
+    ため（§15.3、BL-266/292と同じ教訓——call_detectorのDomain Reviewパスは元々verified_factsを
+    プロンプトへ一切事前展開しておらず、能動的にツールを呼ばない限り見えなかった）、対象を
+    機械的に絞り込んで提示する。スコープは_build_task_scope_contextのdependency_variable_names
+    定義（現在タスク自身のowns_variables ∪ depends_onする各タスクのowns_variables）を踏襲する。
+    Expert/User AIが既存値へ疑義を持ちwrite_agreement/write_entity_attributeで更新した場合、
+    upsert_verified_fact/upsert_entity_attributeのCASE式によりaudited_byがNULLへリセットされる
+    ため、直後のこのDetector呼び出しが自動的にその変更差分を検知して監査対象に含める。
+    """
+    current_task = _get_current_task(state)
+    task_id = current_task.get("task_id", "")
+    var_names = list(current_task.get("owns_variables", []))
+    depends_on_task_ids = current_task.get("depends_on", [])
+    for phase in state.get("phases", []):
+        for t in phase.get("tasks", []):
+            if t.get("task_id") in depends_on_task_ids:
+                var_names.extend(t.get("owns_variables", []))
+    var_names = list(dict.fromkeys(var_names))  # 重複除去（順序維持）
+
+    lines: list[str] = []
+    if var_names:
+        placeholders = ",".join("?" * len(var_names))
+        fact_rows = conn.execute(
+            f"SELECT variable_name, value, unit, confirmed_by FROM verified_facts "
+            f"WHERE run_id=? AND variable_name IN ({placeholders}) AND audited_by IS NULL",
+            (run_id, *var_names)
+        ).fetchall()
+        for r in fact_rows:
+            lines.append(f"- fact:{r['variable_name']} = {r['value']}{r['unit'] or ''}"
+                         f"（登録者: {r['confirmed_by']}）")
+
+    if task_id:
+        attr_rows = conn.execute(
+            "SELECT entity_id, attr_name, value, unit, confirmed_by FROM entity_attributes "
+            "WHERE run_id=? AND source_task_id=? AND audited_by IS NULL",
+            (run_id, task_id)
+        ).fetchall()
+        for r in attr_rows:
+            lines.append(f"- entity:{r['entity_id']}:{r['attr_name']} = {r['value']}{r['unit'] or ''}"
+                         f"（登録者: {r['confirmed_by']}）")
+
+    if not lines:
+        return ""
+    return (
+        "【BL-294: 未監査の確定値】以下は、このタスクに関連するconfirmed_variables/entity属性のうち、"
+        "まだ誰にも定義監査（出典が実際に述べている定義と一致するかの確認）を受けていないものです。"
+        "該当があれば、web_search/web_fetch/read_reference_fileでcitationsの出典本文を確認し、"
+        "定義が一致していればmark_fact_audited(audit_result=\"confirmed_correct\")で記録してください。"
+        "不一致（例：構成比を率として登録している等）を発見した場合、write_agreementで値を訂正した上で"
+        "mark_fact_audited(audit_result=\"corrected\")を呼んでください。\n"
+        + "\n".join(lines) + "\n"
+    )
+
+
 def _get_open_escalations_text(conn: sqlite3.Connection, run_id: str) -> str:
     """[BL-086] User AI向け: 未解決エスカレーション一覧。今回の発言で必ず
     resolve_premise_concern（却下）かrevise_goal（承認）のどちらかを呼んで解決させる
@@ -8347,7 +8547,8 @@ def _get_open_escalations_text(conn: sqlite3.Connection, run_id: str) -> str:
 
 
 def _get_forced_escalated_issues_text(conn: sqlite3.Connection, run_id: str,
-                                       current_task_id: str = "", round_count: int = 0) -> str:
+                                       current_task_id: str = "", round_count: int = 0,
+                                       caller_role: str = "") -> str:
     """[BL-136] User AI向け: issue_logのstatus='escalated'かつ未先送り（defer_to_task_id=''）行を、
     _get_open_escalations_text（BL-086）と同じトーンの強制解決文言で提示する。従来の
     _build_escalation_pin_textは「要対応」というラベルのみで具体的な行動を強制していなかった
@@ -8362,10 +8563,22 @@ def _get_forced_escalated_issues_text(conn: sqlite3.Connection, run_id: str,
     自己先送り（defer_to_task_id==current_task_id）は「先送りされていない」扱いとなり本文の
     強制対象へ復帰する——従来は「受け皿あり」として永久に督促外だった6件（log/2026-08-08/1514）
     がここで初めて督促されるようになる。
+    [BL-293] `_build_escalation_pin_text`と同じ理由・同じフィルタを適用する。この関数は
+    「要対応」の受動表示よりさらに強い「今回の発言内で必ずRESOLVE/DEFERを呼べ」という能動的な
+    行為強制であり、`decision_lineage_gap_*`（他ロールが起こした記録漏れ）がここに紛れ込むと
+    是正手段（write_agreement(Decision)を書く）を持たない相手に「必ず解決せよ」を強制すること
+    になり、pin以上に深刻な板挟みを生みかねない。caller_role未指定時は従来通り全件を通す
+    フェイルセーフ。
     """
     # [BL-194] round_countを渡しACKNOWLEDGE中のissueも督促対象から除外する
     # （ACKの目的そのもの：「今回必ずRESOLVE/DEFERせよ」という督促を一時的に止める）。
     rows = _get_actionable_escalated_issues(conn, run_id, current_task_id, round_count=round_count)
+    if caller_role:
+        rows = [
+            r for r in rows
+            if not r["topic"].startswith("decision_lineage_gap_")
+            or r["topic"].startswith(f"decision_lineage_gap_{caller_role}_")
+        ]
     if not rows:
         return ""
     lines = [
@@ -8682,7 +8895,11 @@ def upsert_verified_fact(conn: sqlite3.Connection, run_id: str, variable_name: s
         "unit=excluded.unit, source_task_id=excluded.source_task_id, "
         "source_phase_id=excluded.source_phase_id, confirmed_by=excluded.confirmed_by, "
         "confirmed_at=excluded.confirmed_at, reason=excluded.reason, "
-        "citations=excluded.citations, confidence=excluded.confidence",
+        "citations=excluded.citations, confidence=excluded.confidence, "
+        # [BL-294] 値が実際に変わった場合のみ監査状態をリセットする。同一値の再登録
+        # （単なる再確認）では既存の監査済み状態を無駄に失わせない。
+        "audited_by=CASE WHEN excluded.value != verified_facts.value THEN NULL ELSE verified_facts.audited_by END, "
+        "audited_at=CASE WHEN excluded.value != verified_facts.value THEN NULL ELSE verified_facts.audited_at END",
         (run_id, variable_name, str(value), unit, source_task_id, source_phase_id,
          confirmed_by, time.time(), reason, citations_json, confidence)
     )
@@ -9306,7 +9523,10 @@ def upsert_entity_attribute(conn: sqlite3.Connection, run_id: str, entity_id: st
         "unit=excluded.unit, confidence=excluded.confidence, citations=excluded.citations, "
         "reason=excluded.reason, source_task_id=excluded.source_task_id, "
         "source_phase_id=excluded.source_phase_id, confirmed_by=excluded.confirmed_by, "
-        "confirmed_at=excluded.confirmed_at",
+        "confirmed_at=excluded.confirmed_at, "
+        # [BL-294] verified_facts側と同型: 値が実際に変わった場合のみ監査状態をリセット。
+        "audited_by=CASE WHEN excluded.value != entity_attributes.value THEN NULL ELSE entity_attributes.audited_by END, "
+        "audited_at=CASE WHEN excluded.value != entity_attributes.value THEN NULL ELSE entity_attributes.audited_at END",
         (run_id, entity_id, attr_name, str(value), unit, confidence,
          json.dumps(citations or [], ensure_ascii=False), reason,
          source_task_id, source_phase_id, confirmed_by, time.time()),
@@ -10777,6 +10997,12 @@ It serves as the initial planning layer for breaking down complex objectives acr
        鵜呑みにせず、一次ソース（公的統計・公式文書等）を優先し、二次的な要約より信頼性の高い
        情報を採用してください。この分解で採用した数値・前提のうち外部情報に基づくものは、
        write_agreementのcitations（type="web"等）で追跡可能な出典として明示してください。
+       [BL-294] 複数のweb_searchをまとめて実行し、その結果をconfirmed_variablesへ一括登録する
+       際は特に注意してください。検索キーワードに近い数値がヒットしても、その出典本文が実際に
+       述べている定義（例：「◯◯に占める割合（構成比）」なのか「◯◯における発生率」なのか）を
+       確認せずに、変数名が意味する定義と一致するものとして転記しないこと。定義の一致を
+       確認できない、または出典本文を十分に読めていない数値は、confidence="provisional"に
+       留めてください（"confirmed"は定義の一致を確認できた場合のみ）。
        [BL-204] read_entityで、この課題に登場する事物について既に登録済みの事実を確認できます
        （何が既知で何が未確認かを踏まえてタスクを分解する際に役立ちます）。
        [BL-205] read_entityは名前を持つ事物専用です。対象を持たない単独の値（予算上限等）は
@@ -11418,7 +11644,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         # [BL-103] facilitatorのエスカレーション名指しはchat_history末尾に追記されるだけで
         # chat_history_windowを過ぎると跡形もなく消える。issue_logのescalated行を毎ターン
         # DBから直接注入することで、その「発言が消えた後の穴」を埋める（recencyに関係ない pin）。
-        escalation_pin = _build_escalation_pin_text(_conn, state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0))
+        escalation_pin = _build_escalation_pin_text(_conn, state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0), caller_role="expert")
         if escalation_pin:
             hydrate_context += f"\n\n【⚠️エスカレーション中の懸念（要対応、issue_log）】\n{escalation_pin}"
         # [BL-194] DEFER済み（別タスクへの受け皿が確定済み）の懸念は、非強制トーンで
@@ -12021,7 +12247,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
     # （BL-103のpin）を一切受け取っておらず、他ロールが既に折り込み済みの懸念を知らないまま
     # 独立に判定してしまっていた。ドメイン妥当性レビュー（前提・実現可能性等）と意味的に
     # 最も親和性が高いためPass 1にのみ注入する（Pass 2は算術検算に専念する設計のため対象外）。
-    escalation_pin = _build_escalation_pin_text(get_active_conn(), state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0))
+    escalation_pin = _build_escalation_pin_text(get_active_conn(), state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0), caller_role="detector")
     escalation_pin_block = (
         f"【⚠️エスカレーション中の懸念（要対応、issue_log）】\n{escalation_pin}\n\n" if escalation_pin else ""
     )
@@ -12147,13 +12373,14 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"（entry_type=\"Decision\"/\"Directive\"の全文はこちら）・"
         f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・"
         f"web_search・web_fetch・read_reference_file・read_goal_reference・read_entity・verify_entity_geo・gsi_geocode・"
-        f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・thinkです。"
+        f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・mark_fact_audited・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
         f"{_build_decision_lineage_directive('\"Rejected\"（懸念を指摘する場合）または\"Reviewed\"（問題なしと判断した場合）')}\n"
         f"{_get_frozen_agreements_text(get_active_conn(), state['run_id'])}"
         f"【BL-086: 🔒Freeze済み項目の扱い】上記に🔒が付いている項目があれば、それは人間の発注者が"
         f"既に審議の上で承認した意図的な例外です。同じ論点をmajor/minorの根拠にしないでください"
         f"（ただし別の新しい問題点はこれまで通り厳格に評価してください）。\n\n"
+        f"{_build_unaudited_facts_text(get_active_conn(), state['run_id'], state)}"
         f"{escalation_pin_block}"
         f"{deferred_issue_pin_block}"
         f"{acknowledged_issue_pin_block}"
@@ -12229,7 +12456,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f'\nReturn ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用(無ければ空文字)", "observations": "気づき・懸念（自由記述、無ければ空文字）", "essence_sufficiency_concern": true/false, "essence_sufficiency_reason": "trueの場合、本質のどの記述が計画のどこにも反映されていないか（falseなら空文字）", "quantitative_sufficiency_concern": true/false, "quantitative_sufficiency_reason": "trueの場合、どの規模適合性の主張がどの規模指標に対して未検証か（falseなら空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
-    _detector_domain_tools = [READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線
+    _detector_domain_tools = [READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, MARK_FACT_AUDITED_TOOL, THINK_TOOL]  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線 [BL-294] 定義監査の記録用
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
         domain_prompt, client=client_detector_domain, model=model_detector_domain, label="Detector (Domain Review)",
         tools=_detector_domain_tools,
@@ -13772,7 +13999,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
 
         # ===== Stage 2: issue確認 =====
         _open_escalations_text = _get_open_escalations_text(_conn, state["run_id"])
-        _forced_escalated_issues_text = _get_forced_escalated_issues_text(_conn, state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0))
+        _forced_escalated_issues_text = _get_forced_escalated_issues_text(_conn, state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0), caller_role="user")
         issue_prompt = (
             f"あなたは目標達成のプロジェクトオーナー（発注者）です。これは4段階レビューの第2段"
             f"（issue確認）です。第1段のレビュー結果を踏まえ、issue_logの未解決事項を確認・整理して"
@@ -14253,7 +14480,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     # 際限なく肥大化するリスクがあった。Expertと同じ共通ヘルパーに統一し、issue_logの
     # escalated行（recencyに関係ない pin）も併せて注入する。
     timeline_str = _build_hydrate_context_from_db(_conn, state["run_id"], config)
-    escalation_pin = _build_escalation_pin_text(_conn, state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0))
+    escalation_pin = _build_escalation_pin_text(_conn, state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0), caller_role="user")
     if escalation_pin:
         timeline_str += f"\n\n【⚠️エスカレーション中の懸念（要対応、issue_log）】\n{escalation_pin}"
     # [BL-194] DEFER済み（別タスクへの受け皿が確定済み）の懸念は非強制トーンで別見出しに
@@ -14340,7 +14567,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
 
     # [BL-136] issue_logのescalated行（未先送り）についても、BL-086と同様に今回の発言で
     # 必ずRESOLVEかDEFERを呼ばせる（従来は受動的なpinのみで強制力がなかった）。
-    _forced_escalated_issues_text = _get_forced_escalated_issues_text(_conn, state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0))
+    _forced_escalated_issues_text = _get_forced_escalated_issues_text(_conn, state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0), caller_role="user")
     if _forced_escalated_issues_text:
         system_prompt_trailing += f"\n{_forced_escalated_issues_text}\n"
 
@@ -15081,9 +15308,9 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     この計画自体の質をレビューしてください（個々のタスクの中身の是非ではなく、計画の構造
     そのものが後工程で無駄な手戻りを生まないかを見てください）。
 
-    以下の観点でレビューしてください（1つに偏らず、9つとも同等以上に重視すること。実際に
+    以下の観点でレビューしてください（1つに偏らず、10個とも同等以上に重視すること。実際に
     後工程で最も高くつく手戻りは、数値の端数不一致よりも「タスクの欠落」や「順序矛盾」から
-    生じることが多いため、数値の細かい不整合ばかりを追いかけて2・3・4・5・6・7・8・9を
+    生じることが多いため、数値の細かい不整合ばかりを追いかけて2・3・4・5・6・7・8・9・10を
     見落とさないこと）:
     1. 曖昧な表記: 各タスクのacceptance_criteria/descriptionに、AIが読み違えるような曖昧な
        数量・比率・位置の表記がないか（例: 比率と絶対値が並記され、どちらが基準か不明瞭等）。
@@ -15134,6 +15361,14 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
        実際には現れていない事項まで拡大解釈して要求を作り出さないでください。また
        call_detector側の本質ドリフト検知（既存計画・成果物の一貫性チェック）とも異なります
        ——こちらは実行前の計画構造全体の網羅性チェックです。
+    10. [BL-294] 定義監査: task_plannerがconfirmed_variablesとして登録した数値・read_entityで
+        確認できるentity属性について、その変数名/属性名が意味する定義と、citationsに挙げられた
+        出典本文の実際の記述が一致しているか、web_search/web_fetch/read_reference_fileで
+        検証してください（例：出典が「◯◯に占める割合（構成比）」を述べているだけなのに、
+        「◯◯率」として登録していないか）。一致していれば mark_fact_audited
+        (audit_result="confirmed_correct") で監査済みを記録してください。定義が食い違う場合、
+        write_agreement（action_type="SUPERSEDE"）で該当のconfirmed_variablesを正しい値へ
+        訂正し、その上で mark_fact_audited(audit_result="corrected") を呼んでください。
 
     【重要: 曖昧さの指摘とゴール文にない数値の捏造要求を混同しない】
     ゴール文（目標）自体が与えていない絶対値（例: 総量そのもの）を、taskに無理やり
@@ -15219,7 +15454,7 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     read_agreement（entry_type="Decision"/"Directive"の全文はこちら。task_plannerが記録した
     phase_design_rationale等はここへ埋め込み済みのため通常は再取得不要）・
     diff_plan_draft_versions・write_agreement・web_search・web_fetch・read_reference_file・
-    read_entity・thinkです。{_THINK_TRAILER_SENTENCE}
+    read_entity・mark_fact_audited・thinkです。{_THINK_TRAILER_SENTENCE}
     {_scratch_concerns_closure_instruction("observations")}
 
     {_build_decision_lineage_directive('"Rejected"（判断根拠を無効化する場合）または"Reviewed"（計画に問題なしと判断した場合）')}
@@ -15246,7 +15481,7 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     _CURRENT_CALLER_ROLE = "task_plan_reviewer"  # [BL-095]
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    _task_plan_reviewer_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
+    _task_plan_reviewer_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, MARK_FACT_AUDITED_TOOL, THINK_TOOL]  # [BL-294] 定義監査の記録用
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_task_plan_reviewer, model=model_task_plan_reviewer, label="Task Plan Reviewer",
         tools=_task_plan_reviewer_tools,

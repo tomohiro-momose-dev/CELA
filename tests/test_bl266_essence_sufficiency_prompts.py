@@ -76,11 +76,13 @@ def test_task_planner_reminder_does_not_restate_the_rule():
 # --- 層2: call_task_plan_reviewer ----------------------------------------------
 
 def test_task_plan_reviewer_lists_nine_criteria():
-    """観点の総数が8→9へ更新され、導入文の個数表記が一貫していること。"""
+    """観点の総数が8→9（BL-266）→10（BL-294）へ更新され、導入文の個数表記が
+    一貫していること。BL-266時点の"9つ"表記自体は残らない（BL-294でさらに更新済み）。"""
     src = _reviewer_src()
-    assert "9つとも" in src
+    assert "10個とも" in src
+    assert "9つとも" not in src
     assert "8つとも" not in src
-    assert "2・3・4・5・6・7・8・9" in src
+    assert "2・3・4・5・6・7・8・9・10" in src
 
 
 def test_task_plan_reviewer_criterion9_mentions_bl266():

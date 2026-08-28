@@ -36,10 +36,12 @@ def _reviewer_src() -> str:
 
 
 def test_reviewer_prompt_lists_review_criteria_count_consistently():
-    """観点の総数が5→8（BL-254）→9（BL-266で本質充足性を追加）と更新され、導入文の
-    個数表記が一貫していること。8つ止まりの古い表記が残っていないこと。"""
+    """観点の総数が5→8（BL-254）→9（BL-266で本質充足性を追加）→10（BL-294で定義監査を
+    追加）と更新され、導入文の個数表記が一貫していること。9つ以前の古い表記が
+    残っていないこと。"""
     src = _reviewer_src()
-    assert "9つとも" in src
+    assert "10個とも" in src
+    assert "9つとも" not in src
     assert "8つとも" not in src
     assert "5つとも" not in src
     assert "4つとも" not in src
