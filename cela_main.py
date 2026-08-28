@@ -1201,10 +1201,16 @@ READ_REFERENCE_FILE_TOOL = {
                 "grep": {
                     "type": "string",
                     "description": (
-                        "[BL-221] Requires 'path'. Substring to search for within that cached "
-                        "file's full text (case-sensitive). Returns matching lines with "
+                        "[BL-244] You do NOT need to resolve 'path' yourself first: you may pass "
+                        "'keyword' and 'grep' together in the SAME call, and 'path' will be "
+                        "resolved from 'keyword' automatically before grepping (falls back to "
+                        "'not_found'/'multiple_matches' exactly as a keyword-only call would). "
+                        "Prefer this combined form directly -- do not spend extra turns deciding "
+                        "whether it is safe to combine them. Substring to search for within that "
+                        "cached file's full text (case-sensitive). Returns matching lines with "
                         "surrounding context lines, not the whole file -- use this for large "
-                        "documents instead of reading from the top. "
+                        "documents instead of reading from the top or manually transcribing rows/"
+                        "columns by hand. "
                         "[BL-252] Use '|' to match ANY of several terms on a line (e.g. "
                         "'A|B|C' matches a line containing A, or B, or C) -- this is the only "
                         "supported operator. This is NOT a full regular expression engine: other "

@@ -19,6 +19,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import cela_main  # noqa: E402
 import web_tools  # noqa: E402
 
 # 実際のhtml.duckduckgo.com/html/レスポンスから採取した1件分のマークアップ（簡略化）。
@@ -1174,3 +1175,23 @@ def test_bl244_keyword_resolution_helper_present_in_source():
     src = inspect.getsource(web_tools.read_reference_file_handler)
     assert "_resolve_reference_cache_path_by_keyword" in src
     assert "if not keyword:" in src
+
+
+# ---------------------------------------------------------------------------
+# [BL-299] READ_REFERENCE_FILE_TOOLのgrep説明文が、BL-244で緩和済みの実装（keyword+grep
+# 同時指定を許容）に追従しておらず"Requires 'path'."とだけ書かれていた（AGENTS.md §15.1
+# 単一の真実源違反）。log/2026-08-28/2031で、Detectorがこの古い説明文を信じてkeyword+grepの
+# 組み合わせを試すべきか約5万字・9分近くかけて逡巡した末、代わりにPDFの数値テーブルを手作業で
+# 突合しようとし、その過程で同一文言を3回繰り返してBL-297/298のn-gram反復ガードに引っかかった
+# （3回の自動再試行も同一の構造的な迷いを再現し、いずれも失敗）。
+# ---------------------------------------------------------------------------
+
+def test_read_reference_file_tool_grep_description_documents_keyword_combo():
+    """[BL-299] grepパラメータの説明文が、keyword+grep同時指定（BL-244で実装済み）を
+    明示的に許可すると書いてあること。「Requires 'path'」という、BL-244以前の
+    より制限された挙動だけを示す古い文言が単独で残っていないこと。"""
+    grep_desc = cela_main.READ_REFERENCE_FILE_TOOL["function"]["parameters"]["properties"]["grep"]["description"]
+    assert "BL-244" in grep_desc
+    assert "keyword" in grep_desc.lower()
+    assert "do NOT need to resolve 'path' yourself" in grep_desc
+    assert "Requires 'path'." not in grep_desc
