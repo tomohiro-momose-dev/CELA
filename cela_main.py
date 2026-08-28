@@ -6122,6 +6122,11 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
     tool_calls_used = 0
     python_calls_log: list[dict] = []  # BL-033: 実行したpython_replのcode/resultを蓄積
     reasoning_parts_all: list[str] = []  # [R5 F-2.1] 全iterationのreasoningを蓄積
+    # [BL-302] BL-298の反復検知リトライ発生時、失敗した試行分をreasoning_parts_allから
+    # 切り詰めるための開始位置。tools=None分岐はreasoning_parts_allを使わない（局所変数
+    # reasoning_partsが試行ごとに再初期化されるため無関係）ため、Noneのままなら
+    # 切り詰め処理をスキップする。
+    _reasoning_start_idx: int | None = None
     iteration_start = 1  # [BL-122] APIエラーで再試行する際、同じiteration番号から再開する
 
     # [BL-202] 従来は`for attempt in range(len(delays) + 1)`だったが、delays消尽後の
@@ -6741,6 +6746,13 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
             # [BL-298] node_redo_count/APIエラー用delaysとは別の、即時・短期の再試行。
             # loop_messages/iteration_startは関数冒頭で保持されているため（BL-122）、
             # このiterationのAPI呼び出しだけがやり直される。
+            # [BL-302] reasoning_parts_allはiterationをまたいで保持される（BL-122/R5 F-2.1）ため、
+            # トリムしないと失敗した試行の反復した思考ログがそのまま残り続け、次の試行の
+            # reasoningへ継ぎ足されてしまう。最終的にget_last_reasoning_text()経由で
+            # state["expert_last_reasoning"]等の他ロールが読む思考ログへ、反復ガードが
+            # 打ち切った崩壊テキストが混入する実害があったため、失敗した試行の分を切り詰める。
+            if _reasoning_start_idx is not None:
+                del reasoning_parts_all[_reasoning_start_idx:]
             if _bl298_repetition_redo_count < _BL298_REPETITION_MAX_REDOS:
                 _bl298_repetition_redo_count += 1
                 print(
