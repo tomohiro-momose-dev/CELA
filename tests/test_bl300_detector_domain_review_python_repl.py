@@ -24,6 +24,18 @@ log/2026-08-28/2049で、DetectorがNPA（警察庁）PDFキャッシュから�
 明記した。既存の「Expertの計算を再検算する必要はない」という指示（Pass 1/Pass 2の
 役割分担、意図的に維持）とは矛盾しないよう、文言を書き分けている。
 
+【追記】ユーザーから、`PYTHON_REPL_TOOL`自体のグローバルな説明文（全ノード共通、
+Expert・Detector両パスが参照する単一の定義）が「mechanical arithmetic/verification」
+としか書かれておらず、テキストの機械的な位置特定という用途が案内されていない、との
+指摘があった。加えて説明文中の許可モジュール一覧（"only math/statistics/datetime/
+json/fractions/decimal allowed"）が、実際の`_ALLOWED_IMPORTS`（BL-058で追加された
+itertools/functools/collections/operator/reを含む）に追従しておらず古いままだった
+（BL-299と同型のスキーマ説明文ドリフト）。`PYTHON_REPL_TOOL`の説明文を、数値計算と
+テキストの機械的な位置特定の両方を用途として明記し、許可モジュール一覧も実装に
+合わせて修正した。他ノードへのpython_repl展開時は、この共通ツール説明文に加えて
+各ノード個別のプロンプト側にも用途を書き分ける必要がある（ユーザー申し送り、
+domain_promptで行ったのと同じパターン）。
+
 参照: log/2026-08-28/2049/log_no_prompt.md、BL-228、BL-297/298（発端）、AGENTS.md §5.1。
 実LLM API呼び出しは伴わない。
 """
@@ -106,3 +118,37 @@ def test_detector_domain_python_repl_calls_get_recorded_like_numeric_pass():
     src = inspect.getsource(cela_main._query_AI_live)
     assert 'tc.function.name == "python_repl"' in src
     assert "python_calls_log.append(" in src
+
+
+# ---------------------------------------------------------------------------
+# 4. PYTHON_REPL_TOOL自体の説明文（全ノード共通、ユーザー申し送り事項）
+# ---------------------------------------------------------------------------
+
+def _python_repl_tool_description() -> str:
+    return cela_main.PYTHON_REPL_TOOL["function"]["description"]
+
+
+def test_python_repl_tool_description_mentions_text_parsing_use_case():
+    """[BL-300追記] PYTHON_REPL_TOOLの説明文が、数値計算だけでなくテキストの
+    機械的な分割・位置特定という用途も明記していること（従来は"mechanical
+    arithmetic/verification"としか書かれておらず、この用途が案内されていなかった）。"""
+    desc = _python_repl_tool_description()
+    assert "arithmetic" in desc  # 既存の数値計算用途の案内は維持されていること
+    assert "split" in desc.lower() or "index" in desc.lower()
+    assert "not_found" in desc  # BL-299/300の実インシデント（grep失敗）に触れていること
+
+
+def test_python_repl_tool_description_allowed_modules_match_actual_whitelist():
+    """[BL-300追記] 説明文中の許可モジュール一覧が、実際の_ALLOWED_IMPORTSと
+    一致していること（BL-058で追加されたitertools/functools/collections/operator/reが
+    説明文から欠落していた、BL-299と同型のスキーマ説明文ドリフトの再発防止）。"""
+    desc = _python_repl_tool_description()
+    for module_name in cela_main._ALLOWED_IMPORTS:
+        assert module_name in desc, f"{module_name}が説明文に含まれていない"
+
+
+def test_python_repl_tool_description_still_instructs_print_usage():
+    """[非退行] print()必須という既存の重要な注意書きが、今回の追記で失われていないこと。"""
+    desc = _python_repl_tool_description()
+    assert "print(" in desc
+    assert "no output" in desc.lower()
