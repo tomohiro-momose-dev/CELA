@@ -10883,6 +10883,39 @@ def _missing_data_estimation_instruction(perspective: str = "producer") -> str:
     )
 
 
+def _reasoning_reset_instruction(observations_field: str = "observations") -> str:
+    """[BL-301] データの定義・解釈を巡る堂々巡り（log/2026-08-28/2131: Detectorが
+    NPA月別PDFの「累計」列が年次合計か2005年からの通算累計かを確定できず、「実際の
+    データ行を読んで確認しよう」と書きながら一度もその読み取りを実行せずに同じ不確実性の
+    分析をほぼ逐語的に繰り返し、iter=8の単一completion内でn-gram反復ガードが発火した
+    事例）を防ぐための打ち切り規定。BL-295（`_bounded_deliberation_instruction`）は
+    カテゴリカルな結論の3回多数決、BL-296（`_missing_data_estimation_instruction`）は
+    データが存在しない場合の推計手法の満足化と、いずれも既存の打ち切り規定はこの
+    「データは存在し引用もしているが、その定義・解釈自体を確定できず同じ検討を
+    繰り返す」パターンを直接カバーしていなかった。
+
+    ユーザー指示: 「write_issueの前にまずthinkのobservationsに書いてiterを終了し、
+    思考をリセットするように指示して」——write_issueへ即座にエスカレーションするのでは
+    なく、まずこのiteration内で作業仮説と残る不確実性を最終出力のobservations_field
+    フィールドへ記録し、そこで応答自体を打ち切らせる（＝次のiterationはこの巨大な
+    単一completionの続きではなく、新しい生成として始まる）。write_issueは、その疑義が
+    ターンを跨いでも解決しない場合の、後段の別の判断として位置づける。
+    """
+    return (
+        "\n【BL-301: 判断が堂々巡りする場合は、その場で思考をリセットする（重要）】"
+        "数値・データの定義や解釈（例：ある集計列が年次合計か累積かなど）について、"
+        "同じ検討・同じ不確実性の指摘を形を変えて何度も繰り返していることに気づいたら、"
+        "それ以上ツール呼び出しや推論を続けないでください。「実際のデータを読んで確認"
+        "しよう」と書きながら、その読み取り自体を先延ばしにし続けるのは典型的な兆候です。"
+        "write_issueで永続化するより前に、まず現時点での作業仮説とその根拠、そして"
+        f"残る不確実性を簡潔に最終出力の「{observations_field}」へ書き、その場で応答"
+        "（最終出力のJSON）を返して打ち切ってください。無理に確信を得ようとして同じ"
+        "分析を繰り返すより、「〇〇という前提で進めたが、△△の点は未確認」と明記して"
+        "打ち切る方が有益です。write_issueは、この疑義がターンを跨いでも未解決のまま"
+        "残った場合に、改めて検討してください（この場では呼ばないこと）。\n"
+    )
+
+
 def _build_retry_situation_label(state: LineageState, retry_count: int, max_retries: int = 3) -> str:
     """[BL-143] Detectorのmajor差し戻しプロンプトには、従来は指摘文（constraint_issue_logの
     直近1件）だけが載っており、「これが何回目の差し戻しか」「前回と同じ指摘が繰り返されて
@@ -12565,6 +12598,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"（①②は呼び出し回数上限を消費しません）。検証の結果、前提数値が実態と乖離していると判明した場合は、それ自体を"
         f"constraint_issueの根拠にしてください（自己参照のみの前提を鵜呑みにしないこと）。\n\n"
         f"{_missing_data_estimation_instruction(perspective='auditor')}"
+        f"{_reasoning_reset_instruction('observations')}"
         f"[BL-195: 実例からの無derivation転記チェック] Agentの主張がcitations type=\"web\"で"
         f"実在の類似事例（デマンド交通・自動運転バス等の運行サービス）を出典としている場合、"
         f"その数値が本課題固有の制約（予算・需要データ・距離・SLA）から独自に導出された形跡が"
