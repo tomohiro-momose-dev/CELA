@@ -10060,7 +10060,7 @@ n-gram反復検出そのものの誤検知率（min_repeats=3という閾値が�
 
 `READ_REFERENCE_FILE_TOOL`の`grep`パラメータ説明文を修正し、「'keyword'と'grep'を同じ呼び出しで同時指定してよく、'path'は自動的にkeywordから解決される（0件/複数件時はkeyword単独呼び出しと同じくnot_found/multiple_matchesへフォールバックする）。この組み合わせを直接使ってよく、安全性を判断するために追加のターンを費やす必要はない」ことを明示した。合わせて「大きな文書は手作業で行・列を書き写すのではなくgrepで到達すべき」という趣旨の一文を追加し、Detectorが今回のように代替の力技（手動でのテーブル突合）へ逃げる誘因を減らした。実装（`web_tools.py`）自体はBL-244で既に正しく、変更していない。
 
-**テスト**: `tests/test_bl184_web_tools.py`（新規1件）: `READ_REFERENCE_FILE_TOOL`の`grep`説明文がBL-244・keyword同時指定を明示し、「Requires 'path'.」という古い制限文言が単独で残っていないことを確認。AGENTS.md §17.1（`cela_main.py`をgit stashで退避し新規テストが失敗することを確認後、diffが完全一致することを確認して復元）。フルオフラインスイート実行済み（既知のBL-269 4件のみ残存、新規失敗なし）。keyword+grep同時指定の解決ロジック自体（`web_tools.py`側）はBL-244で既にテスト済みのため変更・再検証していない。
+**テスト**: `tests/test_bl184_web_tools.py`（新規1件）: `READ_REFERENCE_FILE_TOOL`の`grep`説明文がBL-244・keyword同時指定を明示し、「Requires 'path'.」という古い制限文言が単独で残っていないことを確認。AGENTS.md §17.1（`cela_main.py`をgit stashで退避し新規テストが失敗することを確認後、diffが完全一致することを確認して復元）。フルオフラインスイート1921 passed（既知のBL-269 4件のみ残存、新規失敗なし）。keyword+grep同時指定の解決ロジック自体（`web_tools.py`側）はBL-244で既にテスト済みのため変更・再検証していない。
 
 参照: `tests/test_bl184_web_tools.py`、`docs/design/decision_log.md` D-254、`log/2026-08-28/2031/log_no_prompt.md`。
 
