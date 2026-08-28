@@ -9994,7 +9994,7 @@ CELAには既にBL-231（iteration間で同一出力が10回連続したら強�
 
 n-gram長（80文字）は、実際の崩壊（150字前後の段落反復）を確実に捉えつつ、大規模な計画JSON等での構造的な短い繰り返し（キー名等）を誤検知しない長さとして選定した（AGENTS.md §7重要定数、ユーザー承認済み）。
 
-**テスト**: `tests/test_bl297_stream_repetition_guard.py`（新規9件）: `_StreamRepetitionGuard`単体（①実際の崩壊ログのパターンで検出できること、②task_id等の値を毎回変えた大規模JSON計画に近いテキストで誤検知しないこと、③閾値未満の反復では検出しないこと、④check_intervalによる検査間引きの確認、⑤windowによるバッファサイズ上限の確認、⑥空チャンクの無視）、`_query_AI_live`への配線確認（`inspect.getsource`でクラス参照4箇所・`.feed()`呼び出し4箇所・検出時のログ文言を確認）。AGENTS.md §17.1（`cela_main.py`全体をgit stashで巻き戻し、新規9件全てが失敗することを確認後、復元してdiffが完全一致することを確認）。既存の`test_bl231_loop_guard.py`・`test_bl287_tool_repeat_nudge.py`（計8件）で非退行を確認。
+**テスト**: `tests/test_bl297_stream_repetition_guard.py`（新規9件）: `_StreamRepetitionGuard`単体（①実際の崩壊ログのパターンで検出できること、②task_id等の値を毎回変えた大規模JSON計画に近いテキストで誤検知しないこと、③閾値未満の反復では検出しないこと、④check_intervalによる検査間引きの確認、⑤windowによるバッファサイズ上限の確認、⑥空チャンクの無視）、`_query_AI_live`への配線確認（`inspect.getsource`でクラス参照4箇所・`.feed()`呼び出し4箇所・検出時のログ文言を確認）。AGENTS.md §17.1（`cela_main.py`全体をgit stashで巻き戻し、新規9件全てが失敗することを確認後、復元してdiffが完全一致することを確認）。既存の`test_bl231_loop_guard.py`・`test_bl287_tool_repeat_nudge.py`（計8件）で非退行を確認。フルオフラインスイート1909 passed（既知のBL-269 4件のみ残存、新規失敗なし）。
 
 この機構はストリーミングチャンクの実際の受信タイミングに依存するため、オフラインテストではモックのchunk列でしか検証できない。実LLM呼び出しでの効果確認——①実際の崩壊時に生成が早期に打ち切られトークン・時間の浪費が防げるか、②通常の長い正当な生成（大規模JSON計画等）を誤って打ち切らないか——は次回ドライラン待ち。現在一時停止中のrun（`log/2026-08-28/1535`）を`--resume`するか打ち切るかは本BLとは別にユーザー判断待ち。
 
