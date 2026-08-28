@@ -328,6 +328,7 @@
 | BL-299 | 中 | `cela_main.py`（`READ_REFERENCE_FILE_TOOL`の`grep`パラメータ説明文を修正）、`tests/test_bl184_web_tools.py`（新規1件） | **`done`。** `log/2026-08-28/2031`で3件目の生成崩壊（今度はBL-298の即時再試行が3回とも失敗しクラッシュ）を追跡した結果、BL-297/298とは異なる原因と判明。DetectorがNPA PDFから特定の数値をgrepで探そうとしたが、ツールのgrep説明文が「[BL-221] Requires 'path'.」とだけ書かれておりkeywordとの同時指定が可能か不明だったため、実行を避けて代わりにPDF数値テーブルを手作業で突合しようとし、その逡巡の中で同一文言を約9分・5万字かけて3回繰り返しn-gram反復ガードに引っかかった（構造的な迷いのため3回の自動再試行も同一原因で失敗）。`web_tools.py`の実装を確認したところ、BL-244（2026-08-15）で既にkeyword+grep同時指定を許容する（keywordから内部でpathを自動解決する）よう修正済みだったが、`cela_main.py`側のツールスキーマ説明文だけがBL-244以前の記述のまま取り残されていた（AGENTS.md §15.1単一の真実源違反）。説明文をBL-244の実装に合わせて修正し、「keywordとgrepを同時指定してよい、pathを自分で先に解決する必要はない」ことを明示した。 | P2 |
 | BL-300 | 高 | `cela_main.py`（`_detector_domain_tools`へ`PYTHON_REPL_TOOL`追加、`domain_prompt`に用途の書き分けを追記）、`tests/test_bl300_detector_domain_review_python_repl.py`（新規6件） | **`done`。** BL-299適用後も`log/2026-08-28/2049`で4件目の生成崩壊・クラッシュが発生。今回はBL-299の効果自体は確認できた（keyword+grep同時指定を迷わず使用）が、Detectorがgrepで「長野」を検索し続けても一貫してnot_foundだった。実測したところ、該当PDFの都道府県欄はフルネームではなく1〜3文字の略号コードで構成されており、「長野」という文字列はキャッシュ全3550行中どこにも存在しなかった（`grep -c`で0件を確認）。grepでは原理的に位置特定不可能なため、Detectorは代わりに略号リストと数値列を手作業で突合しようとし、これが反復・クラッシュを招いた（構造的な行き詰まりのためBL-298の自動再試行も3回とも同一原因で失敗）。`call_detector`の数値監査パス（`_detector_numeric_tools`、python_repl付き）とドメイン妥当性レビューパス（`_detector_domain_tools`）を比較すると、BL-228で両者はほぼ揃えられていたが唯一`PYTHON_REPL_TOOL`だけが欠けていたと判明。python_replのサンドボックス（importホワイトリスト）は文字列分割・リストインデックス等の組み込み操作にimportを要求しないため、テキストの機械的な位置特定という用途に制約はないことをユーザーと確認した上で追加。既存の「Expertの計算を再検算する必要はない」という指示（Pass 1/2の役割分担、意図的に維持）とは矛盾しないよう、`domain_prompt`に「検算目的以外での使用（テキストの機械的な位置特定）は妨げない」旨を書き分けて追記した。 | P1 |
 | BL-301 | 高 | `cela_main.py`（新規`_reasoning_reset_instruction`、`call_detector`のdomain_promptへ配線）、`tests/test_bl301_reasoning_reset.py`（新規5件） | **`done`。** BL-300適用後も`log/2026-08-28/2131`で5件目の生成崩壊・クラッシュが発生。今回はBL-298の早期検出（約12,000字で発火、以前の7万字級より大幅に軽微）とBL-300の効果（grepの略号バリエーション試行）は確認できたが、Detectorが「累計」列の定義（令和7年の年次合計か、2005年からの通算累計か）を確定できず、「実際のデータ行を読んで確認しよう」と書きながら一度もその読み取りを実行せずに同じ不確実性の分析をほぼ逐語的に繰り返した（構造的な行き詰まりのためBL-298の自動再試行も3回とも同一原因で失敗）。これはBL-295（カテゴリカルな結論の3回多数決）にもBL-296（データが存在しない場合の推計満足化）にも直接カバーされない、「データは存在し引用もしているが、その定義・解釈自体を確定できず同じ検討を繰り返す」という6つ目の生成崩壊トリガーと特定。ユーザー指示「write_issueの前にまずthinkのobservationsに書いてiterを終了し、思考をリセットするように指示して」を受け、新規ヘルパー`_reasoning_reset_instruction`を実装。同じ検討の繰り返しに気づいたら、write_issueへの即時エスカレーションではなく、まず最終出力の`observations`フィールドへ作業仮説と残る不確実性を記録し、その場で応答を打ち切る（＝次のiterationは巨大な単一completionの続きではなく新しい生成として始まる）よう指示し、`call_detector`のdomain_promptへBL-188/BL-296の検証ブロック直後に配線した。 | P1 |
+| BL-302 | 高 | `cela_main.py`（`_query_AI_live`: `_reasoning_start_idx`のNone初期化、`except _StreamRepetitionRetryError`での`reasoning_parts_all`切り詰め）、`tests/test_bl302_reasoning_trim_on_retry.py`（新規4件） | **`done`。** ユーザーからの鋭い指摘「再試行時にiterをやり直す際、ループしている思考ログを積み上げてないですよね？」を受けて調査した結果、実際に積み上がっていたことが判明。`reasoning_parts_all`（BL-122によりAPIリトライ・BL-298の再試行をまたいで保持される設計）は、BL-297/298の反復ガードが発火し打ち切られた失敗試行分も、打ち切り直前まで既に追記済みだった。切り詰めずに次の試行のreasoningが続けて追記されるため、最終的に成功した際`_LAST_REASONING_TEXT = "".join(reasoning_parts_all)`へ失敗試行の反復テキストがそのまま結合されて残っていた。これは`get_last_reasoning_text()`経由で`state["expert_last_reasoning"]`/`state["user_last_reasoning"]`（他ロールへの思考ログ提示、R5思考プロセス監査の原資）・`_detector_thought`（major判定時）・`_agreement_thought`（write_agreementがRejected時）へ伝播しており、反復ガードが打ち切った崩壊テキストが他ロールの監査対象へ混入する経路が実在した（BL-245の誤爆と同種の実害を将来引き起こしかねない）。`except _StreamRepetitionRetryError`で再試行する直前に、失敗した試行の開始位置（`_reasoning_start_idx`）まで`reasoning_parts_all`を切り詰めるよう修正。tools=Noneブランチは`reasoning_parts_all`を使わない（局所変数が試行ごとに再初期化されるため無関係）ため、`_reasoning_start_idx`をNone初期化し、Noneのままなら切り詰めをスキップするガードを追加した。 | P1 |
 
 ---
 
@@ -10125,6 +10126,32 @@ BL-300適用後も`log/2026-08-28/2131`で5件目の生成崩壊・クラッシ�
 実LLM呼び出しでの効果確認（実際に定義・解釈の曖昧さに直面した際、observationsへ記録して打ち切れるか、write_issueへの即時逃避に切り替わらないか）は次回ドライラン待ち。
 
 参照: `tests/test_bl301_reasoning_reset.py`、`docs/design/decision_log.md` D-256、`log/2026-08-28/2131/log_no_prompt.md`。
+
+### BL-302: BL-298の反復検知リトライで、失敗した試行のreasoningがreasoning_parts_allに積み上がっていたバグの修正
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-297/298（反復検知・同一iteration再試行の原設計）、BL-093/BL-122（`reasoning_parts_all`/`iteration_start`の設計）、BL-245（R5思考プロセス監査の誤爆、同種の実害の先例） |
+
+**経緯:**
+
+BL-297〜301の対応が一段落した後、ユーザーから「再試行時にiterをやり直す際、ループしている思考ログを積み上げてないですよね？」という鋭い確認があった。コードを実際に精査した結果、積み上がっていたことが判明した。
+
+**根本原因（コードで確認）:**
+
+`_query_AI_live`のtoolsループ分岐では、`reasoning_parts_all: list[str]`が関数冒頭で1回だけ初期化され（BL-122の設計により、APIエラーリトライ・BL-298の反復検知リトライいずれをまたいでも保持される）、`for chunk in stream:`ループ内で`reasoning_parts_all.append(delta_reasoning)`が反復ガードのチェックより**前**に実行される。つまりBL-297/298の反復ガードが発火し`_StreamRepetitionRetryError`を送出して打ち切る時点で、既にその失敗試行分の反復した思考テキストが`reasoning_parts_all`へ追記済みだった。`except _StreamRepetitionRetryError`はこのバッファを一切切り詰めずに再試行しており、次の試行の思考が続けて追記される。最終的にツールループが正常終了すると`_LAST_REASONING_TEXT = "".join(reasoning_parts_all)`で全体を結合するため、失敗試行の反復テキストがそのまま残った状態になっていた。
+
+`_LAST_REASONING_TEXT`は`get_last_reasoning_text()`経由で、`state["expert_last_reasoning"]`／`state["user_last_reasoning"]`（他ロールへの思考ログ提示、R5思考プロセス監査の原資）、`_detector_thought`（`constraint_issue="major"`判定時）、`_agreement_thought`（`write_agreement`が`Rejected`時）へ伝播する経路が実在することを確認した。つまり、n-gram反復ガードが打ち切った崩壊テキスト（数千〜数万字の繰り返し）が、他ロールが読む監査対象の思考ログへそのまま混入する実害が起こり得た——BL-245（Detectorが誤ってExpertの思考過程を「独立検証を行わず承認を急いだ事後正当化」と誤読しmajor判定した事故）と同種の誤爆を将来引き起こしかねない、放置すべきでない欠陥だった。
+
+**対応内容（2026-08-28）:**
+
+`except _StreamRepetitionRetryError`で再試行する直前に、失敗した試行の開始位置（`_reasoning_start_idx`、BL-093で「このiteration分の切り出し」用に既に導入済みのインデックス）まで`reasoning_parts_all`を`del reasoning_parts_all[_reasoning_start_idx:]`で切り詰めるよう修正した。`tools=None`分岐は`reasoning_parts_all`を使わない（局所変数`reasoning_parts`が`while True`の各試行で再初期化されるため、そもそもこの種の蓄積問題が存在しない）ため、`_reasoning_start_idx`を関数冒頭で`None`初期化し、`except`節では`if _reasoning_start_idx is not None:`のガードを設けてtools=None分岐由来の例外では切り詰め処理をスキップ（かつ未束縛エラーを回避）するようにした。
+
+**テスト**: `tests/test_bl302_reasoning_trim_on_retry.py`（新規4件）: tests/test_bl231_loop_guard.pyと同型のモックストリーミングクライアントを用い、①1回目が反復ガードで打ち切られ2回目で成功した場合、最終的な`get_last_reasoning_text()`に1回目の崩壊テキストが一切含まれないことの確認、②2回連続で打ち切られ3回目で成功した場合も両方の崩壊テキストが残らないことの確認、③`_reasoning_start_idx`のNone初期化が分岐より前に行われていることの配線確認、④切り詰め処理がNoneガード付きであることの非退行確認。AGENTS.md §17.1（`cela_main.py`をgit stashで退避し新規4件全てが失敗すること——実際に崩壊テキストが混入することを含め——を確認後、diffが完全一致することを確認して復元）。既存の`test_bl298_incremental_repetition_detection.py`・`test_bl297_stream_repetition_guard.py`・`test_bl231_loop_guard.py`・`test_bl287_tool_repeat_nudge.py`（計32件）で非退行を確認。フルオフラインスイート1939 passed（既知のBL-269 4件のみ残存、新規失敗なし）。
+
+参照: `tests/test_bl302_reasoning_trim_on_retry.py`、`docs/design/decision_log.md` D-257。
 
 ---
 
