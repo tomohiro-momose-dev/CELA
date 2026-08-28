@@ -10037,7 +10037,7 @@ BL-297稼働直後、`log/2026-08-28/1919`のドライランで新たな生成�
 
 n-gram反復検出そのものの誤検知率（min_repeats=3という閾値が、今回のような低エントロピーな構造的テキストの正当な再参照に対して依然として敏感すぎないか）は本BLの対応範囲外とし、次回ドライランでの追加発火状況を見てユーザーと再検討する。現在、検出時は即座に同一iterationを再試行するため、仮に同種の誤検知が今後も発生してもクラッシュには至らず「1回分の余分な再試行」で済む設計になっている。
 
-参照: `tests/test_bl298_incremental_repetition_detection.py`、`tests/test_bl297_stream_repetition_guard.py`、`docs/design/back_log/BL-298/BL298_basic_design.md`、`docs/design/decision_log.md` D-253、`log/2026-08-28/1919/log_no_prompt.md`、`log/2026-08-28/1950/log_no_prompt.md`。
+参照: `tests/test_bl298_incremental_repetition_detection.py`、`tests/test_bl297_stream_repetition_guard.py`、`docs/design/back_log/BL-298/BL298_investigation.md`、`docs/design/decision_log.md` D-253、`log/2026-08-28/1919/log_no_prompt.md`、`log/2026-08-28/1950/log_no_prompt.md`。
 
 ---
 
