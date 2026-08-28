@@ -329,6 +329,7 @@
 | BL-300 | 高 | `cela_main.py`（`_detector_domain_tools`へ`PYTHON_REPL_TOOL`追加、`domain_prompt`に用途の書き分けを追記）、`tests/test_bl300_detector_domain_review_python_repl.py`（新規6件） | **`done`。** BL-299適用後も`log/2026-08-28/2049`で4件目の生成崩壊・クラッシュが発生。今回はBL-299の効果自体は確認できた（keyword+grep同時指定を迷わず使用）が、Detectorがgrepで「長野」を検索し続けても一貫してnot_foundだった。実測したところ、該当PDFの都道府県欄はフルネームではなく1〜3文字の略号コードで構成されており、「長野」という文字列はキャッシュ全3550行中どこにも存在しなかった（`grep -c`で0件を確認）。grepでは原理的に位置特定不可能なため、Detectorは代わりに略号リストと数値列を手作業で突合しようとし、これが反復・クラッシュを招いた（構造的な行き詰まりのためBL-298の自動再試行も3回とも同一原因で失敗）。`call_detector`の数値監査パス（`_detector_numeric_tools`、python_repl付き）とドメイン妥当性レビューパス（`_detector_domain_tools`）を比較すると、BL-228で両者はほぼ揃えられていたが唯一`PYTHON_REPL_TOOL`だけが欠けていたと判明。python_replのサンドボックス（importホワイトリスト）は文字列分割・リストインデックス等の組み込み操作にimportを要求しないため、テキストの機械的な位置特定という用途に制約はないことをユーザーと確認した上で追加。既存の「Expertの計算を再検算する必要はない」という指示（Pass 1/2の役割分担、意図的に維持）とは矛盾しないよう、`domain_prompt`に「検算目的以外での使用（テキストの機械的な位置特定）は妨げない」旨を書き分けて追記した。 | P1 |
 | BL-301 | 高 | `cela_main.py`（新規`_reasoning_reset_instruction`、`call_detector`のdomain_promptへ配線）、`tests/test_bl301_reasoning_reset.py`（新規5件） | **`done`。** BL-300適用後も`log/2026-08-28/2131`で5件目の生成崩壊・クラッシュが発生。今回はBL-298の早期検出（約12,000字で発火、以前の7万字級より大幅に軽微）とBL-300の効果（grepの略号バリエーション試行）は確認できたが、Detectorが「累計」列の定義（令和7年の年次合計か、2005年からの通算累計か）を確定できず、「実際のデータ行を読んで確認しよう」と書きながら一度もその読み取りを実行せずに同じ不確実性の分析をほぼ逐語的に繰り返した（構造的な行き詰まりのためBL-298の自動再試行も3回とも同一原因で失敗）。これはBL-295（カテゴリカルな結論の3回多数決）にもBL-296（データが存在しない場合の推計満足化）にも直接カバーされない、「データは存在し引用もしているが、その定義・解釈自体を確定できず同じ検討を繰り返す」という6つ目の生成崩壊トリガーと特定。ユーザー指示「write_issueの前にまずthinkのobservationsに書いてiterを終了し、思考をリセットするように指示して」を受け、新規ヘルパー`_reasoning_reset_instruction`を実装。同じ検討の繰り返しに気づいたら、write_issueへの即時エスカレーションではなく、まず最終出力の`observations`フィールドへ作業仮説と残る不確実性を記録し、その場で応答を打ち切る（＝次のiterationは巨大な単一completionの続きではなく新しい生成として始まる）よう指示し、`call_detector`のdomain_promptへBL-188/BL-296の検証ブロック直後に配線した。 | P1 |
 | BL-302 | 高 | `cela_main.py`（`_query_AI_live`: `_reasoning_start_idx`のNone初期化、`except _StreamRepetitionRetryError`での`reasoning_parts_all`切り詰め）、`tests/test_bl302_reasoning_trim_on_retry.py`（新規4件） | **`done`。** ユーザーからの鋭い指摘「再試行時にiterをやり直す際、ループしている思考ログを積み上げてないですよね？」を受けて調査した結果、実際に積み上がっていたことが判明。`reasoning_parts_all`（BL-122によりAPIリトライ・BL-298の再試行をまたいで保持される設計）は、BL-297/298の反復ガードが発火し打ち切られた失敗試行分も、打ち切り直前まで既に追記済みだった。切り詰めずに次の試行のreasoningが続けて追記されるため、最終的に成功した際`_LAST_REASONING_TEXT = "".join(reasoning_parts_all)`へ失敗試行の反復テキストがそのまま結合されて残っていた。これは`get_last_reasoning_text()`経由で`state["expert_last_reasoning"]`/`state["user_last_reasoning"]`（他ロールへの思考ログ提示、R5思考プロセス監査の原資）・`_detector_thought`（major判定時）・`_agreement_thought`（write_agreementがRejected時）へ伝播しており、反復ガードが打ち切った崩壊テキストが他ロールの監査対象へ混入する経路が実在した（BL-245の誤爆と同種の実害を将来引き起こしかねない）。`except _StreamRepetitionRetryError`で再試行する直前に、失敗した試行の開始位置（`_reasoning_start_idx`）まで`reasoning_parts_all`を切り詰めるよう修正。tools=Noneブランチは`reasoning_parts_all`を使わない（局所変数が試行ごとに再初期化されるため無関係）ため、`_reasoning_start_idx`をNone初期化し、Noneのままなら切り詰めをスキップするガードを追加した。 | P1 |
+| BL-303 | 中 | `tests/test_bl302_reasoning_trim_on_retry.py`（新規1件、コード変更なし・検証のみ） | **`done`。** BL-302対応直後、ユーザーから「それに加えて、ループしているログを見せられると次のiterでも同じ轍を踏みやすくなります（おそらく）」との追加懸念があった。`_query_AI_live`のtoolsループ分岐を精査した結果、`loop_messages.append(msg.model_dump())`（実際にAPIへ送信されるメッセージ履歴への追記、しかもreasoningは含まずcontent/tool_callsのみ）は、ストリームが正常に完了しtool_callsが続く場合にのみ実行されることを確認した。反復ガードが`_StreamRepetitionRetryError`を送出するのは、この追記より前——ストリーム受信中の`break`時点——であり、失敗した試行は`loop_messages`に一切触れないまま中断される。したがって再試行時にAPIへ実際に送信される`messages`は、失敗試行のものと完全に同一であり、**モデルは自分自身の直前の反復した出力を一切見ずに再挑戦する**ことが判明した（BL-302が対処したのは別の経路＝他ロールへ後で提示される思考ログの汚染であり、リトライ自体への影響ではなかった）。この結論を、モック経由で実際にcreate()呼び出しへ送信された`messages`を2回分捕捉し完全一致することを確認するテストで直接証明した（意図的に`loop_messages`へ漏洩させるコードを一時挿入しテストが正しく失敗することも確認済み、AGENTS.md §17.1相当の健全性確認）。コード変更は不要と判断。 | P2 |
 
 ---
 
@@ -10152,6 +10153,28 @@ BL-297〜301の対応が一段落した後、ユーザーから「再試行時�
 **テスト**: `tests/test_bl302_reasoning_trim_on_retry.py`（新規4件）: tests/test_bl231_loop_guard.pyと同型のモックストリーミングクライアントを用い、①1回目が反復ガードで打ち切られ2回目で成功した場合、最終的な`get_last_reasoning_text()`に1回目の崩壊テキストが一切含まれないことの確認、②2回連続で打ち切られ3回目で成功した場合も両方の崩壊テキストが残らないことの確認、③`_reasoning_start_idx`のNone初期化が分岐より前に行われていることの配線確認、④切り詰め処理がNoneガード付きであることの非退行確認。AGENTS.md §17.1（`cela_main.py`をgit stashで退避し新規4件全てが失敗すること——実際に崩壊テキストが混入することを含め——を確認後、diffが完全一致することを確認して復元）。既存の`test_bl298_incremental_repetition_detection.py`・`test_bl297_stream_repetition_guard.py`・`test_bl231_loop_guard.py`・`test_bl287_tool_repeat_nudge.py`（計32件）で非退行を確認。フルオフラインスイート1939 passed（既知のBL-269 4件のみ残存、新規失敗なし）。
 
 参照: `tests/test_bl302_reasoning_trim_on_retry.py`、`docs/design/decision_log.md` D-257。
+
+### BL-303: BL-298の再試行時、モデルが自分自身の直前の反復出力を見ないことの検証（コード変更なし）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| 関連 | BL-298（同一iteration即時再試行の原設計）、BL-302（別経路＝他ロールへの思考ログ汚染の修正） |
+
+**経緯:**
+
+BL-302対応の直後、ユーザーから「それに加えて、ループしているログを見せられると次のiterでも同じ轍を踏みやすくなります（おそらく）」との追加懸念が示された。BL-302は`reasoning_parts_all`（他ロールへ後で提示される思考ログの蓄積バッファ）の汚染を修正したが、これは「リトライ自体が失敗した自分の出力を見て同じ轍を踏みやすくなるか」という懸念とは別の経路であり、改めて精査が必要だった。
+
+**調査結果（コードで確認）:**
+
+`_query_AI_live`のtoolsループ分岐を精査した結果、実際にAPIへ送信されるメッセージ履歴（`loop_messages`）への追記は`loop_messages.append(msg.model_dump())`の1箇所のみで、これは`for chunk in stream:`ループが正常に完了しtool_callsが続く場合にのみ実行される（かつ`msg`は`content`と`tool_calls`のみを持ち、`reasoning`は含まない）。一方、反復ガードが`_StreamRepetitionRetryError`を送出するのは、この追記より**前**——ストリーム受信中に反復を検知して`break`する時点——であり、失敗した試行は`loop_messages`に一切触れないまま中断される。`create_kwargs["messages"] = loop_messages`は参照代入であり、失敗試行から再試行までの間に`loop_messages`は変更されないため、再試行時にAPIへ送信される`messages`は失敗試行のものと完全に同一（バイト同一）になる。
+
+**結論**: モデルは、自分自身が直前に生成した反復した出力を、リトライの際に一切見ない。再試行は「失敗した生成の続き」ではなく、同一プロンプトに対する完全に独立した新規サンプリングである。ユーザーの懸念は、少なくともBL-298の同一iteration即時再試行の仕組みにおいては実際には発生しない（BL-302が修正した「他ロールへの思考ログ汚染」とは別の、より直接的な「リトライ自体への影響」という観点では、コード上安全であることを確認した）。
+
+**検証**: `tests/test_bl302_reasoning_trim_on_retry.py`に新規1件追加（コード変更は無し、検証のみ）。モックの`create()`呼び出しに実際に送信された`messages`を2回分（失敗試行・再試行）キャプチャし、両者が完全一致することを直接証明した。テスト自体の健全性確認として、`except`節へ`loop_messages.append(...)`を意図的に一時挿入し、このテストが正しく失敗する（漏洩を検知できる）ことを確認した後、元に戻した（AGENTS.md §17.1相当の「その場で作った意図的な不具合をテストが捕捉できるか」の確認）。フルオフラインスイートは本BL単独では未実行（コード変更が無いため、BL-302のフルスイート結果1939 passedに変更なし）。
+
+参照: `tests/test_bl302_reasoning_trim_on_retry.py`、`docs/design/decision_log.md` D-258。
 
 ---
 
