@@ -3577,6 +3577,20 @@
 
 ---
 
+### D-257: BL-302 — BL-298の反復検知リトライで、失敗した試行のreasoningがreasoning_parts_allに積み上がっていたバグの修正
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-28 |
+| 状態 | `decided` |
+| 決定者 | t-momose（「再試行時にiterをやり直す際、ループしている思考ログを積み上げてないですよね？」という確認質問。調査の結果、実際に積み上がっていたことが判明し修正） |
+| **決定理由** | BL-297〜301の対応が一段落した後、ユーザーから上記の確認質問を受けた。`_query_AI_live`のtoolsループ分岐を精査したところ、`reasoning_parts_all`（BL-122によりAPIリトライ・BL-298の反復検知リトライをまたいで保持される設計）は、`for chunk in stream:`ループ内で反復ガードのチェックより前に`.append(delta_reasoning)`が実行されるため、`_StreamRepetitionRetryError`で打ち切る時点で既に失敗試行分の反復した思考テキストが追記済みだった。`except _StreamRepetitionRetryError`はこのバッファを一切切り詰めずに再試行しており、最終的に成功した際`_LAST_REASONING_TEXT = "".join(reasoning_parts_all)`へ失敗試行の反復テキストがそのまま結合されて残っていた。これは`get_last_reasoning_text()`経由で`state["expert_last_reasoning"]`／`state["user_last_reasoning"]`（他ロールへの思考ログ提示、R5思考プロセス監査の原資）・`_detector_thought`（major判定時）・`_agreement_thought`（Rejected時）へ伝播する経路が実在し、n-gram反復ガードが打ち切った崩壊テキストが他ロールの監査対象へ混入する実害があった——BL-245（Detectorが誤ってExpertの思考過程を誤読しmajor判定した事故）と同種の誤爆を将来引き起こしかねない、放置すべきでない欠陥だった。 |
+| 決定内容 | `except _StreamRepetitionRetryError`で再試行する直前に、失敗した試行の開始位置（`_reasoning_start_idx`、BL-093で導入済みの「このiteration分の切り出し」用インデックス）まで`reasoning_parts_all`を`del reasoning_parts_all[_reasoning_start_idx:]`で切り詰めるよう修正した。`tools=None`分岐は`reasoning_parts_all`を使わない（局所変数`reasoning_parts`が各試行で再初期化されるためこの種の蓄積問題が存在しない）ため、`_reasoning_start_idx`を関数冒頭で`None`初期化し、`except`節を`if _reasoning_start_idx is not None:`でガードしてtools=None分岐由来の例外では切り詰め処理をスキップ（かつ未束縛エラーを回避）するようにした。 |
+| 影響 | `cela_main.py`（`_reasoning_start_idx`のNone初期化、`except _StreamRepetitionRetryError`での`reasoning_parts_all`切り詰め）。`tests/test_bl302_reasoning_trim_on_retry.py`（新規4件：1回失敗→成功、2回失敗→成功のいずれでも崩壊テキストが最終reasoning_textに残らないことの確認、配線位置確認、Noneガードの非退行確認）。AGENTS.md §17.1確認済み（cela_main.pyをgit stashで退避し新規4件全てが失敗すること——実際に崩壊テキストが混入することを含め——を確認後、diffが完全一致することを確認して復元）。既存の`test_bl298_incremental_repetition_detection.py`・`test_bl297_stream_repetition_guard.py`・`test_bl231_loop_guard.py`・`test_bl287_tool_repeat_nudge.py`で非退行を確認（計32件）。フルオフラインスイート1939 passed（既知のBL-269汚染4件のみ、新規失敗なし）。 |
+| 関連 BL | BL-302（本件）、BL-297/298（反復検知・同一iteration再試行の原設計）、BL-093/BL-122（`reasoning_parts_all`/`iteration_start`の設計）、BL-245（R5思考プロセス監査の誤爆、同種の実害の先例） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
