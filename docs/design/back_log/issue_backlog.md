@@ -10093,6 +10093,8 @@ grepが使えない状況で、Detectorは代わりに略号リストと数値�
 
 **残る申し送り**: ユーザーから「python_replの応用は他のノードにも応用できそうですね」との指摘があった。現状python_replを持つのは`call_expert`と`call_detector`の数値監査パスのみで、`generate_user_utterance`（User AI）・`call_reviewer`・`call_resource_arbiter`・`call_integrator`は持っていない。同種の「長大・略号だらけの参照テキストから特定の値を機械的に位置特定する」ニーズは他ノードでも起こり得るが、本BLでは実際にクラッシュした箇所（Detectorドメイン妥当性レビュー）への対症を優先し、他ノードへの横展開はユーザー判断待ちとして次回に持ち越す。
 
+**追記（同日、ユーザーフィードバックによる追加修正）**: ユーザーから2点の確認があった。①クラッシュ挙動（再試行上限3回到達時に隠さず伝播する設計）は「生成崩壊しにくいシステムにしていく方が根本的」との判断で維持を確認、コード変更なし。②`PYTHON_REPL_TOOL`自体のグローバルな説明文（全ノード共通の単一定義）が「mechanical arithmetic/verification」としか書かれておらずテキスト処理用途が案内されていないこと、かつ許可モジュール一覧が"only math/statistics/datetime/json/fractions/decimal allowed"のまま古く、BL-058で追加された`itertools`/`functools`/`collections`/`operator`/`re`が欠落していたこと（BL-299と同型のスキーマ説明文ドリフト）が判明。説明文を「数値計算の検証」と「grepで見つからない参照テキストの機械的な分割・位置特定（BL-300の実インシデントを例示）」の両方を用途として明記する内容へ修正し、許可モジュール一覧も実装（`_ALLOWED_IMPORTS`）に合わせて修正した。他ノードへ展開する際はこの共通ツール説明文に加え、各ノード個別のプロンプト側にも用途を書き分ける必要がある旨をユーザーから申し送りとして受けた（`domain_prompt`で行ったのと同じパターン）。この過程で、`cela_main.py`374行目に本セッションの編集とは無関係な誤入力（`Show`という単独行、ユーザーIDE操作時の混入とみられる）を発見し、元の空行へ復元した。テストを3件追加（説明文がテキスト処理用途に言及すること、許可モジュール一覧が`_ALLOWED_IMPORTS`と完全一致すること、print()注意書きが維持されていることの非退行確認）、AGENTS.md §17.1確認済み（新規2件が失敗することを確認後、diffが完全一致することを確認して復元）。フルオフラインスイート1930 passed（既知のBL-269 4件のみ残存、新規失敗なし）。
+
 参照: `tests/test_bl300_detector_domain_review_python_repl.py`、`docs/design/decision_log.md` D-255、`log/2026-08-28/2049/log_no_prompt.md`、`web_cache/40d17513c6c29834.md`。
 
 ---
