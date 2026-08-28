@@ -326,6 +326,7 @@
 | BL-297 | 高 | `cela_main.py`（新規`_StreamRepetitionGuard`クラス＋4定数、`_query_AI_live`の2分岐計4箇所へ配線） | **`done`。** BL-293〜296がいずれもプロンプトレベルの対策に留まっていたことを受け、機械的なバックストップを追加。BL-231/287はcompletion完了後・iteration間の比較にしか働かず、単一completion内で反復し続ける生成崩壊（0649/1023/1313/1535、いずれもreasoning側で発生）を検知できなかった。ストリーミング中のreasoning/contentチャンクをn-gram反復検出で監視し、閾値超過時に`for chunk in stream:`を強制break、既存のfinish_reason=="length"パスと同型のValueErrorで外側のAPIエラーリトライへ委ねる。n-gram長80文字は実際の崩壊を捉えつつ大規模JSON計画の構造的反復を誤検知しない値としてユーザー承認済み。 | P1 |
 | BL-298 | 高 | `cela_main.py`（`_StreamRepetitionGuard`の内部実装をwindow方式からインクリメンタルngramカウント方式へ再設計、新規`_StreamRepetitionRetryError`例外クラス＋2定数、`_query_AI_live`の検出時raise 2箇所＋専用except節） | **`done`。** BL-297稼働直後に2つの実害を発見・修正。①`log/2026-08-28/1919`で新たな生成崩壊（Expertが公式統計の無い「アプリ操作可能割合」の推計方法を巡り単一completion内で9分・約7万字ループ）が発生したにもかかわらず`_StreamRepetitionGuard`が一度も発火しなかった。実際のreasoningストリームを本番同一定数で再生した結果、同一文が27回・ほぼ正確に2159文字周期で反復していたが、min_repeats=3回目の出現がバッファに同時に残るには2周期分＝4318文字必要なところwindow=3000ではその前に1回目が追い出され、周期がwindow/(min_repeats-1)=1500文字を超える反復は原理的に検出不可能という構造的欠陥が原因と判明。window方式を廃し、chunk到着ごとにngram出現回数をストリーム全体で累積カウントする方式に置き換えた（周期の長さに関係なく検出可能、メモリは`_TEXT_REPETITION_MAX_STREAM_CHARS`で安全弁を設置）。②再設計後の初回本番発火（`log/2026-08-28/1950`）で、PDFの都道府県略称一覧という低エントロピーな構造的テキストを2〜3回参照し直す正当な自己確認的推論が過検知されたことをユーザーが指摘、直後に同一のValueError送出パターン（finish_reason=="length"用の既存パスを流用）が実際に本番ランをクラッシュさせるトレースバックが判明した。原因はD-009の意図的設計（ValueErrorはAPIError系exceptに含めず外側へ伝播させノードを失敗させる）で、`_query_and_parse_with_retry`層でも捕捉されず`run_ai_vs_ai_loop`まで伝播していたこと。finish_reason=="length"と異なりn-gram反復はサンプリングの偏りに起因する一過性の事象である可能性が高く、ユーザーの「検知したときはそのiterをやり直してほしい」との指示どおり、検出時のraiseを専用の`_StreamRepetitionRetryError`へ変更し、`_query_AI_live`内の`while True`ループ自身がその場で捕捉、BL-122のiteration_start保持機構に乗せて同一iterationのAPI呼び出しのみを即時再試行（node_redo_countとは別予算、API過負荷用の指数バックオフ/180秒クールダウンは適用しない）するよう修正した。再試行上限到達時はBL-202の教訓（プレースホルダー文字列を実回答として誤読させた事故）を踏まえ、隠蔽せず元の例外をそのまま再raiseする。 | P1 |
 | BL-299 | 中 | `cela_main.py`（`READ_REFERENCE_FILE_TOOL`の`grep`パラメータ説明文を修正）、`tests/test_bl184_web_tools.py`（新規1件） | **`done`。** `log/2026-08-28/2031`で3件目の生成崩壊（今度はBL-298の即時再試行が3回とも失敗しクラッシュ）を追跡した結果、BL-297/298とは異なる原因と判明。DetectorがNPA PDFから特定の数値をgrepで探そうとしたが、ツールのgrep説明文が「[BL-221] Requires 'path'.」とだけ書かれておりkeywordとの同時指定が可能か不明だったため、実行を避けて代わりにPDF数値テーブルを手作業で突合しようとし、その逡巡の中で同一文言を約9分・5万字かけて3回繰り返しn-gram反復ガードに引っかかった（構造的な迷いのため3回の自動再試行も同一原因で失敗）。`web_tools.py`の実装を確認したところ、BL-244（2026-08-15）で既にkeyword+grep同時指定を許容する（keywordから内部でpathを自動解決する）よう修正済みだったが、`cela_main.py`側のツールスキーマ説明文だけがBL-244以前の記述のまま取り残されていた（AGENTS.md §15.1単一の真実源違反）。説明文をBL-244の実装に合わせて修正し、「keywordとgrepを同時指定してよい、pathを自分で先に解決する必要はない」ことを明示した。 | P2 |
+| BL-300 | 高 | `cela_main.py`（`_detector_domain_tools`へ`PYTHON_REPL_TOOL`追加、`domain_prompt`に用途の書き分けを追記）、`tests/test_bl300_detector_domain_review_python_repl.py`（新規6件） | **`done`。** BL-299適用後も`log/2026-08-28/2049`で4件目の生成崩壊・クラッシュが発生。今回はBL-299の効果自体は確認できた（keyword+grep同時指定を迷わず使用）が、Detectorがgrepで「長野」を検索し続けても一貫してnot_foundだった。実測したところ、該当PDFの都道府県欄はフルネームではなく1〜3文字の略号コードで構成されており、「長野」という文字列はキャッシュ全3550行中どこにも存在しなかった（`grep -c`で0件を確認）。grepでは原理的に位置特定不可能なため、Detectorは代わりに略号リストと数値列を手作業で突合しようとし、これが反復・クラッシュを招いた（構造的な行き詰まりのためBL-298の自動再試行も3回とも同一原因で失敗）。`call_detector`の数値監査パス（`_detector_numeric_tools`、python_repl付き）とドメイン妥当性レビューパス（`_detector_domain_tools`）を比較すると、BL-228で両者はほぼ揃えられていたが唯一`PYTHON_REPL_TOOL`だけが欠けていたと判明。python_replのサンドボックス（importホワイトリスト）は文字列分割・リストインデックス等の組み込み操作にimportを要求しないため、テキストの機械的な位置特定という用途に制約はないことをユーザーと確認した上で追加。既存の「Expertの計算を再検算する必要はない」という指示（Pass 1/2の役割分担、意図的に維持）とは矛盾しないよう、`domain_prompt`に「検算目的以外での使用（テキストの機械的な位置特定）は妨げない」旨を書き分けて追記した。 | P1 |
 
 ---
 
@@ -10063,6 +10064,36 @@ n-gram反復検出そのものの誤検知率（min_repeats=3という閾値が�
 **テスト**: `tests/test_bl184_web_tools.py`（新規1件）: `READ_REFERENCE_FILE_TOOL`の`grep`説明文がBL-244・keyword同時指定を明示し、「Requires 'path'.」という古い制限文言が単独で残っていないことを確認。AGENTS.md §17.1（`cela_main.py`をgit stashで退避し新規テストが失敗することを確認後、diffが完全一致することを確認して復元）。フルオフラインスイート1921 passed（既知のBL-269 4件のみ残存、新規失敗なし）。keyword+grep同時指定の解決ロジック自体（`web_tools.py`側）はBL-244で既にテスト済みのため変更・再検証していない。
 
 参照: `tests/test_bl184_web_tools.py`、`docs/design/decision_log.md` D-254、`log/2026-08-28/2031/log_no_prompt.md`。
+
+### BL-300: Detectorの「ドメイン妥当性レビュー」パスへ`PYTHON_REPL_TOOL`を追加し、grep不能な略号表の手作業突合を解消する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-228（数値監査パスとドメイン妥当性レビューパスのツール整合の原典）、BL-297/298/299（本件の発端となった生成崩壊・n-gram反復ガード・grep説明文修正）、AGENTS.md §5.1（LLMは計算・機械的位置特定が不得手、python_repl必須） |
+
+**経緯:**
+
+BL-299適用後も`log/2026-08-28/2049`で4件目の生成崩壊・クラッシュが発生した。BL-299自体の効果は確認できた——このランではDetectorが`read_reference_file(keyword=..., grep=...)`の同時指定を一切迷わず使用しており（「Actually, I can use keyword + grep together」と即断）、BL-299以前のような50,000字の逡巡は発生しなかった。しかし今回はgrepで「長野」を検索し続けても一貫して`not_found`が返り続け、iter=6で約9分・別種の反復（略号リストと数値列の手作業突合）に陥りn-gram反復ガードが発火、BL-298の自動再試行3回も同一原因で失敗しクラッシュした。
+
+**根本原因（実測で確認）:**
+
+実際のキャッシュファイル（`web_cache/40d17513c6c29834.md`、Source: `rdhtransition_monthly_r07.pdf`、全3550行）を直接確認したところ、「長野」という文字列はどこにも存在しなかった（`grep -c "長野"` == 0、`grep -c "自主返納"` == 0）。理由は、この警察庁PDFの都道府県欄がフルネームではなく1〜3文字の略号コード（多くは1文字、`神奈川`→`神 奈 川`のように衝突する場合のみ複数文字をスペース区切りで表現）で構成されているためで、grepでは原理的に位置特定不可能だった。これは1950の「低エントロピーなデータの正当な再確認」や2031の「ツール説明文の古さ」とは異なる、**元の政府PDFの表構造そのものに起因する第4の原因**である。
+
+grepが使えない状況で、Detectorは代わりに略号リストと数値列（都道府県×月×年齢層）を手作業で1件ずつ突合しようとした。`call_detector`には数値監査パス（`_detector_numeric_tools`、`PYTHON_REPL_TOOL`付き）とドメイン妥当性レビューパス（`_detector_domain_tools`）の2段構成があり、BL-228で両者はほぼ同じツールセットへ揃えられていたが、両リストを比較すると**唯一`PYTHON_REPL_TOOL`だけが欠けていた**（差分は他に`MARK_FACT_AUDITED_TOOL`の有無のみ、これはドメイン妥当性レビュー側にのみ必要で意図通り）。つまりドメイン妥当性レビューパスには、フラットなテキストをプログラム的に分割・インデックスして機械的に位置特定する手段が無く、LLMの地の文推論だけで数十項目の突合をするしかなかった——AGENTS.md §5.1（LLMは計算が原理的に不得手、python_repl必須）の趣旨が、単純計算だけでなくこの種の「位置特定・突合」にも当てはまる実例。
+
+**対応内容（2026-08-28、ユーザー確認・承認済み）:**
+
+ユーザーへ「ドメイン妥当性レビューパスにpython_replを追加してよいか」を確認したところ、「import制約は大丈夫か（現在は計算系のみに絞られている）」という懸念が示された。python_replのサンドボックス（`_check_repl_code_safety`のASTベースimportホワイトリスト、`_ALLOWED_IMPORTS = {"math", "statistics", "datetime", "json", "fractions", "decimal", "itertools", "functools", "collections", "operator", "re"}`）を確認したところ、文字列分割（`.split()`）やリストインデックス等の組み込み操作は一切importを要求せず、必要になり得る`re`も既に許可リストに含まれているため、今回の用途（テキストの機械的な位置特定）に制約はないことを確認し、ユーザーの了承を得た。
+
+`_detector_domain_tools`へ`PYTHON_REPL_TOOL`を追加した。`domain_prompt`には既存の「あなたの役割は数値の検算ではない、Expertの計算を再検算する必要はない」という指示（Pass 1/Pass 2の役割分担、BL-049由来、意図的に維持）が既にあり、これと矛盾しないよう「python_replは検算目的以外でも使ってよく、read_reference_fileで取得した参照テキストが長大・略号だらけでgrepでは特定できない場合、python_replでテキストを分割・インデックスして機械的に位置特定してください」という用途の書き分けを追記した。
+
+**テスト**: `tests/test_bl300_detector_domain_review_python_repl.py`（新規6件）: `_detector_domain_tools`への`PYTHON_REPL_TOOL`追加確認、数値監査パスとの差分が引き続き`MARK_FACT_AUDITED_TOOL`のみであることの確認（BL-228の意図からの新たな乖離が無いことの確認）、`domain_prompt`が既存の検算不要指示と新しい位置特定許可指示を書き分けて両立させていることの確認、python_replサンドボックスが文字列分割・リストインデックスをimport無しで許可することの実行確認（ユーザー確認事項の裏付け）、許可外importが引き続き拒否されることの非退行確認、python_repl呼び出し記録機構（`python_calls_log`）が呼び出し元ラベルに依存しないことの確認。AGENTS.md §17.1（`cela_main.py`をgit stashで退避し新規3件が失敗することを確認後、diffが完全一致することを確認して復元）。既存の`test_bl093_think_tool_scratchpad.py`・`test_bl294_definitional_audit.py`（`_detector_domain_tools`参照、計76件）で非退行を確認。フルオフラインスイート1927 passed（既知のBL-269 4件のみ残存、新規失敗なし）。
+
+**残る申し送り**: ユーザーから「python_replの応用は他のノードにも応用できそうですね」との指摘があった。現状python_replを持つのは`call_expert`と`call_detector`の数値監査パスのみで、`generate_user_utterance`（User AI）・`call_reviewer`・`call_resource_arbiter`・`call_integrator`は持っていない。同種の「長大・略号だらけの参照テキストから特定の値を機械的に位置特定する」ニーズは他ノードでも起こり得るが、本BLでは実際にクラッシュした箇所（Detectorドメイン妥当性レビュー）への対症を優先し、他ノードへの横展開はユーザー判断待ちとして次回に持ち越す。
+
+参照: `tests/test_bl300_detector_domain_review_python_repl.py`、`docs/design/decision_log.md` D-255、`log/2026-08-28/2049/log_no_prompt.md`、`web_cache/40d17513c6c29834.md`。
 
 ---
 
