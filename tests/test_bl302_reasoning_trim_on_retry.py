@@ -66,21 +66,29 @@ class _FakeStream:
 
 
 class _FakeCompletions:
-    def __init__(self, factory, counter):
+    def __init__(self, factory, counter, sent_messages_log=None):
         self._factory = factory
         self._counter = counter
+        self._sent_messages_log = sent_messages_log
 
     def create(self, **kwargs):
         self._counter[0] += 1
         n = self._counter[0]
+        if self._sent_messages_log is not None:
+            # [BL-303] このcreate()呼び出しへ実際に送信されたmessagesを、後で比較できるよう
+            # スナップショット（コピー）で保存する。loop_messagesは可変listのため、参照のまま
+            # 保存すると後続の変更が過去分にも反映されてしまい、失敗試行と再試行の比較に使えない。
+            self._sent_messages_log.append(list(kwargs.get("messages", [])))
         return _FakeStream(self._factory(n))
 
 
 class _FakeClient:
-    def __init__(self, factory):
+    def __init__(self, factory, sent_messages_log=None):
         self._counter = [0]
         self.base_url = "http://fake"  # openrouterでないこと（extra_bodyスキップ）
-        self.chat = SimpleNamespace(completions=_FakeCompletions(factory, self._counter))
+        self.chat = SimpleNamespace(
+            completions=_FakeCompletions(factory, self._counter, sent_messages_log)
+        )
 
 
 DUMMY_TOOLS = [{"function": {"name": "bl302_test_tool"}}]
@@ -164,3 +172,40 @@ def test_bl302_trim_guarded_by_none_check():
     import inspect
     src = inspect.getsource(cela_main._query_AI_live)
     assert "if _reasoning_start_idx is not None:" in src
+
+
+def test_bl302_retry_sends_identical_messages_the_model_never_sees_its_own_collapse():
+    """[BL-303] ユーザー指摘（「ループしているログを見せられると次のiterでも同じ轍を
+    踏みやすくなる（おそらく）」）の検証。反復ガードが発火した失敗試行はストリーム受信中の
+    breakでその場から中断され、loop_messages.append(msg.model_dump())（正常終了時のみ
+    実行される、しかもreasoningは含まずcontent/tool_callsのみ）まで一切到達しない。
+    したがって再試行時にAPIへ実際に送信されるmessagesは、失敗試行のものと完全に同一で
+    あり、モデルは自分自身の直前の反復した出力を一切見ずに再挑戦することを、実際に
+    2回分のcreate()呼び出しへ送信されたmessagesを比較して直接証明する。"""
+    sent_messages_log = []
+
+    def factory(n):
+        if n == 1:
+            return [_reasoning_only_chunk(_COLLAPSED_REASONING)]
+        return _final_answer_chunks("clean reasoning after retry", "final answer text")
+
+    client = _FakeClient(factory, sent_messages_log=sent_messages_log)
+    result = cela_main._query_AI_live(
+        messages=[{"role": "user", "content": "監査対象"}],
+        client=client,
+        model="fake",
+        label="detector",
+        tools=DUMMY_TOOLS,
+        light_system_prompt=None,
+        state=None,
+    )
+
+    assert result == "final answer text"
+    assert len(sent_messages_log) == 2  # 失敗試行1回＋再試行1回
+    # 失敗試行（1回目）へ送信されたmessagesと、再試行（2回目）へ送信されたmessagesが
+    # 完全に同一であること（＝反復した出力自体は一切送信メッセージに混入していない）。
+    assert sent_messages_log[0] == sent_messages_log[1]
+    # 送信メッセージのどこにも、反復した崩壊テキストの断片が含まれていないこと
+    # （そもそもreasoningはAPIへ送り返されない設計だが、念のため直接確認する）。
+    for m in sent_messages_log[1]:
+        assert "Z" * 80 not in json.dumps(m, ensure_ascii=False, default=str)
