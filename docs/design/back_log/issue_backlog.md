@@ -323,6 +323,7 @@
 | BL-294 | 高 | `cela_main.py`（`verified_facts`/`entity_attributes`へ`audited_by`/`audited_at`列追加、新規`mark_fact_audited`ツール、`_build_unaudited_facts_text`、task_plan_reviewer観点10、call_task_planner／WRITE_AGREEMENT_TOOLの自己確認文言） | **`done`。** `log/2026-08-28/1023`の生成崩壊（Expertが35分超の単一ターン内で数値矛盾を堂々巡り）を遡ると、`log/2026-08-27/2345`でtask_plannerがweb_search結果の「構成比（自主返納者全体に占める75歳以上の割合）」を「返納率」と誤読し`confidence="confirmed"`で登録した単一の誤登録が真因だった（ユーザー指摘「78.3がいつ、だれが、どこから持ってきた数字か？」により特定）。confirmed_variables/entity属性に「誰が定義を出典と照合したか」を記録する監査機構が無かったことが構造的原因。verified_facts/entity_attributesへaudited_by/audited_at列を追加（値変化時のみUPSERTのCASE式でリセット）、task_plan_reviewerに定義監査の観点を追加、Detectorが未監査differential（audited_by IS NULL）を機械的に検知して監査するようdomain_promptへ組み込んだ。 | P1 |
 | BL-295 | 高 | `cela_main.py`（新規`_bounded_deliberation_instruction`、call_detector Pass 1/Pass 2、generate_user_utterance計2箇所、BL-292 quantitative_sufficiency_concernの既定値文言） | **`done`。** `log/2026-08-28/1313`でDetectorが「observationsをwrite_issueで永続化すべきか」という裁量判断を打ち切り規定無しに30回以上往復し停止（ユーザーがCtrl+Cで一時停止）。BL-293（役割の板挟み）・BL-294（マンデート値と検証結果の衝突）とは異なる3つ目の生成崩壊トリガーと特定。既にPass 2に実証済みだった「判定のブレ防止（3回多数決方式）」を汎用ヘルパー化し、Pass 1のwrite_issue永続化判断・User AIのRESOLVE/DEFER/ACKNOWLEDGE選択（2箇所）へ横展開。Exploreエージェントの横断調査で見つかったquantitative_sufficiency_concernの非対称（姉妹フィールドessence_sufficiency_concernの既定値文言欠如）も併せて解消した。 | P1 |
 | BL-296 | 高 | `cela_main.py`（新規`_missing_data_estimation_instruction`、call_expert・`_USER_AI_ROLE_MANDATE`・call_detector計3箇所） | **`done`。** `log/2026-08-28/1535`でExpertが公式統計に存在しない値（免許返納市単位累計）の推計中、「もっと誠実な方法があるはず」と同一の推計サイクルを9分半・15回以上繰り返し停止（ユーザーがCtrl+Cで一時停止）。BL-293/294/295とは異なる4つ目の生成崩壊トリガー（推計の精緻化に終わりが無い完璧主義ループ）と特定。実務標準の推計手法5種（代理指標の比例配分・類似事例の転用・フェルミ推定的分解・レンジ提示・前提の明示的記録）と満足化規定を導入し、Expert（producer視点：1つ選んだら確定）・User AI/Detector（auditor視点：文書化された推計を理由なく差し戻さない）双方へ横展開した。 | P1 |
+| BL-297 | 高 | `cela_main.py`（新規`_StreamRepetitionGuard`クラス＋4定数、`_query_AI_live`の2分岐計4箇所へ配線） | **`done`。** BL-293〜296がいずれもプロンプトレベルの対策に留まっていたことを受け、機械的なバックストップを追加。BL-231/287はcompletion完了後・iteration間の比較にしか働かず、単一completion内で反復し続ける生成崩壊（0649/1023/1313/1535、いずれもreasoning側で発生）を検知できなかった。ストリーミング中のreasoning/contentチャンクをn-gram反復検出で監視し、閾値超過時に`for chunk in stream:`を強制break、既存のfinish_reason=="length"パスと同型のValueErrorで外側のAPIエラーリトライへ委ねる。n-gram長80文字は実際の崩壊を捉えつつ大規模JSON計画の構造的反復を誤検知しない値としてユーザー承認済み。 | P1 |
 
 ---
 
@@ -9970,6 +9971,34 @@ BL-266の`_BL266_ESSENCE_TOPIC_PREFIX`によるトピック接頭辞フィルタ
 実LLM呼び出しでの効果確認は次回ドライラン待ち: ①Expertが公式統計の無い値に直面した際、1つの手法を選んで確定できるか、②User AIがExpertの文書化された推計を不当に差し戻さないか、③Detectorが同様の推計をmajorとして誤って差し戻さないか。現在一時停止中のrun（`log/2026-08-28/1535`）を`--resume`するか打ち切るかは本BLとは別にユーザー判断待ち。
 
 参照: `tests/test_bl296_missing_data_estimation.py`、`docs/design/back_log/BL-296/BL296_basic_design.md`、`log/2026-08-28/1535/log_no_prompt.md`、`docs/design/decision_log.md` D-251。
+
+### BL-297: 純粋テキスト生成（ツール呼び出しゼロ）に対するn-gram反復の機械的検出・強制打ち切り
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-231（frequency/presence_penalty=0.3の確率的抑制、iteration間ループガード）、BL-287（ツール呼び出し引数反復のnudge→強制終了パターン踏襲元）、BL-293/294/295/296（本BLが機械的バックストップを追加する対象の生成崩壊群） |
+
+**経緯:**
+
+本日発見した4件の生成崩壊（BL-293〜296）はいずれもプロンプトレベルの対策（打ち切り規定・満足化規定の追記）に留まっていた。ユーザーとの議論の中で「商用エージェントはこの辺りを徹底的にチューニングしているのでは」という指摘を受け、商用システムが一般にプロンプト指示だけでなく機械的な反復検出（n-gram反復のハード打ち切り等）を併用することを説明したところ、CELA自身にも同種の機械的バックストップを導入する方針が承認された。
+
+**根本原因（コードで確認）:**
+
+CELAには既にBL-231（iteration間で同一出力が10回連続したら強制終了）とBL-287（ツール呼び出し引数が3回連続一致でnudge→強制終了）という機械的検出があるが、いずれも**completion完了後・iteration境界をまたいだ比較**であり、**単一のcompletion（1回のストリーミング応答）内で起きる反復には無力**（`cela_main.py`のBL-231自身のコメントが2026-08-15時点で既に明記）。この弱点への対処として同日`frequency_penalty`/`presence_penalty=0.3`が導入済みだったが、これは確率的な抑制に過ぎず、本日観測した0649/1023/1313/1535の4件全てがこの対策が有効な状態で発生していた。Explore調査の結果、CELAの全LLM呼び出しは`stream=True`で、reasoning（`💭思考`）とcontent（`💬発言`）の2種のdeltaを別々に蓄積・表示しており、**今回観測した4件の反復は全てreasoning側で発生していた**ことも確認した。
+
+**対応内容（2026-08-28）:**
+
+新規クラス`_StreamRepetitionGuard`を追加し、ストリーミング中に届くreasoning/contentのdeltaチャンクを`.feed()`で監視する。直近`window`（3000文字）中に`ngram_len`（80文字）の部分文字列が`min_repeats`（3回）以上出現したら、`check_interval`（300文字）ごとの検査で検出し、`for chunk in stream:`ループを即座に`break`、既存の`finish_reason=="length"`パスと同型の`ValueError`を送出して外側のAPIエラーリトライ（`node_redo_count`）へ処理を委ねる（新しいリトライ経路は作らず、既存の実証済み経路を再利用）。`_query_AI_live`内の`tools is None`分岐・toolsループ分岐それぞれに、reasoning用・content用の2インスタンスずつ計4箇所へ配線した。
+
+n-gram長（80文字）は、実際の崩壊（150字前後の段落反復）を確実に捉えつつ、大規模な計画JSON等での構造的な短い繰り返し（キー名等）を誤検知しない長さとして選定した（AGENTS.md §7重要定数、ユーザー承認済み）。
+
+**テスト**: `tests/test_bl297_stream_repetition_guard.py`（新規9件）: `_StreamRepetitionGuard`単体（①実際の崩壊ログのパターンで検出できること、②task_id等の値を毎回変えた大規模JSON計画に近いテキストで誤検知しないこと、③閾値未満の反復では検出しないこと、④check_intervalによる検査間引きの確認、⑤windowによるバッファサイズ上限の確認、⑥空チャンクの無視）、`_query_AI_live`への配線確認（`inspect.getsource`でクラス参照4箇所・`.feed()`呼び出し4箇所・検出時のログ文言を確認）。AGENTS.md §17.1（`cela_main.py`全体をgit stashで巻き戻し、新規9件全てが失敗することを確認後、復元してdiffが完全一致することを確認）。既存の`test_bl231_loop_guard.py`・`test_bl287_tool_repeat_nudge.py`（計8件）で非退行を確認。
+
+この機構はストリーミングチャンクの実際の受信タイミングに依存するため、オフラインテストではモックのchunk列でしか検証できない。実LLM呼び出しでの効果確認——①実際の崩壊時に生成が早期に打ち切られトークン・時間の浪費が防げるか、②通常の長い正当な生成（大規模JSON計画等）を誤って打ち切らないか——は次回ドライラン待ち。現在一時停止中のrun（`log/2026-08-28/1535`）を`--resume`するか打ち切るかは本BLとは別にユーザー判断待ち。
+
+参照: `tests/test_bl297_stream_repetition_guard.py`、`docs/design/back_log/BL-297/BL297_basic_design.md`、`docs/design/decision_log.md` D-252。
 
 ---
 
