@@ -3495,6 +3495,18 @@
 | 影響 | `cela_main.py`（`_bounded_deliberation_instruction`新設、call_detector Pass 2の置換2箇所、Pass 1への追加1箇所、generate_user_utteranceへの追加2箇所、quantitative_sufficiency_concernの既定値文言追加、計6箇所）、`tests/test_bl295_bounded_deliberation.py`（新規13件）、`tests/test_bl089_anti_repetition_instructions.py`（既存1件を呼び出し式マーカー方式へ追随修正、BL-256と同型）。AGENTS.md §17.1確認済み（cela_main.py全体をgit stashで巻き戻し、新規13件＋既存1件の計14件全てが失敗することを確認後、diffが完全一致することを確認して復元）。フルオフラインスイート1888 passed（既知のBL-269汚染4件のみ）。実LLM呼び出しでの効果確認（Pass 1のwrite_issue永続化判断・User AIのRESOLVE/DEFER/ACKNOWLEDGE選択で同種の堂々巡りが再発しないか）は次回ドライラン待ち。 |
 | 関連 BL | BL-295（本件）、BL-293/BL-294（同種の生成崩壊、別の欠陥クラス）、BL-266/BL-292（quantitative_sufficiency_concern非対称の当事者）、BL-089/BL-256（`_verification_throttle_warning`の既存集約パターンの踏襲元） |
 
+### D-251: BL-296 — 公表されていない値の推計に、実務標準5手法＋満足化規定を導入する（producer/auditor両視点）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-28 |
+| 状態 | `decided` |
+| 決定者 | t-momose（「再開ラン1535のログ参照、まだ、生成崩壊」という報告、「こういう公表されていない値を推計する一般的な方法は？」という質問、「進めてください、ユーザー、detectorにも必要ですね」という承認と横展開指示） |
+| **決定理由** | `log/2026-08-28/1535`で、Expertが公式統計に存在しない値（茅野市単位の免許返納累計件数）の推計中、単一の生成ターン内で9分半・15回以上「按分推計→仮定が重すぎると自己却下→もっと誠実な方法を求めて振り出しに戻る」という同一サイクルを繰り返し停止した。これはBL-293/294/295のいずれとも異なる4つ目の生成崩壊パターンで、BL-295の3回多数決方式（カテゴリカルな結論の選択向け）はこの「連続的な手法の洗練が終わらない」失敗モードには構造的に適合しない。ユーザーの質問に答える形で実務標準の推計手法5種（代理指標の比例配分・類似事例の転用・フェルミ推定的分解・レンジ/感度分析での提示・前提の明示的記録）を提示したところ、これを満足化（satisficing）規定としてBL化する方針が承認された。ユーザーから、Expert（自ら推計する側）だけでなくUser AI・Detector（他者の推計を審査・許可する側）にも同種の必要性があるとの指摘を受け、producer/auditor両視点での横展開を決定した。 |
+| 決定内容 | 新規共有ヘルパー`_missing_data_estimation_instruction(perspective)`を追加（`_bounded_deliberation_instruction`の近く、`_verification_throttle_warning`の`output_form`引数と同型のパターン）。perspective="producer"（`call_expert`のBL-041ブロックへ追加）は「5手法のいずれか1つを選び前提を明記した時点で確定させ、再導出し続けない」、perspective="auditor"（`_USER_AI_ROLE_MANDATE`、`call_detector`のBL-188根拠実在性チェック直後へ追加）は「文書化された妥当な推計を理由なく差し戻さない、手法自体が不合理か前提未記載の場合のみ指摘」という逆方向の指示を返す。`_USER_AI_ROLE_MANDATE`はStage1/Stage4双方へ自動配線されるため単一箇所への追加で両場面をカバーする。 |
+| 影響 | `cela_main.py`（`_missing_data_estimation_instruction`新設、call_expertへの追加1箇所、`_USER_AI_ROLE_MANDATE`への追加1箇所、call_detectorへの追加1箇所、計4箇所）、`tests/test_bl296_missing_data_estimation.py`（新規12件）。AGENTS.md §17.1確認済み（cela_main.py全体をgit stashで巻き戻し、新規12件中11件が失敗することを確認——1件は`_USER_AI_ROLE_MANDATE`定数参照自体の既存回帰確認でありBL-296以前から成功——後、diffが完全一致することを確認して復元）。実LLM呼び出しでの効果確認（Expertが1つの手法で確定できるか、User AI/Detectorが文書化された推計を不当に差し戻さないか）は次回ドライラン待ち。 |
+| 関連 BL | BL-296（本件）、BL-293/294/295（同種の生成崩壊、別の欠陥クラス）、BL-041（confirmed/provisional区別の原設計）、BL-292（`_USER_AI_ROLE_MANDATE`拡張の先例パターン踏襲元） |
+
 ---
 
 ## 決定の記録ルール
