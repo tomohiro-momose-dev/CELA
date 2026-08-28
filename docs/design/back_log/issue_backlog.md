@@ -9933,7 +9933,7 @@ BL-266の`_BL266_ESSENCE_TOPIC_PREFIX`によるトピック接頭辞フィルタ
 **検討したが見送った代替案:**
 - `_verification_throttle_warning`へ「判断が割れた場合は一度決めたら再検討しない」という一文を追加するだけの軽量案: Pass 2自身が単なる注意書きでは不十分と判断し3回多数決方式を別途導入した経緯があり、同じ弱さを抱える可能性が高いと判断し、ユーザー承認のもと3回多数決方式の汎用ヘルパー化を採用した。
 
-**テスト**: `tests/test_bl295_bounded_deliberation.py`（新規13件）: `_bounded_deliberation_instruction`のパラメータ化確認、Pass 2のヘルパー呼び出しへの置換確認（3回多数決文言はヘルパー本体に、call_detector側は呼び出し式で確認）、Pass 2の`_verification_throttle_warning`重複解消確認、Pass 1へのヘルパー適用と挿入位置確認、generate_user_utteranceの2箇所への適用確認、quantitative_sufficiency_concernの既定値文言追加・姉妹フィールドとの対称性確認。既存の`tests/test_bl089_anti_repetition_instructions.py`の1件（`test_call_detector_has_anti_repetition_instruction`）も、文言が共有ヘルパーへ移行したため既存の他3件（BL-256）と同じ「呼び出し式マーカー」方式へ追随修正した。AGENTS.md §17.1（`cela_main.py`全体をgit stashで巻き戻し、新規13件＋BL-089の1件、計14件全てが失敗することを確認後、復元してdiffが完全一致することを確認）。
+**テスト**: `tests/test_bl295_bounded_deliberation.py`（新規13件）: `_bounded_deliberation_instruction`のパラメータ化確認、Pass 2のヘルパー呼び出しへの置換確認（3回多数決文言はヘルパー本体に、call_detector側は呼び出し式で確認）、Pass 2の`_verification_throttle_warning`重複解消確認、Pass 1へのヘルパー適用と挿入位置確認、generate_user_utteranceの2箇所への適用確認、quantitative_sufficiency_concernの既定値文言追加・姉妹フィールドとの対称性確認。既存の`tests/test_bl089_anti_repetition_instructions.py`の1件（`test_call_detector_has_anti_repetition_instruction`）も、文言が共有ヘルパーへ移行したため既存の他3件（BL-256）と同じ「呼び出し式マーカー」方式へ追随修正した。AGENTS.md §17.1（`cela_main.py`全体をgit stashで巻き戻し、新規13件＋BL-089の1件、計14件全てが失敗することを確認後、復元してdiffが完全一致することを確認）。フルオフラインスイート1888 passed（既知のBL-269 4件のみ残存、新規失敗なし）。
 
 実LLM呼び出しでの効果確認は次回ドライラン待ち: ①Pass 1のwrite_issue永続化判断で同種の堂々巡りが再発しないか、②Pass 2の既存3回多数決方式の挙動が維持されているか、③User AIのRESOLVE/DEFER/ACKNOWLEDGE選択で同種の堂々巡りが無いか。
 
