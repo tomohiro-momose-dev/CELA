@@ -325,6 +325,7 @@
 | BL-296 | 高 | `cela_main.py`（新規`_missing_data_estimation_instruction`、call_expert・`_USER_AI_ROLE_MANDATE`・call_detector計3箇所） | **`done`。** `log/2026-08-28/1535`でExpertが公式統計に存在しない値（免許返納市単位累計）の推計中、「もっと誠実な方法があるはず」と同一の推計サイクルを9分半・15回以上繰り返し停止（ユーザーがCtrl+Cで一時停止）。BL-293/294/295とは異なる4つ目の生成崩壊トリガー（推計の精緻化に終わりが無い完璧主義ループ）と特定。実務標準の推計手法5種（代理指標の比例配分・類似事例の転用・フェルミ推定的分解・レンジ提示・前提の明示的記録）と満足化規定を導入し、Expert（producer視点：1つ選んだら確定）・User AI/Detector（auditor視点：文書化された推計を理由なく差し戻さない）双方へ横展開した。 | P1 |
 | BL-297 | 高 | `cela_main.py`（新規`_StreamRepetitionGuard`クラス＋4定数、`_query_AI_live`の2分岐計4箇所へ配線） | **`done`。** BL-293〜296がいずれもプロンプトレベルの対策に留まっていたことを受け、機械的なバックストップを追加。BL-231/287はcompletion完了後・iteration間の比較にしか働かず、単一completion内で反復し続ける生成崩壊（0649/1023/1313/1535、いずれもreasoning側で発生）を検知できなかった。ストリーミング中のreasoning/contentチャンクをn-gram反復検出で監視し、閾値超過時に`for chunk in stream:`を強制break、既存のfinish_reason=="length"パスと同型のValueErrorで外側のAPIエラーリトライへ委ねる。n-gram長80文字は実際の崩壊を捉えつつ大規模JSON計画の構造的反復を誤検知しない値としてユーザー承認済み。 | P1 |
 | BL-298 | 高 | `cela_main.py`（`_StreamRepetitionGuard`の内部実装をwindow方式からインクリメンタルngramカウント方式へ再設計、新規`_StreamRepetitionRetryError`例外クラス＋2定数、`_query_AI_live`の検出時raise 2箇所＋専用except節） | **`done`。** BL-297稼働直後に2つの実害を発見・修正。①`log/2026-08-28/1919`で新たな生成崩壊（Expertが公式統計の無い「アプリ操作可能割合」の推計方法を巡り単一completion内で9分・約7万字ループ）が発生したにもかかわらず`_StreamRepetitionGuard`が一度も発火しなかった。実際のreasoningストリームを本番同一定数で再生した結果、同一文が27回・ほぼ正確に2159文字周期で反復していたが、min_repeats=3回目の出現がバッファに同時に残るには2周期分＝4318文字必要なところwindow=3000ではその前に1回目が追い出され、周期がwindow/(min_repeats-1)=1500文字を超える反復は原理的に検出不可能という構造的欠陥が原因と判明。window方式を廃し、chunk到着ごとにngram出現回数をストリーム全体で累積カウントする方式に置き換えた（周期の長さに関係なく検出可能、メモリは`_TEXT_REPETITION_MAX_STREAM_CHARS`で安全弁を設置）。②再設計後の初回本番発火（`log/2026-08-28/1950`）で、PDFの都道府県略称一覧という低エントロピーな構造的テキストを2〜3回参照し直す正当な自己確認的推論が過検知されたことをユーザーが指摘、直後に同一のValueError送出パターン（finish_reason=="length"用の既存パスを流用）が実際に本番ランをクラッシュさせるトレースバックが判明した。原因はD-009の意図的設計（ValueErrorはAPIError系exceptに含めず外側へ伝播させノードを失敗させる）で、`_query_and_parse_with_retry`層でも捕捉されず`run_ai_vs_ai_loop`まで伝播していたこと。finish_reason=="length"と異なりn-gram反復はサンプリングの偏りに起因する一過性の事象である可能性が高く、ユーザーの「検知したときはそのiterをやり直してほしい」との指示どおり、検出時のraiseを専用の`_StreamRepetitionRetryError`へ変更し、`_query_AI_live`内の`while True`ループ自身がその場で捕捉、BL-122のiteration_start保持機構に乗せて同一iterationのAPI呼び出しのみを即時再試行（node_redo_countとは別予算、API過負荷用の指数バックオフ/180秒クールダウンは適用しない）するよう修正した。再試行上限到達時はBL-202の教訓（プレースホルダー文字列を実回答として誤読させた事故）を踏まえ、隠蔽せず元の例外をそのまま再raiseする。 | P1 |
+| BL-299 | 中 | `cela_main.py`（`READ_REFERENCE_FILE_TOOL`の`grep`パラメータ説明文を修正）、`tests/test_bl184_web_tools.py`（新規1件） | **`done`。** `log/2026-08-28/2031`で3件目の生成崩壊（今度はBL-298の即時再試行が3回とも失敗しクラッシュ）を追跡した結果、BL-297/298とは異なる原因と判明。DetectorがNPA PDFから特定の数値をgrepで探そうとしたが、ツールのgrep説明文が「[BL-221] Requires 'path'.」とだけ書かれておりkeywordとの同時指定が可能か不明だったため、実行を避けて代わりにPDF数値テーブルを手作業で突合しようとし、その逡巡の中で同一文言を約9分・5万字かけて3回繰り返しn-gram反復ガードに引っかかった（構造的な迷いのため3回の自動再試行も同一原因で失敗）。`web_tools.py`の実装を確認したところ、BL-244（2026-08-15）で既にkeyword+grep同時指定を許容する（keywordから内部でpathを自動解決する）よう修正済みだったが、`cela_main.py`側のツールスキーマ説明文だけがBL-244以前の記述のまま取り残されていた（AGENTS.md §15.1単一の真実源違反）。説明文をBL-244の実装に合わせて修正し、「keywordとgrepを同時指定してよい、pathを自分で先に解決する必要はない」ことを明示した。 | P2 |
 
 ---
 
@@ -10038,6 +10039,30 @@ BL-297稼働直後、`log/2026-08-28/1919`のドライランで新たな生成�
 n-gram反復検出そのものの誤検知率（min_repeats=3という閾値が、今回のような低エントロピーな構造的テキストの正当な再参照に対して依然として敏感すぎないか）は本BLの対応範囲外とし、次回ドライランでの追加発火状況を見てユーザーと再検討する。現在、検出時は即座に同一iterationを再試行するため、仮に同種の誤検知が今後も発生してもクラッシュには至らず「1回分の余分な再試行」で済む設計になっている。
 
 参照: `tests/test_bl298_incremental_repetition_detection.py`、`tests/test_bl297_stream_repetition_guard.py`、`docs/design/back_log/BL-298/BL298_investigation.md`、`docs/design/decision_log.md` D-253、`log/2026-08-28/1919/log_no_prompt.md`、`log/2026-08-28/1950/log_no_prompt.md`。
+
+### BL-299: `READ_REFERENCE_FILE_TOOL`のgrep説明文をBL-244の実装（keyword+grep同時指定許容）へ追従させる
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| 関連 | BL-244（実装の原典、既に正しい挙動）、BL-297/298（本件の発端となった生成崩壊・n-gram反復ガード）、BL-221（grepパラメータ自体の原設計） |
+
+**経緯:**
+
+`log/2026-08-28/2031`のクラッシュ（BL-298の即時再試行が3回とも失敗）を調査した結果、BL-297/298とは異なる第3の原因と判明した。DetectorがNPA（警察庁）PDFキャッシュから特定の数値（長野の免許返納件数1,569等）をgrepで探そうとしたが、`READ_REFERENCE_FILE_TOOL`の`grep`パラメータ説明文が「[BL-221] Requires 'path'.」とだけ記述されており、`keyword`との同時指定が可能かどうかが読み取れなかった。そのためDetectorは実行を避け、代わりに約5万字・9分近くかけてPDFの数値テーブル（都道府県×月×年齢層、49個の数値列）を手作業で1行ずつ突合しようと試み、その逡巡の中で「Let me try read_reference_file(keyword="rdhtransition_monthly_r07", grep="1,569")」という同一文言を3回検討し、n-gram反復ガードに引っかかった。
+
+**根本原因（コードで確認）:**
+
+この原因は確率的なサンプリングの揺らぎではなく構造的な迷いであるため、BL-298の即時再試行（同一loop_messagesでの再送）は3回とも同一の理由で失敗した（1回目・2回目・3回目とも同じ「Let me try read_reference_file(keyword=..., grep=...)」という文言で発火）。`web_tools.py`の`read_reference_file_handler`実装を確認したところ、BL-244（2026-08-15）で既に「keyword+grep同時指定時は、まずkeywordでpathを一意解決してからgrepする」よう修正済みであり（対応する単体テスト`test_read_reference_file_keyword_and_grep_together_*`3件も既存）、Detectorが逡巡していた組み合わせは実際にはとっくに安全に動作するものだった。`cela_main.py`側のツールスキーマ説明文だけがBL-244以前の「grepはpathと組み合わせて指定してください」という制限的な記述のまま取り残されており、AGENTS.md §15.1（単一の真実源）違反——実装（正）とツールの外部向けドキュメント（誤）が乖離していた——が根本原因と特定した。
+
+**対応内容（2026-08-28）:**
+
+`READ_REFERENCE_FILE_TOOL`の`grep`パラメータ説明文を修正し、「'keyword'と'grep'を同じ呼び出しで同時指定してよく、'path'は自動的にkeywordから解決される（0件/複数件時はkeyword単独呼び出しと同じくnot_found/multiple_matchesへフォールバックする）。この組み合わせを直接使ってよく、安全性を判断するために追加のターンを費やす必要はない」ことを明示した。合わせて「大きな文書は手作業で行・列を書き写すのではなくgrepで到達すべき」という趣旨の一文を追加し、Detectorが今回のように代替の力技（手動でのテーブル突合）へ逃げる誘因を減らした。実装（`web_tools.py`）自体はBL-244で既に正しく、変更していない。
+
+**テスト**: `tests/test_bl184_web_tools.py`（新規1件）: `READ_REFERENCE_FILE_TOOL`の`grep`説明文がBL-244・keyword同時指定を明示し、「Requires 'path'.」という古い制限文言が単独で残っていないことを確認。AGENTS.md §17.1（`cela_main.py`をgit stashで退避し新規テストが失敗することを確認後、diffが完全一致することを確認して復元）。フルオフラインスイート実行済み（既知のBL-269 4件のみ残存、新規失敗なし）。keyword+grep同時指定の解決ロジック自体（`web_tools.py`側）はBL-244で既にテスト済みのため変更・再検証していない。
+
+参照: `tests/test_bl184_web_tools.py`、`docs/design/decision_log.md` D-254、`log/2026-08-28/2031/log_no_prompt.md`。
 
 ---
 
