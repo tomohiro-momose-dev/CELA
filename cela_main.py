@@ -5894,6 +5894,104 @@ _TOOL_CALL_REPEAT_NUDGE_THRESHOLD = 3
 _GENERATION_FREQUENCY_PENALTY = 0.3
 _GENERATION_PRESENCE_PENALTY = 0.3
 
+# [BL-297] AGENTS.md §7 重要定数（2026-08-28 ユーザー承認値）: BL-231の反復ペナルティ
+# （frequency/presence_penalty=0.3、上記）は確率的な抑制に過ぎず、log/2026-08-28の
+# 0649/1023/1313/1535で単一completion内のreasoning反復による生成崩壊（ツール呼び出し
+# ゼロのまま最大9分半・15回以上同一段落を繰り返す）が実機で再発したことを受け、決定的な
+# 機械的バックストップを追加する。BL-231/287のiteration間比較（completion完了後にしか
+# 働かない）では単一completion内の反復を検知できないため、ストリーミング中に直接検査する。
+_TEXT_REPETITION_NGRAM_LEN = 80       # 実際の崩壊（150字前後の段落反復）を確実に捉えつつ、
+                                       # JSON出力中の構造的な短い繰り返し（キー名等）を誤検知しない長さ。
+_TEXT_REPETITION_MIN_REPEATS = 3      # BL-287のnudge閾値(3)と揃える。
+# [BL-298] AGENTS.md §7 重要定数（2026-08-28 ユーザー承認値）: BL-297初版はwindow=3000文字の
+# 直近バッファのみを再走査する方式だったため、log/2026-08-28/1919の実機崩壊（同一文が27回、
+# ほぼ正確に2159文字周期で反復）を検出できなかった。min_repeats=3回目の出現がバッファに
+# 同時に残るには2周期分＝4318文字が必要だが、window=3000ではその前に1回目が追い出されるため、
+# 周期がwindow/(min_repeats-1)=1500文字を超える反復は原理的に検出不可能だった（実測で確認済み、
+# 詳細はdocs/design/back_log/BL-298/参照）。BL-298はwindowによる直近バッファ方式を廃し、
+# chunk到着ごとにngram出現回数をストリーム全体で累積カウントする方式に置き換えることで、
+# 反復周期の長さに関係なく検出できるようにする。_TEXT_REPETITION_MAX_STREAM_CHARSは検出用の
+# 窓ではなく、病的に長い単一completion（実機最大観測値、約7万字を大きく上回る）に対する
+# メモリ安全弁としてのみ働く。
+_TEXT_REPETITION_MAX_STREAM_CHARS = 200_000
+
+
+class _StreamRepetitionGuard:
+    """[BL-297/BL-298] ストリーミング中のreasoning/contentテキストに対するn-gram反復の
+    機械的検出。BL-231/287はcompletion完了後・iteration間の比較にしか働かないため、
+    単一completion内で反復し続ける生成崩壊（log/2026-08-28/1313等、9分半・15回以上
+    ツール呼び出しゼロで反復）を検知できなかった。このクラスはchunk受信のたびに
+    .feed()を呼ぶことで、生成の途中でも反復を検知できるようにする。
+
+    BL-298: 直近window文字だけを保持して定期的に再走査する初版設計は、反復の周期が
+    windowに対して長い場合（実機観測: 2159文字周期）に3回目の出現がバッファに同時に
+    残らず検出漏れした。そのためストリーム全体にわたってngramの出現回数を
+    インクリメンタルに積算する方式に変更した。1回のfeed()呼び出しのコストは
+    新しく届いたchunk長にのみ比例し、過去分の再走査は発生しない。
+    """
+    def __init__(self, ngram_len: int = _TEXT_REPETITION_NGRAM_LEN,
+                 min_repeats: int = _TEXT_REPETITION_MIN_REPEATS,
+                 max_stream_chars: int = _TEXT_REPETITION_MAX_STREAM_CHARS) -> None:
+        self._ngram_len = ngram_len
+        self._min_repeats = min_repeats
+        self._max_stream_chars = max_stream_chars
+        self._counts: dict[str, int] = {}
+        self._carry = ""
+        self._total_chars = 0
+        self._capped = False
+
+    def feed(self, chunk: str) -> bool:
+        """新しいテキストを追加し、反復を検出したらTrueを返す（呼び出し側はストリームをbreakする）。"""
+        if not chunk:
+            return False
+        if self._capped:
+            return False
+        self._total_chars += len(chunk)
+        if self._total_chars > self._max_stream_chars:
+            # [BL-298] メモリ安全弁: 実機最大観測（約7万字）を大きく上回る病的なケースのみ、
+            # それ以降の追跡を打ち切る（検出感度ではなくメモリ上限のための措置）。
+            self._capped = True
+            return False
+        scan_text = self._carry + chunk
+        triggered = False
+        if len(scan_text) >= self._ngram_len:
+            for i in range(len(scan_text) - self._ngram_len + 1):
+                gram = scan_text[i:i + self._ngram_len]
+                n = self._counts.get(gram, 0) + 1
+                self._counts[gram] = n
+                if n >= self._min_repeats:
+                    triggered = True
+        if self._ngram_len > 1:
+            self._carry = scan_text[-(self._ngram_len - 1):]
+        return triggered
+
+
+class _StreamRepetitionRetryError(Exception):
+    """[BL-298] _StreamRepetitionGuardが反復を検知した際にraiseする内部シグナル。
+    log/2026-08-28/1950で、finish_reason=="length"用のValueErrorをそのまま流用した結果、
+    D-009の意図的設計（ValueErrorはAPIError系exceptに含めず外側へ伝播させ、ノードを
+    失敗させる）に従って本番ランがクラッシュする実害が発生した（該当ValueErrorは
+    _query_and_parse_with_retryやcall_detector等どの層でも捕捉されず、
+    run_ai_vs_ai_loopまで伝播していた）。finish_reason=="length"は同一promptを
+    再送しても再び切り詰められる可能性が高く伝播させる設計が妥当だが、n-gram反復は
+    サンプリングの偏りに起因する一過性の事象である可能性が高く、同一loop_messages・
+    同一iteration番号のまま即座に再試行する方が適切（ユーザー指示: 「検知したときは
+    そのiterをやり直してほしい」）。_query_AI_live内のwhile Trueループでのみ捕捉し、
+    BL-122のiteration_start保持機構に乗せることで、他のiterationの思考ログ・
+    ツール結果は失わずにこのiterationのAPI呼び出しだけをやり直す。
+    """
+
+
+# [BL-298] AGENTS.md §7 重要定数（2026-08-28 ユーザー承認値）: 反復検知はAPIインフラの
+# 過負荷ではなくサンプリングのばらつきが原因のため、APIエラー用の指数バックオフ
+# （delays=[8,16,32,64,128]秒）やノードやり直しクールダウン（180秒）は適用せず、
+# 短い固定待機のみで即座に再試行する。上限に達した場合はBL-202のプレースホルダー
+# 文字列（"(サーバー高負荷によるAPIエラー)"）を返さず、元のエラーをそのまま伝播させる
+# （BL-202はこの文字列が下流のDetector等に「実際の回答」として誤読された事故を教訓に
+# 導入されたものであり、反復検知という異なる性質の失敗に同じ隠蔽策を流用しない）。
+_BL298_REPETITION_MAX_REDOS = 3          # BL-287のnudge閾値(3)・BL-297のmin_repeats(3)と揃える。
+_BL298_REPETITION_REDO_COOLDOWN_SECONDS = 3  # APIバックオフ目的ではなく連続リクエストの緩衝のみ。
+
 
 def _bl231_norm_text(text: str) -> str:
     # [BL-231] ホワイトスペースを正規化し、不可視文字の微小な揺らぎに強くする。
@@ -6014,6 +6112,7 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
     # ループ本体は一切変更していない（attemptは例外処理ブロック内でしか参照されない）。
     attempt = 0
     node_redo_count = 0
+    _bl298_repetition_redo_count = 0  # [BL-298] node_redo_countとは別予算（API過負荷ではないため）
     while True:
         try:
             time.sleep(5)
@@ -6093,6 +6192,9 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                 reasoning_started = False
                 content_started = False
                 finish_reason = None
+                _bl297_reasoning_guard = _StreamRepetitionGuard()
+                _bl297_content_guard = _StreamRepetitionGuard()
+                _bl297_repetition_detected = False
                 for chunk in response_stream:
                     if not chunk.choices:
                         continue
@@ -6105,6 +6207,9 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                             reasoning_started = True
                         print(delta_reasoning, end="", flush=True)
                         reasoning_parts.append(delta_reasoning)
+                        if _bl297_reasoning_guard.feed(delta_reasoning):
+                            _bl297_repetition_detected = True
+                            break
                     if delta.content:
                         if not content_started:
                             if reasoning_started:
@@ -6112,8 +6217,15 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                             content_started = True
                         print(delta.content, end="", flush=True)
                         content_parts.append(delta.content)
+                        if _bl297_content_guard.feed(delta.content):
+                            _bl297_repetition_detected = True
+                            break
                 if reasoning_started or content_started:
                     print()
+                if _bl297_repetition_detected:
+                    print(f"🛑 [{label}] BL-297テキストストリーム反復ガード発動: "
+                          f"単一completion内でn-gram反復を検知したため生成を強制打ち切りしました。")
+                    raise _StreamRepetitionRetryError("Generation interrupted due to detected text repetition (BL-297/298)")
                 if finish_reason == "length":
                     print(f" [{label_lower}] ⚠️ max_tokens超過により出力が打ち切られました")
                     raise ValueError("Output truncated due to max_tokens limit")
@@ -6205,6 +6317,9 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                     content_started = False
                     finish_reason = None
                     tool_call_accum: dict[int, dict] = {}
+                    _bl297_reasoning_guard = _StreamRepetitionGuard()
+                    _bl297_content_guard = _StreamRepetitionGuard()
+                    _bl297_repetition_detected = False
                     for chunk in stream:
                         if not chunk.choices:
                             continue
@@ -6217,6 +6332,9 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                                 reasoning_started = True
                             print(delta_reasoning, end="", flush=True)
                             reasoning_parts_all.append(delta_reasoning)
+                            if _bl297_reasoning_guard.feed(delta_reasoning):
+                                _bl297_repetition_detected = True
+                                break
                         if delta.content:
                             if not content_started:
                                 if reasoning_started:
@@ -6225,6 +6343,9 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                                 content_started = True
                             print(delta.content, end="", flush=True)
                             content_parts.append(delta.content)
+                            if _bl297_content_guard.feed(delta.content):
+                                _bl297_repetition_detected = True
+                                break
                         if getattr(delta, "tool_calls", None):
                             for tc_delta in delta.tool_calls:
                                 entry = tool_call_accum.setdefault(
@@ -6239,6 +6360,11 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                                         entry["arguments"] += tc_delta.function.arguments
                     if reasoning_started or content_started:
                         print()
+
+                    if _bl297_repetition_detected:
+                        print(f"🛑 [{label}] BL-297テキストストリーム反復ガード発動: "
+                              f"単一completion内でn-gram反復を検知したため生成を強制打ち切りしました（iter={iteration}）。")
+                        raise _StreamRepetitionRetryError("Generation interrupted due to detected text repetition (BL-297/298)")
 
                     # [CONSTRAINT] max_tokens超過によるtool_call引数の途中切れをここで検出する（D-009）。
                     # ValueErrorはAPIError系ではないため下記exceptに飲み込まれず、原因が伝播する。
@@ -6592,6 +6718,25 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
             else:
                 print(f"\n[API Error] サーバーが高負荷のため応答できませんでした。: {e}")
                 return "(サーバー高負荷によるAPIエラー)"
+        except _StreamRepetitionRetryError as e:
+            # [BL-298] node_redo_count/APIエラー用delaysとは別の、即時・短期の再試行。
+            # loop_messages/iteration_startは関数冒頭で保持されているため（BL-122）、
+            # このiterationのAPI呼び出しだけがやり直される。
+            if _bl298_repetition_redo_count < _BL298_REPETITION_MAX_REDOS:
+                _bl298_repetition_redo_count += 1
+                print(
+                    f"\n🔁 [{label}] BL-298: n-gram反復検知によりこのiterationのAPI呼び出しを"
+                    f"やり直します（サンプリングのばらつきが原因のため即座に再試行、"
+                    f"{_bl298_repetition_redo_count}/{_BL298_REPETITION_MAX_REDOS}回目）: {e}"
+                )
+                time.sleep(_BL298_REPETITION_REDO_COOLDOWN_SECONDS)
+            else:
+                print(
+                    f"\n❌ [{label}] BL-298: n-gram反復検知による再試行が"
+                    f"{_BL298_REPETITION_MAX_REDOS}回連続で上限に達しました。構造的な問題の"
+                    f"可能性があるため、プレースホルダーで隠さずエラーを伝播します。"
+                )
+                raise
 
 
 def _safe_json_parse(raw: str | None, fallback: dict | list) -> dict | list:
@@ -10654,6 +10799,71 @@ def _verification_throttle_warning(example: str = "", output_form: str = "json")
         f"{tail}"
     )
 
+
+def _bounded_deliberation_instruction(judgment_description: str) -> str:
+    """[BL-295] 裁量判断（結論が割れうる二択・三択の判定）で無限に再検討し続ける生成崩壊
+    （log/2026-08-28/1313: Detectorが「この気づきをwrite_issueで永続化すべきか」という
+    判断を、ツール呼び出しゼロのまま単一の生成ターン内で30回以上往復し停止）を防ぐための、
+    3回多数決方式の打ち切り規定。call_detectorのPass 2（数値監査パス、constraint_issue判定）
+    向けに実証済みだった機構を judgment_description でパラメータ化し、他の裁量判断箇所へも
+    横展開できるようにした（§15.1: 同じ規則を複数箇所に手書きで重複させない）。
+    _verification_throttle_warningが「同じ検証・計算の反復」を防ぐのに対し、こちらは
+    「結論が出ない二択・三択判断の反復」を防ぐ、別種の失敗モードへの対応。
+    """
+    return (
+        f"【判定のブレ防止（3回多数決方式）】{judgment_description}で"
+        f"結論が変わったり迷ったりする場合、同じ論点を無限に再検討し続けないでください。"
+        f"その論点について、独立した判定を意識的に3回だけ行い（1回目・2回目・3回目、それぞれ短く"
+        f"「trial1: ...」のように結論だけ明記すればよく、毎回長い理由の再展開は不要です）、"
+        f"3回のうち多数だった結論を最終的な判断として採用してください。"
+        f"3回分の判定が出た時点で、それ以上の再検討・迷いは禁止します。\n\n"
+    )
+
+
+def _missing_data_estimation_instruction(perspective: str = "producer") -> str:
+    """[BL-296] 公表されていない値の推計で「より誠実な方法」を無限に探し続ける完璧主義
+    ループ（log/2026-08-28/1535: Expertが茅野市単位の免許返納累計件数という公式統計に
+    存在しない値を前に、9分半・15回以上同一の推計サイクル（按分推計→仮定が重すぎると
+    自己却下→振り出しに戻る）を繰り返し、ツール呼び出しゼロのまま停止）を防ぐための、
+    実務標準の推計手法一覧と満足化（satisficing）規定。_bounded_deliberation_instruction
+    （BL-295）がカテゴリカルな結論（trial1/2/3の多数決）が取れる二択・三択判断向けなのに
+    対し、こちらは「連続的に手法を洗練させ続けて終わらない」推計プロセス向けの、別種の
+    打ち切り規定。
+    perspective="producer"（Expert等、自ら推計する側）は「1つ選んだら確定させ、探索を
+    打ち切れ」、perspective="auditor"（User AI/Detector等、他者の推計を審査・許可する側）は
+    「文書化された妥当な手法を理由なく差し戻すな」という逆方向の指示になる
+    （_verification_throttle_warningのoutput_form引数と同型のパターン）。
+    """
+    methods = (
+        "・代理指標の比例配分（より広域の公表統計を、既知の按分係数で対象へ配分する）\n"
+        "・類似事例の転用（統計が公表されている類似の対象を近似値として使う）\n"
+        "・フェルミ推定的分解（未知の値を、個別に推定しやすい複数要素の積・商に分解する）\n"
+        "・レンジ（感度分析）での提示（単一の点推定ではなく、前提を変えた場合の低位・"
+        "中位・高位の幅で示す）\n"
+        "・前提の明示的記録（使った基礎統計・按分係数・仮定を出典として残す）\n"
+    )
+    if perspective == "auditor":
+        action = (
+            "相手が上記いずれかの方法を使い、前提（基礎統計・按分係数・仮定）を明記した"
+            "上でconfidence=\"provisional\"として値を確定させている場合、それだけを理由に"
+            "差し戻したり、より正確なデータの再提出を求めたりしないでください。指摘すべきは、"
+            "手法自体が不合理（無関係な代理指標を使っている等）か、前提が明記されていない"
+            "場合に限ります。指示を書く際も、これらの方法のいずれかで済ませてよいことを"
+            "明記してください。\n\n"
+        )
+    else:
+        action = (
+            "1つの方法を選び前提を明記できた時点で確定させてください。それ以上"
+            "「もっと誠実な方法があるはず」と再導出し続けないでください。\n\n"
+        )
+    return (
+        "【公表されていない値の推計方法（重要）】求められている数値がどの一次情報源にも"
+        "直接は公表されていない場合の一般的な推計方法は次の通りです。\n"
+        f"{methods}"
+        f"{action}"
+    )
+
+
 def _build_retry_situation_label(state: LineageState, retry_count: int, max_retries: int = 3) -> str:
     """[BL-143] Detectorのmajor差し戻しプロンプトには、従来は指摘文（constraint_issue_logの
     直近1件）だけが載っており、「これが何回目の差し戻しか」「前回と同じ指摘が繰り返されて
@@ -10790,6 +11000,7 @@ _USER_AI_ROLE_MANDATE = (
     "「一定数確保した」といった定性的な事実だけで実質的に満たされていると判断せず、対象規模"
     "（人口・需要量・処理件数・負荷等）に対する定量的なカバレッジ・比率が示されているかを"
     "確認してください。\n"
+    + _missing_data_estimation_instruction(perspective="auditor")
 )
 # [BL-267] MemTrapBench（arXiv:2608.20202）が指摘する記憶誘発性の認知的罠への予防的ガード。
 # D-207によりExpert/Userの生reasoningは常に無条件で次iterationへ引き継がれる設計（情報破壊を
@@ -11581,6 +11792,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     承認した場合に限ります。\n
     暫定値は後続タスクで矛盾が判明した際に再検討される前提の値であり、暫定として記録すること自体は
     後退ではありません。\n
+    {_missing_data_estimation_instruction(perspective="producer")}
     {_scratch_concerns_closure_instruction(
         "write_agreementのreason_why、または成果物本文",
         escalation_tools="escalate_premise_concern（前提と矛盾する懸念）またはflag_needs_human_input（AIには解決不能な懸念）",
@@ -12313,6 +12525,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"情報）の範囲内で矛盾を具体的に指摘できることが必須です。\n\n"
         f"{_observations_block}"
         f"{_issue_carryover_prefix}\n\n"
+        f"{_bounded_deliberation_instruction('observationsに書いた懸念をwrite_issueで永続化すべきかの判断')}"
         f"【BL-093】必要であれば、thinkツールで検討過程を書き残しても構いません。\n\n"
         f"[BL-188] Expertの主張がcitations（引用元）付きでweb由来の情報を根拠にしている場合、"
         f"read_reference_fileでそのキャッシュ本文を確認し、実際に主張と一致しているか（数値の"
@@ -12328,6 +12541,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"ページも読めます）→③web_search、の順に確認し、無駄な重複呼び出しを避けてください"
         f"（①②は呼び出し回数上限を消費しません）。検証の結果、前提数値が実態と乖離していると判明した場合は、それ自体を"
         f"constraint_issueの根拠にしてください（自己参照のみの前提を鵜呑みにしないこと）。\n\n"
+        f"{_missing_data_estimation_instruction(perspective='auditor')}"
         f"[BL-195: 実例からの無derivation転記チェック] Agentの主張がcitations type=\"web\"で"
         f"実在の類似事例（デマンド交通・自動運転バス等の運行サービス）を出典としている場合、"
         f"その数値が本課題固有の制約（予算・需要データ・距離・SLA）から独自に導出された形跡が"
@@ -12425,7 +12639,8 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"対して十分か」という規模適合性の主張を含むか確認してください。含む場合、その十分性が"
         f"定量的なカバレッジ・比率計算（python_repl等）で裏付けられているか、それとも「複数ある」"
         f"等の定性的な事実の提示に留まっているかを判定し、後者の場合のみ"
-        f"'quantitative_sufficiency_concern'をtrueにしてください。'quantitative_sufficiency_reason'"
+        f"'quantitative_sufficiency_concern'をtrueにしてください——判断に迷う・確信が持てない"
+        f"場合はfalseのままにしてください。'quantitative_sufficiency_reason'"
         f"には、どの主張が・どの規模指標に対して未検証かを具体的に書いてください（falseの場合は"
         f"空文字）。規模適合性の主張自体が今回のタスクに存在しない場合はfalseのままにしてください。\n\n"
         f"【現在タスクのacceptance_criteria】\n{criteria_text}\n\n"
@@ -12572,17 +12787,9 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"必ず python_repl ツールで機械的に再計算し、一致を確認してからでなければ constraint_issue=\"major\" としないでください。"
         f"暗算での承認・却下判定は禁止します。\n\n"
 
-        f"【判定のブレ防止（3回多数決方式）】constraint_issueの判定（特にminorとmajorの境界）で"
-        f"結論が変わったり迷ったりする場合、同じ論点を無限に再検討し続けないでください。"
-        f"その論点について、独立した判定を意識的に3回だけ行い（1回目・2回目・3回目、それぞれ短く"
-        f"「trial1: minor」のように結論だけ明記すればよく、毎回長い理由の再展開は不要です）、"
-        f"3回のうち多数だった結論を最終的なconstraint_issueとして採用してください。"
-        f"3回分の判定が出た時点で、それ以上の再検討・迷いは禁止します。\n\n"
-        f"【同じ計算を繰り返さない（重要）】上記の判定ブレ防止とは別に、同一の数値検算"
-        f"（例:「この合計は制約内か」）をpython_replで何度も繰り返さないでください。"
-        f"各検算は2回程度で十分です。ツール呼び出しの回数には上限があり、新しい論点が無いまま"
-        f"「念のため再確認」を重ねると、上限到達時に強制的に打ち切られたテキスト応答としてJSONを"
-        f"一度に出力せざるを得なくなり、出力が途中で切れるリスクがあります。\n\n"
+        f"{_bounded_deliberation_instruction('constraint_issueの判定（特にminorとmajorの境界）')}"
+        f"【同じ計算を繰り返さない（重要、上記の判定ブレ防止とは別の注意点）】\n"
+        f"{_verification_throttle_warning(example='「この合計は制約内か」')}\n\n"
 
         f"{_observations_block}"
         f"【BL-079: 引用前に必ずverify_whiteboard_excerptで検証】target_excerptを確定する前に、"
@@ -14012,6 +14219,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             f"このタスクの範囲に関係しないか確認してください】。Expertの回答がその懸念を解消して"
             f"いれば、write_issue(action_type=\"RESOLVE\", topic=\"...\", resolution_note=\"...\")"
             f"で明示的にクローズしてください（issueをクローズする役目はあなたです）。\n"
+            f"{_bounded_deliberation_instruction('write_issueでRESOLVE/DEFER/ACKNOWLEDGEのいずれを選ぶべきかの判断')}"
             f"{_open_escalations_text}\n"
             f"{_forced_escalated_issues_text}\n"
             f"【重要：ゴール自体の文言と真の目的が矛盾していると気づいた場合の3ツール】\n"
@@ -14596,6 +14804,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         "範囲に関係しないか確認してください】。Expertの回答がその懸念を解消していれば、"
         "write_issue(action_type=\"RESOLVE\", topic=\"...\", resolution_note=\"...\")で"
         "明示的にクローズしてください（issueをクローズする役目はあなたです）。"
+        + _bounded_deliberation_instruction('write_issueでRESOLVE/DEFER/ACKNOWLEDGEのいずれを選ぶべきかの判断') +
         "[BL-140] 直前のthinkツールのscratch_concernsは、このツール呼び出しループの中だけで"
         "消える一時メモであり、後続タスクへは一切引き継がれません。持ち越したい懸念を"
         "scratch_concernsに書くだけで満足せず、必ずwrite_issueで記録してください。\n"

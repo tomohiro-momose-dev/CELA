@@ -33,8 +33,11 @@ def test_call_expert_has_anti_repetition_instruction():
 
 
 def test_call_detector_has_anti_repetition_instruction():
+    """[BL-295] Pass 2の手書き重複ブロック（§15.1違反）を共有ヘルパー
+    _verification_throttle_warning()呼び出しへ置換したため、他の3テスト（BL-256）と
+    同様に呼び出し式そのものを存在確認のマーカーとする。"""
     src = inspect.getsource(cela_main.call_detector)
-    assert "同じ計算を繰り返さない" in src
+    assert "_verification_throttle_warning(" in src
 
 
 def test_call_resource_arbiter_has_anti_repetition_instruction():
