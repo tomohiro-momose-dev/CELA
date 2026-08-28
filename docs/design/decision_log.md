@@ -3549,6 +3549,20 @@
 
 ---
 
+### D-255: BL-300 — Detectorの「ドメイン妥当性レビュー」パスへ`PYTHON_REPL_TOOL`を追加し、grep不能な略号表の手作業突合を解消する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-28 |
+| 状態 | `decided` |
+| 決定者 | t-momose（「ドメイン妥当性レビューパスにpython_replを追加してよいですか？」の質問に「追加してよいが、import制約は大丈夫か？現在は計算系のみに絞られている」と条件付き承認。サンドボックスのimportホワイトリストが今回の用途（文字列分割・リストインデックス）に制約を課さないことを確認した上で実装） |
+| **決定理由** | BL-299適用後も`log/2026-08-28/2049`で4件目の生成崩壊・クラッシュが発生した。BL-299の効果自体は確認できた（keyword+grep同時指定を迷わず使用）が、今回はDetectorがgrepで「長野」を検索し続けても一貫して`not_found`が返り続けた。実際のキャッシュファイル（`web_cache/40d17513c6c29834.md`、全3550行）を直接確認したところ、「長野」という文字列はどこにも存在しなかった（`grep -c`で実測0件）。原因は元の警察庁PDFの都道府県欄がフルネームではなく1〜3文字の略号コードで構成されているためで、grepでは原理的に位置特定不可能だった——1950（低エントロピーデータの正当な再確認）・2031（ツール説明文の古さ）とは異なる、元の政府PDFの表構造そのものに起因する第4の原因。grepが使えず、Detectorは代わりに略号リストと数値列を手作業で突合しようとし、これが反復・クラッシュ（BL-298の自動再試行3回も同一の構造的原因で失敗）を招いた。`call_detector`の数値監査パス（`_detector_numeric_tools`）とドメイン妥当性レビューパス（`_detector_domain_tools`）を比較したところ、BL-228で両者はほぼ揃えられていたが唯一`PYTHON_REPL_TOOL`だけが欠けていたと判明。AGENTS.md §5.1（LLMは計算が原理的に不得手、python_repl必須）の趣旨は、単純計算だけでなくこの種の「位置特定・突合」にも当てはまる。 |
+| 決定内容 | `_detector_domain_tools`へ`PYTHON_REPL_TOOL`を追加。ユーザーの懸念（importホワイトリストによる制約の有無）に対しては、`_check_repl_code_safety`のASTベースimportホワイトリスト（`math`/`statistics`/`datetime`/`json`/`fractions`/`decimal`/`itertools`/`functools`/`collections`/`operator`/`re`）が文字列分割（`.split()`）やリストインデックス等の組み込み操作にimportを一切要求しないこと（`re`も既に許可済み）を確認して回答し、了承を得た。`domain_prompt`には既存の「Expertの計算を再検算する必要はない」という指示（Pass 1/Pass 2の役割分担、BL-049由来、意図的に維持）と矛盾しないよう、「python_replは検算目的以外でも使ってよく、grepで特定できない長大・略号だらけの参照テキストはpython_replで分割・インデックスして機械的に位置特定してください」という用途の書き分けを追記した。 |
+| 影響 | `cela_main.py`（`_detector_domain_tools`へ`PYTHON_REPL_TOOL`追加、`domain_prompt`に用途の書き分けを追記）。`tests/test_bl300_detector_domain_review_python_repl.py`（新規6件：ツール追加確認、数値監査パスとの差分が引き続き`MARK_FACT_AUDITED_TOOL`のみであることの確認、プロンプトの指示書き分け確認、サンドボックスのimport制約なしの実行確認、許可外importの非退行確認、呼び出し記録機構の存在確認）。AGENTS.md §17.1確認済み（cela_main.pyをgit stashで退避し新規3件が失敗することを確認後、diffが完全一致することを確認して復元）。既存の`test_bl093_think_tool_scratchpad.py`・`test_bl294_definitional_audit.py`で非退行を確認（計76件）。フルオフラインスイート1927 passed（既知のBL-269汚染4件のみ、新規失敗なし）。 |
+| 関連 BL | BL-300（本件）、BL-228（数値監査パスとドメイン妥当性レビューパスのツール整合の原典）、BL-297/298/299（本件の発端となった生成崩壊・n-gram反復ガード・grep説明文修正） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
