@@ -321,6 +321,7 @@
 | BL-292 | 高 | `cela_main.py`（call_task_planner／`_USER_AI_ROLE_MANDATE`／call_expert／call_detector＝新規`quantitative_sufficiency_concern`フィールド＋floor enforcement／数値監査パス／call_reviewer、計6箇所） | **`done`。** BL-278の「十分性」判定が散文同士の主観的照合に留まり、定量的なカバレッジ計算を要求しない問題。ユーザー指摘により対応範囲を「一般化（交通・商業施設特化の文言を排除）」「task_planner/User AI等の上流ノードへの拡張」「Detectorへの独立JSONフィールド化（BL-266と同型、機械的floor enforcement付き）」「Reviewer（最終QA）への追加」まで拡張し、規模適合性チェックとして6箇所へ一貫実装した。 | P1 |
 | BL-293 | 高 | `cela_main.py`（`_build_escalation_pin_text`／`_get_forced_escalated_issues_text`への`caller_role`引数追加、計4呼び出し箇所） | **`done`。** ユーザーが複数モデルでの反復ドライラン中、同一パターンの生成崩壊（同様な文節の反復）が複数の異なるモデルで再現することに気づき調査を依頼。`log/2026-08-28/0649`で、DetectorのDomain Reviewが「User AIのDecision記録漏れエスカレーション（BL-283自動起票）はドメイン妥当性の話か、自分の職掌外か」という判定不能な自問をthinkingで6回以上繰り返しmax_tokens打ち切りに至る崩壊を確認。BL-283の自動エスカレーションが、本来「起こした当人が自己解決すべき」性質にもかかわらず既存の汎用`escalation_pin`チャネル経由で全ロールへ「要対応」表示されており、「エスカレーションには要対応」と「自分の職掌はドメイン妥当性のみ」という両立しない指示の板挟みが原因と特定（ツール呼び出し反復ガードの対象外＝純テキスト推論の無限循環）。ユーザー依頼による総点検で、さらに強い行為強制を行う`_get_forced_escalated_issues_text`（BL-136、User AI向け）にも同型の欠陥を発見し併せて修正。`decision_lineage_gap_*`トピックを、起こした当人のロールにのみ表示するよう両チャネルとも機械的にフィルタした。 | P1 |
 | BL-294 | 高 | `cela_main.py`（`verified_facts`/`entity_attributes`へ`audited_by`/`audited_at`列追加、新規`mark_fact_audited`ツール、`_build_unaudited_facts_text`、task_plan_reviewer観点10、call_task_planner／WRITE_AGREEMENT_TOOLの自己確認文言） | **`done`。** `log/2026-08-28/1023`の生成崩壊（Expertが35分超の単一ターン内で数値矛盾を堂々巡り）を遡ると、`log/2026-08-27/2345`でtask_plannerがweb_search結果の「構成比（自主返納者全体に占める75歳以上の割合）」を「返納率」と誤読し`confidence="confirmed"`で登録した単一の誤登録が真因だった（ユーザー指摘「78.3がいつ、だれが、どこから持ってきた数字か？」により特定）。confirmed_variables/entity属性に「誰が定義を出典と照合したか」を記録する監査機構が無かったことが構造的原因。verified_facts/entity_attributesへaudited_by/audited_at列を追加（値変化時のみUPSERTのCASE式でリセット）、task_plan_reviewerに定義監査の観点を追加、Detectorが未監査differential（audited_by IS NULL）を機械的に検知して監査するようdomain_promptへ組み込んだ。 | P1 |
+| BL-295 | 高 | `cela_main.py`（新規`_bounded_deliberation_instruction`、call_detector Pass 1/Pass 2、generate_user_utterance計2箇所、BL-292 quantitative_sufficiency_concernの既定値文言） | **`done`。** `log/2026-08-28/1313`でDetectorが「observationsをwrite_issueで永続化すべきか」という裁量判断を打ち切り規定無しに30回以上往復し停止（ユーザーがCtrl+Cで一時停止）。BL-293（役割の板挟み）・BL-294（マンデート値と検証結果の衝突）とは異なる3つ目の生成崩壊トリガーと特定。既にPass 2に実証済みだった「判定のブレ防止（3回多数決方式）」を汎用ヘルパー化し、Pass 1のwrite_issue永続化判断・User AIのRESOLVE/DEFER/ACKNOWLEDGE選択（2箇所）へ横展開。Exploreエージェントの横断調査で見つかったquantitative_sufficiency_concernの非対称（姉妹フィールドessence_sufficiency_concernの既定値文言欠如）も併せて解消した。 | P1 |
 
 ---
 
@@ -9904,6 +9905,39 @@ BL-266の`_BL266_ESSENCE_TOPIC_PREFIX`によるトピック接頭辞フィルタ
 実LLM呼び出しでの効果確認は次回ドライラン待ち: ①task_plan_reviewerが初期confirmed_variablesの定義監査を実際に行うか、②Detectorが未監査facts一覧を見て実際にmark_fact_auditedを呼ぶか、③今回の78.3%相当の定義不一致が実際に捕捉されるか。また、`log/2026-08-28/1023`のドライランで登録された誤った`nagano_license_surrender_rate_75plus=78.3%（confirmed）`は本機構の実装とは別に、当該run（あるいは以後の再実行）のDBを手動訂正するか実行を打ち切るかのユーザー判断待ち（§18.3のバックアップ手順に従う）。
 
 参照: `tests/test_bl294_definitional_audit.py`、`docs/design/back_log/BL-294/BL294_basic_design.md`、`log/2026-08-27/2345/log_no_prompt.md`、`log/2026-08-28/1023/log_no_prompt.md`、`docs/design/decision_log.md` D-249。
+
+### BL-295: 裁量判断の「打ち切り規定」を汎用ヘルパー化（3回多数決方式の切り出しと横展開）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-293（同種の生成崩壊、ただし役割板挟みが原因という別の欠陥クラス）、BL-294（同種の生成崩壊、マンデート値と検証結果の衝突が原因という別の欠陥クラス）、BL-266/BL-292（`essence_sufficiency_concern`/`quantitative_sufficiency_concern`の非対称の当事者）、AGENTS.md §15.1（単一ソース） |
+
+**経緯:**
+
+`log/2026-08-28/1313`で、Detector（Domain Review, Pass 1）が`constraint_issue=none`の判定自体は正しく完了させた直後、続く自由記述部分で「observationsに書いた気づきをwrite_issueで後続タスクへ永続化すべきか」という**別の裁量判断**に入り、41秒間・単一の生成ターン内で「後続タスクにも影響する」⇔「いや今回のタスク内でExpertが対応できる」という同一の二択を30回以上往復し、ツール呼び出しも出力確定も行わないまま停止した（ユーザーがCtrl+Cで手動一時停止）。これはBL-293（役割の板挟み）ともBL-294（マンデート値と検証結果の衝突）とも異なる、**3つ目の生成崩壊トリガー**——「裁量判断を求める指示に、判断が割れた場合の打ち切り規定が伴っていない」というパターンだった。
+
+**根本原因（コードで確認）:**
+
+`call_detector`のDomain Review（Pass 1, `domain_prompt`）には、BL-096（`observations`に書いた懸念をwrite_issueで永続化すべきか）という裁量判断の指示はあるが、判断が割れた場合の打ち切り規定が一切なかった。一方、同じ`call_detector`のPass 2（数値監査パス）には既に実証済みの**「判定のブレ防止（3回多数決方式）」**という構造化された打ち切り機構（独立判定を3回だけ行い多数決を採用、3回に達したら再検討禁止）が存在していたが、constraint_issueのmajor/minor境界判定にしかスコープされておらず、file全体でこの機構はPass 2のこの1箇所にしか存在しなかった。Pass 2直後の「同じ計算を繰り返さない」ブロックも、既存の共有ヘルパー`_verification_throttle_warning`とほぼ内容が重複する手書きテキストであることが判明した（§15.1違反）。
+
+**対応内容（2026-08-28）:**
+
+1. Pass 2の3回多数決方式ブロックを`_bounded_deliberation_instruction(judgment_description)`として汎用ヘルパー化（`_verification_throttle_warning`の近くに新設）。Pass 2自体はこのヘルパー呼び出しへ置換し、既存挙動を実質的に維持した。
+2. Pass 2直後の手書き重複ブロックは`_verification_throttle_warning(example=...)`の呼び出しへ置換し、§15.1違反を解消した。
+3. Pass 1（domain_prompt）のBL-096永続化判断（診断されたバグ本体）へ、新規ヘルパーを適用した。
+4. Exploreエージェントによる横断調査で、同種の欠如がもう2箇所見つかり、併せて修正した：①`generate_user_utterance`のwrite_issue action_type選択（RESOLVE/DEFER/ACKNOWLEDGE、Stage2懸念確認プロンプトとStage4指示作成プロンプトの計2箇所）、②BL-292 `quantitative_sufficiency_concern`が、3行上の姉妹フィールドBL-266 `essence_sufficiency_concern`が持つ「判断に迷う・確信が持てない場合はfalseのままにしてください」という既定値への逃げ道を欠いていた非対称（軽量修正：3回多数決方式ではなく姉妹フィールドと同じ既定値パターンを踏襲）。
+5. 他の裁量判断箇所（confidence確定/暫定の選択、escalate_premise_concern判断、task_plan_reviewerの10観点判定）は、いずれも既存の閉じた基準（既定値バイアス・客観的な回数閾値・`_verification_throttle_warning`＋独自の一文）を既に持っており、追加対応は不要と判断した。
+
+**検討したが見送った代替案:**
+- `_verification_throttle_warning`へ「判断が割れた場合は一度決めたら再検討しない」という一文を追加するだけの軽量案: Pass 2自身が単なる注意書きでは不十分と判断し3回多数決方式を別途導入した経緯があり、同じ弱さを抱える可能性が高いと判断し、ユーザー承認のもと3回多数決方式の汎用ヘルパー化を採用した。
+
+**テスト**: `tests/test_bl295_bounded_deliberation.py`（新規13件）: `_bounded_deliberation_instruction`のパラメータ化確認、Pass 2のヘルパー呼び出しへの置換確認（3回多数決文言はヘルパー本体に、call_detector側は呼び出し式で確認）、Pass 2の`_verification_throttle_warning`重複解消確認、Pass 1へのヘルパー適用と挿入位置確認、generate_user_utteranceの2箇所への適用確認、quantitative_sufficiency_concernの既定値文言追加・姉妹フィールドとの対称性確認。既存の`tests/test_bl089_anti_repetition_instructions.py`の1件（`test_call_detector_has_anti_repetition_instruction`）も、文言が共有ヘルパーへ移行したため既存の他3件（BL-256）と同じ「呼び出し式マーカー」方式へ追随修正した。AGENTS.md §17.1（`cela_main.py`全体をgit stashで巻き戻し、新規13件＋BL-089の1件、計14件全てが失敗することを確認後、復元してdiffが完全一致することを確認）。
+
+実LLM呼び出しでの効果確認は次回ドライラン待ち: ①Pass 1のwrite_issue永続化判断で同種の堂々巡りが再発しないか、②Pass 2の既存3回多数決方式の挙動が維持されているか、③User AIのRESOLVE/DEFER/ACKNOWLEDGE選択で同種の堂々巡りが無いか。
+
+参照: `tests/test_bl295_bounded_deliberation.py`、`docs/design/back_log/BL-295/BL295_basic_design.md`、`log/2026-08-28/1313/log_no_prompt.md`、`docs/design/decision_log.md` D-250。
 
 ---
 
