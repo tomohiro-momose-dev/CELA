@@ -12506,9 +12506,13 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
     # （ターンごとには変わらない）ため、固定指示文グループの直後に配置する。
     domain_prompt = (
         f"あなたはプロジェクトにおける議論の「ドメイン妥当性レビュー」担当監査人です。\n"
-        f"あなたの役割は数値の検算（計算が合っているか）ではありません。数値の機械的検算は"
+        f"あなたの役割は数値の検算（Expertの計算が合っているか）ではありません。数値の機械的検算は"
         f"この後、別の監査パスで独立して行われるため、ここでは検算する必要はありません"
-        f"（結果に明らかな違和感がある場合を除き、python_replでの再計算は不要です）。\n"
+        f"（結果に明らかな違和感がある場合を除き、Expertの計算をpython_replで再計算する必要はありません）。\n"
+        f"[BL-300] ただしpython_replは検算目的以外でも使ってよく、read_reference_fileで取得した"
+        f"参照テキスト（例：政府統計PDFの表）が長大・略号だらけでgrepでは目的の値を特定できない場合、"
+        f"python_replでテキストを分割・インデックスして機械的に位置特定してください。手作業で"
+        f"何十項目もの表を目視で突合しようとすると、極めて時間がかかる上に誤りやすくなります。\n"
         f"まず最初に、そもそもの前提・設計（設備・人員の規模、シフト、速度・距離の設定など）"
         f"自体に現実世界で無理がないかを確認してください。検算で数式のつじつまが合っていても、"
         f"前提そのものが現実的に成立しなければ意味がありません。\n\n"
@@ -12677,7 +12681,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f'\nReturn ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用(無ければ空文字)", "observations": "気づき・懸念（自由記述、無ければ空文字）", "essence_sufficiency_concern": true/false, "essence_sufficiency_reason": "trueの場合、本質のどの記述が計画のどこにも反映されていないか（falseなら空文字）", "quantitative_sufficiency_concern": true/false, "quantitative_sufficiency_reason": "trueの場合、どの規模適合性の主張がどの規模指標に対して未検証か（falseなら空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
-    _detector_domain_tools = [READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, MARK_FACT_AUDITED_TOOL, THINK_TOOL]  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線 [BL-294] 定義監査の記録用
+    _detector_domain_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, MARK_FACT_AUDITED_TOOL, THINK_TOOL]  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線 [BL-294] 定義監査の記録用 [BL-300] log/2026-08-28/2049でgrep不可能な略号コード表を手作業突合しようとして生成崩壊したため、_detector_numeric_toolsとの唯一の差分だったPYTHON_REPL_TOOLを追加
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
         domain_prompt, client=client_detector_domain, model=model_detector_domain, label="Detector (Domain Review)",
         tools=_detector_domain_tools,
