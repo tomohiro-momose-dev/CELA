@@ -324,6 +324,7 @@
 | BL-295 | 高 | `cela_main.py`（新規`_bounded_deliberation_instruction`、call_detector Pass 1/Pass 2、generate_user_utterance計2箇所、BL-292 quantitative_sufficiency_concernの既定値文言） | **`done`。** `log/2026-08-28/1313`でDetectorが「observationsをwrite_issueで永続化すべきか」という裁量判断を打ち切り規定無しに30回以上往復し停止（ユーザーがCtrl+Cで一時停止）。BL-293（役割の板挟み）・BL-294（マンデート値と検証結果の衝突）とは異なる3つ目の生成崩壊トリガーと特定。既にPass 2に実証済みだった「判定のブレ防止（3回多数決方式）」を汎用ヘルパー化し、Pass 1のwrite_issue永続化判断・User AIのRESOLVE/DEFER/ACKNOWLEDGE選択（2箇所）へ横展開。Exploreエージェントの横断調査で見つかったquantitative_sufficiency_concernの非対称（姉妹フィールドessence_sufficiency_concernの既定値文言欠如）も併せて解消した。 | P1 |
 | BL-296 | 高 | `cela_main.py`（新規`_missing_data_estimation_instruction`、call_expert・`_USER_AI_ROLE_MANDATE`・call_detector計3箇所） | **`done`。** `log/2026-08-28/1535`でExpertが公式統計に存在しない値（免許返納市単位累計）の推計中、「もっと誠実な方法があるはず」と同一の推計サイクルを9分半・15回以上繰り返し停止（ユーザーがCtrl+Cで一時停止）。BL-293/294/295とは異なる4つ目の生成崩壊トリガー（推計の精緻化に終わりが無い完璧主義ループ）と特定。実務標準の推計手法5種（代理指標の比例配分・類似事例の転用・フェルミ推定的分解・レンジ提示・前提の明示的記録）と満足化規定を導入し、Expert（producer視点：1つ選んだら確定）・User AI/Detector（auditor視点：文書化された推計を理由なく差し戻さない）双方へ横展開した。 | P1 |
 | BL-297 | 高 | `cela_main.py`（新規`_StreamRepetitionGuard`クラス＋4定数、`_query_AI_live`の2分岐計4箇所へ配線） | **`done`。** BL-293〜296がいずれもプロンプトレベルの対策に留まっていたことを受け、機械的なバックストップを追加。BL-231/287はcompletion完了後・iteration間の比較にしか働かず、単一completion内で反復し続ける生成崩壊（0649/1023/1313/1535、いずれもreasoning側で発生）を検知できなかった。ストリーミング中のreasoning/contentチャンクをn-gram反復検出で監視し、閾値超過時に`for chunk in stream:`を強制break、既存のfinish_reason=="length"パスと同型のValueErrorで外側のAPIエラーリトライへ委ねる。n-gram長80文字は実際の崩壊を捉えつつ大規模JSON計画の構造的反復を誤検知しない値としてユーザー承認済み。 | P1 |
+| BL-298 | 高 | `cela_main.py`（`_StreamRepetitionGuard`の内部実装をwindow方式からインクリメンタルngramカウント方式へ再設計、新規`_StreamRepetitionRetryError`例外クラス＋2定数、`_query_AI_live`の検出時raise 2箇所＋専用except節） | **`done`。** BL-297稼働直後に2つの実害を発見・修正。①`log/2026-08-28/1919`で新たな生成崩壊（Expertが公式統計の無い「アプリ操作可能割合」の推計方法を巡り単一completion内で9分・約7万字ループ）が発生したにもかかわらず`_StreamRepetitionGuard`が一度も発火しなかった。実際のreasoningストリームを本番同一定数で再生した結果、同一文が27回・ほぼ正確に2159文字周期で反復していたが、min_repeats=3回目の出現がバッファに同時に残るには2周期分＝4318文字必要なところwindow=3000ではその前に1回目が追い出され、周期がwindow/(min_repeats-1)=1500文字を超える反復は原理的に検出不可能という構造的欠陥が原因と判明。window方式を廃し、chunk到着ごとにngram出現回数をストリーム全体で累積カウントする方式に置き換えた（周期の長さに関係なく検出可能、メモリは`_TEXT_REPETITION_MAX_STREAM_CHARS`で安全弁を設置）。②再設計後の初回本番発火（`log/2026-08-28/1950`）で、PDFの都道府県略称一覧という低エントロピーな構造的テキストを2〜3回参照し直す正当な自己確認的推論が過検知されたことをユーザーが指摘、直後に同一のValueError送出パターン（finish_reason=="length"用の既存パスを流用）が実際に本番ランをクラッシュさせるトレースバックが判明した。原因はD-009の意図的設計（ValueErrorはAPIError系exceptに含めず外側へ伝播させノードを失敗させる）で、`_query_and_parse_with_retry`層でも捕捉されず`run_ai_vs_ai_loop`まで伝播していたこと。finish_reason=="length"と異なりn-gram反復はサンプリングの偏りに起因する一過性の事象である可能性が高く、ユーザーの「検知したときはそのiterをやり直してほしい」との指示どおり、検出時のraiseを専用の`_StreamRepetitionRetryError`へ変更し、`_query_AI_live`内の`while True`ループ自身がその場で捕捉、BL-122のiteration_start保持機構に乗せて同一iterationのAPI呼び出しのみを即時再試行（node_redo_countとは別予算、API過負荷用の指数バックオフ/180秒クールダウンは適用しない）するよう修正した。再試行上限到達時はBL-202の教訓（プレースホルダー文字列を実回答として誤読させた事故）を踏まえ、隠蔽せず元の例外をそのまま再raiseする。 | P1 |
 
 ---
 
@@ -9999,6 +10000,44 @@ n-gram長（80文字）は、実際の崩壊（150字前後の段落反復）を
 この機構はストリーミングチャンクの実際の受信タイミングに依存するため、オフラインテストではモックのchunk列でしか検証できない。実LLM呼び出しでの効果確認——①実際の崩壊時に生成が早期に打ち切られトークン・時間の浪費が防げるか、②通常の長い正当な生成（大規模JSON計画等）を誤って打ち切らないか——は次回ドライラン待ち。現在一時停止中のrun（`log/2026-08-28/1535`）を`--resume`するか打ち切るかは本BLとは別にユーザー判断待ち。
 
 参照: `tests/test_bl297_stream_repetition_guard.py`、`docs/design/back_log/BL-297/BL297_basic_design.md`、`docs/design/decision_log.md` D-252。
+
+### BL-298: BL-297のwindow方式検出漏れの再設計と、検出時クラッシュを「同一iteration即時再試行」へ修正
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-297（再設計・修正対象）、BL-122（iteration_start保持機構の流用元）、BL-202（プレースホルダー文字列誤読事故の教訓）、BL-231/287（同型の反復検出パターン踏襲元） |
+
+**経緯（実害①: 検出漏れ）:**
+
+BL-297稼働直後、`log/2026-08-28/1919`のドライランで新たな生成崩壊（Expertがtask_1_1で、公式統計に存在しない「アプリ操作可能割合」という値の推計方法を巡り、iter=2の単一completion内で約9分・約7万字にわたり同じ結論の言い換えを繰り返す）が発生した。BL-296で追加した`_missing_data_estimation_instruction`（推計方法論の満足化規定）はこの呼び出しのプロンプトに実際に含まれていたことを`log_with_prompt.md`で確認したが、それでも発生した——プロンプト助言が確率的にしか効かないことの実例。より重大な問題として、BL-297で実装したばかりの`_StreamRepetitionGuard`が一度も発火しなかった。
+
+**根本原因（実測で確認）:**
+
+該当区間のreasoningストリームを、本番同一の定数（ngram_len=80, min_repeats=3, window=3000, check_interval=300）で実際の`_StreamRepetitionGuard`に再生させたところ、一度も検出されなかった。原因を数値で特定：同一文（「スマホ所有率（65歳以上）：通信利用動向調査令和7年 利用率ベース...」）が27回、ほぼ正確に2159文字周期で反復していた。min_repeats=3を満たすには3回目の出現がバッファに同時に残る必要があり、そのためには最低でも2周期分＝4318文字がwindow内に同時に存在しなければならないが、window=3000のため3回目が来る前に必ず1回目が追い出される構造になっており、この周期の反復は原理的に検出不可能だった。実質的にこの実装は「反復周期 ≤ window/(min_repeats-1) = 1500文字」の反復しか検出できなかった。BL-297のオフラインテストは`_COLLAPSE_PARAGRAPH * 4`（間隔ゼロの直接連続反復）でしか検証しておらず、「周期はあるが間に別の文章を挟む」現実の反復パターンでの弱点を見逃していた（AGENTS.md §17.2「モックテスト合格は実効性の証拠ではない」の典型例）。
+
+**対応内容①（2026-08-28、ユーザー承認済み）:**
+
+`_StreamRepetitionGuard`の内部実装を、window文字数だけを保持し`check_interval`ごとに全体を再走査する方式から、chunk到着ごとにngram出現回数をストリーム全体でインクリメンタルに積算する方式（`_counts: dict[str,int]`＋chunk境界をまたぐ`_carry`）へ置き換えた。1回の`feed()`呼び出しのコストは新しく届いたchunk長にのみ比例し、過去分の再走査は発生しない。反復周期の長さに関係なく検出できるようになった一方、病的に長い単一completionに対するメモリ安全弁として新定数`_TEXT_REPETITION_MAX_STREAM_CHARS=200_000`（実機最大観測値約7万字を大きく上回る）を追加。`window`/`check_interval`引数は廃止（コンストラクタは`ngram_len`/`min_repeats`/`max_stream_chars`のみ）。`_query_AI_live`側の配線（`_StreamRepetitionGuard()`の無引数呼び出し4箇所、`.feed()`呼び出し4箇所）は変更不要だった。
+
+**経緯（実害②: 誤検知直後の本番クラッシュ）:**
+
+再設計後の初回本番発火（`log/2026-08-28/1950`）をユーザーがレビューし、「過検知です」と指摘。該当箇所はDetectorがNPA（警察庁）PDFの都道府県略称一覧（「北海道(計), 札幌, 函館, ...」という低エントロピーな一文字略称の羅列）を、略称と都道府県名の対応関係を確認するため2〜3回参照し直していた正当な自己確認的推論で、たまたま同一80文字ngramが3回出現し閾値に達していた（実測で確認：3回目の出現は1回目・2回目とは別の再確認の試みであり、崩壊ではなく進行中の分析作業だった）。この指摘の直後、ユーザーから実際のトレースバックが提示され、同一のBL-297検出が`run_ai_vs_ai_loop`全体をクラッシュさせていたことが判明した。
+
+**根本原因（トレースバックで確認）:**
+
+検出時のraiseは、finish_reason=="length"用の既存`ValueError`と同型で実装していたが、そのValueErrorはD-009の意図的設計（コード自身のコメント「ValueErrorはAPIError系ではないため下記exceptに飲み込まれず、原因が伝播する」）により、`_query_AI_live`内の`except (APIError, ...)`にも、`_query_and_parse_with_retry`にも、`call_detector`にも一切捕捉されず、`detector_node`を経て`run_ai_vs_ai_loop`全体まで伝播し未捕捉例外としてプロセスをクラッシュさせていた。finish_reason=="length"は同一promptを再送しても再び切り詰められる可能性が高く「伝播させて失敗を明示する」設計が妥当だが、n-gram反復はサンプリングの偏りに起因する一過性の事象である可能性が高く、同じ扱いは不適切だった。ユーザーは「検知したときはそのiterをやり直してほしい」と明示的に要求した。
+
+**対応内容②（2026-08-28、ユーザー指示に基づき実装）:**
+
+検出時のraiseを、専用の新規例外クラス`_StreamRepetitionRetryError`（素の`Exception`から派生、`ValueError`ではない）へ変更。`_query_AI_live`内の`while True`ループ自身に新設した`except _StreamRepetitionRetryError`節でその場で捕捉し、BL-122のiteration_start保持機構（loop_messages/iteration_start/reasoning_parts_all等が関数冒頭・`while True`の外で保持される既存の実証済み機構）に自然に乗せることで、他のiterationの思考ログ・ツール結果を失わず、失敗した「このiterationのAPI呼び出し」だけを即座に再試行する。API過負荷用の`node_redo_count`／指数バックオフ（8〜128秒）／180秒クールダウンとは意図的に別予算・別クールダウンとした（新定数`_BL298_REPETITION_MAX_REDOS=3`、`_BL298_REPETITION_REDO_COOLDOWN_SECONDS=3`秒）——反復検知はインフラ過負荷ではなくサンプリングのばらつきが原因であり、長い待機は無意味な時間浪費になるため。再試行上限（3回）に到達した場合は、BL-202の教訓（「(サーバー高負荷によるAPIエラー)」というプレースホルダー文字列が下流ノードに「実際の回答」として誤読され、無意味なラウンド消費を繰り返した過去事故）を踏まえ、同じ隠蔽策を流用せず元の例外をそのまま`raise`で再送出する（新しい例外に握り替えない、文字列を返さない）。
+
+**テスト**: `tests/test_bl298_incremental_repetition_detection.py`（新規19件）: ①検出漏れの数値的検算（BL-297初版の検出上限がwindow/(min_repeats-1)=1500文字であり実測周期2159文字がそれを上回っていたことの確認）、②`log/2026-08-28/1919`から採取した実測2159文字周期・2159文字丸ごとそのままの実データを用いた回帰テスト（新実装が確実に検出すること、10文字程度の小chunkに分割して供給しても検出できること）、③min_repeats未満では誤検知しないこと、④BL-297由来の大規模JSON非退行テスト、⑤クラッシュ修正の回帰テスト7件（旧ValueError文言がもう送出されないこと、専用例外クラスへの変更確認、node_redo_countとは別予算であることの確認、再試行上限到達時にプレースホルダーを返さず元の例外を再raiseすることの確認）。`tests/test_bl297_stream_repetition_guard.py`を新設計に追従させ、window/check_interval依存だった2テストを`_carry`によるchunk境界越え検出テスト・`_TEXT_REPETITION_MAX_STREAM_CHARS`メモリ安全弁テストへ置換、raiseメッセージ確認を新例外クラス名の確認へ更新。AGENTS.md §17.1（`cela_main.py`全体を退避して旧実装（window方式・旧ValueError）へ戻し、検出漏れ系2件・クラッシュ修正系7件の計9件が失敗することを確認後、diffが完全一致することを確認して復元）。既存の`test_bl231_loop_guard.py`・`test_bl287_tool_repeat_nudge.py`と合わせ計28件で非退行を確認。フルオフラインスイート1915 passed（既知のBL-269 4件のみ残存、新規失敗なし。①の再設計単独時点で確認、②のクラッシュ修正追加後も同じ関連テスト群で非退行確認済み）。
+
+n-gram反復検出そのものの誤検知率（min_repeats=3という閾値が、今回のような低エントロピーな構造的テキストの正当な再参照に対して依然として敏感すぎないか）は本BLの対応範囲外とし、次回ドライランでの追加発火状況を見てユーザーと再検討する。現在、検出時は即座に同一iterationを再試行するため、仮に同種の誤検知が今後も発生してもクラッシュには至らず「1回分の余分な再試行」で済む設計になっている。
+
+参照: `tests/test_bl298_incremental_repetition_detection.py`、`tests/test_bl297_stream_repetition_guard.py`、`docs/design/back_log/BL-298/BL298_basic_design.md`、`docs/design/decision_log.md` D-253、`log/2026-08-28/1919/log_no_prompt.md`、`log/2026-08-28/1950/log_no_prompt.md`。
 
 ---
 

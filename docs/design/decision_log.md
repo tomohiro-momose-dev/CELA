@@ -3521,6 +3521,20 @@
 
 ---
 
+### D-253: BL-298 — BL-297のwindow方式検出漏れの再設計と、検出時クラッシュを「同一iteration即時再試行」へ修正
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-28 |
+| 状態 | `decided` |
+| 決定者 | t-momose（「1950をレビュー 過検知です」「次いで言うと クラッシュしています」＋実トレースバック提示、「検知したときはそのiterをやり直してほしい」という明示的指示。設計自体は「進めてください」で承認された前ターンの提案（window方式の欠陥をインクリメンタルカウント方式へ再設計する案）に基づく） |
+| **決定理由** | BL-297稼働直後、`log/2026-08-28/1919`で新たな生成崩壊（Expertが公式統計の無い値の推計方法を巡り単一completion内で9分・約7万字ループ）が発生したが`_StreamRepetitionGuard`は一度も発火しなかった。実際のreasoningストリームを本番同一定数（ngram_len=80, min_repeats=3, window=3000, check_interval=300）で再生した結果、同一文が27回・ほぼ正確に2159文字周期で反復していたにもかかわらず検出されなかった。原因を計算で特定：min_repeats=3回目の出現が直近windowバッファに同時に残るには2周期分＝4318文字が必要だが、window=3000ではその前に1回目の出現がバッファから追い出され、周期がwindow/(min_repeats-1)=1500文字を超える反復は原理的に検出不可能という構造的欠陥だった。BL-297自身のオフラインテストは間隔ゼロの直接連続反復のみを検証しており、この「周期はあるが間に別の文章を挟む」現実の反復パターンでの弱点を見逃していた（AGENTS.md §17.2）。ユーザー承認のもとwindow方式を廃し、chunk到着ごとにngram出現回数をストリーム全体でインクリメンタルに積算する方式へ再設計した。再設計後の初回本番発火（`log/2026-08-28/1950`）で、ユーザーから「過検知です」との指摘を受けた——PDFの都道府県略称一覧という低エントロピーな構造的テキストを、モデルが対応関係を確認するため2〜3回参照し直す正当な自己確認的推論が、たまたま3回の閾値に達し誤検知されたもの。この指摘の直後、同一のValueError送出パターン（finish_reason=="length"用の既存パスを流用）が実際に本番ランをクラッシュさせるトレースバックが判明した。原因はD-009の意図的設計（"ValueErrorはAPIError系exceptに含めず外側へ伝播させ、ロジックエラーを握りつぶさず明示させる"という`_query_AI_live`自身のコードコメント）で、finish_reason=="length"は同一promptの再送が再び切り詰められる可能性が高く伝播させる設計が妥当だが、n-gram反復はサンプリングの偏りに起因する一過性の事象である可能性が高く同じ扱いは不適切だった。ユーザーが「検知したときはそのiterをやり直してほしい」と明示したことを受け、検出時の挙動を「そのiterationだけを即時再試行」へ変更した。 |
+| 決定内容 | **(1) 検出方式の再設計**: `_StreamRepetitionGuard`の内部実装を、window文字数だけを保持し`check_interval`ごとに再走査する方式から、chunk到着ごとにngram出現回数をストリーム全体で累積カウントする方式（`_counts: dict[str,int]`＋chunk境界をまたぐ`_carry`）へ置き換えた。周期の長さに関係なく検出できるようになった一方、病的に長い単一completionに対するメモリ安全弁として新定数`_TEXT_REPETITION_MAX_STREAM_CHARS=200_000`（実機最大観測値約7万字を大きく上回る）を追加。`window`/`check_interval`引数は廃止（コンストラクタは`ngram_len`/`min_repeats`/`max_stream_chars`）。**(2) 検出時の挙動変更**: 検出時のraiseを、finish_reason=="length"用ValueError（外側へ伝播させノードを失敗させる設計）の流用から、専用の`_StreamRepetitionRetryError`へ変更。`_query_AI_live`内の`while True`ループ自身が新設の`except _StreamRepetitionRetryError`節でその場で捕捉し、BL-122のiteration_start保持機構（既にAPIエラーリトライで実証済み、loop_messages/iteration_start等を関数冒頭で保持）に乗せて同一iterationのAPI呼び出しのみを即時再試行する。API過負荷用の`node_redo_count`／指数バックオフ（8〜128秒）／180秒クールダウンとは別の予算・別のクールダウン（新定数`_BL298_REPETITION_MAX_REDOS=3`、`_BL298_REPETITION_REDO_COOLDOWN_SECONDS=3`）を持つ——サンプリングのばらつきが原因でありインフラ過負荷ではないため。再試行上限到達時は、BL-202の教訓（「サーバー高負荷によるAPIエラー」というプレースホルダー文字列が下流ノードに実回答として誤読され、無意味なラウンド消費を繰り返した過去事故）を踏まえ、同じ隠蔽策を流用せず元の例外をそのまま再raiseする。 |
+| 影響 | `cela_main.py`（`_StreamRepetitionGuard`の内部実装再設計、新規`_StreamRepetitionRetryError`例外クラス＋2定数、検出時raise 2箇所の変更、専用except節の新設）。`tests/test_bl298_incremental_repetition_detection.py`（新規19件：window欠陥の数値的検算、実測2159文字周期の実データ回帰テスト、小chunk分割供給での検出確認、JSON非退行確認、クラッシュ修正の回帰テスト7件）。`tests/test_bl297_stream_repetition_guard.py`を新設計へ追従（window/check_interval依存の2テストを`_carry`境界越え検出テスト・メモリ安全弁テストへ置換、raiseメッセージ確認を新例外クラスへ更新）。AGENTS.md §17.1確認済み（cela_main.py全体を退避して旧実装へ戻し、window欠陥系2件・クラッシュ修正系7件の計9件が失敗することを確認後、diffが完全一致することを確認して復元）。既存の`test_bl231_loop_guard.py`・`test_bl287_tool_repeat_nudge.py`で非退行を確認（計28件）。フルオフラインスイート1915 passed（既知のBL-269汚染4件のみ、再設計単独での確認）。 |
+| 関連 BL | BL-298（本件）、BL-297（再設計・修正対象）、BL-122（iteration_start保持機構の流用元）、BL-202（プレースホルダー文字列誤読事故の教訓）、D-009（ValueError伝播設計の原典） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
