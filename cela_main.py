@@ -347,7 +347,7 @@ client_expert = client_openrouter
 model_expert = glm_5_3_flash # nemotron_3_ultra
 
 client_task_planner = client_openrouter
-model_task_planner = nemotron_3_ultra # nemotron_3_ultra
+model_task_planner = glm_5_3_flash # nemotron_3_ultra
 
 client_task_plan_reviewer = client_openrouter
 model_task_plan_reviewer = nemotron_3_ultra # nemotron_3_ultra
@@ -9325,6 +9325,95 @@ def _answer_human_question(conn: sqlite3.Connection, run_id: str, topic: str, qu
     )
     conn.commit()
     return {"success": True, "answer": answer}
+
+
+# [BL-309] AGENTS.md §7に準ずる位置づけの設計選択（重要定数ではないが固定リストのため
+# 一箇所に集約）。--interactive-queryが使えるツールは、既存の読み取り専用ツール実体
+# （TOOL_DISPATCHへの新規追加は不要、既存のグラフ内ノードと全く同じ実装を再利用する、
+# AGENTS.md §15.1）に限定する。ログファイルを読むツールは意図的に一切含めない——本機能の
+# 目的は「DBの記録だけで意思決定・数値の系譜を追跡できるか」を検証することでもあるため
+# （ユーザー指示: 「ログはあえて読ませない、dbだけで十分に追跡ができるか...のテストにもなる」）。
+_INTERACTIVE_QUERY_TOOLS = [
+    READ_AGREEMENT_TOOL, READ_VERIFIED_FACT_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL,
+    READ_ISSUES_TOOL, READ_ESCALATION_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_PROJECT_PLAN_TOOL,
+    TRACE_LINEAGE_TOOL, PYTHON_REPL_TOOL, THINK_TOOL,
+]
+
+
+def _answer_general_query(conn: sqlite3.Connection, run_id: str, question: str) -> dict:
+    """[BL-309] `--interactive-query`向け。`_answer_human_question`（BL-274）とは異なり、
+    (1) 特定の保留issueに紐づかない自由な質問を受け付け、(2) 事前に固定した2テーブル
+    （agreements/verified_facts）だけを静的に貼り付けるのではなく、ツールループとして
+    LLMに能動的にDBを検索させる（AGENTS.md §15.1: 既存の読み取り専用ツール実体を
+    そのまま再利用、新規DB検索ロジックは書かない）。
+
+    [CONSTRAINT] グラフ実行中のノードと異なり、この呼び出しはLangGraphのstate/checkpointを
+    経由しない独立プロセスからのツール呼び出しである。read_agreement等のツール実体は
+    get_active_conn()/_CURRENT_RUN_IDというモジュールグローバルを参照する設計（グラフ内では
+    各ノード呼び出し時に設定される）ため、ここで明示的に同じグローバルを設定してから
+    ツールループへ入る（_answer_human_input等、既存のCLI関数と同じ約束事）。
+    """
+    global _DB_CONN, _CURRENT_RUN_ID, _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    _DB_CONN = conn
+    _CURRENT_RUN_ID = run_id
+    _CURRENT_CALLER_ROLE = "human_query"
+    _CURRENT_TASK_ID = ""
+
+    goal_essence_text = _get_goal_essence_text(conn, run_id)
+    prompt = (
+        "あなたはCELAというAIオーケストレーションシステムの監査補助です。人間の運用者が、"
+        f"run_id={run_id}の実行内容について自由に質問しています。\n\n"
+        "以下のツールだけを使い、実際のDB記録（agreements/verified_facts/entities/"
+        "entity_attributes/issue_log/goal_escalations/whiteboard_drafts/plan_drafts/"
+        "relation_edges）に基づいて回答してください。\n"
+        "[BL-309: 意図的な制限] あなたは生の実行ログファイルには一切アクセスできません。"
+        "これは制限漏れではなく意図的な設計です——CELAの決定事項DB・系譜（lineage）記録が、"
+        "ログを読まなくても意思決定や数値の経緯を十分に追跡できる設計になっているかを、"
+        "この場で検証する目的も兼ねています。DBの記録だけで答えられない場合は、推測で"
+        "埋めず「DB記録からは判断できません（ログを参照すれば分かる可能性はありますが、"
+        "このツールでは意図的にログへアクセスしません）」と正直に答えてください。\n"
+        "値や意思決定の経緯を追う際は、read_agreement/read_verified_fact/read_entityで"
+        "現状を確認した上で、trace_lineageで上流（何を根拠にその値が確定したか）・"
+        "下流（その値が後続の何に使われたか）を辿ってください。数値の再計算が必要な場合は"
+        "python_replを使い、暗算での回答は禁止します。\n\n"
+        f"{goal_essence_text}\n\n"
+        f"【人間からの質問】\n{question}"
+    )
+    answer = query_AI([{"role": "user", "content": prompt}], client=client_hil_qa,
+                       model=model_hil_qa, label="interactive_query", tools=_INTERACTIVE_QUERY_TOOLS)
+    now = time.time()
+    conn.execute(
+        "INSERT INTO human_qa_log (id, run_id, issue_id, issue_topic, question, answer, asked_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (str(uuid.uuid4()), run_id, "", "(general_query)", question, answer, now)
+    )
+    conn.commit()
+    return {"success": True, "answer": answer}
+
+
+def _run_interactive_query(conn: sqlite3.Connection, run_id: str,
+                            input_fn=input, print_fn=print) -> None:
+    """[BL-309] 保留issueの有無に関わらずいつでも起動できる、自由質問専用の対話REPL
+    （`--interactive-query RUN_ID`向け）。`_run_interactive_hil`（BL-274）が保留issueの
+    承認/却下フローに紐づくのに対し、こちらは読み取り専用の監査・追跡に特化し承認/却下は
+    行わない（issue_logへは一切書き込まない）。
+    """
+    print_fn(f"run_id={run_id} について自由に質問できます（DBの記録のみに基づき回答、"
+              f"ログファイルは意図的に参照しません）。'q'で終了。")
+    while True:
+        try:
+            q = input_fn("質問（'q'で終了）: ").strip()
+        except (EOFError, StopIteration):
+            return
+        if q.lower() == "q":
+            return
+        if not q:
+            continue
+        result = _answer_general_query(conn, run_id, q)
+        if result["success"]:
+            print_fn(f"🤖 {result['answer']}")
+        else:
+            print_fn(f"⚠️ {result['error']}")
 
 
 def _build_human_input_answered_notice(conn: sqlite3.Connection, run_id: str) -> str:
@@ -18578,6 +18667,17 @@ if __name__ == "__main__":
         "--interactive-hil", metavar="RUN_ID", default=None,
         help="指定run_idの保留中issueについて対話的に質問し、AIがDB情報に基づき回答した上で承認/却下する。",
     )
+    # [BL-309] --interactive-hilは保留issueの承認/却下フローに限定されるため、それ以外の
+    # 自由な質問（値・意思決定の経緯を追う等）ができなかった。ログファイルは意図的に
+    # 参照させず、DBの記録（agreements/verified_facts/entities/issue_log/relation_edges等）
+    # だけで十分に追跡できるかを検証する目的も兼ねる。
+    _cli_parser.add_argument(
+        "--interactive-query", metavar="RUN_ID", default=None,
+        help="指定run_idについて、保留issueの有無に関わらず自由に質問できる対話REPL。"
+             "read_agreement/read_verified_fact/read_entity/trace_lineage等の読み取り専用"
+             "ツールでDBを能動的に検索して回答する（承認/却下は行わない、ログファイルは"
+             "意図的に参照しない）。",
+    )
     # [BL-222] 人間監査用レポート。runの動作状態に関わらずいつでも別ターミナルから実行できる
     # （--pending-human-inputと同じ設計）。継続的に眺めたい場合はシェル側でwatch等を使う。
     _cli_parser.add_argument(
@@ -18648,6 +18748,13 @@ if __name__ == "__main__":
         _conn = get_db_connection()
         init_db(_conn)
         _run_interactive_hil(_conn, _cli_args.interactive_hil)
+        _conn.close()
+        sys.exit(0)
+
+    if _cli_args.interactive_query:
+        _conn = get_db_connection()
+        init_db(_conn)
+        _run_interactive_query(_conn, _cli_args.interactive_query)
         _conn.close()
         sys.exit(0)
 
