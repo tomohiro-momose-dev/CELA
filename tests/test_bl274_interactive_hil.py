@@ -246,7 +246,12 @@ def test_issue_loop_approve_flow_writes_verified_fact_and_resolves_issue(db_conn
     assert len(qa_rows) == 1
 
 
-def test_issue_loop_reject_flow_writes_rejected_value(db_conn, monkeypatch):
+def test_issue_loop_reject_flow_does_not_write_literal_rejected_string(db_conn, monkeypatch):
+    """[BL-308による意図的な変更] 従来はgoal_escalation_hil以外のトピックでも却下時に
+    文字列'rejected'をそのまま確定値として書き込んでいたが、これは数値変数を破損させる
+    （AGENTS.md §13）ため、BL-308で「既存の確定値をそのまま維持する」方式へ変更した。
+    store_selection_basisには事前登録されたverified_factsが無いため、既存値=空文字列に
+    なることを確認する（'rejected'という文字列がもはや書き込まれないことが本テストの主眼）。"""
     conn, run_id = db_conn
     _seed_issue(conn, run_id)
     monkeypatch.setattr(cela_main, "query_AI", _fake_query_AI("参考情報です。"))
@@ -259,13 +264,40 @@ def test_issue_loop_reject_flow_writes_rejected_value(db_conn, monkeypatch):
         "SELECT value FROM verified_facts WHERE run_id=? AND variable_name=?",
         (run_id, "store_selection_basis")
     ).fetchone()
-    assert fact["value"] == "rejected"
+    assert fact["value"] != "rejected"
+    assert fact["value"] == ""
     issue = conn.execute(
         "SELECT status, resolution_note FROM issue_log WHERE run_id=? AND topic=?",
         (run_id, "store_selection_basis")
     ).fetchone()
     assert issue["status"] == "resolved"
     assert issue["resolution_note"] == "根拠不十分のため却下"
+
+
+def test_issue_loop_reject_flow_preserves_existing_numeric_value(db_conn, monkeypatch):
+    """[BL-308本体] 既にExpertが暫定登録した数値（例：license_surrender_count=58）がある
+    トピックで却下すると、'rejected'で上書きせず既存の値をそのまま人間確認済みへ
+    格上げすること（実際の不具合再現: run_id=1787890406-1e73a89dでlicense_surrender_countを
+    58のまま人間確認する運用を想定）。"""
+    conn, run_id = db_conn
+    _seed_issue(conn, run_id, topic="license_surrender_count_topic",
+                variable_name="license_surrender_count")
+    cela_main.upsert_verified_fact(
+        conn, run_id, variable_name="license_surrender_count", value="58", unit="人",
+        source_task_id="task_1_1", source_phase_id="phase_1",
+        confirmed_by="expert", confidence="provisional", citations=[],
+    )
+    printed = []
+    input_fn = _scripted_input("", "reject", "市単独の一次統計は取得不可のため現状値を維持")
+
+    cela_main._interactive_hil_issue_loop(conn, run_id, "license_surrender_count_topic", input_fn, printed.append)
+
+    fact = conn.execute(
+        "SELECT value, unit, confidence FROM verified_facts WHERE run_id=? AND variable_name=?",
+        (run_id, "license_surrender_count")
+    ).fetchone()
+    assert fact["value"] == "58"
+    assert fact["confidence"] == "confirmed"
 
 
 def test_issue_loop_skip_leaves_issue_unresolved(db_conn):

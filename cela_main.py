@@ -3259,6 +3259,9 @@ def record_scheduling_decision(conn: sqlite3.Connection, run_id: str, decision_t
 _GOAL_ESCALATION_HIL_TOPIC_PREFIX = "goal_escalation_hil_"
 _GOAL_ESCALATION_HIL_VARIABLE_PREFIX = "goal_escalation_decision_"
 _GOAL_ESCALATION_HIL_APPROVED_VALUE = "approved"
+# [BL-308] 却下側にも同じ規約が既に使われていた（_interactive_hil_issue_loopが決定分岐で
+# 直接"rejected"という文字列リテラルを書いていた）ため、承認値と対で定数化する（§15.1）。
+_GOAL_ESCALATION_HIL_REJECTED_VALUE = "rejected"
 
 
 def _goal_escalation_hil_topic(escalation_id: str) -> str:
@@ -18458,7 +18461,19 @@ def _interactive_hil_issue_loop(conn: sqlite3.Connection, run_id: str, topic: st
     （AGENTS.md §16.5、既存配線の再利用）。「却下」はvalue='rejected'という既存の文字列規約
     （_create_goal_escalation_hil_gateのhuman_research_prompt文言が既に人間へ案内している）
     をそのまま踏襲する。
+
+    [BL-308] goal_escalation_hil_*トピックは、値そのものが人間の自由記述ではなく
+    _GOAL_ESCALATION_HIL_APPROVED_VALUE（"approved"）という厳密な文字列でなければ
+    revise_goal（_get_goal_escalation_hil_decision、cela_main.py:3327-3333）の承認判定を
+    通らない特殊なトピック種別だった。従来はこの種別を区別せず、approve分岐で常に
+    汎用の「確定値 (value):」を自由記述で尋ねていたため、人間が承認の意思（"approve"）は
+    正しく入力しても、値入力欄を空Enterで済ませると空文字列がconfirmedとして書き込まれ、
+    revise_goal側は「未承認」と判定し続けた（issue_log.statusは'resolved'になるため
+    --pending-human-inputでは解決済みに見える一方、resume後もAI側は承認されていないと
+    扱う、という食い違いが実機で発生）。goal_escalation_hil_*トピックでは値入力を
+    スキップし、決定（approve/reject）に対応する定数値を自動的に使う。
     """
+    is_goal_escalation_topic = topic.startswith(_GOAL_ESCALATION_HIL_TOPIC_PREFIX)
     while True:
         try:
             q = input_fn("質問（空Enterで承認/却下へ、'b'で一覧に戻る、'q'で終了）: ").strip()
@@ -18481,14 +18496,37 @@ def _interactive_hil_issue_loop(conn: sqlite3.Connection, run_id: str, topic: st
     except (EOFError, StopIteration):
         raise SystemExit(0)
     if decision == "approve":
-        value = input_fn("確定値 (value): ").strip()
+        if is_goal_escalation_topic:
+            # [BL-308] このトピック種別は自由記述値ではなく、revise_goal側が厳密一致で
+            # 要求する固定値を使う（人間に自由記述させると空Enter等で壊れるため尋ねない）。
+            value = _GOAL_ESCALATION_HIL_APPROVED_VALUE
+            print_fn(f"（このissueは承認/却下の記録専用のため、確定値は自動的に'{value}'とします）")
+        else:
+            value = input_fn("確定値 (value): ").strip()
         unit = input_fn("単位（省略可）: ").strip()
         source = input_fn("出典（省略可）: ").strip()
         comment = input_fn("コメント（省略可）: ").strip()
         result = _answer_human_input(conn, run_id, topic, value, unit, source, comment)
     elif decision == "reject":
         comment = input_fn("却下理由コメント: ").strip()
-        result = _answer_human_input(conn, run_id, topic, "rejected", "", "human_operator", comment)
+        if is_goal_escalation_topic:
+            value = _GOAL_ESCALATION_HIL_REJECTED_VALUE
+        else:
+            # [BL-308] goal_escalation_hil以外のトピック（例：license_surrender_countのような
+            # 数値変数）にとって、文字列'rejected'をそのまま確定値として書き込むと、後続タスクが
+            # 数値として扱おうとした際に破損する（AGENTS.md §13、フォールバック値の下流汚染）。
+            # この種のトピックでの「却下」は「これ以上のデータ取得は求めない」という意味に
+            # 留め、既存の（Expertが暫定登録した）値をそのまま人間確認済みへ格上げする。
+            existing_row = conn.execute(
+                "SELECT vf.value FROM issue_log il "
+                "JOIN verified_facts vf ON vf.run_id = il.run_id "
+                "AND vf.variable_name = il.human_variable_name "
+                "WHERE il.run_id=? AND il.topic=?",
+                (run_id, topic),
+            ).fetchone()
+            value = existing_row["value"] if existing_row and existing_row["value"] is not None else ""
+            print_fn(f"（数値項目のため'rejected'は書き込まず、既存の確定値'{value}'をそのまま人間確認済みとします）")
+        result = _answer_human_input(conn, run_id, topic, value, "", "human_operator", comment)
     else:
         return
     if result["success"]:
