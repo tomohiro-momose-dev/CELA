@@ -3079,10 +3079,51 @@ FREEZE_AGREEMENT_TOOL = {
 }
 
 
+def _resolve_agreement_id(conn: sqlite3.Connection, run_id: str, given_id: str) -> tuple[str | None, list[str]]:
+    """[BL-311] agreements.idの厳密一致が失敗した場合に、枝番（`_new_record_id`が付与する
+    末尾のuuid6桁、BL-215）の省略を自己修復する。
+
+    [経緯] log/2026-08-29/1809で、Detectorがdepends_on/citationで`AG-1787986026078`
+    （正しくは`AG-1787986026078-8663f0`）と枝番を落として参照し、write_agreementの
+    guardに2回連続で拒否された末に、SUPERSEDEを諦めてcitationへ逃げる（＝古い誤った
+    agreementがstatus='Reviewed'のまま差し替えられず残存する）という実害が観測された。
+    IDはタイムスタンプ(ms)の時点でほぼ一意（BL-215の設計意図）なため、前方一致で
+    ちょうど1件に絞れる場合のみ自己修復し、0件/複数件は呼び出し元でエラーとして扱う
+    （曖昧な場合に憶測で決め打ちしない、§13.2/§15.3）。
+
+    Returns: (resolved_full_id, candidates)。
+        - 厳密一致 or 前方一致1件のみ → (フルID, [])
+        - 前方一致0件（＝存在しない） → (None, [])
+        - 前方一致2件以上（＝曖昧） → (None, 候補IDのリスト)
+    """
+    exists = conn.execute(
+        "SELECT 1 FROM agreements WHERE id=? AND run_id=?", (given_id, run_id)
+    ).fetchone()
+    if exists:
+        return given_id, []
+    candidates = [
+        row[0] for row in conn.execute(
+            "SELECT id FROM agreements WHERE id LIKE ? AND run_id=?",
+            (given_id + "-%", run_id),
+        ).fetchall()
+    ]
+    if len(candidates) == 1:
+        print(f"  🩹 [ID自己修復][BL-311] 枝番省略ID '{given_id}' を '{candidates[0]}' へ自己修復しました。")
+        return candidates[0], []
+    return None, candidates
+
+
 def freeze_agreement(conn: sqlite3.Connection, run_id: str, agreement_id: str, reason: str) -> dict:
     """【SLM要約】
     [R5 F-8.3] 指定されたagreementのis_frozenを1に更新し、Freeze自体を監査ログ（decisions）として記録する。
+    [BL-311] agreement_idの枝番省略はSELECT前方一致で自己修復し、曖昧な場合のみ候補を提示する。
     """
+    resolved_id, candidates = _resolve_agreement_id(conn, run_id, agreement_id)
+    if resolved_id is None:
+        if candidates:
+            return {"success": False, "error": f"agreement_id '{agreement_id}' は複数のagreementに前方一致し曖昧です。枝番を含む正確なIDを指定してください。候補: {candidates}"}
+        return {"success": False, "error": f"agreement_id '{agreement_id}' が見つかりません"}
+    agreement_id = resolved_id
     cur = conn.execute(
         "UPDATE agreements SET is_frozen = 1 WHERE id = ? AND run_id = ?", (agreement_id, run_id)
     )
@@ -4247,14 +4288,21 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
         return {"success": False, "error": perm_error}
 
     # 4. depends_onリレーション整合性チェック
+    # [BL-311] 枝番（uuid6桁）省略は前方一致で自己修復し、args["depends_on"]を実IDへ
+    # 差し替える（この後の_commit_agreement_from_tool呼び出しへ同一dictを渡すため、
+    # ここでの書き換えがdepends_on_val/relation_edgesへそのまま伝播する）。
     if args.get("depends_on"):
+        resolved_depends_on = []
         for dep_id in args["depends_on"]:
-            exists = conn.execute(
-                "SELECT 1 FROM agreements WHERE id=? AND run_id=?", (dep_id, run_id)
-            ).fetchone()
-            if not exists:
+            resolved_id, candidates = _resolve_agreement_id(conn, run_id, dep_id)
+            if resolved_id is None:
+                if candidates:
+                    print(f"  🚫 [write_agreement guard] depends_on IDが複数候補に前方一致し曖昧なため拒否: caller={caller_role}, dep_id={dep_id}, candidates={candidates}, topic={args.get('topic')!r}")
+                    return {"success": False, "error": f"depends_onのID '{dep_id}' は複数のagreementに前方一致し曖昧です。枝番を含む正確なIDを指定してください。候補: {candidates}"}
                 print(f"  🚫 [write_agreement guard] 存在しないdepends_on IDを拒否: caller={caller_role}, dep_id={dep_id}, topic={args.get('topic')!r}")
                 return {"success": False, "error": f"depends_onに存在しないID: {dep_id}"}
+            resolved_depends_on.append(resolved_id)
+        args["depends_on"] = resolved_depends_on
 
     # 4.5. [BL-131] task_id実在チェック。entry_type='Decision'（ゴール直下の一般的な合意事項）は
     # タスクに紐づかない全体決定もありうるため対象外とする。
