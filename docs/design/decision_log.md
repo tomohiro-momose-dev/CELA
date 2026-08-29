@@ -3661,6 +3661,20 @@
 
 ---
 
+### D-263: BL-308 — `_interactive_hil_issue_loop`をトピック種別で分岐させ、確定値の破損を防ぐ
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-29 |
+| 状態 | `decided` |
+| 決定者 | t-momose（「--interactive-hilで対話的にHILを解決しましたが、レジュームしてもまだ人間の回答待ちとなる」と実運用中の不具合を報告。原因説明とDB修正・コード修正の両方の提案に対し「直してください」と両方を承認） |
+| **決定理由** | run_id=1787890406-1e73a89dの実際のターミナルログとDBを確認した結果、ユーザーがgoal_escalation_hil_ESC-1787977807466-799e0bを「approve」で承認した際、続く「確定値 (value):」プロンプトへ空Enterで進めたため、`verified_facts`へ空文字列が`confidence='confirmed'`として書き込まれていた。`revise_goal`側（`_get_goal_escalation_hil_decision`、`cela_main.py:3327`）は`_GOAL_ESCALATION_HIL_APPROVED_VALUE`（"approved"）との厳密一致を要求するため、空文字列では通らず、`issue_log.status='resolved'`（見かけ上解決済み）とAI側の未承認判定が食い違っていた。根本原因は`_interactive_hil_issue_loop`のapprove分岐が、トピック種別を区別せず一律で自由記述の確定値を尋ねていたこと。逆方向に、reject分岐は全トピック一律で文字列"rejected"を確定値として書き込んでおり、goal_escalation_hil以外の数値系トピック（license_surrender_count等）ではこの文字列が数値変数を破損させる問題も判明した。 |
+| 決定内容 | `topic.startswith(_GOAL_ESCALATION_HIL_TOPIC_PREFIX)`でトピック種別を判定し、goal_escalation_hil_*トピックはapprove/reject双方とも自由記述を求めず対応する定数値（新設`_GOAL_ESCALATION_HIL_REJECTED_VALUE`を含む）を自動セット、それ以外のトピックはrejectで'rejected'文字列を書き込まず既存のverified_facts値をそのまま人間確認済みへ格上げするよう修正した。実害を受けたrun_id=1787890406-1e73a89dのDBも、バックアップ後に該当issue_log行を一時的に'open'へ戻し、既存の公式API（`_answer_human_input`）を正しい値`approved`で再実行して訂正した（AGENTS.md §18.3準拠、raw SQLでの直接上書きではなく既存APIを再利用）。 |
+| 影響 | `cela_main.py`（新規`_GOAL_ESCALATION_HIL_REJECTED_VALUE`定数、`_interactive_hil_issue_loop`のトピック種別分岐）、`tests/test_bl308_hil_topic_aware_answer.py`（新規5件）、`tests/test_bl274_interactive_hil.py`（既存reject系2件を意図的な仕様変更に合わせ更新）。`cela.db`（実運用DB）の該当1行を訂正済み、バックアップファイルを保持。AGENTS.md §17.1準拠：`git stash`で本修正を一時的に取り除き新規5件中4件・既存2件の計6件が期待通り失敗することを確認後、`git stash pop`で復元。 |
+| 関連 BL | BL-308（本件）、BL-274（`--interactive-hil`原設計）、BL-236（goal_escalation_hil原設計） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
