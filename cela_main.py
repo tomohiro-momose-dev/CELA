@@ -5934,9 +5934,30 @@ _TEXT_REPETITION_MIN_REPEATS = 3      # BL-287のnudge閾値(3)と揃える。
 # メモリ安全弁としてのみ働く。
 _TEXT_REPETITION_MAX_STREAM_CHARS = 200_000
 
+# [BL-304] AGENTS.md §7 重要定数（2026-08-29 ユーザー承認値）: BL-298の「ストリーム全体で
+# 無制限に累積カウント」方式は近接性の制約を完全に撤廃したため、log/2026-08-28の2031・2049・
+# 2208で過検知（誤検知）を起こしていたことが実測で判明した。3件とも、実際のreasoningは
+# 複数の観点（人口按分の妥当性、「累計」の定義、代替アプローチの検討等）を検討する正当な
+# 長い思考であり、同一の80字前後のアンカー文（例:「escalation says the correct values
+# are...」）を思考の節目ごとに3回程度言い直していただけだった。一方、真の生成崩壊
+# （1919・2131）は同一文・同一段落がほぼ間隔なく繰り返す。BL-304は「直近の同一ngram出現からの
+# 間隔がmax_gap文字以内である場合のみ連続反復とみなす」近接ゲートを導入し、この2種を区別する。
+#
+# 閾値の実測根拠（tests/test_bl304_repetition_proximity_gate.pyのcalibration系テストで
+# 固定値として再現・保存）: 各ログのiter初回試行の生reasoningをそのままガードへ通し、
+# 「新設計がその値以上のmax_gapで初めて発火する最小値」を求めた。
+#   - 1919（真の崩壊、周期2159字）: max_gap=2200で発火（新設計でも検出可能な下限）
+#   - 2131（真の崩壊）        : max_gap=3400で発火（＝真の崩壊を捉えるには3400以上が必要）
+#   - 2031（誤検知だった）    : max_gap=10000でも不発（アンカー文の間隔が1万字超）
+#   - 2049（誤検知だった）    : max_gap=6000で初めて発火（＝5000台までは誤検知しない）
+#   - 2208（誤検知だった）    : max_gap=5000で初めて発火（＝4000台までは誤検知しない）
+# 真の崩壊を確実に捉える下限(3400)と、誤検知が生じ始める上限(5000)の間に安全域があるため、
+# その中間に余裕を持たせた4000を採用する（下限から+600、上限から-1000のマージン）。
+_TEXT_REPETITION_MAX_GAP = 4000
+
 
 class _StreamRepetitionGuard:
-    """[BL-297/BL-298] ストリーミング中のreasoning/contentテキストに対するn-gram反復の
+    """[BL-297/BL-298/BL-304] ストリーミング中のreasoning/contentテキストに対するn-gram反復の
     機械的検出。BL-231/287はcompletion完了後・iteration間の比較にしか働かないため、
     単一completion内で反復し続ける生成崩壊（log/2026-08-28/1313等、9分半・15回以上
     ツール呼び出しゼロで反復）を検知できなかった。このクラスはchunk受信のたびに
@@ -5945,17 +5966,29 @@ class _StreamRepetitionGuard:
     BL-298: 直近window文字だけを保持して定期的に再走査する初版設計は、反復の周期が
     windowに対して長い場合（実機観測: 2159文字周期）に3回目の出現がバッファに同時に
     残らず検出漏れした。そのためストリーム全体にわたってngramの出現回数を
-    インクリメンタルに積算する方式に変更した。1回のfeed()呼び出しのコストは
+    インクリメンタルに積算する方式に変更した。
+
+    BL-304: BL-298は近接性の制約を完全に撤廃した結果、「同じアンカー文を長い正当な思考の
+    節目ごとに言い直す」という正常なパターンを、真の生成崩壊と区別できず過検知していた
+    （log/2026-08-28の2031・2049・2208で実測確認）。本クラスは各ngramの直近出現位置を
+    記録し、次の出現までの間隔がmax_gapを超えたら「連続反復」のカウントをリセットする
+    （間隔内で連続した出現のみをmin_repeats回まで数える）。1回のfeed()呼び出しのコストは
     新しく届いたchunk長にのみ比例し、過去分の再走査は発生しない。
     """
     def __init__(self, ngram_len: int = _TEXT_REPETITION_NGRAM_LEN,
                  min_repeats: int = _TEXT_REPETITION_MIN_REPEATS,
+                 max_gap: int = _TEXT_REPETITION_MAX_GAP,
                  max_stream_chars: int = _TEXT_REPETITION_MAX_STREAM_CHARS) -> None:
         self._ngram_len = ngram_len
         self._min_repeats = min_repeats
+        self._max_gap = max_gap
         self._max_stream_chars = max_stream_chars
-        self._counts: dict[str, int] = {}
+        # [BL-304] gram -> 直近出現の絶対位置（ストリーム先頭からの文字オフセット）
+        self._last_pos: dict[str, int] = {}
+        # [BL-304] gram -> 直近出現までの間隔がmax_gap以内だった連続回数
+        self._streak: dict[str, int] = {}
         self._carry = ""
+        self._carry_start_abs = 0  # self._carryがストリーム全体の中で始まる絶対位置
         self._total_chars = 0
         self._capped = False
 
@@ -5976,12 +6009,22 @@ class _StreamRepetitionGuard:
         if len(scan_text) >= self._ngram_len:
             for i in range(len(scan_text) - self._ngram_len + 1):
                 gram = scan_text[i:i + self._ngram_len]
-                n = self._counts.get(gram, 0) + 1
-                self._counts[gram] = n
-                if n >= self._min_repeats:
+                abs_pos = self._carry_start_abs + i
+                last = self._last_pos.get(gram)
+                if last is not None and (abs_pos - last) <= self._max_gap:
+                    streak = self._streak.get(gram, 1) + 1
+                else:
+                    # [BL-304] 間隔がmax_gapを超えた場合、これは「反復」ではなく
+                    # 「正当な思考の節目での言い直し」とみなし、連続カウントを1から数え直す。
+                    streak = 1
+                self._last_pos[gram] = abs_pos
+                self._streak[gram] = streak
+                if streak >= self._min_repeats:
                     triggered = True
         if self._ngram_len > 1:
-            self._carry = scan_text[-(self._ngram_len - 1):]
+            carry_len = self._ngram_len - 1
+            self._carry = scan_text[-carry_len:]
+            self._carry_start_abs = self._carry_start_abs + len(scan_text) - carry_len
         return triggered
 
 
