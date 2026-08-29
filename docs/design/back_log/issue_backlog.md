@@ -334,6 +334,7 @@
 | BL-305 | 高 | `cela_main.py`（新規`_TEXT_REPETITION_NGRAM_LEN_CONTENT`定数、content用`_StreamRepetitionGuard`の2箇所へ配線）、`tests/test_bl305_content_ngram_len.py`（新規8件）、`tests/test_bl297_stream_repetition_guard.py`（配線確認テストの期待値更新） | **`done`。** BL-304適用後の`log/2026-08-29/1003`・`1054`で、ユーザーから「まだ、過検知な気がします」との指摘。追跡した結果、1054（Expert）は真の崩壊（同一チェックリスト段落がほぼ間隔ゼロで3回再出現）で正しく検知されていたが、1003のDecision Extractor（`tools=None`でJSON配列を直接出力する、コードベース全体で現状唯一のノードと確認済み）はBL-304とは別原因の過検知だった。Decision Extractorが出力する`extracted_events`配列の各要素は、`proposed_by`（そのターンでは常に"Agent"）・`phase_id`/`task_id`（そのターンの現在フェーズ/タスクに固定）・`owned_variable_values`（変数を持たない要素では共通の"{}"）等、要素間で正当に完全一致するフィールドを複数含む。実ログの値を使った再現で共通部分文字列は約150字、content/rationaleも意図的に一致させた最も敵対的な人工ケースでも239字までしか伸びなかった一方、BL-297設計当初のコメントが示す通りこれまで観測された全ての真の生成崩壊はreasoningチャンネルでのみ発生しており、content側の真の反復崩壊は実機で一件も観測されていない。ユーザーへ「(1)content/reasoning別基準」「(2)`tools=None`ノードでは無効化」の2案を提示し、(1)が選択された（「1の方が良いでは？？」）。reasoning用ガードはngram_len=80のまま維持し、content用ガードのみ`_TEXT_REPETITION_NGRAM_LEN_CONTENT`（400、実測した敵対的最悪ケース239字に十分なマージンを持たせつつ実際の生成崩壊の文字数（実測: 数千〜7万字級）とは二桁小さい値）を使うよう分離した。 | P1 |
 | BL-306 | 中 | `cela_main.py`（`call_detector`のBL-278ブロックへ選定基準の十分性判定強化を追記）、`tests/test_bl306_selection_sufficiency_label_check.py`（新規4件） | **`done`。** run_id=1787890406-1e73a89dのDB調査中、ユーザーから「学校の候補が茅野高校一つだけというのが気になります」との指摘。task_1_2成果物（`log/2026-08-29/1054/whiteboards/phase_1_task_1_2_V1.md`）を確認したところ、ゴール文が「小学校、中学校、高校」と3種を明示的に列挙しているにもかかわらず、「学校群」はGIS代表地点として永明小学校1校を使い、通学需要は別の茅野高校を対象に計上、中学校は完全に欠落していた。実際のDetector審査記録（`agreements.reason_why`、topic=task_1_2_domain_validity_review）を確認すると、BL-278（複数候補からの選定妥当性・十分性チェック）は「複数候補からの選定(BL-278)は代表地点の選択に基準(代表地点)が明記され問題なし」の一文で通過しており、基準の**存在**（「代表地点」というラベル）を確認しただけで、基準の**十分性**（本来BL-278が要求していた「本質に照らして量・範囲として十分か」の評価）を実質的に評価していなかったことが判明した。ユーザー指示「プロンプトは具体的に、一般的に書いてください」を受け、学校固有の記述を避け、「役割ラベル（『代表地点として』等）を添えただけで十分性の理由が伴っていないものは、基準明記なしと同様に扱う」「ゴール文が複数の名称付きサブカテゴリを列挙しているのに一部だけを代表として扱っている場合を重点確認」という一般原則としてBL-278ブロックへ追記した。 | P2 |
 | BL-307 | 中 | `cela_main.py`（`call_expert`のsystem_prompt・light_system_prompt両方へ確定前セルフチェックを追記）、`tests/test_bl307_expert_coverage_self_check.py`（新規5件） | **`done`。** BL-306はDetector側の事後審査を強化する対応に留まり、Expert自身が最初から見落とさないための予防策ではなかった。BL-306の議論の中で、Expertが唯一「1層」のまま巨大な単一プロンプトでGIS実測・web検証・OD推計・執筆を全て担っている点（User AI/Detectorは複数段階に分割済み）が、代表性検討が薄くなる一因ではないかとユーザーと議論。task_plannerでのサブタスク事前分解＋Expertの単純worker化（重い案）と、既存プロンプトへの確認事項追記（軽い案）を比較提示し、2層化の場合の追加LLM呼び出し・コスト増というトレードオフを説明した上で、ユーザーが「うーんまずは、プロンプトで行きましょうか」と軽量案を選択。BL-306と対になる一般原則（役割ラベルのみでの代表化に理由が伴っているか、複数の名称付きサブカテゴリの一部だけを無言で切り捨てていないか、GIS代表地点と別記述の対象が無自覚に食い違っていないか）を、Expertのフル版system_prompt（iter=1用）・軽量版light_system_prompt（BL-178、iter=2以降用）の両方に同一文言で追記した。1箇所のみだとiter=1で即座に成果物を確定する単発ターンでは触れないため、両方への配線をテストで機械的に確認している。 | P2 |
+| BL-308 | 高 | `cela_main.py`（新規`_GOAL_ESCALATION_HIL_REJECTED_VALUE`定数、`_interactive_hil_issue_loop`のapprove/reject分岐をトピック種別で分岐）、`tests/test_bl308_hil_topic_aware_answer.py`（新規5件）、`tests/test_bl274_interactive_hil.py`（既存reject系2件を意図的な仕様変更に合わせ更新） | **`done`。** run_id=1787890406-1e73a89dの実運用で発生した実害。ユーザーが`--interactive-hil`でgoal_escalation_hil_*トピック（ゴール改定エスカレーションの承認）を「approve」で決定したが、続く「確定値 (value):」プロンプトを空Enterで済ませた結果、`verified_facts`へ空文字列が`confidence='confirmed'`として書き込まれた。`revise_goal`（`_get_goal_escalation_hil_decision`）は`_GOAL_ESCALATION_HIL_APPROVED_VALUE`（"approved"）との厳密一致を要求するため空文字列は通らず、`issue_log.status`は'resolved'で見かけ上は解決済みなのに、`--resume`後もAI側は未承認と判定し続ける食い違いが発生した（ユーザー報告「レジュームしてもまだ人間の回答待ちとなる」）。原因は`_interactive_hil_issue_loop`のapprove分岐が、トピック種別を区別せず一律で自由記述の確定値を尋ねていたこと（reject分岐は既に"rejected"を自動セットしていたが、これも全トピック一律で、goal_escalation_hil以外の数値系トピック（license_surrender_count等）には'rejected'という文字列が確定値として書き込まれ破損する逆方向の問題があった）。`topic.startswith(_GOAL_ESCALATION_HIL_TOPIC_PREFIX)`でトピック種別を判定し、goal_escalation_hil系はapprove/reject双方とも対応する定数値を自動セット（自由記述を求めない）、それ以外はrejectで既存のverified_facts値をそのまま人間確認済みへ格上げする（無ければ空文字列、'rejected'という無意味な文字列を数値変数へ書き込まない）よう修正した。実害が発生していたrun_id=1787890406-1e73a89dのDB（`cela.db`）も、バックアップ後に該当issue_logを一時的に'open'へ戻し、`--answer-human-input --value approved`を正しい値で再実行して修正済み。 | P1 |
 
 ---
 
@@ -10324,6 +10325,49 @@ BL-306と対になる一般原則（学校固有の記述は含めない）を�
 **テスト**: `tests/test_bl307_expert_coverage_self_check.py`（新規5件）。フル版・軽量版それぞれへの存在確認、文言が計2箇所にのみ存在すること（重複貼付・片方への追記漏れの検知）、両方とも`_scratch_concerns_closure_instruction`呼び出し直後という位置関係の確認、学校固有名詞が含まれていないこと（一般化の確認）。AGENTS.md §17.1準拠：`git stash`で本修正を一時的に取り除き新規テスト5件中4件が期待通り失敗することを確認後、`git stash pop`で復元しコンパイル・再テスト成功を確認した。
 
 参照: `tests/test_bl307_expert_coverage_self_check.py`、`docs/design/decision_log.md` D-262、BL-306、BL-278。
+
+---
+
+### BL-308: `_interactive_hil_issue_loop`がトピック種別を区別せず確定値を扱っていた不具合
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-274（`--interactive-hil`の原設計）、BL-236（goal_escalation_hilの原設計、厳密一致チェック）、AGENTS.md §13（フォールバック値の下流汚染）、§18.3（DB訂正時のバックアップ・official API優先） |
+
+**経緯:**
+
+run_id=1787890406-1e73a89dで`--interactive-hil`を使って対話的にHILを解決したユーザーから、「レジュームしてもまだ人間の回答待ちとなる」と報告があった。
+
+**調査結果（実測、ユーザーが貼り付けた実際のターミナルログとDBの両方で確認）:**
+
+ユーザーはgoal_escalation_hil_ESC-1787977807466-799e0b（ゴール改定エスカレーション）を「approve」で承認したが、続く「確定値 (value):」プロンプトには何も入力せず空Enterで進めた：
+```
+承認しますか？ (approve/reject/skip): approve
+確定値 (value): 
+```
+実際にDBを確認すると、`verified_facts.goal_escalation_decision_ESC-1787977807466-799e0b`の値は空文字列のまま`confidence='confirmed'`として記録されていた。
+
+`revise_goal`（`_revise_goal_tool_impl`、`cela_main.py:3398`）は`_get_goal_escalation_hil_decision`（`cela_main.py:3327`）で、この値が`_GOAL_ESCALATION_HIL_APPROVED_VALUE`（`"approved"`、`cela_main.py:3261`）と**厳密一致**することを要求する（BL-236: LLMの自己申告ではなく人間が書いた確定値で判定する設計）。空文字列は一致しないため、AIは「まだ承認されていない」と判定し続ける。一方`issue_log.status`は正常に`'resolved'`になるため、`--pending-human-input`では解決済みに見え、両者の食い違いが「resumeしてもまだ待ち」という体感の不具合として現れていた。
+
+**根本原因:**
+
+`_interactive_hil_issue_loop`（`cela_main.py:18454`）のapprove分岐が、トピックの種類を区別せず一律で「確定値 (value):」という自由記述を尋ねていた。goal_escalation_hil_*トピックだけは、人間が入力すべき値が自由記述ではなく固定文字列（"approved"/"rejected"）でなければならない特殊な種別だが、その区別がなかった。逆方向の問題として、reject分岐は既に全トピック一律で文字列"rejected"を確定値として書き込んでおり、goal_escalation_hil以外の数値系トピック（例：license_surrender_count）では、この文字列が数値変数を破損させる（AGENTS.md §13相当）。
+
+**対応内容:**
+
+`topic.startswith(_GOAL_ESCALATION_HIL_TOPIC_PREFIX)`でトピック種別を判定する分岐を追加：
+- goal_escalation_hil_*トピック: approve/reject双方とも、自由記述を求めず`_GOAL_ESCALATION_HIL_APPROVED_VALUE`/新設`_GOAL_ESCALATION_HIL_REJECTED_VALUE`定数を自動セットする。
+- それ以外のトピック: approveは従来通り自由記述の値を求める（非退行）。rejectは`'rejected'`という文字列をもはや書き込まず、既存のverified_facts値（Expertが暫定登録済みの値等）をそのまま人間確認済みへ格上げする（無ければ空文字列）。
+
+**実害を受けたrun_id=1787890406-1e73a89dのDB訂正（AGENTS.md §18.3準拠）:**
+
+`cela.db`をタイムスタンプ付きでバックアップ後、該当issue_log行（1行、id確認済み）のみ`status`を`'open'`へ一時的に戻し、既存の公式API（`_answer_human_input`）を`--value approved`で再実行して正しい値へ訂正した。訂正後、`verified_facts`の値が`'approved'`・`confidence='confirmed'`になっていること、`issue_log.status='resolved'`に戻っていること、`--pending-human-input`が「実地調査待ちのissueはありません」を返すことを確認済み。
+
+**テスト**: `tests/test_bl308_hil_topic_aware_answer.py`（新規5件）。goal_escalation_hil_*トピックのapproveが自由記述を一切求めないこと（値入力を誤って要求すればinput_fnのStopIterationでテストが失敗する設計）、実際の不具合（空文字列がconfirmedとして書き込まれ`_get_goal_escalation_hil_decision`が一致しなくなること）の再現、reject分岐の非退行、配線・定数の確認。既存`tests/test_bl274_interactive_hil.py`のreject系2件は、意図的な仕様変更（'rejected'文字列を書き込まなくなったこと）に合わせて期待値を更新した（退行ではない）。AGENTS.md §17.1準拠：`git stash`で本修正を一時的に取り除き、新規5件中4件・既存2件の計6件が期待通り失敗することを確認後、`git stash pop`で復元しコンパイル・再テスト成功を確認した。
+
+参照: `tests/test_bl308_hil_topic_aware_answer.py`、`tests/test_bl274_interactive_hil.py`、`docs/design/decision_log.md` D-263、BL-274、BL-236。
 
 ---
 
