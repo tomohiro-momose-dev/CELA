@@ -173,6 +173,87 @@ class MultiLogger:
 # 実行時（__main__としての起動時）にのみ有効化する。
 
 # ===========================================================================
+# [BL-310] 監査ログフィルタ（`--audit-log`向け、事後フィルタ方式）
+# ===========================================================================
+# ユーザー要望: 「現在のlog_no_promptログから思考ログを除いたもの。ただしdb登録や
+# 参照状況は表示、オプションで各ノードのthinkも表示」。ライブ（ドライラン中にMultiLogger
+# へ3本目のストリームを追加）ではなく、既存のlog_no_prompt.mdを事後的にフィルタする方式を
+# 採用した（実装がシンプルで壊れにくく、過去に既に記録された全ログにも遡って使える）。
+#
+# 除外対象は2種類: (1) 💭ストリーミング思考の生プローズ（複数行にわたる）、
+# (2) thinkツールの呼び出し・結果行（🔧 ... think 実行 + 直後の→結果、通常は1行ずつに
+# 収まる）。それ以外（write_agreement/write_issue/read_*/python_repl等の🔧ツール実行、
+# 📝📌📋🆕✨📤🔒📄✅♻️🚫🔀🚨⚠️等のDB登録・状態変化行、💬発言＝モデルの最終出力）は
+# 全て残す。
+#
+# [既知の限界] 「構造マーカー行」の判定は、実際のログから収集した絵文字プレフィックスの
+# 経験的な一覧に基づく発見的（heuristic）手法であり、完全な構文解析ではない。将来
+# 新しい絵文字プレフィックスの出力が追加された場合、本フィルタが思考ブロックの終端を
+# 誤検出する可能性がある（監査補助ツールとしての実用上の精度を狙ったものであり、
+# 100%の正確性を保証するものではない）。
+_AUDIT_LOG_TIMESTAMP_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\]\s?")
+_AUDIT_LOG_REASONING_HEADER_RE = re.compile(r"^💭\s*\[[^\]]*\]\s*思考")
+_AUDIT_LOG_THINK_CALL_RE = re.compile(r"^🔧\s*\[[^\]]*\]\s*think\s*実行")
+_AUDIT_LOG_ROLE_LABEL_RE = re.compile(r"^\[[a-z_]+(?::[^\]]*)?\]")
+_AUDIT_LOG_STRUCTURAL_PREFIXES = (
+    "💬", "🔧", "🧰", "📌", "📋", "📝", "🆕", "✨", "📤", "🔒", "📄", "✅", "♻️", "⏭️",
+    "🚫", "🔀", "🚨", "⚠️", "ℹ️", "🔕", "🗂️", "🔎", "➡️", "🎯", "⏸️", "└", "→", "🛑", "🔁",
+    "🙋", "⏳", "🚀", "🆔", "⚙️", "🔷", "------", "===",
+)
+
+
+def _audit_log_strip_timestamp(line: str) -> str:
+    return _AUDIT_LOG_TIMESTAMP_RE.sub("", line, count=1)
+
+
+def _audit_log_is_structural_line(stripped_line: str) -> bool:
+    """タイムスタンプを除いた行が、思考ブロックを終端させる「構造マーカー行」かどうか。"""
+    s = stripped_line.lstrip()
+    if not s:
+        return False
+    if s.startswith(_AUDIT_LOG_STRUCTURAL_PREFIXES):
+        return True
+    return bool(_AUDIT_LOG_ROLE_LABEL_RE.match(s))
+
+
+def filter_audit_log_text(text: str, show_think: bool = False) -> str:
+    """[BL-310] log_no_prompt.md相当のテキストから、思考ログ（💭ストリーミング・
+    thinkツール呼び出し）を除いたテキストを返す。DB登録・参照状況（その他の🔧ツール実行、
+    📝📌等の状態変化行、💬最終発言）は変更せずそのまま残す。show_think=Trueの場合はthink
+    ツール呼び出しのみ復元する（💭ストリーミング思考は常に除外）。
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        stripped = _audit_log_strip_timestamp(line).lstrip()
+        if _AUDIT_LOG_REASONING_HEADER_RE.match(stripped):
+            # [BL-310] 💭思考ブロック開始。次の構造マーカー行が現れるかEOFまで、
+            # ヘッダ行自体を含めて丸ごとスキップする。
+            i += 1
+            while i < n:
+                nxt = _audit_log_strip_timestamp(lines[i]).lstrip()
+                if _audit_log_is_structural_line(nxt):
+                    break
+                i += 1
+            continue
+        if not show_think and _AUDIT_LOG_THINK_CALL_RE.match(stripped):
+            # [BL-310] thinkツール呼び出しは引数が同一行にインラインで収まる設計
+            # （BL-093のthink_handler）のため、呼び出し行＋直後の→結果行（あれば）
+            # ＋直後の空行（1つだけ、整形のため）をスキップすれば足りる。
+            i += 1
+            if i < n and _audit_log_strip_timestamp(lines[i]).lstrip().startswith("→"):
+                i += 1
+            if i < n and not _audit_log_strip_timestamp(lines[i]).strip():
+                i += 1
+            continue
+        out.append(line)
+        i += 1
+    return "".join(out)
+
+# ===========================================================================
 # ファイル出力用ユーティリティ
 # ===========================================================================
 def save_deliverable_to_file(topic: str, content: str) -> str:
@@ -18684,6 +18765,19 @@ if __name__ == "__main__":
         "--audit-report", metavar="RUN_ID", default=None,
         help="指定run_idのverified_facts/agreementsを、値・理由・出典・確定者・確定タスクとともに表示して終了する。",
     )
+    # [BL-310] 既存のlog_no_prompt.mdから思考ログ（💭ストリーミング・thinkツール呼び出し）を
+    # 除いたテキストを標準出力へ表示する事後フィルタ。DB登録・参照状況（その他のツール実行・
+    # 状態変化行・最終発言）はそのまま残る。
+    _cli_parser.add_argument(
+        "--audit-log", metavar="PATH", default=None,
+        help="log_no_prompt.mdのパス（またはそれを含むログフォルダ）を指定し、思考ログを"
+             "除いたテキストを標準出力へ表示する。--show-thinkと併用可。",
+    )
+    _cli_parser.add_argument(
+        "--show-think", action="store_true",
+        help="--audit-logと併用し、thinkツールの呼び出し・結果も表示する"
+             "（💭ストリーミング思考は--show-thinkでも常に除外される）。",
+    )
     _cli_parser.add_argument("--task-id", default="", help="--audit-reportの絞り込み対象task_id（省略時はphase-idか全件）。")
     _cli_parser.add_argument("--phase-id", default="", help="--audit-reportの絞り込み対象phase_id（task-id指定時は無視）。")
     _cli_parser.add_argument("--ref", default="",
@@ -18764,6 +18858,18 @@ if __name__ == "__main__":
         print(_audit_report(_conn, _cli_args.audit_report, task_id=_cli_args.task_id,
                             phase_id=_cli_args.phase_id, ref=_cli_args.ref))
         _conn.close()
+        sys.exit(0)
+
+    if _cli_args.audit_log:
+        _log_path = _cli_args.audit_log
+        if os.path.isdir(_log_path):
+            _log_path = os.path.join(_log_path, "log_no_prompt.md")
+        if not os.path.isfile(_log_path):
+            print(f"エラー: ログファイルが見つかりません: {_log_path}")
+            sys.exit(1)
+        with open(_log_path, encoding="utf-8") as _f:
+            _log_text = _f.read()
+        print(filter_audit_log_text(_log_text, show_think=_cli_args.show_think))
         sys.exit(0)
 
     # カスタムロガーを標準出力に設定（importのみでは発火させない。BL-027）
