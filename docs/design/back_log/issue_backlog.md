@@ -336,6 +336,7 @@
 | BL-307 | 中 | `cela_main.py`（`call_expert`のsystem_prompt・light_system_prompt両方へ確定前セルフチェックを追記）、`tests/test_bl307_expert_coverage_self_check.py`（新規5件） | **`done`。** BL-306はDetector側の事後審査を強化する対応に留まり、Expert自身が最初から見落とさないための予防策ではなかった。BL-306の議論の中で、Expertが唯一「1層」のまま巨大な単一プロンプトでGIS実測・web検証・OD推計・執筆を全て担っている点（User AI/Detectorは複数段階に分割済み）が、代表性検討が薄くなる一因ではないかとユーザーと議論。task_plannerでのサブタスク事前分解＋Expertの単純worker化（重い案）と、既存プロンプトへの確認事項追記（軽い案）を比較提示し、2層化の場合の追加LLM呼び出し・コスト増というトレードオフを説明した上で、ユーザーが「うーんまずは、プロンプトで行きましょうか」と軽量案を選択。BL-306と対になる一般原則（役割ラベルのみでの代表化に理由が伴っているか、複数の名称付きサブカテゴリの一部だけを無言で切り捨てていないか、GIS代表地点と別記述の対象が無自覚に食い違っていないか）を、Expertのフル版system_prompt（iter=1用）・軽量版light_system_prompt（BL-178、iter=2以降用）の両方に同一文言で追記した。1箇所のみだとiter=1で即座に成果物を確定する単発ターンでは触れないため、両方への配線をテストで機械的に確認している。 | P2 |
 | BL-308 | 高 | `cela_main.py`（新規`_GOAL_ESCALATION_HIL_REJECTED_VALUE`定数、`_interactive_hil_issue_loop`のapprove/reject分岐をトピック種別で分岐）、`tests/test_bl308_hil_topic_aware_answer.py`（新規5件）、`tests/test_bl274_interactive_hil.py`（既存reject系2件を意図的な仕様変更に合わせ更新） | **`done`。** run_id=1787890406-1e73a89dの実運用で発生した実害。ユーザーが`--interactive-hil`でgoal_escalation_hil_*トピック（ゴール改定エスカレーションの承認）を「approve」で決定したが、続く「確定値 (value):」プロンプトを空Enterで済ませた結果、`verified_facts`へ空文字列が`confidence='confirmed'`として書き込まれた。`revise_goal`（`_get_goal_escalation_hil_decision`）は`_GOAL_ESCALATION_HIL_APPROVED_VALUE`（"approved"）との厳密一致を要求するため空文字列は通らず、`issue_log.status`は'resolved'で見かけ上は解決済みなのに、`--resume`後もAI側は未承認と判定し続ける食い違いが発生した（ユーザー報告「レジュームしてもまだ人間の回答待ちとなる」）。原因は`_interactive_hil_issue_loop`のapprove分岐が、トピック種別を区別せず一律で自由記述の確定値を尋ねていたこと（reject分岐は既に"rejected"を自動セットしていたが、これも全トピック一律で、goal_escalation_hil以外の数値系トピック（license_surrender_count等）には'rejected'という文字列が確定値として書き込まれ破損する逆方向の問題があった）。`topic.startswith(_GOAL_ESCALATION_HIL_TOPIC_PREFIX)`でトピック種別を判定し、goal_escalation_hil系はapprove/reject双方とも対応する定数値を自動セット（自由記述を求めない）、それ以外はrejectで既存のverified_facts値をそのまま人間確認済みへ格上げする（無ければ空文字列、'rejected'という無意味な文字列を数値変数へ書き込まない）よう修正した。実害が発生していたrun_id=1787890406-1e73a89dのDB（`cela.db`）も、バックアップ後に該当issue_logを一時的に'open'へ戻し、`--answer-human-input --value approved`を正しい値で再実行して修正済み。 | P1 |
 | BL-309 | 中 | `cela_main.py`（新規`--interactive-query`CLIフラグ、`_run_interactive_query`・`_answer_general_query`・`_INTERACTIVE_QUERY_TOOLS`）、`tests/test_bl309_interactive_general_query.py`（新規9件） | **`done`。** ユーザー要望「エスカレーション以外でも対話で内容を確認できるようにしたい。すべてのdbへ能動的にアクセスして値や意思決定を追いたい。ただしログはあえて読ませず、dbだけで十分に追跡ができるか（意思決定や事物の系譜が成り立っているか）のテストにもしたい」を受けて実装。既存の`--interactive-hil`（BL-274）は保留issueの承認/却下フローに限定され、内部のQ&A（`_answer_human_question`）もagreements/verified_factsの2テーブルを事前に静的取得してプロンプトへ貼り付けるだけで、LLMが能動的にDBを検索する構造ではなかった。保留issueの有無を問わず起動できる自由質問専用の対話REPL（`--interactive-query RUN_ID`）を新設し、read_agreement/read_verified_fact/read_entity/verify_entity_geo/read_issues/read_escalation/read_deliverable_file/read_project_plan/trace_lineage/python_repl/thinkという既存の読み取り専用ツール実体（グラフ内ノードと同一実装、新規DB検索ロジックは書かない、AGENTS.md §15.1）をツールループとして与えた。生ログファイルを読むツールは一切含めない（現状のツール一覧にそもそも存在しないが、意図的な固定リスト化として明記）。グラフ外の独立CLIプロセスからのツール呼び出しのため、`get_active_conn()`/`_CURRENT_RUN_ID`等のモジュールグローバルを明示的に設定してからツールループへ入る（既存の`_answer_human_input`等と同じ約束事）。承認/却下は行わず、issue_logへは一切書き込まない（`_run_interactive_hil`との役割分担）。 | P2 |
+| BL-310 | 中 | `cela_main.py`（新規`--audit-log`/`--show-think`CLIフラグ、`filter_audit_log_text`他フィルタ用ヘルパー4件） | **`done`。** ユーザー要望「コマンドラインの監査ログをもっと充実させたい。現在のlog_no_promptログから思考ログを除いたもの。ただし、db登録や参照状況は表示、オプションで各ノードのthinkも表示」を受けて実装。実装方式（事後フィルタ vs ライブ3本目ログストリーム）と除外範囲（💭ストリーミング思考＋thinkツール呼び出しの両方を除外、それ以外の🔧ツール実行・DB登録/状態変化行・💬最終発言は残す）をAskUserQuestionで確認し、いずれも提示した推奨案（事後フィルタ方式、実装がシンプルで過去ログにも遡って使える）が選択された。既存のlog_no_prompt.mdを読み、`💭 [label] 思考` ヘッダから次の構造マーカー行（経験的に収集した🔧📝📌📋🆕✨📤🔒📄✅♻️⏭️🚫🔀🚨⚠️ℹ️🔕🗂️🔎➡️🎯⏸️└→🛑🔁🙋等の絵文字プレフィックス、または`[role_name]`形式の役割ラベル行）までを丸ごと除外し、`🔧 ... think 実行`呼び出し＋直後の→結果行のみを別途除外（`--show-think`で復元可、💭ストリーミング思考は`--show-think`でも常に除外）する事後フィルタを実装した。実際のログ（log/2026-08-29/1147で12%、生成崩壊を含むlog/2026-08-28/1919で45%の文字数削減）で目視検証し、write_agreement等のDB登録行・python_replコード等の非think内容が意図通り残ることを確認済み。 | P2 |
 
 ---
 
@@ -10403,6 +10404,38 @@ BL-308対応の直後、ユーザーから「エスカレーション以外で�
 **テスト**: `tests/test_bl309_interactive_general_query.py`（新規9件）。human_qa_logへの永続化、単発呼び出しではなくツールループとして呼ばれていること（tools引数の確認）、プロンプトにログ非参照の意図的制限が明記されていること、DBグローバルの設定漏れが無いこと、REPLループのq終了・回答後継続・issue_logへの非書き込み、ツールリストにログ読み込みツールが含まれないこと、CLIフラグの登録・ディスパッチ配線を確認。AGENTS.md §17.1準拠：`git stash`で本修正を一時的に取り除き新規テスト9件全件が期待通り失敗する（新設関数・定数・CLIフラグが未定義のため）ことを確認後、`git stash pop`で復元しコンパイル・再テスト成功を確認した。
 
 参照: `tests/test_bl309_interactive_general_query.py`、`docs/design/decision_log.md` D-264、BL-274。
+
+---
+
+### BL-310: 監査ログフィルタ（`--audit-log`）による思考ログ除去
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| 関連 | AGENTS.md §2（新機能実装前の設計提示）、MultiLogger（`cela_main.py:57`、log_no_prompt.md/log_with_prompt.mdの原設計） |
+
+**経緯:**
+
+BL-309対応の直後、ユーザーから「コマンドラインの監査ログをもっと充実させたい。現在のlog_no_promptログから思考ログを除いたもの。ただし、db登録や参照状況は表示、オプションで各ノードのthinkも表示。どうでしょうか？」との提案があった。
+
+**設計確認（AskUserQuestion）:**
+
+実装前に、AGENTS.md §2に従い設計を提示し2点を確認した：
+1. **除外範囲**: 「💭ストリーミング思考とthinkツール実行の両方を除外、それ以外（他の🔧ツール実行・DB登録/状態変化行・💬発言）は残す」という理解 → 承認。
+2. **実装方式**: 「事後フィルタ（既存log_no_prompt.mdを読んでフィルタする新CLIコマンド）」 vs 「ライブ（ドライラン中に3本目のログストリームを追加、MultiLoggerの改修が必要）」 → 事後フィルタを選択（実装がシンプルで壊れにくく、過去ログにも遡って使える）。
+
+**対応内容:**
+
+`--audit-log PATH`（log_no_prompt.mdまたはそれを含むフォルダを指定）と`--show-think`（thinkツール呼び出しのみ復元）のCLIフラグを追加。フィルタ本体`filter_audit_log_text`は、実際のログから収集した絵文字プレフィックス一覧（🔧📝📌📋🆕✨📤🔒📄✅♻️⏭️🚫🔀🚨⚠️ℹ️🔕🗂️🔎➡️🎯⏸️└→🛑🔁🙋等）または`[role_name]`形式の役割ラベル行を「構造マーカー行」と判定し、`💭 [label] 思考`ヘッダ行から次の構造マーカー行（またはEOF）までを丸ごと除外する。`🔧 ... think 実行`呼び出しは、引数が同一行にインラインで収まる設計（BL-093のthink_handler）を利用し、呼び出し行＋直後の→結果行のみをピンポイントで除外する（`--show-think`で復元可能、💭ストリーミング思考は`--show-think`でも常に除外）。
+
+**既知の限界**: 構造マーカー行の判定は実際のログから収集した経験的な一覧に基づく発見的（heuristic）手法であり、完全な構文解析ではない。将来新しい絵文字プレフィックスが追加された場合、思考ブロックの終端を誤検出する可能性がある（コード内コメントに明記）。
+
+**実機検証**: `log/2026-08-29/1147`（12%の文字数削減）・`log/2026-08-28/1919`（生成崩壊を含む、45%の文字数削減）に対して実際に実行し、`write_agreement`実行行・`python_repl`コード等の非think内容が意図通り残ること、`extracted_events`のような文字列がDecision Extractorの出力チャネル（💭内かどうか）によって正しく残る/除外されるかが分かれることを個別に確認した（削減率の違いは元のログの思考プローズ比率の違いであり不具合ではない）。
+
+**テスト**: `tests/test_bl310_audit_log_filter.py`（新規10件）。単一行/複数行/EOF終端の思考ブロック除外、thinkツール呼び出しのデフォルト除外・`--show-think`での復元、`--show-think`でも💭は常に除外されること、非think内容の完全な非変更、役割ラベル行が構造マーカーとして機能すること、CLIフラグの配線確認、実ログでの健全性確認（サイズ縮小・write_agreement行の残存）を検証。AGENTS.md §17.1準拠：`git stash`で本修正を一時的に取り除き新規テスト10件全件が期待通り失敗することを確認後、`git stash pop`で復元しコンパイル・再テスト成功を確認した。
+
+参照: `tests/test_bl310_audit_log_filter.py`、`docs/design/decision_log.md` D-265。
 
 ---
 
