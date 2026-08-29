@@ -335,6 +335,7 @@
 | BL-306 | 中 | `cela_main.py`（`call_detector`のBL-278ブロックへ選定基準の十分性判定強化を追記）、`tests/test_bl306_selection_sufficiency_label_check.py`（新規4件） | **`done`。** run_id=1787890406-1e73a89dのDB調査中、ユーザーから「学校の候補が茅野高校一つだけというのが気になります」との指摘。task_1_2成果物（`log/2026-08-29/1054/whiteboards/phase_1_task_1_2_V1.md`）を確認したところ、ゴール文が「小学校、中学校、高校」と3種を明示的に列挙しているにもかかわらず、「学校群」はGIS代表地点として永明小学校1校を使い、通学需要は別の茅野高校を対象に計上、中学校は完全に欠落していた。実際のDetector審査記録（`agreements.reason_why`、topic=task_1_2_domain_validity_review）を確認すると、BL-278（複数候補からの選定妥当性・十分性チェック）は「複数候補からの選定(BL-278)は代表地点の選択に基準(代表地点)が明記され問題なし」の一文で通過しており、基準の**存在**（「代表地点」というラベル）を確認しただけで、基準の**十分性**（本来BL-278が要求していた「本質に照らして量・範囲として十分か」の評価）を実質的に評価していなかったことが判明した。ユーザー指示「プロンプトは具体的に、一般的に書いてください」を受け、学校固有の記述を避け、「役割ラベル（『代表地点として』等）を添えただけで十分性の理由が伴っていないものは、基準明記なしと同様に扱う」「ゴール文が複数の名称付きサブカテゴリを列挙しているのに一部だけを代表として扱っている場合を重点確認」という一般原則としてBL-278ブロックへ追記した。 | P2 |
 | BL-307 | 中 | `cela_main.py`（`call_expert`のsystem_prompt・light_system_prompt両方へ確定前セルフチェックを追記）、`tests/test_bl307_expert_coverage_self_check.py`（新規5件） | **`done`。** BL-306はDetector側の事後審査を強化する対応に留まり、Expert自身が最初から見落とさないための予防策ではなかった。BL-306の議論の中で、Expertが唯一「1層」のまま巨大な単一プロンプトでGIS実測・web検証・OD推計・執筆を全て担っている点（User AI/Detectorは複数段階に分割済み）が、代表性検討が薄くなる一因ではないかとユーザーと議論。task_plannerでのサブタスク事前分解＋Expertの単純worker化（重い案）と、既存プロンプトへの確認事項追記（軽い案）を比較提示し、2層化の場合の追加LLM呼び出し・コスト増というトレードオフを説明した上で、ユーザーが「うーんまずは、プロンプトで行きましょうか」と軽量案を選択。BL-306と対になる一般原則（役割ラベルのみでの代表化に理由が伴っているか、複数の名称付きサブカテゴリの一部だけを無言で切り捨てていないか、GIS代表地点と別記述の対象が無自覚に食い違っていないか）を、Expertのフル版system_prompt（iter=1用）・軽量版light_system_prompt（BL-178、iter=2以降用）の両方に同一文言で追記した。1箇所のみだとiter=1で即座に成果物を確定する単発ターンでは触れないため、両方への配線をテストで機械的に確認している。 | P2 |
 | BL-308 | 高 | `cela_main.py`（新規`_GOAL_ESCALATION_HIL_REJECTED_VALUE`定数、`_interactive_hil_issue_loop`のapprove/reject分岐をトピック種別で分岐）、`tests/test_bl308_hil_topic_aware_answer.py`（新規5件）、`tests/test_bl274_interactive_hil.py`（既存reject系2件を意図的な仕様変更に合わせ更新） | **`done`。** run_id=1787890406-1e73a89dの実運用で発生した実害。ユーザーが`--interactive-hil`でgoal_escalation_hil_*トピック（ゴール改定エスカレーションの承認）を「approve」で決定したが、続く「確定値 (value):」プロンプトを空Enterで済ませた結果、`verified_facts`へ空文字列が`confidence='confirmed'`として書き込まれた。`revise_goal`（`_get_goal_escalation_hil_decision`）は`_GOAL_ESCALATION_HIL_APPROVED_VALUE`（"approved"）との厳密一致を要求するため空文字列は通らず、`issue_log.status`は'resolved'で見かけ上は解決済みなのに、`--resume`後もAI側は未承認と判定し続ける食い違いが発生した（ユーザー報告「レジュームしてもまだ人間の回答待ちとなる」）。原因は`_interactive_hil_issue_loop`のapprove分岐が、トピック種別を区別せず一律で自由記述の確定値を尋ねていたこと（reject分岐は既に"rejected"を自動セットしていたが、これも全トピック一律で、goal_escalation_hil以外の数値系トピック（license_surrender_count等）には'rejected'という文字列が確定値として書き込まれ破損する逆方向の問題があった）。`topic.startswith(_GOAL_ESCALATION_HIL_TOPIC_PREFIX)`でトピック種別を判定し、goal_escalation_hil系はapprove/reject双方とも対応する定数値を自動セット（自由記述を求めない）、それ以外はrejectで既存のverified_facts値をそのまま人間確認済みへ格上げする（無ければ空文字列、'rejected'という無意味な文字列を数値変数へ書き込まない）よう修正した。実害が発生していたrun_id=1787890406-1e73a89dのDB（`cela.db`）も、バックアップ後に該当issue_logを一時的に'open'へ戻し、`--answer-human-input --value approved`を正しい値で再実行して修正済み。 | P1 |
+| BL-309 | 中 | `cela_main.py`（新規`--interactive-query`CLIフラグ、`_run_interactive_query`・`_answer_general_query`・`_INTERACTIVE_QUERY_TOOLS`）、`tests/test_bl309_interactive_general_query.py`（新規9件） | **`done`。** ユーザー要望「エスカレーション以外でも対話で内容を確認できるようにしたい。すべてのdbへ能動的にアクセスして値や意思決定を追いたい。ただしログはあえて読ませず、dbだけで十分に追跡ができるか（意思決定や事物の系譜が成り立っているか）のテストにもしたい」を受けて実装。既存の`--interactive-hil`（BL-274）は保留issueの承認/却下フローに限定され、内部のQ&A（`_answer_human_question`）もagreements/verified_factsの2テーブルを事前に静的取得してプロンプトへ貼り付けるだけで、LLMが能動的にDBを検索する構造ではなかった。保留issueの有無を問わず起動できる自由質問専用の対話REPL（`--interactive-query RUN_ID`）を新設し、read_agreement/read_verified_fact/read_entity/verify_entity_geo/read_issues/read_escalation/read_deliverable_file/read_project_plan/trace_lineage/python_repl/thinkという既存の読み取り専用ツール実体（グラフ内ノードと同一実装、新規DB検索ロジックは書かない、AGENTS.md §15.1）をツールループとして与えた。生ログファイルを読むツールは一切含めない（現状のツール一覧にそもそも存在しないが、意図的な固定リスト化として明記）。グラフ外の独立CLIプロセスからのツール呼び出しのため、`get_active_conn()`/`_CURRENT_RUN_ID`等のモジュールグローバルを明示的に設定してからツールループへ入る（既存の`_answer_human_input`等と同じ約束事）。承認/却下は行わず、issue_logへは一切書き込まない（`_run_interactive_hil`との役割分担）。 | P2 |
 
 ---
 
@@ -10368,6 +10369,40 @@ run_id=1787890406-1e73a89dで`--interactive-hil`を使って対話的にHILを�
 **テスト**: `tests/test_bl308_hil_topic_aware_answer.py`（新規5件）。goal_escalation_hil_*トピックのapproveが自由記述を一切求めないこと（値入力を誤って要求すればinput_fnのStopIterationでテストが失敗する設計）、実際の不具合（空文字列がconfirmedとして書き込まれ`_get_goal_escalation_hil_decision`が一致しなくなること）の再現、reject分岐の非退行、配線・定数の確認。既存`tests/test_bl274_interactive_hil.py`のreject系2件は、意図的な仕様変更（'rejected'文字列を書き込まなくなったこと）に合わせて期待値を更新した（退行ではない）。AGENTS.md §17.1準拠：`git stash`で本修正を一時的に取り除き、新規5件中4件・既存2件の計6件が期待通り失敗することを確認後、`git stash pop`で復元しコンパイル・再テスト成功を確認した。
 
 参照: `tests/test_bl308_hil_topic_aware_answer.py`、`tests/test_bl274_interactive_hil.py`、`docs/design/decision_log.md` D-263、BL-274、BL-236。
+
+---
+
+### BL-309: 保留issueに紐づかない自由対話クエリ（`--interactive-query`）とDB完結性の検証
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| 関連 | BL-274（既存の対話型HIL、issue紐づき）、BL-236/BL-224（trace_lineage・系譜設計）、AGENTS.md §15.1（既存ツール実体の再利用） |
+
+**経緯:**
+
+BL-308対応の直後、ユーザーから「エスカレーション以外でも、対話で内容を確認できるようにしたい。さらに、すべてのdbへ能動的にアクセスして、例えば、値や意思決定を追いたい。ただ、ログはあえて読ませない、dbだけで十分に追跡ができるか、つまり意思決定や事物の系譜が成り立っているかのテストにもなる」との要望があった。
+
+**設計:**
+
+既存の`--interactive-hil`（BL-274）は「保留中issueの承認/却下」フローに限定され、内部のQ&A関数`_answer_human_question`もagreements/verified_factsの2テーブルを事前に静的取得してプロンプトへ貼り付けるだけの単発呼び出しで、LLM自身が能動的にDBを検索する構造ではなかった。
+
+保留issueの有無を問わず起動できる自由質問専用の対話REPL（`--interactive-query RUN_ID`）を新設した。Q&A部分（`_answer_general_query`）は、新規のDB検索ロジックを書く代わりに、既存の読み取り専用ツール実体（グラフ内の各ノードが使っているのと全く同じ実装）をツールループとして与える設計とした：`read_agreement`（agreements）・`read_verified_fact`（verified_facts）・`read_entity`/`verify_entity_geo`（entities/entity_attributes）・`read_issues`（issue_log）・`read_escalation`（goal_escalations）・`read_deliverable_file`（whiteboard_drafts/plan_drafts）・`read_project_plan`（phases）・`trace_lineage`（relation_edges、値・意思決定の上流/下流追跡）・`python_repl`（数値の再検算）・`think`。
+
+ユーザー要望の核心である「ログはあえて読ませない」を反映し、生の実行ログファイルを読むツールは一切含めない（現状そのようなツール自体が存在しないが、`_INTERACTIVE_QUERY_TOOLS`という固定リストとして明示し、将来ログ読み込みツールが追加された際に誤って混入しないようにした）。プロンプトにも「意図的な設計であり、CELAの決定事項DB・系譜記録がログ無しでも十分に追跡できるかを検証する目的も兼ねる」旨を明記し、DBだけで答えられない場合は推測せず正直に「DB記録からは判断できません」と答えるよう指示した。
+
+**技術的な配線上の注意点:**
+
+`read_agreement`等の既存ツール実体は、グラフ実行中のノード呼び出しを前提に`get_active_conn()`/`_CURRENT_RUN_ID`というモジュールグローバルを参照する設計になっている。本機能はLangGraphのstate/checkpointを経由しない独立CLIプロセスからの呼び出しのため、`_answer_general_query`内で明示的にこれらのグローバルを設定してからツールループへ入るようにした（既存の`_answer_human_input`等と同じ約束事）。
+
+**対応内容:**
+
+`--interactive-query`CLIフラグ、`_run_interactive_query`（REPLループ、承認/却下は行わずissue_logへは一切書き込まない）、`_answer_general_query`（ツールループ呼び出し、`human_qa_log`へ`issue_id=""`・`issue_topic="(general_query)"`として永続化）、`_INTERACTIVE_QUERY_TOOLS`（固定ツールリスト）を実装した。
+
+**テスト**: `tests/test_bl309_interactive_general_query.py`（新規9件）。human_qa_logへの永続化、単発呼び出しではなくツールループとして呼ばれていること（tools引数の確認）、プロンプトにログ非参照の意図的制限が明記されていること、DBグローバルの設定漏れが無いこと、REPLループのq終了・回答後継続・issue_logへの非書き込み、ツールリストにログ読み込みツールが含まれないこと、CLIフラグの登録・ディスパッチ配線を確認。AGENTS.md §17.1準拠：`git stash`で本修正を一時的に取り除き新規テスト9件全件が期待通り失敗する（新設関数・定数・CLIフラグが未定義のため）ことを確認後、`git stash pop`で復元しコンパイル・再テスト成功を確認した。
+
+参照: `tests/test_bl309_interactive_general_query.py`、`docs/design/decision_log.md` D-264、BL-274。
 
 ---
 
