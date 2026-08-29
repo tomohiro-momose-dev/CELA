@@ -3675,6 +3675,20 @@
 
 ---
 
+### D-264: BL-309 — 保留issueに紐づかない自由対話クエリ（`--interactive-query`）を新設し、ログ非依存のDB完結性を検証する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-29 |
+| 状態 | `decided` |
+| 決定者 | t-momose（「エスカレーション以外でも、対話で内容を確認できるようにしたい。さらに、すべてのdbへ能動的にアクセスして、例えば、値や意思決定を追いたい。ただ、ログはあえて読ませない、dbだけで十分に追跡ができるか、つまり意思決定や事物の系譜が成り立っているかのテストにもなる」） |
+| **決定理由** | 既存の`--interactive-hil`（BL-274）は保留issueの承認/却下フローに限定され、内部のQ&A（`_answer_human_question`）もagreements/verified_factsの2テーブルを事前に静的取得してプロンプトへ貼り付けるだけの単発呼び出しで、LLMが能動的にDBを検索する構造ではなかった。ユーザーは保留issueの有無を問わない自由質問、より広いDBテーブルへの能動的アクセス、そしてログファイルを意図的に見せないことでCELAの決定事項DB・系譜（lineage）記録がログ無しでも十分に意思決定・数値の経緯を追跡できる設計になっているかを検証したいという意図を明示した。 |
+| 決定内容 | `--interactive-query RUN_ID`という新規CLIフラグ・REPL（`_run_interactive_query`/`_answer_general_query`）を追加。新規のDB検索ロジックは書かず、グラフ内の各ノードが使っているのと同じ既存の読み取り専用ツール実体（`read_agreement`/`read_verified_fact`/`read_entity`/`verify_entity_geo`/`read_issues`/`read_escalation`/`read_deliverable_file`/`read_project_plan`/`trace_lineage`/`python_repl`/`think`）をツールループとして与える（AGENTS.md §15.1）。生ログファイルを読むツールは`_INTERACTIVE_QUERY_TOOLS`という固定リストに一切含めない。グラフ外の独立CLIプロセスからのツール呼び出しのため、`get_active_conn()`/`_CURRENT_RUN_ID`等のモジュールグローバルを明示的に設定してからツールループへ入る。承認/却下は行わず、issue_logへは一切書き込まない（`--interactive-hil`との役割分担）。 |
+| 影響 | `cela_main.py`（新規CLIフラグ・2関数・1定数）、`tests/test_bl309_interactive_general_query.py`（新規9件）。AGENTS.md §17.1準拠：`git stash`で本修正を一時的に取り除き新規テスト9件全件が期待通り失敗することを確認後、`git stash pop`で復元。 |
+| 関連 BL | BL-309（本件）、BL-274（既存の対話型HIL、issue紐づき） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
