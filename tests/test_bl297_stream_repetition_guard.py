@@ -118,7 +118,10 @@ def test_feed_ignores_empty_chunk():
 def test_query_ai_live_wires_repetition_guard_in_both_branches():
     src = inspect.getsource(cela_main._query_AI_live)
     # tools=None分岐・toolsループ分岐それぞれでreasoning用・content用ガードを生成するため計4回。
-    assert src.count("_StreamRepetitionGuard()") == 4
+    # [BL-305] content用ガードはJSON構造の誤検知対策でngram_lenを明示指定するようになった
+    # （tests/test_bl305_content_ngram_len.py参照）ため、引数無し呼び出しはreasoning用の2回のみ。
+    assert src.count("_StreamRepetitionGuard()") == 2
+    assert src.count("_StreamRepetitionGuard(ngram_len=_TEXT_REPETITION_NGRAM_LEN_CONTENT)") == 2
     # 各ガードで.feed()が呼ばれる箇所（reasoning用2箇所・content用2箇所）。
     assert src.count(".feed(") == 4
 

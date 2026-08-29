@@ -331,7 +331,7 @@ client_summarizer = client_local
 model_summarizer = gemma_local
 
 client_user = client_openrouter
-model_user =    hy3
+model_user =    glm_5_3_flash # gemini_2_5
 
 # [BL-189] 従来はExpert/Orchestratorがclient_agent/model_agentを、Task Planner/Detector（両パス）/
 # Decision Extractor/Resource Arbiter/Reflection/Facilitator/Integrator/Reviewer QA/
@@ -341,10 +341,10 @@ model_user =    hy3
 # デフォルトは全ノードとも従来通りnemotron_3_ultra/client_openrouterのままなので、挙動は変わらない。
 # ノードごとに変えたい場合は、該当行のclient/model値だけを書き換えればよい。
 client_orchestrator = client_openrouter
-model_orchestrator = hy3 # nemotron_3_ultra
+model_orchestrator = glm_5_3_flash # nemotron_3_ultra
 
 client_expert = client_openrouter
-model_expert = hy3 # nemotron_3_ultra
+model_expert = glm_5_3_flash # nemotron_3_ultra
 
 client_task_planner = client_openrouter
 model_task_planner = nemotron_3_ultra # nemotron_3_ultra
@@ -353,35 +353,35 @@ client_task_plan_reviewer = client_openrouter
 model_task_plan_reviewer = nemotron_3_ultra # nemotron_3_ultra
 
 client_detector_domain = client_openrouter
-model_detector_domain = hy3 # nemotron_3_ultra
+model_detector_domain = glm_5_3_flash # nemotron_3_ultra
 client_detector_numeric = client_openrouter
-model_detector_numeric = hy3 # nemotron_3_ultra
+model_detector_numeric = glm_5_3_flash # nemotron_3_ultra
 
 client_decision_extractor = client_openrouter
-model_decision_extractor = hy3
+model_decision_extractor = glm_5_3_flash
 
 client_resource_arbiter = client_openrouter
-model_resource_arbiter = hy3 #nemotron_3_ultra
+model_resource_arbiter = glm_5_3_flash #nemotron_3_ultra
 
 client_reflection = client_openrouter
-model_reflection = hy3
+model_reflection = glm_5_3_flash
 
 client_facilitator = client_openrouter
-model_facilitator = hy3
+model_facilitator = glm_5_3_flash
 
 client_integrator = client_openrouter
-model_integrator = hy3 #nemotron_3_ultra
+model_integrator = glm_5_3_flash #nemotron_3_ultra
 
 client_reviewer_qa = client_openrouter
-model_reviewer_qa = hy3 #nemotron_3_ultra
+model_reviewer_qa = glm_5_3_flash #nemotron_3_ultra
 
 client_goal_essence = client_openrouter
-model_goal_essence = hy3 #nemotron_3_ultra
+model_goal_essence = glm_5_3_flash #nemotron_3_ultra
 
 # [BL-274] 対話型HIL（--interactive-hil）の単発Q&A応答生成用。グラフ実行を伴わない
 # スタンドアロンCLI呼び出しのため、他ノードと同じBL-189パターンで専用変数を持たせる。
 client_hil_qa = client_openrouter
-model_hil_qa = hy3
+model_hil_qa = glm_5_3_flash # gemini_2_5
 
 LOW_TEMP_LABEL_KEYWORDS = ("detector", "reflection", "review", "decision extractor", "summarizer")
 # JSON厳密出力が必要なノードのラベル（部分一致）
@@ -389,9 +389,9 @@ STRUCTURED_OUTPUT_LABEL_KEYWORDS = ("detector", "decision extractor", "reflectio
 
 
 MAX_TOKENS_BY_ROLE = {
-    "expert": 100000,
+    "expert": 64000,
     "user": 64000,
-    "detector": 100000,
+    "detector": 64000,
     "reflection": 64000,
     "review": 64000,
     "decision extractor": 64000,
@@ -5955,6 +5955,29 @@ _TEXT_REPETITION_MAX_STREAM_CHARS = 200_000
 # その中間に余裕を持たせた4000を採用する（下限から+600、上限から-1000のマージン）。
 _TEXT_REPETITION_MAX_GAP = 4000
 
+# [BL-305] AGENTS.md §7 重要定数（2026-08-29 ユーザー承認値）: BL-304は近接ゲートを導入したが、
+# log/2026-08-29/1003でDecision Extractor（`tools=None`でJSON配列を直接出力する、現状唯一の
+# ノード）がBL-304後もなお過検知した。原因はBL-304とは別で、近接性の問題ではなく、
+# 「content（最終JSON出力）は1回のcompletion内で構造的に類似したキー・値パターンが複数
+# 要素にわたって繰り返されうる」というBL-297設計当初からの既知リスク（本ファイルのBL-297
+# コメント参照）が、値まで含めて本当に一致するケースで実際に的中したもの。
+# extracted_events配列の各要素は、proposed_by（そのターンでは常に"Agent"）・phase_id/task_id
+# （そのターンの現在フェーズ/タスクに固定）・owned_variable_values（変数を持たない要素では
+# 共通の"{}"）等、要素間で正当に完全一致するフィールドを複数含む。実測（
+# tests/test_bl305_content_ngram_len.pyのcalibration系テストで固定値として再現・保存）:
+# 実ログの値をそのまま使った再現（proposed_by/phase_id/task_id/owned_variable_valuesが
+# 一致、content/rationale/target_topicのみ相違）で共通部分文字列は最大150字前後、
+# content/rationaleも意図的に一致させた最も敵対的な人工ケース（action_type/entry_type/
+# status/content/rationaleを全て共通化しtarget_topicのみ相違）でも239字までしか伸びなかった。
+# 一方、reasoning側の真の崩壊（BL-297が元々対象とした「150字前後の段落反復」、および
+# BL-298/304で確認した1919・2131の実例）はいずれもreasoningチャンネルでのみ観測されており
+# （本ファイルのBL-297設計コメント「今回観測した4件の反復は全てreasoning側で発生している」
+# 参照）、content側の真の反復崩壊は今のところ実機で一件も観測されていない。そのため
+# reasoning側のngram長(80)は変更せず、content側にのみ別の（より長い）ngram長を適用する。
+# 実測した敵対的最悪ケース(239字)に対して十分なマージンを持たせ、かつ実際の生成崩壊の
+# 文字数（実測: 数千〜7万字級）とは依然として二桁小さい400を採用する。
+_TEXT_REPETITION_NGRAM_LEN_CONTENT = 400
+
 
 class _StreamRepetitionGuard:
     """[BL-297/BL-298/BL-304] ストリーミング中のreasoning/contentテキストに対するn-gram反復の
@@ -6260,7 +6283,9 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                 content_started = False
                 finish_reason = None
                 _bl297_reasoning_guard = _StreamRepetitionGuard()
-                _bl297_content_guard = _StreamRepetitionGuard()
+                # [BL-305] content側はJSON構造の正当な繰り返し（キー名・共通値）を誤検知
+                # しないよう、reasoning側より長いngram長を使う（詳細は定数コメント参照）。
+                _bl297_content_guard = _StreamRepetitionGuard(ngram_len=_TEXT_REPETITION_NGRAM_LEN_CONTENT)
                 _bl297_repetition_detected = False
                 for chunk in response_stream:
                     if not chunk.choices:
@@ -6385,7 +6410,9 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                     finish_reason = None
                     tool_call_accum: dict[int, dict] = {}
                     _bl297_reasoning_guard = _StreamRepetitionGuard()
-                    _bl297_content_guard = _StreamRepetitionGuard()
+                    # [BL-305] content側はJSON構造の正当な繰り返し（キー名・共通値）を誤検知
+                    # しないよう、reasoning側より長いngram長を使う（詳細は定数コメント参照）。
+                    _bl297_content_guard = _StreamRepetitionGuard(ngram_len=_TEXT_REPETITION_NGRAM_LEN_CONTENT)
                     _bl297_repetition_detected = False
                     for chunk in stream:
                         if not chunk.choices:
