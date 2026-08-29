@@ -331,6 +331,7 @@
 | BL-302 | 高 | `cela_main.py`（`_query_AI_live`: `_reasoning_start_idx`のNone初期化、`except _StreamRepetitionRetryError`での`reasoning_parts_all`切り詰め）、`tests/test_bl302_reasoning_trim_on_retry.py`（新規4件） | **`done`。** ユーザーからの鋭い指摘「再試行時にiterをやり直す際、ループしている思考ログを積み上げてないですよね？」を受けて調査した結果、実際に積み上がっていたことが判明。`reasoning_parts_all`（BL-122によりAPIリトライ・BL-298の再試行をまたいで保持される設計）は、BL-297/298の反復ガードが発火し打ち切られた失敗試行分も、打ち切り直前まで既に追記済みだった。切り詰めずに次の試行のreasoningが続けて追記されるため、最終的に成功した際`_LAST_REASONING_TEXT = "".join(reasoning_parts_all)`へ失敗試行の反復テキストがそのまま結合されて残っていた。これは`get_last_reasoning_text()`経由で`state["expert_last_reasoning"]`/`state["user_last_reasoning"]`（他ロールへの思考ログ提示、R5思考プロセス監査の原資）・`_detector_thought`（major判定時）・`_agreement_thought`（write_agreementがRejected時）へ伝播しており、反復ガードが打ち切った崩壊テキストが他ロールの監査対象へ混入する経路が実在した（BL-245の誤爆と同種の実害を将来引き起こしかねない）。`except _StreamRepetitionRetryError`で再試行する直前に、失敗した試行の開始位置（`_reasoning_start_idx`）まで`reasoning_parts_all`を切り詰めるよう修正。tools=Noneブランチは`reasoning_parts_all`を使わない（局所変数が試行ごとに再初期化されるため無関係）ため、`_reasoning_start_idx`をNone初期化し、Noneのままなら切り詰めをスキップするガードを追加した。 | P1 |
 | BL-303 | 中 | `tests/test_bl302_reasoning_trim_on_retry.py`（新規1件、コード変更なし・検証のみ） | **`done`。** BL-302対応直後、ユーザーから「それに加えて、ループしているログを見せられると次のiterでも同じ轍を踏みやすくなります（おそらく）」との追加懸念があった。`_query_AI_live`のtoolsループ分岐を精査した結果、`loop_messages.append(msg.model_dump())`（実際にAPIへ送信されるメッセージ履歴への追記、しかもreasoningは含まずcontent/tool_callsのみ）は、ストリームが正常に完了しtool_callsが続く場合にのみ実行されることを確認した。反復ガードが`_StreamRepetitionRetryError`を送出するのは、この追記より前——ストリーム受信中の`break`時点——であり、失敗した試行は`loop_messages`に一切触れないまま中断される。したがって再試行時にAPIへ実際に送信される`messages`は、失敗試行のものと完全に同一であり、**モデルは自分自身の直前の反復した出力を一切見ずに再挑戦する**ことが判明した（BL-302が対処したのは別の経路＝他ロールへ後で提示される思考ログの汚染であり、リトライ自体への影響ではなかった）。この結論を、モック経由で実際にcreate()呼び出しへ送信された`messages`を2回分捕捉し完全一致することを確認するテストで直接証明した（意図的に`loop_messages`へ漏洩させるコードを一時挿入しテストが正しく失敗することも確認済み、AGENTS.md §17.1相当の健全性確認）。コード変更は不要と判断。 | P2 |
 | BL-304 | 高 | `cela_main.py`（`_StreamRepetitionGuard`を近接ゲート付きstreak方式へ再設計、新規`_TEXT_REPETITION_MAX_GAP`定数）、`tests/test_bl304_repetition_proximity_gate.py`（新規9件） | **`done`。** `log/2026-08-28/2208`を追跡中、ユーザーから「ngram検知ですが、ログを見た感じでは完全なループというより、思考過程を過検知しているようにも見えます」との指摘。実際にreasoningを読むと、人口按分の妥当性・「6割」仮定の吟味・移動弱者推計など多角的に検討する正当な長い思考であり、同一の80字超アンカー文（「escalation says the correct values are...」）を思考の節目ごとに3回言い直していただけだった（実測: 文字オフセット5,571/9,183/14,021、間隔3,612字・4,838字、間はいずれも別内容）。原因はBL-298が「ストリーム全体でngram出現回数を無制限に累積カウントする」方式へ再設計した際、近接性の制約を完全に撤廃していたこと。真の生成崩壊（同一文・同一段落がほぼ間隔なく反復）と、正当な長い検討中の言い回しの再利用（数千字離れて散発的に一致）を区別できなくなっていた。5件の実ログ（真の崩壊と確認済みの1919・2131、過検知の疑いがあった2031・2049・2208）それぞれについて、iter初回試行の生reasoningを実際に新旧アルゴリズムへ通し「新設計がその値以上のmax_gapで初めて発火する最小値」を計測した結果、1919=2200字・2131=3400字で発火する一方、2031は10000字でも不発、2049=6000字・2208=5000字で初めて発火することが判明——**2031・2049も2208と同型の過検知だった**ことが実測で裏付けられた（該当箇所を目視確認済み、2031・2049とも「escalation says...」の言い直しの間はいずれも別内容の正当な検討）。真の崩壊を捉える下限(3400)と誤検知が始まる上限(5000)の間に安全域があるため、中間の4000を`_TEXT_REPETITION_MAX_GAP`として採用。`_StreamRepetitionGuard`を、各ngramの直近出現位置を記録し次の出現までの間隔がmax_gapを超えたら連続反復カウント(streak)を1にリセットする方式へ再設計した（間隔内で連続した出現のみをmin_repeats(3)回まで数える）。BL-300（python_repl追加）・BL-301（reasoning_reset指示）は過検知への対処としては的外れだった可能性が高いが、いずれも実害のない追加機能であるため、本BLでは撤回を提案せず維持している（要ユーザー最終確認）。 | P1 |
+| BL-305 | 高 | `cela_main.py`（新規`_TEXT_REPETITION_NGRAM_LEN_CONTENT`定数、content用`_StreamRepetitionGuard`の2箇所へ配線）、`tests/test_bl305_content_ngram_len.py`（新規8件）、`tests/test_bl297_stream_repetition_guard.py`（配線確認テストの期待値更新） | **`done`。** BL-304適用後の`log/2026-08-29/1003`・`1054`で、ユーザーから「まだ、過検知な気がします」との指摘。追跡した結果、1054（Expert）は真の崩壊（同一チェックリスト段落がほぼ間隔ゼロで3回再出現）で正しく検知されていたが、1003のDecision Extractor（`tools=None`でJSON配列を直接出力する、コードベース全体で現状唯一のノードと確認済み）はBL-304とは別原因の過検知だった。Decision Extractorが出力する`extracted_events`配列の各要素は、`proposed_by`（そのターンでは常に"Agent"）・`phase_id`/`task_id`（そのターンの現在フェーズ/タスクに固定）・`owned_variable_values`（変数を持たない要素では共通の"{}"）等、要素間で正当に完全一致するフィールドを複数含む。実ログの値を使った再現で共通部分文字列は約150字、content/rationaleも意図的に一致させた最も敵対的な人工ケースでも239字までしか伸びなかった一方、BL-297設計当初のコメントが示す通りこれまで観測された全ての真の生成崩壊はreasoningチャンネルでのみ発生しており、content側の真の反復崩壊は実機で一件も観測されていない。ユーザーへ「(1)content/reasoning別基準」「(2)`tools=None`ノードでは無効化」の2案を提示し、(1)が選択された（「1の方が良いでは？？」）。reasoning用ガードはngram_len=80のまま維持し、content用ガードのみ`_TEXT_REPETITION_NGRAM_LEN_CONTENT`（400、実測した敵対的最悪ケース239字に十分なマージンを持たせつつ実際の生成崩壊の文字数（実測: 数千〜7万字級）とは二桁小さい値）を使うよう分離した。 | P1 |
 
 ---
 
@@ -10222,6 +10223,38 @@ BL-302対応の直後、ユーザーから「それに加えて、ループし�
 **テスト**: `tests/test_bl304_repetition_proximity_gate.py`（新規9件）。実ログ全文を埋め込む代わりに、実測した間隔の値（1919=2200字・2131=3400字・2208/2049の疑似間隔3612〜5900字等）を再現する合成ストリーム（一意なfillerテキスト＋反復アンカーngram）でガード単体の挙動を検証。境界値（間隔がmax_gapちょうど／max_gap+1）、定数が実測安全域(3400, 5000)に収まっていることの確認、配線確認を含む。AGENTS.md §17.1準拠：`git stash`で本修正を一時的に取り除き、新規9件中6件が期待通り失敗する（既存の`_TEXT_REPETITION_MAX_GAP`等が未定義でAttributeError、または旧の近接性なし挙動で過検知テストが失敗）ことを確認後、`git stash pop`で復元しコンパイル・再テスト成功を確認した。
 
 参照: `tests/test_bl304_repetition_proximity_gate.py`、`docs/design/decision_log.md` D-259、BL-297/298/300/301。
+
+---
+
+### BL-305: content側（JSON構造化出力）の反復ガードが、正当なフィールド重複を誤検知する問題
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-297（content側リスクの設計当初からの認識）、BL-304（別原因、近接ゲート）、AGENTS.md §7（重要定数） |
+
+**経緯:**
+
+BL-304適用後の`log/2026-08-29/1003`・`1054`のドライランで、ユーザーから「まだ、過検知な気がします」との指摘があった。
+
+**調査結果（実測）:**
+
+- `1054`（Expert、`思考（iter=4）`）: 「実は、まずはread_goal_referenceで十分な情報が得られたか確認...」から始まる住所調査のチェックリスト段落が、ほぼ逐語的に3回連続で再出現していた（進捗のない再検討）。BL-304後も正しく検知されており、バグではない。
+- `1003`（Detector Domain Review、iter=3）: 実データ（PDFの都道府県略号ヘッダー）を「let me parse: ...」として3回引用しながら段階的に解釈を進めていた。間隔は1,131字・300字と近接しており、正しく検知された（真の崩壊との区別が付きにくいが、少なくともBL-304の設計方針と矛盾しない）。
+- `1003`（**Decision Extractor**）: BL-304とは別原因の過検知と判明。このノードは`cela_main.py:13452`で`tools=None`を渡してJSON配列（`extracted_events`）を1回のcompletionで直接出力する、**コードベース全体で現状唯一の`tools=None`ノード**（ユーザーからの「tools=noneのノードなんてありましてっけ？」との確認を受け、`grep`で全呼び出し箇所を確認し裏付けた。過去はOrchestrator/Facilitator/Reflection/Reviewer QA等も`tools=None`だったが、BL-184前後で全てにツールが追加され現在はツール付き）。配列の各要素は`proposed_by`（そのターンでは常に"Agent"）・`phase_id`/`task_id`（そのターンの現在フェーズ/タスクに固定）・`owned_variable_values`（変数を持たない要素では共通の"{}"）等、要素間で正当に完全一致するフィールドを複数含む。実ログの値を使った再現で共通部分文字列の実測値は約150字、content/rationaleも意図的に一致させた最も敵対的な人工ケースでも239字までしか伸びなかった。これはBL-297設計当初のコメント「content側（最終JSON出力）は、大規模な計画JSON等で構造的に類似したキー・値パターンが複数タスクにわたって繰り返される可能性がある」が懸念していたリスクのうち、「実際の値（task_id等）も含めて本当に一致する」という当時未検討だったケースが的中したもの。一方、これまで観測された全ての真の生成崩壊（BL-297〜304の全事例）はreasoningチャンネル（`delta.reasoning`）でのみ発生しており、content側の真の反復崩壊は実機で一件も観測されていない。
+
+**対応方針の検討:**
+
+ユーザーへ2案を提示: (1) content側とreasoning側で別のngram長を使う、(2) `tools=None`ノードではcontent側ガードを無効化する。(2)は現状Decision Extractor 1箇所にしか影響しない狙い通りの局所修正になることを`grep`で確認した上で提示したが、ユーザーは「1の方が良いでは？？」と(1)を選択した（`tools=None`という状態依存の条件に頼らず、より直接的にcontent/reasoningという性質の違いへ基準を紐付けるため）。
+
+**対応内容:**
+
+reasoning用`_StreamRepetitionGuard`のngram_lenは80のまま維持し、content用ガードのみ新規`_TEXT_REPETITION_NGRAM_LEN_CONTENT`（400）を使うよう分離した。値の根拠: 実測した敵対的最悪ケース（239字）に対して十分なマージン（+161字、約1.7倍）を持たせつつ、実際の生成崩壊の文字数（実測: 数千〜7万字級）とは依然として二桁小さい値。周期的な真の反復であれば、ngram長をこの程度伸ばしても検出には影響しないこと（十分な反復回数があれば、周期性により長いウィンドウでも一致が見つかる）をテストで確認済み。
+
+**テスト**: `tests/test_bl305_content_ngram_len.py`（新規8件）。実ログの値を使った現実的な再現・content/rationaleも共通化した敵対的最悪ケースがcontent用ガードで誤検知しないこと、同じ入力が旧来のngram_len=80では実際に誤検知していたこと（根本原因の再現）、content側でも真の周期反復は引き続き検出できること、定数が実測マージンを保っていることの確認、配線確認を含む。既存の`tests/test_bl297_stream_repetition_guard.py`の配線確認テストは、content用ガードの生成呼び出しが引数無し`_StreamRepetitionGuard()`ではなくなったため期待値を更新した（BL-305による意図的な変更であり退行ではない）。AGENTS.md §17.1準拠：`git stash`で本修正を一時的に取り除き新規テスト8件中5件が期待通り失敗することを確認後、`git stash pop`で復元しコンパイル・再テスト成功を確認した。
+
+参照: `tests/test_bl305_content_ngram_len.py`、`docs/design/decision_log.md` D-260、BL-297、BL-304。
 
 ---
 
