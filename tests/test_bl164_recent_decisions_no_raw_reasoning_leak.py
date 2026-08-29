@@ -62,12 +62,18 @@ def test_call_detector_source_no_longer_dumps_raw_decision_rows():
 
 
 def test_call_detector_source_has_recent_decisions_provenance_warning():
+    """[BL-312で文面を再構成] 元は「直近の決定事項は…参考情報」→「target_excerptや
+    verify_whiteboard_excerptの根拠には…」の順だったが、キャッシュ効率化のため
+    自己完結文へ書き換えた際に「target_excerptやverify_whiteboard_excerptの根拠には…
+    （直近の決定事項は…参考情報であり…）」と主従を入れ替えた（内容は不変）。
+    3つの語すべてがRecent Decisionsの動的ブロックより前に存在することを確認する。"""
     src = inspect.getsource(cela_main.call_detector)
     warning_idx = src.index("直近の決定事項は状況把握のための参考情報")
+    target_excerpt_idx = src.index("target_excerptやverify_whiteboard_excerptの根拠には")
     recent_idx = src.index('Recent Decisions（参考程度）: {recent_decitions}')
     assert warning_idx < recent_idx
-    assert "target_excerpt" in src[warning_idx:recent_idx]
-    assert "verify_whiteboard_excerpt" in src[warning_idx:recent_idx]
+    assert target_excerpt_idx < recent_idx
+    assert "verify_whiteboard_excerpt" in src[target_excerpt_idx:recent_idx]
 
 
 # ---------------------------------------------------------------------------

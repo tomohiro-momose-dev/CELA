@@ -213,14 +213,16 @@ def test_call_detector_domain_prompt_static_blocks_precede_dynamic_history_text(
     assert static_idx < dynamic_idx
 
 
-def test_call_detector_domain_prompt_bl076_block_stays_after_whiteboard_block():
-    """「上記ホワイトボードの本文から」はwhiteboard_blockへの位置的参照を持つため、
-    whiteboard_blockの後という相対位置を維持していることを確認する。
+def test_call_detector_domain_prompt_bl076_block_precedes_whiteboard_block():
+    """[BL-312] BL-076は元々「上記ホワイトボードの本文から」という後方参照を持ち
+    whiteboard_blockの直後に固定されていたが、キャッシュ効率化のため「後述の【R4: ...】節」
+    という自己完結な前方参照へ書き換えた上でSTATIC-TOP側（whiteboard_blockより前）へ
+    移動した。新しい相対位置（BL-076が先、whiteboard_blockが後）を確認する。
     """
     src = inspect.getsource(cela_main.call_detector)
+    bl076_idx = src.index("後述の【R4: 現在タスクの成果物・")
     whiteboard_idx = src.index('f"{whiteboard_block}"')
-    bl076_idx = src.index("上記ホワイトボードの本文から")
-    assert whiteboard_idx < bl076_idx
+    assert bl076_idx < whiteboard_idx
 
 
 def test_call_detector_domain_prompt_tool_list_precedes_frozen_agreements():
@@ -282,27 +284,28 @@ def test_call_detector_numeric_prompt_thought_process_audit_stays_after_python_c
     assert python_calls_idx < thought_audit_idx
 
 
-def test_call_detector_numeric_prompt_bl076_block_stays_after_whiteboard_block():
-    """数値監査パスのBL-076（「上記ホワイトボードの本文から」）もwhiteboard_blockの後という
-    相対位置を維持していることを確認する。
+def test_call_detector_numeric_prompt_bl076_block_precedes_whiteboard_block():
+    """[BL-312] 数値監査パスのBL-076も、「後述の【R4: ...】節」という自己完結な前方参照へ
+    書き換えた上でSTATIC-TOP側（whiteboard_blockより前）へ移動した。
     """
     src = inspect.getsource(cela_main.call_detector)
     start = _numeric_prompt_start(src)
+    bl076_idx = src.index("後述の【R4: 現在タスクの成果物・", start)
     whiteboard_idx = src.index('f"{whiteboard_block}"', start)
-    bl076_idx = src.index("上記ホワイトボードの本文から", start)
-    assert whiteboard_idx < bl076_idx
+    assert bl076_idx < whiteboard_idx
 
 
-def test_call_detector_numeric_prompt_bl086_bl062_stay_after_agreements_text():
-    """BL-086/BL-062はいずれも「上記DB」（agreements_text）への位置的参照を持つため、
-    agreements_textの後という相対位置を維持していることを確認する。
+def test_call_detector_numeric_prompt_bl086_bl062_precede_agreements_text():
+    """[BL-312] BL-086/BL-062はいずれも元々「上記DB」（agreements_text）への後方参照を
+    持っていたが、「後述の【プロジェクトの合意・決定事項・検討状況DB】」という自己完結な
+    前方参照へ書き換えた上でSTATIC-TOP側（agreements_textより前）へ移動した。
     """
     src = inspect.getsource(cela_main.call_detector)
     start = _numeric_prompt_start(src)
+    bl086_idx = src.index("🔒アイコンが付いている項目は", start)
+    bl062_idx = src.index("その原因が後述の", start)
     agreements_idx = src.index('【プロジェクトの合意・決定事項・検討状況DB】\\n{agreements_text}', start)
-    bl086_idx = src.index("上記DBで🔒アイコンが付いている項目は", start)
-    bl062_idx = src.index("その原因が上記DB内の", start)
-    assert agreements_idx < bl086_idx < bl062_idx
+    assert bl086_idx < bl062_idx < agreements_idx
 
 
 # ---------------------------------------------------------------------------

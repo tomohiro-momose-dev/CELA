@@ -12793,7 +12793,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
             【評価対象：Agent(作業者)の発言】\n
             今回の発言は作業者からの『提案・成果物』です。\n
             以下の場合は major としてください：\n
-            - 検算の結果、明白な数値矛盾や計算ミスが確認された場合（検算必須、下記参照）。\n
+            - 検算の結果、明白な数値矛盾や計算ミスが確認された場合（検算必須、【F-2.6 機械的検算ゲート】参照）。\n
             - 要求された成果物項目が欠落しているにもかかわらずそれに一切触れず、
               あたかも全項目に対応済みであるかのように「最終確定」「これで承認」等の
               言葉で議論を打ち切ろうとしている場合。\n
@@ -12866,14 +12866,22 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
     # （設備・人員の規模・配置等）が現実的かというドメイン評価が後手・軽視されやすいため、まず前提・
     # 設計そのものの妥当性を検算とは無関係に確認する（ユーザー指摘、2026-07-23）。
     # この時点では数値監査パスはまだ実行していないため、その結果には言及しない。
-    # [BL-104] プロンプトキャッシュのヒット率向上のため、実行中いつでも内容が同一の固定指示文
-    # （判定基準・気づき欄/write_issue/think/ツール一覧の説明）を先頭付近にまとめ、ターンごとに
-    # 変わる動的な内容（Freeze状況・現在タスク・ホワイトボード・今回評価するやり取り本文）は
-    # 末尾側に配置する（call_expert/generate_user_utteranceと同じ原則）。「上記ホワイトボードの
-    # 本文から」という位置的参照を持つBL-076ブロックのみ、whiteboard_blockの直後という相対位置を
-    # 維持し並び替えの対象外とする。domain_role_instructionはtarget_role単位でしか変わらない
-    # （ターンごとには変わらない）ため、固定指示文グループの直後に配置する。
+    # [BL-104/BL-312] プロンプトキャッシュのヒット率向上のため、実行中いつでも内容が同一の
+    # 固定指示文（判定基準・気づき欄/write_issue/think/ツール一覧の説明、BL-086/087/266/278・
+    # 306/279/292/076の各指示文）を先頭にまとめ、ターンごとに変わる動的な内容（domain_role_
+    # instruction・Freeze状況・エスカレーション・現在タスク・ゴール文・本質・acceptance_
+    # criteria・ホワイトボード・申し送り事項・今回評価するやり取り本文）は末尾側に集約する
+    # （call_expertのsystem_prompt/system_prompt_trailingと同じ原則）。
+    # [BL-312] 「上記に🔒が付いている項目」「上記【🎯 本質】」「上記のドリフト検知」「上記2つ」
+    # 「上記の選定妥当性チェック」「上記ホワイトボードの本文から」という6箇所の位置参照文は、
+    # いずれも参照先の見出し名・BL番号を直接書く自己完結文（「後述の…」「[BL-087]の…」等）へ
+    # 書き換えた上で先頭側へ移動した（BL-178のlight_system_promptと同じ技法）。
+    # [BL-312] domain_role_instructionはreview_mode=="goal_change"分岐でのみ旧ゴール文・
+    # 新ゴール文を直接埋め込む＝動的になる（他2分岐は静的）ため、BL-104時代の想定
+    # 「target_role単位でしか変わらない」は一部の分岐で成立せず、安全側に倒して末尾へ配置する。
     domain_prompt = (
+        # === STATIC-TOP（BL-312: 実行中いつでも内容が同一。domain_role_instructionは
+        # goal_change分岐で動的になるためDYNAMIC-TAILへ移した） ===
         f"あなたはプロジェクトにおける議論の「ドメイン妥当性レビュー」担当監査人です。\n"
         f"あなたの役割は数値の検算（Expertの計算が合っているか）ではありません。数値の機械的検算は"
         f"この後、別の監査パスで独立して行われるため、ここでは検算する必要はありません"
@@ -12885,7 +12893,6 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"まず最初に、そもそもの前提・設計（設備・人員の規模、シフト、速度・距離の設定など）"
         f"自体に現実世界で無理がないかを確認してください。検算で数式のつじつまが合っていても、"
         f"前提そのものが現実的に成立しなければ意味がありません。\n\n"
-        f"{domain_role_instruction}\n\n"
         f"【判定基準（重要：情報不足だけでmajorにしないこと。ただし調べられることは調べること）】\n"
         f"- major: 与えられた情報だけから、具体的かつ明白なドメイン上の矛盾・違反が特定できる場合のみ"
         f"（例：明記された労働時間・人数から法定休憩が物理的に取得不可能と計算できる、"
@@ -12970,21 +12977,16 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・mark_fact_audited・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
         f"{_build_decision_lineage_directive('\"Rejected\"（懸念を指摘する場合）または\"Reviewed\"（問題なしと判断した場合）')}\n"
-        f"{_get_frozen_agreements_text(get_active_conn(), state['run_id'])}"
-        f"【BL-086: 🔒Freeze済み項目の扱い】上記に🔒が付いている項目があれば、それは人間の発注者が"
+        # ★[BL-312] 以下、旧来は動的ブロック（Freeze状況・本質・決定事項DB等）の直後に置かれて
+        # いた静的指示文を、位置参照（「上記の」等）を見出し名・BL番号での自己完結文へ書き換えた
+        # 上でSTATIC-TOP側へ移動した。
+        f"【BL-086: 🔒Freeze済み項目の扱い】後述の内容に🔒が付いている項目があれば、それは人間の発注者が"
         f"既に審議の上で承認した意図的な例外です。同じ論点をmajor/minorの根拠にしないでください"
         f"（ただし別の新しい問題点はこれまで通り厳格に評価してください）。\n\n"
-        f"{_build_unaudited_facts_text(get_active_conn(), state['run_id'], state)}"
-        f"{escalation_pin_block}"
-        f"{deferred_issue_pin_block}"
-        f"{acknowledged_issue_pin_block}"
-        f"{human_input_notice_block}"
-        f"System Goal: {goal}\n"
-        f"{_get_goal_essence_text(get_active_conn(), state['run_id'])}\n"
-        f"[BL-087 Stage4] 上記【🎯 本質】に照らして、数値・条件設定自体は妥当でも本質から"
+        f"[BL-087 Stage4] 後述の【🎯 本質】に照らして、数値・条件設定自体は妥当でも本質から"
         f"乖離していないか（手段の細部の帳尻合わせに終始し、本来達成すべきことを見失っていないか）"
         f"も確認してください。乖離があればconstraint_issueをminor以上に引き上げる根拠にできます。\n\n"
-        f"[BL-266] 上記のドリフト検知（本質からの乖離）とは別に、能動的な充足性チェックも"
+        f"[BL-266] [BL-087]のドリフト検知（本質からの乖離）とは別に、能動的な充足性チェックも"
         f"行ってください。ドリフト検知が『今ある計画・成果物の数値や条件が本質からずれて"
         f"いないか』を見るのに対し、こちらは『本質が要求しているのに、現在のタスク構造・"
         f"計画全体にそもそも存在しない要素はないか』を見ます。今回のタスクの成果物を"
@@ -12995,8 +12997,8 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"trueにする場合は'essence_sufficiency_reason'に、本質のどの記述が根拠で、"
         f"どのフェーズ・タスクにも対応が無いと判断したかを具体的に書いてください"
         f"（falseの場合は空文字でよい）。\n\n"
-        f"[BL-278: 複数候補からの選定妥当性・十分性チェック] 上記2つ（本質ドリフト・本質充足性）"
-        f"とは別の観点として、今回のタスクで複数の候補（実在の施設・業者等だけでなく、"
+        f"[BL-278: 複数候補からの選定妥当性・十分性チェック] [BL-087]の本質ドリフト・[BL-266]の"
+        f"本質充足性、2つとは別の観点として、今回のタスクで複数の候補（実在の施設・業者等だけでなく、"
         f"内部で検討した複数の案・戦略・手法も含む）から一部を採用する意思決定が行われた"
         f"形跡があるか確認してください。\n"
         f"- そのような意思決定が行われたが、選定基準・却下理由がreason_why等のいずれにも"
@@ -13004,7 +13006,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"Expertへ選定基準の明記を差し戻してください（BL-277で記録を必須化したが、それが"
         f"すり抜けた場合の第二の防波堤です。「候補のうちなぜこの一部を採用したか記録が"
         f"ない」のように具体的に指摘すること）。\n"
-        f"- 選定基準が明記されている場合：その基準が上記【🎯 本質】（受益者ニーズ）に照らして"
+        f"- 選定基準が明記されている場合：その基準が後述の【🎯 本質】（受益者ニーズ）に照らして"
         f"量・範囲として十分か評価してください（本質ドリフト・本質充足性チェックと同じ"
         f"「本質記述と照らし合わせる」パターンです）。基準はあるが本質の要求水準に対し明らかに"
         f"不十分と判断できる場合のみminor以上の根拠にしてください——判断に迷う場合は"
@@ -13024,7 +13026,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"判定してください。\n"
         f"複数候補からの選定自体が今回のタスクで行われていない場合、この観点は該当なしと"
         f"してconstraint_issueの根拠にしないでください。\n\n"
-        f"[BL-292: 規模適合性チェック] 上記の選定妥当性チェックとは別に、今回のタスクが「何らかの"
+        f"[BL-292: 規模適合性チェック] [BL-278/306]の選定妥当性チェックとは別に、今回のタスクが「何らかの"
         f"リソース（拠点数・容量・人員・予算等）が対象規模（人口・需要量・処理件数・負荷等）に"
         f"対して十分か」という規模適合性の主張を含むか確認してください。含む場合、その十分性が"
         f"定量的なカバレッジ・比率計算（python_repl等）で裏付けられているか、それとも「複数ある」"
@@ -13033,12 +13035,23 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"場合はfalseのままにしてください。'quantitative_sufficiency_reason'"
         f"には、どの主張が・どの規模指標に対して未検証かを具体的に書いてください（falseの場合は"
         f"空文字）。規模適合性の主張自体が今回のタスクに存在しない場合はfalseのままにしてください。\n\n"
-        f"【現在タスクのacceptance_criteria】\n{criteria_text}\n\n"
-        f"{whiteboard_block}"
-        f"【BL-076: 指摘箇所の引用】constraint_issueがminor/majorの場合、上記ホワイトボードの本文から、"
+        f"【BL-076: 指摘箇所の引用】constraint_issueがminor/majorの場合、後述の【R4: 現在タスクの成果物・"
+        f"最新ホワイトボード】節の本文から、"
         f"指摘対象の箇所を一字一句そのまま（改変・要約せず）1〜2文だけ引用し'target_excerpt'に"
         f"入れてください（ホワイトボードへの注釈挿入に機械的に使うため、正確な引用が必須です）。"
         f"noneの場合や、ホワイトボードが存在せず引用できない場合は空文字にしてください。\n\n"
+        # === DYNAMIC-TAIL（BL-312: state/DB由来でターンごとに変わる内容をここへ集約） ===
+        f"{domain_role_instruction}\n\n"
+        f"{_get_frozen_agreements_text(get_active_conn(), state['run_id'])}"
+        f"{_build_unaudited_facts_text(get_active_conn(), state['run_id'], state)}"
+        f"{escalation_pin_block}"
+        f"{deferred_issue_pin_block}"
+        f"{acknowledged_issue_pin_block}"
+        f"{human_input_notice_block}"
+        f"System Goal: {goal}\n"
+        f"{_get_goal_essence_text(get_active_conn(), state['run_id'])}\n"
+        f"【現在タスクのacceptance_criteria】\n{criteria_text}\n\n"
+        f"{whiteboard_block}"
         f"{write_agreement_status_block}\n"
         f"{deferred_notes_block}"
         f"{_get_task_focus_companion_text(state)}"
@@ -13138,15 +13151,25 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         )
     )
 
-    # [BL-104] プロンプトキャッシュのヒット率向上のため、domain_promptと同じ原則で並び替える:
-    # 固定指示文（軸1/軸2の定義・役割別指示・検算ゲート・判定ブレ防止・気づき欄/BL-079/BL-094/
-    # BL-093/BL-096/ツール一覧の説明）を先頭、ゴール文（実行中はほぼ不変）をその次、タスク単位
-    # でしか変わらないacceptance_criteriaをその次、ターンごとに変わる動的な内容（ドメインレビュー
-    # 結果・python_repl記録・write_agreement結果・思考過程監査・決定事項DB・ホワイトボード・
-    # 申し送り事項・今回の対話本文）を末尾に配置する。「上記の」「上記DB」「上記ホワイトボードの
-    # 本文から」という位置的参照を持つthought_process_audit（BL-033連携）・BL-086・BL-062・
-    # BL-076の各ブロックのみ、参照先の直後という相対位置を維持し並び替えの対象外とする。
+    # [BL-104/BL-312] プロンプトキャッシュのヒット率向上のため、domain_promptと同じ原則で
+    # 並び替える: 固定指示文（軸1/軸2の定義・検算ゲート・判定ブレ防止・気づき欄/BL-079/BL-094/
+    # BL-093/BL-096/ツール一覧の説明、BL-086/062/076の各指示文）を先頭にまとめ、ターンごとに
+    # 変わる動的な内容（role_specific_instruction・ゴール文・本質・acceptance_criteria・
+    # ドメインレビュー結果・python_repl記録・write_agreement結果・思考過程監査・決定事項DB・
+    # ホワイトボード・申し送り事項・今回の対話本文）を末尾に集約する。
+    # [BL-312] role_specific_instructionはtarget_role=="user"分岐でcurrent_task_idを直接
+    # 埋め込む＝動的になるため末尾へ移した（else分岐は静的だが安全側に倒す）。移した際、
+    # else分岐内の「検算必須、下記参照」というF-2.6ゲートへの前方参照は、F-2.6が先頭側に
+    # 来ることで方向が逆転するため「【F-2.6 機械的検算ゲート】参照」という自己完結文へ書き換え
+    # 済み。thought_process_auditは「上記のBL-023 criteria_status判定」「上記のBL-033機械的
+    # 検算記録」という自身の内部でcriteria_text/python_calls_blockより後に置かれることを前提と
+    # した後方参照を持つため、両ブロックより後という現在の相対位置のまま動かしていない。
+    # BL-086/BL-062/BL-076の3ブロックは「上記DBで」「上記DB内の」「上記ホワイトボードの本文から」
+    # という位置参照を、見出し名を直接書く自己完結文へ書き換えた上で先頭側へ移動した
+    # （BL-178のlight_system_promptと同じ技法）。
     prompt = (
+        # === STATIC-TOP（BL-312: 実行中いつでも内容が同一。role_specific_instructionは
+        # target_role=="user"分岐で動的になるためDYNAMIC-TAILへ移した） ===
         f"あなたはプロジェクトにおける議論の厳格で優秀な監査人です。\n\n"
         f"以下の2軸は**完全に独立した別の評価軸**です。混同しないでください。\n\n"
         f"【軸1: risk（安全性・倫理のみ）】\n"
@@ -13166,8 +13189,6 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"- 未対応項目が残っていても、何が未着手かを具体的に名指しした上で「次タスクで扱う」等、"
         f"明示的な申し送りとして次に進めている場合は、それだけでは major にしない（minor とする）。\n\n"
         f"**重要: constraint_issueがmajorであっても、riskをhighにしてはいけません。riskは安全性専用です。**\n\n"
-
-        f"{role_specific_instruction}\n\n" # ★ここで切り替える
 
         f"**追加の重要指示: 上限値（例:「上限1億円」「上限3,000万円」）を超えていない場合、"
         f"あるいは上限値に近い値であっても、それは矛盾とは見なさないでください。"
@@ -13249,6 +13270,33 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
         f"{_build_decision_lineage_directive('\"Rejected\"（懸念を指摘する場合）または\"Reviewed\"（問題なしと判断した場合）')}\n"
+        # ★[BL-312] 以下、旧来は動的ブロック（決定事項DB・ホワイトボード）の直後に置かれていた
+        # 静的指示文を、位置参照を見出し名での自己完結文へ書き換えた上でSTATIC-TOP側へ移動した。
+        f"target_excerptやverify_whiteboard_excerptの根拠には、必ず後述の【R4: 現在タスクの成果物・"
+        f"最新ホワイトボード】節の内容のみを使用してください（直近の決定事項は状況把握のための参考情報"
+        f"であり、ここに含まれる引用（whyの内容等）は執筆時点のホワイトボード内容である"
+        f"可能性があり、既に上書き・改訂されている場合があります）。\n"
+        f"【BL-086: 🔒Freeze済み項目の扱い】後述の【プロジェクトの合意・決定事項・検討状況DB】で"
+        f"🔒アイコンが付いている項目は、既に人間の発注者"
+        f"（User）が審議の上で承認した意図的な例外です。同じ論点を理由に再度major判定やSUPERSEDEの"
+        f"対象にしないでください（unfreeze機構は存在せず、Freeze済みへのSUPERSEDE/UPDATEはツール"
+        f"呼び出し自体がエラーになります）。ただし、Freezeされていない別の新しい問題点はこれまで通り"
+        f"厳格に評価してください。🔒項目について致命的ではない懸念がある場合は、constraint_issueを"
+        f"上げず'observations'欄に留めてください。\n\n"
+        f"【BL-062: 既存Agreementの無効化】constraint_issue=\"major\"と判定し、その原因が後述の"
+        f"【プロジェクトの合意・決定事項・検討状況DB】内の"
+        f"特定のtopic（例：既にApprovedとして記録されている数値や決定）にある場合、commentに書くだけで"
+        f"終わらせず、write_agreementツールをaction_type=\"SUPERSEDE\", status=\"Rejected\", "
+        f"target_topic=\"<該当するtopic文字列そのまま>\", reason_why=\"<何が誤りでなぜ無効化するか>\" "
+        f"として呼び出し、DB上のその記録を実際に無効化してください。そうしないと、あなたが誤りと判定した"
+        f"内容が「承認済み」としてDBに残り続け、後続タスクや最終統合が誤って参照してしまいます。\n\n"
+        f"【BL-076: 指摘箇所の引用】constraint_issueがminor/majorの場合、後述の【R4: 現在タスクの成果物・"
+        f"最新ホワイトボード】節の本文から、"
+        f"指摘対象の箇所を一字一句そのまま（改変・要約せず）1〜2文だけ引用し'target_excerpt'に"
+        f"入れてください（ホワイトボードへの注釈挿入に機械的に使うため、正確な引用が必須です）。"
+        f"noneの場合や、ホワイトボードが存在せず引用できない場合は空文字にしてください。\n\n"
+        # === DYNAMIC-TAIL（BL-312: state/DB由来でターンごとに変わる内容をここへ集約） ===
+        f"{role_specific_instruction}\n\n"
 
         f"System Goal: {goal}\n"
         f"{_get_goal_essence_text(get_active_conn(), state['run_id'])}\n"
@@ -13264,30 +13312,9 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"{deliverable_reads_block}"
         f"{write_agreement_status_block}\n"
         f"{thought_process_audit}\n"
-        f"【注意】直近の決定事項は状況把握のための参考情報であり、ここに含まれる引用（whyの内容等）は"
-        f"執筆時点のホワイトボード内容である可能性があり、既に上書き・改訂されている場合があります。"
-        f"target_excerptやverify_whiteboard_excerptの根拠には、必ず下記【R4: 現在タスクの成果物・"
-        f"最新ホワイトボード】節の内容のみを使用してください。\n"
         f"Recent Decisions（参考程度）: {recent_decitions}\n\n"
         f"【プロジェクトの合意・決定事項・検討状況DB】\n{agreements_text}\n\n"
-        f"【BL-086: 🔒Freeze済み項目の扱い】上記DBで🔒アイコンが付いている項目は、既に人間の発注者"
-        f"（User）が審議の上で承認した意図的な例外です。同じ論点を理由に再度major判定やSUPERSEDEの"
-        f"対象にしないでください（unfreeze機構は存在せず、Freeze済みへのSUPERSEDE/UPDATEはツール"
-        f"呼び出し自体がエラーになります）。ただし、Freezeされていない別の新しい問題点はこれまで通り"
-        f"厳格に評価してください。🔒項目について致命的ではない懸念がある場合は、constraint_issueを"
-        f"上げず'observations'欄に留めてください。\n\n"
-        f"【BL-062: 既存Agreementの無効化】constraint_issue=\"major\"と判定し、その原因が上記DB内の"
-        f"特定のtopic（例：既にApprovedとして記録されている数値や決定）にある場合、commentに書くだけで"
-        f"終わらせず、write_agreementツールをaction_type=\"SUPERSEDE\", status=\"Rejected\", "
-        f"target_topic=\"<上記DBのtopic文字列そのまま>\", reason_why=\"<何が誤りでなぜ無効化するか>\" "
-        f"として呼び出し、DB上のその記録を実際に無効化してください。そうしないと、あなたが誤りと判定した"
-        f"内容が「承認済み」としてDBに残り続け、後続タスクや最終統合が誤って参照してしまいます。\n\n"
-
         f"{whiteboard_block}"
-        f"【BL-076: 指摘箇所の引用】constraint_issueがminor/majorの場合、上記ホワイトボードの本文から、"
-        f"指摘対象の箇所を一字一句そのまま（改変・要約せず）1〜2文だけ引用し'target_excerpt'に"
-        f"入れてください（ホワイトボードへの注釈挿入に機械的に使うため、正確な引用が必須です）。"
-        f"noneの場合や、ホワイトボードが存在せず引用できない場合は空文字にしてください。\n\n"
         f"{deferred_notes_block}"
         f"{_get_task_focus_companion_text(state)}"
         f"{_build_task_focus_state_text(state)}"
