@@ -3619,6 +3619,20 @@
 
 ---
 
+### D-260: BL-305 — content側反復ガードにJSON構造用の別ngram長を導入する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-29 |
+| 状態 | `decided` |
+| 決定者 | t-momose（BL-304適用後の`log/2026-08-29/1003`・`1054`について「まだ、過検知な気がします」と再指摘。提示した2案のうち「1の方が良いでは？？」とcontent/reasoning別基準案を選択） |
+| **決定理由** | `1054`（Expert）は真の崩壊（同一チェックリスト段落がほぼ間隔ゼロで3回再出現）で正しく検知されていたが、`1003`のDecision Extractorが別原因で過検知していた。Decision Extractorは`cela_main.py:13452`で`tools=None`を渡してJSON配列（`extracted_events`）を1回のcompletionで直接出力する、コードベース全体で現状唯一の`tools=None`ノードと`grep`で確認済み（ユーザーからの「tools=noneのノードなんてありましてっけ？」との確認要求を受けて検証。過去はOrchestrator/Facilitator/Reflection/Reviewer QA等も`tools=None`だったが、BL-184前後で全てにツールが追加され現在はツール付き）。配列の各要素は`proposed_by`（そのターンでは常に"Agent"）・`phase_id`/`task_id`（そのターンの現在フェーズ/タスクに固定）・`owned_variable_values`（変数を持たない要素では共通の"{}"）等、要素間で正当に完全一致するフィールドを複数含む。実ログの値を使った再現で共通部分文字列は約150字、content/rationaleも意図的に一致させた最も敵対的な人工ケースでも239字までしか伸びなかった。これはBL-297設計当初のコメントが懸念していたリスク（content側のJSON構造的反復）のうち、「実際の値も含めて本当に一致する」という当時未検討だったケースが的中したもの。一方、これまで観測された全ての真の生成崩壊（BL-297〜304の全事例）はreasoningチャンネルでのみ発生しており、content側の真の反復崩壊は実機で一件も観測されていない。提示した2案（(1)content/reasoning別基準、(2)`tools=None`ノードでは無効化）のうち、(2)は現状Decision Extractor 1箇所にしか影響しない局所修正であることを確認した上で提示したが、`tools=None`という状態依存の条件より、content/reasoningという性質の違いに直接紐付く(1)が選択された。 |
+| 決定内容 | reasoning用`_StreamRepetitionGuard`のngram_lenは80のまま維持し、content用ガードのみ新規`_TEXT_REPETITION_NGRAM_LEN_CONTENT`（AGENTS.md §7重要定数、400）を使うよう分離した。実測した敵対的最悪ケース（239字）に対して十分なマージン（+161字）を持たせつつ、実際の生成崩壊の文字数（実測: 数千〜7万字級）とは二桁小さい値。 |
+| 影響 | `cela_main.py`（新規`_TEXT_REPETITION_NGRAM_LEN_CONTENT`定数、content用`_StreamRepetitionGuard`の2箇所へ配線）、`tests/test_bl305_content_ngram_len.py`（新規8件）、`tests/test_bl297_stream_repetition_guard.py`（配線確認テストの期待値更新、意図的な変更であり退行ではない）。関連するBL-297/298/300/301/302/304系テスト（計56件）は全て非退行で成功を確認。AGENTS.md §17.1準拠：`git stash`で本修正を一時的に取り除き新規テスト8件中5件が期待通り失敗することを確認後、`git stash pop`で復元。 |
+| 関連 BL | BL-305（本件）、BL-297（content側リスクの設計当初からの認識）、BL-304（別原因、近接ゲート） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
