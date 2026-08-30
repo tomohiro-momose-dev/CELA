@@ -431,7 +431,7 @@ client_task_planner = client_openrouter
 model_task_planner = glm_5_3_flash # nemotron_3_ultra
 
 client_task_plan_reviewer = client_openrouter
-model_task_plan_reviewer = nemotron_3_ultra # nemotron_3_ultra
+model_task_plan_reviewer = glm_5_3_flash # nemotron_3_ultra
 
 client_detector_domain = client_openrouter
 model_detector_domain = glm_5_3_flash # nemotron_3_ultra
@@ -1103,11 +1103,14 @@ SCHEDULE_TASK_FOCUS_TOOL = {
     "function": {
         "name": "schedule_task_focus",
         "description": (
-            "[BL-191] 通常の『次タスクへ進む』指示とは別に、過去の承認済みタスクの手戻り対応が"
-            "必要になった場合に、そのスケジューリング判断を構造化して1回で明示するツール。"
-            "任意呼び出し（通常通り前進するだけの場合は呼ぶ必要はない）。"
-            "'redirect_backward': 今すぐ作業対象を過去タスクへ完全に切り替える（現在のフォワード"
-            "タスクは一時中断し、対象task_idのDeliverableが再承認され次第、自動的に元へ戻ります）。"
+            "[BL-191/BL-318] タスクのスケジューリング判断を構造化して1回で明示するツール。"
+            "'advance_task': [BL-318] 通常の『次タスクへ進む』指示を確定的に記録する標準手段。"
+            "会話文だけによるcurrent_task_id更新は抽出漏れが起きうるため、次タスクへ移行する際は"
+            "必ずこれも呼ぶこと。target_task_idには移行先task_idを指定する（未着手タスク可、"
+            "既存Deliverableは不要）。"
+            "'redirect_backward': 過去の承認済みタスクの手戻り対応が必要な場合のみの任意呼び出し。"
+            "今すぐ作業対象を過去タスクへ完全に切り替える（現在のフォワードタスクは一時中断し、"
+            "対象task_idのDeliverableが再承認され次第、自動的に元へ戻ります）。"
             "深さ1固定（既に中断中のフォーカスがある間は使えません。force_resumeで先に解消してください）。"
             "'joint_focus': 現在のタスクは変更しないが、指定した過去task_idを『今回のターンで"
             "Expert/Detectorが併せて考慮すべき関連タスク』として明示する（current_task_idは動かない）。"
@@ -1124,11 +1127,11 @@ SCHEDULE_TASK_FOCUS_TOOL = {
             "properties": {
                 "decision_type": {
                     "type": "string",
-                    "enum": ["redirect_backward", "joint_focus", "clear_companion", "force_resume"]
+                    "enum": ["advance_task", "redirect_backward", "joint_focus", "clear_companion", "force_resume"]
                 },
                 "target_task_id": {
                     "type": "string",
-                    "description": "redirect_backward時必須。切替先の過去task_id（既存のDeliverableを持つtask_idのみ有効）"
+                    "description": "redirect_backward/advance_task時必須。切替先のtask_id（advance_taskは既存Deliverable不要、未着手タスクも指定可。redirect_backwardは既存のDeliverableを持つ過去task_idのみ有効）"
                 },
                 "companion_task_id": {
                     "type": "string",
@@ -3951,6 +3954,29 @@ def _get_task_planner_phase_design_rationale_text(conn: sqlite3.Connection, run_
     return "(task_plannerはまだ分解の判断根拠を記録していません)"
 
 
+# [BL-321] 成果物本文の先頭見出しが「他タスクの成果物」を名乗っているのに、宣言先task_idと
+# 食い違っている場合を機械的に検知する。task_id自体は権威（BL-131/BL-212の設計方針）として
+# 扱い続け、この正規表現は書き込み前の安全網に過ぎない——見出しにtask_id言及がない
+# Deliverableは検知対象外（過剰な一般化はしない）。
+_DELIVERABLE_HEADING_TASK_ID_RE = re.compile(r'^#{1,3}\s*(task_\d+(?:_\d+)*)\b')
+
+
+def _deliverable_heading_task_id_mismatch(content: str, tid: str) -> str | None:
+    """[BL-321] 成果物本文の先頭見出しが宣言先task_idと異なるtask_idを名指ししていれば、
+    そのtask_idを返す（見出しにtask_id言及なし、または一致していればNone）。
+    実インシデント（log/2026-08-30/2051）: current_task_id=task_1_1のまま
+    「# task_3_2_1 車両選定の前提補完確認」という他タスクの本文がtask_1_1の
+    whiteboardへ丸ごと保存された。
+    """
+    if not content:
+        return None
+    first_line = content.lstrip().split("\n", 1)[0]
+    m = _DELIVERABLE_HEADING_TASK_ID_RE.match(first_line)
+    if m and m.group(1) != tid:
+        return m.group(1)
+    return None
+
+
 def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str, task_id: str = "", phase_id: str = "") -> tuple[str | None, str | None]:
     """[F-3.1] write_agreementツールからDBへagreementをコミットする。
     action_type=SUPERSEDEの場合は既存レコードをSupersededに更新する。
@@ -4033,6 +4059,18 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
     global _LAST_WHITEBOARD_EDIT
     content = raw_content
     if entry_type == "Deliverable" and action_type in ("CREATE", "SUPERSEDE") and len(raw_content) > 200:
+        # [BL-321] 本文の見出しが宣言先task_idと矛盾していないかを書き込み前に確認する。
+        _mismatch_tid = _deliverable_heading_task_id_mismatch(raw_content, tid)
+        if _mismatch_tid:
+            return (
+                f"成果物本文の見出しが'{_mismatch_tid}'を名指ししていますが、"
+                f"書き込み先task_idは'{tid}'です（phase_id='{phase_id}'）。"
+                f"本文の内容と書き込み先task_idが一致していません。"
+                f"'{_mismatch_tid}'として書くつもりなら、write_agreementのtask_id引数を"
+                f"'{_mismatch_tid}'に修正するか（current_task_idと異なる場合はまず正しい"
+                f"タスクへ遷移してから）、本文の見出しを現在のタスク（'{tid}'）の内容に"
+                f"修正してください。"
+            ), None
         edit_summary = "初版作成" if action_type == "CREATE" else (args.get("reason_why", "") or "SUPERSEDEによる全文置換")
         v = apply_whiteboard_patch(conn, run_id, phase_id, tid, raw_content, author_role=caller_role, edit_summary=edit_summary)
         _LAST_WHITEBOARD_EDIT = {"phase_id": phase_id, "task_id": tid, "version": v}
@@ -4116,6 +4154,18 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
                 # 「まだホワイトボード化されていない初回作成」（not is_whiteboard）の場合のみに限定し、
                 # 既に完全版が存在する場合はcaller_roleを問わずeditsパラメータを必須とする。
                 if len(raw_content) > 200 and not is_whiteboard:
+                    # [BL-321] 本文の見出しが宣言先task_idと矛盾していないかを書き込み前に確認する。
+                    _mismatch_tid = _deliverable_heading_task_id_mismatch(raw_content, tid)
+                    if _mismatch_tid:
+                        return (
+                            f"成果物本文の見出しが'{_mismatch_tid}'を名指ししていますが、"
+                            f"書き込み先task_idは'{tid}'です（phase_id='{phase_id}'）。"
+                            f"本文の内容と書き込み先task_idが一致していません。"
+                            f"'{_mismatch_tid}'として書くつもりなら、write_agreementのtask_id引数を"
+                            f"'{_mismatch_tid}'に修正するか（current_task_idと異なる場合はまず正しい"
+                            f"タスクへ遷移してから）、本文の見出しを現在のタスク（'{tid}'）の内容に"
+                            f"修正してください。"
+                        ), None
                     v = apply_whiteboard_patch(conn, run_id, phase_id, tid, raw_content, author_role=caller_role,
                                                 edit_summary=args.get("reason_why", ""))
                     _LAST_WHITEBOARD_EDIT = {"phase_id": phase_id, "task_id": tid, "version": v}
@@ -4240,7 +4290,8 @@ def _commit_agreement_from_tool(args: dict, conn: sqlite3.Connection, run_id: st
 
 def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_role: str, task_id: str = "",
                            phases: list[dict] | None = None, pending_task_ids: list[str] | None = None,
-                           effective_current_task_id: str = "", phase_id: str = "") -> dict:
+                           effective_current_task_id: str = "", phase_id: str = "",
+                           pending_task_redirect: dict | None = None) -> dict:
     """[F-3.2] write_agreement_toolの実体。バリデーション→権限チェック→SQLiteコミット→確定値反映
 
     ★修正（レビュー指摘H1、二重JSONエンコード対応）: 生のdictを返す。json.dumps済み文字列を
@@ -4342,6 +4393,33 @@ def _write_agreement_impl(args: dict, conn: sqlite3.Connection, run_id: str, cal
                     f"task_id '{tid}' は現在のタスク（'{effective_current_task_id}'）と一致しません。"
                     "write_agreementのCREATE/UPDATEで書き込めるのは現在進行中のタスクの内容のみです。"
                     "他タスクの内容を改訂・訂正する場合はaction_type='SUPERSEDE'を使ってください。"
+                ),
+            }
+
+        # 4.56. [BL-319] pending_task_redirect（advance_task待機中）に対する「現在task_idへの
+        # 偽装書き込み」の遮断。BL-146を額面通り通過するが、宣言task_idが現在task_idと一致する
+        # 一方でadvance_taskの遷移先が別task_idを指している場合、それは正当な現在タスクの記録
+        # ではなく、遷移待ちのLLMが拒否を回避するため現在task_idへ偽装した可能性が高い
+        # （実インシデント: log/2026-08-30/2010、task_3_2_1で3回正当に拒否された後、
+        # 同一内容がtask_id="task_1_1"で書き込まれた）。
+        if (args["action_type"] != "SUPERSEDE" and pending_task_redirect
+                and pending_task_redirect.get("decision_type") == "advance_task"
+                and pending_task_redirect.get("target_task_id")
+                and pending_task_redirect["target_task_id"] != tid
+                and tid == effective_current_task_id):
+            print(
+                f"  🚫 [write_agreement guard][BL-319] pending advance_task待機中の現在task_id"
+                f"書き込みを拒否: caller={caller_role}, 宣言task_id={tid!r}, "
+                f"pending先={pending_task_redirect['target_task_id']!r}, topic={args.get('topic')!r}"
+            )
+            return {
+                "success": False,
+                "error": (
+                    f"'{pending_task_redirect['target_task_id']}'への移行が既に受理され適用待ちです"
+                    f"（直前のレビューが差し戻されたため未反映）。この内容は現在のtask_id"
+                    f"（'{tid}'）と一致していますが、移行先タスクの内容を現在task_idへ偽装して"
+                    "登録することはできません。差し戻しへの対応を完了させ、移行の適用を待って"
+                    "ください。"
                 ),
             }
 
@@ -5004,6 +5082,15 @@ def _get_escalated_issues(conn: sqlite3.Connection, run_id: str) -> list[dict]:
 # 達したら、その「受け皿」はもはや実在する対応計画ではなく先送りの捨て場とみなす。
 _DEFERRAL_PILEUP_THRESHOLD = 5
 
+# [BL-315][AGENTS.md §7 承認済み 2026-08-30] defer_to_task_idが一度も割り当てられないopen
+# issueがこの件数に達したら、task_plannerへ計画再構成の検討を促す。
+_UNDEFERRED_OPEN_ISSUE_THRESHOLD = 5
+# [BL-315][AGENTS.md §7 承認済み 2026-08-30] 1回のトリガーで一括planned化する上限。無制限に
+# 積むと、task_plannerが実際には拾わなかったissueまで機械的に「組み込み済み」扱いになり
+# 偽の状態をUser AIへ表示し続けるため（独立レビュー指摘）、古い順（_get_open_issuesの
+# ORDER BY rowid、BL-215）に上限件数だけを対象とし、残りは次回reflectionで再評価する。
+_UNDEFERRED_OPEN_ISSUE_BATCH_CAP = 10
+
 
 def _get_overloaded_defer_targets(conn: sqlite3.Connection, run_id: str) -> set[str]:
     """[BL-233] 先送りが積み上がりすぎたtask_idの集合を返す（＝受け皿として破綻している先）。
@@ -5211,6 +5298,16 @@ def _get_open_issues(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _get_undeferred_open_issues(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    """[BL-315] defer_to_task_idが一度も設定されていないstatus='open'（minor）行を返す。
+    escalated行はBL-136の強制RESOLVE/DEFER督促（_get_forced_escalated_issues_text）が
+    既に効いているため対象外——open行だけが「_build_open_issue_pin_textで毎ターン参考表示
+    されるのみで対応を強制されない」という構造的欠落を持つ。_get_open_issuesのORDER BY
+    rowid（BL-215）をそのまま引き継ぐため、返り値は起票順（＝古い順）。
+    """
+    return [i for i in _get_open_issues(conn, run_id) if not i.get("defer_to_task_id")]
+
+
 def _build_open_issue_pin_text(conn: sqlite3.Connection, run_id: str) -> str:
     """[BL-136] issue_logのopen（minor）行を毎ターン参考情報として差し込むための整形テキスト。
     escalated行（_build_escalation_pin_text、対応必須）とは異なり、こちらはあくまで参考情報
@@ -5319,12 +5416,6 @@ def _build_task_transition_blocked_notice(state: LineageState) -> str:
             "提出を指示する）まで、次タスクへの移行指示は行わないでください。\n"
         )
 
-    reassigned_notice = state.get("task_reassigned_after_replan_notice")
-    if reassigned_notice:
-        state["task_reassigned_after_replan_notice"] = ""
-        print(f"  📣 [BL-190] タスク再割当通知をLLMプロンプトへ注入します。")
-        return f"\n【🛑 {reassigned_notice}】\n"
-
     unmet_deps_task_id = state.get("task_transition_blocked_unmet_deps_task_id")
     if unmet_deps_task_id:
         unmet_deps = state.get("task_transition_blocked_unmet_deps") or []
@@ -5340,6 +5431,22 @@ def _build_task_transition_blocked_notice(state: LineageState) -> str:
         )
 
     return ""
+
+
+def _build_task_reassigned_notice(state: LineageState) -> str:
+    """[BL-190/BL-318][独立レビュー指摘I-2] task_reassigned_after_replan_noticeの消費を
+    _build_task_transition_blocked_noticeから分離した専用関数。この通知はadvance_task
+    ツール（schedule_task_focus）の利用を促す内容のため、ツールを持たないプロンプト経路
+    （cela_main.py内、差し戻し・本質対話・Expert相談応答・終盤・初回ターン用のsystem_prompt_
+    trailing側）でone-shotが無為に消費されてしまうのを防ぐ必要がある。ツールが利用可能な
+    Stage4呼び出し箇所からのみ呼ぶこと。
+    """
+    reassigned_notice = state.get("task_reassigned_after_replan_notice")
+    if not reassigned_notice:
+        return ""
+    state["task_reassigned_after_replan_notice"] = ""
+    print(f"  📣 [BL-190] タスク再割当通知をLLMプロンプトへ注入します。")
+    return f"\n【🛑 {reassigned_notice}】\n"
 
 
 def _read_issues_handler(args: dict) -> dict | list:
@@ -5498,18 +5605,55 @@ def _schedule_task_focus_tool_impl(args: dict, conn: sqlite3.Connection, run_id:
     このbaselineとの比較で行う（`_is_task_completed`単独では、BL-163でフラグされただけで
     ステータスがApprovedのまま残っている過去タスクにredirectした直後、Expertが何も手を
     付けていない時点で即座に「完了済み」と誤判定してしまうため）。
+    [BL-318] advance_task: 通常の順方向タスク遷移をLLMの自由文脈判断（call_decision_extractor）
+    に頼らず構造化して確定させる。_resolve_task_transitionのstructured_redirect優先ロジックへ
+    next_task_id/next_phase_idの取得元として渡り、BL-125/176/255のゲートは自由文脈経路と
+    完全に共用する（ここでは複製しない）。
     """
     global _LAST_SCHEDULING_DECISION
     if caller_role != "user":
         return {"success": False, "error": f"{caller_role}はschedule_task_focusを呼び出せません（userロールのみ許可）"}
     decision_type = args.get("decision_type")
     reason = args.get("reason", "")
-    if decision_type not in ("redirect_backward", "joint_focus", "clear_companion", "force_resume") or not reason:
+    if decision_type not in ("advance_task", "redirect_backward", "joint_focus", "clear_companion", "force_resume") or not reason:
         return {"success": False, "error": "decision_type/reasonは必須です"}
 
     phases = _phases_from(state)
     current_task_id = _effective_current_task_id_from(state)
     current_phase_id = _phase_id_from(state)
+
+    if decision_type == "advance_task":
+        target_task_id = args.get("target_task_id", "")
+        target = _find_task_by_id(phases, target_task_id)
+        if not target:
+            return {"success": False, "error": f"target_task_id '{target_task_id}' は計画に存在しません"}
+        # [BL-318][CONSTRAINT][独立レビュー指摘C-1] ここは直上(5533)の`current_task_id`
+        # (=_effective_current_task_id_from(state)、current_phase先頭タスクへのフォールバック
+        # 込み)ではなく、生のraw値を使う。BL-190リコンサイル直後はstate["current_task_id"]=""・
+        # current_phase=phases[0]であり、_effective_current_task_id_fromはphases[0]の先頭
+        # タスク（実インシデントで14件の誤帰属を起こした'task_1_1'そのもの）を返してしまう。
+        # 実効値をここで使うと、(a)正当な後継タスクへのadvance_taskがフォールバック値と偶然
+        # 一致した場合に「現在タスクと同一」と誤って拒否され、(b)scheduling_drafts.primary_task_id
+        # にフォールバック値が実際の離脱元として記録される——BL-146/BL-211と同型の誤帰属を
+        # このツール自身が再生産することになる。BL-214が_resolve_task_transition側で確立した
+        # 「departing_task_idは生の値が正しい」規約をここでも踏襲する。
+        _raw_current_task_id = state.get("current_task_id", "") if state else ""
+        if target_task_id == _raw_current_task_id:
+            return {"success": False, "error": "target_task_idは現在のタスクと同一です"}
+        # [独立レビュー指摘M-2] redirect_backward中(task_focus_stack非空)にadvance_taskで
+        # current_task_idを動かすと、一時中断中のフォワードタスクとの対応関係が壊れ、
+        # _maybe_resume_forward_focusが誤ったタスクの完了判定で自動復帰してしまう。
+        # redirect_backward自身の「深さ1固定」ガードと同じ理由で拒否する。
+        if state and state.get("task_focus_stack"):
+            return {"success": False, "error": "既に一時中断中のフォーカスがあります。force_resumeで先に解消してからadvance_taskを呼んでください"}
+        target_phase_id = _find_phase_id_for_task(phases, target_task_id)
+        record_scheduling_decision(conn, run_id, decision_type, _raw_current_task_id, current_phase_id,
+                                    "", "", reason, caller_role)
+        _LAST_SCHEDULING_DECISION = {
+            "decision_type": "advance_task", "target_task_id": target_task_id,
+            "target_phase_id": target_phase_id, "reason": reason,
+        }
+        return {"success": True}
 
     if decision_type == "redirect_backward":
         target_task_id = args.get("target_task_id", "")
@@ -5583,7 +5727,7 @@ _RUNTIME_TOOL_LIMIT_KEYS = (
 def _resume_config_overrides_from(config: dict) -> dict:
     """[BL-203] AppConfigから実行時設定4フィールドを取り出す（既定値はLineageState初期化と同値）。"""
     return {
-        "max_web_search_calls": config.get("max_web_search_calls", 200),
+        "max_web_search_calls": config.get("max_web_search_calls", 400),
         "max_web_fetch_calls": config.get("max_web_fetch_calls", 30),
         "max_road_route_calls": config.get("max_road_route_calls", 30),
         "goal_reference_dir": config.get("goal_reference_dir", ""),
@@ -5619,7 +5763,8 @@ TOOL_DISPATCH = {
         args, get_active_conn(), _run_id_from(state), _CURRENT_CALLER_ROLE, _task_id_from(state),
         phases=_phases_from(state), pending_task_ids=_pending_task_ids_from(state),
         effective_current_task_id=_effective_current_task_id_from(state),
-        phase_id=_phase_id_from(state)
+        phase_id=_phase_id_from(state),
+        pending_task_redirect=(state or {}).get("pending_task_redirect"),
     ),
     "freeze_agreement": lambda args, state=None: _freeze_agreement_tool_impl(
         args, get_active_conn(), _run_id_from(state), _CURRENT_CALLER_ROLE
@@ -10359,6 +10504,9 @@ class Appconfig(TypedDict):
     agent_has_guardrail: bool
     chat_histry_window: int
     expert_history_window: int
+    # [BL-317] agreementsコンテキストで、現在タスク・直接依存タスク以外を直近何件まで
+    # 含めるか（expert_history_windowとの対称性のためAppconfigフィールドとする）。
+    agreements_context_recency_window: int
     # [BL-184] web_search/web_fetchのrun単位の呼び出し回数上限（ユーザー確定値: 各30回/run）。
     max_web_search_calls: int
     max_web_fetch_calls: int
@@ -10394,6 +10542,48 @@ def _build_hydrate_context(decisions: list[Decision], config: Appconfig) -> str:
         lines.append(f"- [{d['who']}] {d['what']}（理由: {why_short}）{missing_flag}")
     return "\n".join(lines)
 
+# [BL-317][AGENTS.md §7 承認済み] 関連タスク以外のagreementsを直近何件まで含めるか。
+# Appconfig["agreements_context_recency_window"]として設定可能（decisions側の
+# expert_history_windowと対称。既定40）。
+
+def _is_agreement_displayable(a: dict) -> bool:
+    """[BL-317][独立レビュー指摘A] _build_agreements_contextの表示フィルタと
+    _select_relevant_agreementsの窓対象判定が同じ基準を使うための共有述語
+    （AGENTS.md §15.1）。Decision/Deliverableのみ・Superseded除外・Directive除外。
+    """
+    return (
+        a.get("entry_type", "Decision") in ("Decision", "Deliverable")
+        and a.get("status") != "Superseded"
+        # Directive（指示）はDB画面から除外。完了後の無限ループ防止
+        and a.get("entry_type") != "Directive"
+    )
+
+
+def _select_relevant_agreements(agreements: list[dict], current_task_id: str,
+                                 task_depends_on: list[str], window: int) -> list[dict]:
+    """[BL-317] 現在タスク自身＋直接依存タスクのagreementsは無制限に残し、それ以外は
+    「実際に表示される」行のうち直近window件のみ残す（独立レビュー指摘A: 生のraw行に
+    対して窓をかけると、Superseded/Directiveが混入し実効窓が意図より大幅に縮む）。
+    current_task_idが未解決（空文字）の場合は絞り込まず全件返す（初回ターン等、
+    フィルタ不能な状態での安全側デフォルト）。
+    [独立レビュー指摘C] task_depends_onに空文字が混在していても、呼び出し元の
+    フィルタ漏れに関わらずここ自体で防御する（AGENTS.md §13.1: 空文字混入がtask_id=""の
+    agreementを誤って無制限扱いに昇格させる事故を、消費地点で確実に塞ぐ）。
+    """
+    if not current_task_id:
+        return agreements
+    relevant_task_ids = {current_task_id} | {d for d in (task_depends_on or []) if d}
+    relevant = [a for a in agreements if a.get("task_id") in relevant_task_ids]
+    displayable_others = [
+        a for a in agreements
+        if a.get("task_id") not in relevant_task_ids and _is_agreement_displayable(a)
+    ]
+    others_kept = displayable_others[-window:] if window else displayable_others
+    keep_ids = {a["id"] for a in relevant} | {a["id"] for a in others_kept}
+    # 元のrowid順（get_agreements_from_dbの並び）を保った状態で返す
+    return [a for a in agreements if a["id"] in keep_ids]
+
+
 def _build_agreements_context(agreements: list[Agreement],
                             conn: sqlite3.Connection | None = None,
                             run_id: str = "") -> str:
@@ -10401,14 +10591,8 @@ def _build_agreements_context(agreements: list[Agreement],
     Formatting of relevant agreements (Decisions/Deliverables) into a readable, contextual string for LLM consumption.
 Filters out superseded or directive items and applies status-based formatting/labeling.
     """
-    decisions_and_deliverables = [
-        a for a in agreements
-        if a.get("entry_type", "Decision") in ("Decision", "Deliverable") 
-        and a.get("status") != "Superseded"
-        # Directive（指示）はDB画面から除外。完了後の無限ループ防止
-        and a.get("entry_type") != "Directive"
-    ]
-    
+    decisions_and_deliverables = [a for a in agreements if _is_agreement_displayable(a)]
+
     if not decisions_and_deliverables:
         return "(まだ合意・決定・提案された事項はありません)"
 
@@ -10694,12 +10878,56 @@ def _build_hydrate_context_from_db(conn: sqlite3.Connection, run_id: str, config
     return _build_hydrate_context(get_decisions_from_db(conn, run_id), config)
 
 
-def _build_agreements_context_from_db(conn: sqlite3.Connection, run_id: str) -> str:
+def _build_agreements_context_from_db(conn: sqlite3.Connection, run_id: str,
+                                       current_task_id: str = "",
+                                       task_depends_on: list[str] | None = None,
+                                       window: int = 40) -> str:
     """【SLM要約】
     SQLiteからagreementsを取得し、旧list版と同一のロジック（Rejectedも却下事項として含める既存挙動維持）でコンテキスト文字列化する。
     [BL-224 C1] conn/run_id を渡して系譜（lineage）表示を有効化する。
+    [BL-317] current_task_idを渡すと、現在タスク＋直接依存タスク以外のagreementsを
+    直近window件へ絞り込む（AGENTS.md §16.1の追加案。decision_extractor温存のBL-318と同じ
+    「置換ではなく追加」方針）。current_task_id省略時（既定""）は従来通り全件無制限
+    （tests/test_bl071_agreement_timestamp_crash.py:57・tests/test_bl224_phase2_lineage_
+    consumption.pyが2引数のみで呼ぶ既存呼び出しとの後方互換）。
     """
-    return _build_agreements_context(get_agreements_from_db(conn, run_id), conn, run_id)
+    agreements = get_agreements_from_db(conn, run_id)
+    trimmed = False
+    if current_task_id:
+        _before = len(agreements)
+        agreements = _select_relevant_agreements(agreements, current_task_id, task_depends_on or [], window)
+        trimmed = len(agreements) < _before
+        if trimmed:
+            print(f"  ✂️ [BL-317] agreementsコンテキストを{_before}件→{len(agreements)}件へ絞り込みました"
+                  f"（current_task_id={current_task_id}）。")
+    text = _build_agreements_context(agreements, conn, run_id)
+    if trimmed:
+        # [BL-317][ユーザー指摘] 絞り込みが発生した場合、LLM自身にその事実を明示し、
+        # ここに含まれない過去の合意・決定事項が必要な場合はread_agreementで能動的に
+        # 確認するよう促す。登録済みなのに単に表示されず読み漏らす事故を防ぐため
+        # （§13/§15.4: 入口〈write_agreement〉があっても出口〈参照〉が欠けると
+        # 記録が実質死蔵する）。
+        text += (
+            f"\n\n【BL-317: このリストは全件ではありません】現在タスク（{current_task_id}）"
+            "及びその直接依存タスクの事項は全件表示していますが、それ以外の過去の合意・決定・"
+            f"成果物は直近{window}件のみに絞り込んでいます。ここに含まれていない過去の"
+            "合意事項・成果物が必要になった場合は、必ずread_agreementツール"
+            "（topic_keyword/task_id指定）で能動的に確認してください。\n"
+        )
+    return text
+
+
+def _build_agreements_context_for_state(conn: sqlite3.Connection, state: "LineageState",
+                                         config: "Appconfig | None" = None) -> str:
+    """[BL-317] call_orchestrator/call_expert/call_detector/generate_user_utterance
+    共通のagreementsコンテキスト取得パターンを1箇所へ集約する（独立レビュー指摘F。
+    D-179と同型の「パターンを5箇所に複製し1箇所だけ更新漏れる」事故を防ぐ）。
+    """
+    current_task = _get_current_task(state)
+    current_task_id = _effective_current_task_id_from(state)
+    task_depends_on = _task_depends_on(current_task)
+    window = (config or {}).get("agreements_context_recency_window", 40)
+    return _build_agreements_context_from_db(conn, state["run_id"], current_task_id, task_depends_on, window)
 
 
 def _get_current_task(state: LineageState) -> dict:
@@ -10719,6 +10947,15 @@ def _get_current_task(state: LineageState) -> dict:
     if current_task_id and tasks:
         print(f"  ⚠️ [_get_current_task] current_task_id='{current_task_id}'がcurrent_phaseのタスク一覧に見つかりません。先頭タスク'{tasks[0].get('task_id')}'にフォールバックします。")
     return tasks[0] if tasks else {}
+
+
+def _task_depends_on(task: dict) -> list[str]:
+    """[BL-242/BL-317] taskのdepends_onを安全に取得する共有ヘルパー。None・欠落・
+    空文字混入いずれでも安全に劣化する（AGENTS.md §13.1、独立レビュー指摘C）。
+    call_detector（BL-242の未読み込み依存警告）とBL-317の関連性フィルタの両方から
+    参照する共有述語（AGENTS.md §15.1、同じロジックを複製しない）。
+    """
+    return [d for d in (task.get("depends_on", []) or []) if d]
 
 
 def _reconcile_current_phase_after_replan(state: LineageState, phases: list[dict]) -> None:
@@ -10793,7 +11030,9 @@ def _reconcile_current_phase_after_replan(state: LineageState, phases: list[dict
     state["task_reassigned_after_replan_notice"] = (
         f"[BL-190] 直前まで進行していたタスク'{current_task_id}'は、直前の計画再構成により"
         "廃止・統合されました。新しい計画（phases）を確認し、対応する新タスクへ改めて着手して"
-        "ください。"
+        "ください。schedule_task_focusツールをdecision_type=\"advance_task\", "
+        "target_task_id=\"（新タスクのID）\"で呼び、遷移を確実に記録してください（会話文だけでは"
+        "遷移が記録されない場合があります）。"
     )
 
 
@@ -11732,7 +11971,7 @@ def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
     if not recent_text:
         recent_text = "(まだ履歴はありません)"
 
-    agreements_text = _build_agreements_context_from_db(_conn, state["run_id"])
+    agreements_text = _build_agreements_context_for_state(_conn, state, config)
     print(f"【プロジェクトの合意・決定事項・検討状況DB】\n {agreements_text} \n\n")
 
     # [BL-148] read_project_plan/read_deliverable_fileのハンドラはstateを直接参照できず
@@ -11870,7 +12109,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     max_turns = config["initial_max_turnval"]
     turn_count = state["turn_count"]
     _conn = get_active_conn()
-    agreements_text = _build_agreements_context_from_db(_conn, state["run_id"])
+    agreements_text = _build_agreements_context_for_state(_conn, state, config)
     is_stateless_mode = config["is_stateless_mode"]
     user_input = state["user_input"]
     chat_history_window = config["chat_history_window"]
@@ -12568,7 +12807,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
     # [BL-062] Detectorがmajor判定を出した際、対象のtopicをtarget_topicとしてSUPERSEDEできるよう、
     # 既存の【決定事項DB】（topic名・ID）を提示する。従来はDetectorに一切見えておらず、
     # write_agreementの権限（status='Rejected'）はあってもtarget_topicを指定する材料がなかった。
-    agreements_text = _build_agreements_context_from_db(get_active_conn(), state["run_id"])
+    agreements_text = _build_agreements_context_for_state(get_active_conn(), state)
     recent_history = state["chat_history"][-2:]
     history_text = "\n".join([f"{'[User]' if m['role']=='user' else '[AI]'}\n {m['content']}" for m in recent_history])
     goal = state["goal"]
@@ -12623,7 +12862,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
     # BL-108→BL-110/D-206→D-207で「機械的強制は往復コスト過大」と判断した経緯を踏襲）。
     # log/2026-08-16/1000で、task_7_1のExpertが依存タスク7件中5件の成果物を一度も読まずに
     # 統合文書を書いていた実インシデントへの対応。
-    _current_task_depends_on = [d for d in (current_task.get("depends_on", []) or []) if d]
+    _current_task_depends_on = _task_depends_on(current_task)
     expert_deliverable_reads = state.get("expert_last_deliverable_reads", [])
     _unread_deps = [d for d in _current_task_depends_on if d not in expert_deliverable_reads]
     deliverable_reads_block = (
@@ -13447,6 +13686,15 @@ _EXTRACTOR_VALID_ENTRY_TYPES = {"Decision", "Directive", "Deliverable", "Essence
 _EXTRACTOR_VALID_STATUSES = {
     "Proposed", "Approved", "Approved_with_Conditions", "Rejected", "Implicitly_Accepted", "Deferred",
 }
+# [BL-320] decision_extractorのJSONスキーマで文書化されているトップレベルキー。
+# これ以外のキーが混入している項目は、モデル出力が反復collapse（無意味なキー名の
+# 反復生成）で劣化している強いシグナルとして扱う（実インシデント: log/2026-08-30/2051、
+# "_comment_removed"/"__junk__"等のゴミキーが延々と続き、本来のcontent/task_id等が
+# 一切出力されなかった）。
+_EXTRACTOR_KNOWN_EVENT_KEYS = {
+    "action_type", "entry_type", "target_topic", "status", "topic", "content", "rationale",
+    "proposed_by", "phase_id", "task_id", "owned_variable_values", "defer_to_task_id",
+}
 
 
 def _check_extracted_event(item: dict) -> list[tuple[str, str, str]]:
@@ -13468,6 +13716,17 @@ def _check_extracted_event(item: dict) -> list[tuple[str, str, str]]:
     entry_type = item.get("entry_type")
     status = item.get("status")
 
+    # [BL-320] 未知キー混入の検知。task_id等の特定フィールドには依存しない、
+    # 反復collapse劣化の汎用的な検知シグナル（詳細はdocs/design/back_log/BL-320参照）。
+    unknown_keys = sorted(set(item.keys()) - _EXTRACTOR_KNOWN_EVENT_KEYS)
+    if unknown_keys:
+        problems.append((
+            "fatal", "(unknown_keys)",
+            f"スキーマにないキー{unknown_keys}が含まれています。extracted_eventsの各要素は"
+            f"{sorted(_EXTRACTOR_KNOWN_EVENT_KEYS)}のみを使用してください。未知のキーは"
+            "出力が破綻している兆候であり、この項目は全体を破棄します。",
+        ))
+
     if entry_type not in _EXTRACTOR_VALID_ENTRY_TYPES:
         problems.append((
             "fatal", "entry_type",
@@ -13488,6 +13747,18 @@ def _check_extracted_event(item: dict) -> list[tuple[str, str, str]]:
             "action_typeがUPDATEなのにtarget_topicが空です。UPDATEでは更新対象の既存トピック名を"
             "target_topicへ**そのままの文字列で**入れてください。省略すると更新対象を特定できず、"
             "何も更新されないまま新しい行だけが増えます。",
+        ))
+    if action_type == "CREATE" and not item.get("content"):
+        # [BL-320] UPDATE時のcontent=""は「Userが評価しただけ」を意味する正規パターン
+        # （プロンプト仕様、common_rules）だが、CREATE時にcontentが空という状態は
+        # プロンプトのどこにも許容されていない。実インシデントではCREATE項目のcontentが
+        # 反復collapseで丸ごと欠落し、内容のないDirectiveがtask_id誤帰属のままDBへ
+        # 書き込まれた（詳細はdocs/design/back_log/BL-320参照）。
+        problems.append((
+            "fatal", "content",
+            "action_typeがCREATEなのにcontentが空です。新規に抽出する提案・指示・成果物の"
+            "内容をcontentへ記載してください（Deliverableは200字以内の要約で構いません）。"
+            "省略すると内容の無い空の記録がDBに残ります。",
         ))
 
     if status not in _EXTRACTOR_VALID_STATUSES:
@@ -14667,7 +14938,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         remaining_concerns = "" if issue_parse_failed else (issue_parsed.get("remaining_concerns", "") or "")
 
         # ===== Stage 3: 統合承認判断（write_agreementを単独所有） =====
-        agreements_text = _build_agreements_context_from_db(_conn, state["run_id"])
+        agreements_text = _build_agreements_context_for_state(_conn, state, config)
         # [BL-178フォローアップ] 承認先のtarget_topicを明示的に注入する。従来はこの指定が無く、
         # LLMが「統合承認判断」という別トピックのDecisionエントリを新規CREATEしてしまい
         # （Expertの成果物＝entry_type="Deliverable"自体はProposedのまま更新されず）、
@@ -14790,7 +15061,8 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
             approval_status = "ApprovalRecordingFailed"
 
         # ===== Stage 4: 次タスク指示 / 現タスク修正指示 / 承認記録失敗の待機メッセージ =====
-        _transition_notice = _build_task_transition_blocked_notice(state)  # [BL-125/BL-176/BL-190]
+        _transition_notice = _build_task_transition_blocked_notice(state)  # [BL-125/BL-176]
+        _task_reassigned_notice = _build_task_reassigned_notice(state)  # [BL-190/BL-318] ツール利用可能なStage4でのみ消費
         _escalation_resume_notice = _build_escalation_resume_notice(state)  # [BL-096]
         _task_focus_transition_notice = _build_task_focus_transition_notice(state)  # [BL-191]
         _task_focus_state_text = _build_task_focus_state_text(state)  # [BL-191]
@@ -14810,6 +15082,9 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
                 f"{_task_focus_state_text}"
                 f"{_stale_past_tasks_text}"
                 f"{_scheduling_history_text}"
+                f"[BL-318] 次タスクへの移行を指示する際は、通常の指示文に加えて必ず"
+                f"schedule_task_focus(decision_type=\"advance_task\", target_task_id=\"...\")も"
+                f"呼び、遷移を確実に記録してください（会話文だけの指示では抽出漏れが起きえます）。\n"
                 f"[BL-191] 過去の承認済みタスクの手戻りが必要だと判断した場合は、通常の次タスク"
                 f"指示文とは別に、schedule_task_focusツールで明示的にスケジューリング判断を"
                 f"記録してください。'redirect_backward'で今すぐ過去タスクへ完全に切り替えるか、"
@@ -14819,6 +15094,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
                 f"【承認理由（第3段）】{approval_reason}\n"
                 f"{_escalation_resume_notice}"
                 f"{_transition_notice}"
+                f"{_task_reassigned_notice}"
                 f"{_task_focus_transition_notice}"
                 f"{_BL192_DIRECTIVE_QUALITY_BLOCK}"
                 f"【同じ検証・計算を繰り返さない】必要な確認は既に前段で完了しています。ここでは"
@@ -14868,8 +15144,10 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
                 f"呼んでください。\n"
             )
         stage4_system_prompt += (
-            f"\n【重要】あなたが使えるツールはthink・schedule_task_focus（[BL-191]過去タスクの"
-            f"手戻りが必要な場合のみ）・read_entityです。{_THINK_TRAILER_SENTENCE}\n"
+            f"\n【重要】あなたが使えるツールはthink・schedule_task_focus・read_entityです。"
+            f"次タスクへの移行を指示する際は必ずschedule_task_focus(decision_type=\"advance_task\", "
+            f"target_task_id=\"...\")も呼んでください。過去タスクの手戻りが必要な場合のみ"
+            f"redirect_backward/joint_focusを使ってください。{_THINK_TRAILER_SENTENCE}\n"
             f"{_scratch_concerns_closure_instruction('これから生成する次タスク指示メッセージ本文')}\n"
         )
         _reset_think_scratchpad()
@@ -15098,12 +15376,13 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     system_prompt_trailing = ""
 
     _conn = get_active_conn()
-    agreements_text = _build_agreements_context_from_db(_conn, state["run_id"])
+    agreements_text = _build_agreements_context_for_state(_conn, state, config)
 
     # [BL-103] 従来はget_decisions_from_dbの全件を毎ターン無制限に展開しており、Expert側の
     # 窓付きhydrate_context（expert_history_windowでスライス）と非対称かつ長時間runで
     # 際限なく肥大化するリスクがあった。Expertと同じ共通ヘルパーに統一し、issue_logの
     # escalated行（recencyに関係ない pin）も併せて注入する。
+    # [BL-317] agreements側もこの非対称を解消し、現在タスク関連＋直近N件へ窓化済み。
     timeline_str = _build_hydrate_context_from_db(_conn, state["run_id"], config)
     escalation_pin = _build_escalation_pin_text(_conn, state["run_id"], _effective_current_task_id_from(state), state.get("round_count", 0), caller_role="user")
     if escalation_pin:
@@ -16628,8 +16907,20 @@ def _resolve_task_transition(state: LineageState, transition: dict,
             _force_resume_forward_focus(state)
             return
 
-    next_phase_id = transition.get("advances_to_phase_id")
-    next_task_id = transition.get("advances_to_task_id")
+    # [BL-318] structured_redirectがadvance_task（通常の順方向遷移の構造化確定）の場合、
+    # 自由文脈のtransition.advances_to_task_id/advances_to_phase_idより優先する。以降の
+    # task_id正規化（BL-039）・フェーズ横断探索（BL-210）・BL-125/176/255ゲートは一切複製せず
+    # 共用する。next_task_idは_schedule_task_focus_tool_implの検証により実質空にならない
+    # （万一空で来た場合は直後のnot next_phase_id and not next_task_idで無音no-opする、既存の
+    # 自由文脈経路と同じ挙動）。
+    if structured_redirect and structured_redirect.get("decision_type") == "advance_task":
+        next_phase_id = structured_redirect.get("target_phase_id") or None
+        next_task_id = structured_redirect.get("target_task_id")
+        print(f"  🧭 [BL-318] schedule_task_focus(advance_task)による構造化遷移要求を優先します: "
+              f"target_task_id='{next_task_id}'")
+    else:
+        next_phase_id = transition.get("advances_to_phase_id")
+        next_task_id = transition.get("advances_to_task_id")
     if not next_phase_id and not next_task_id:
         return
 
@@ -17542,6 +17833,62 @@ It generates a formal decision based on reflection results, updating the overall
         print(
             "  ⚠️ [BL-313] 先送り集中を検知しましたが、plan_revision_reasonが既に別要因で"
             "セット済みのため今回はスキップします（次回reflectionで再評価）。"
+        )
+
+    # [BL-315] 受け皿（defer_to_task_id）が一度も割り当てられないopen issueが溜まっている場合、
+    # task_plannerへ計画再構成の検討を促す。BL-136の強制督促（_get_forced_escalated_issues_text）
+    # はstatus='escalated'限定であり、open（minor）行は_build_open_issue_pin_textで毎ターン
+    # 参考表示されるのみで対応を強制されない（軽微な懸念を毎ターン強制すると本来のタスク進行を
+    # 妨げるという意図的なトレードオフ）。そのため受け皿が一度も割り当てられなかったopen issueは
+    # 誰からも能動的にクローズされず無期限に残り続ける（実DBで26件確認、最古は2026-08-28 15:36
+    # から約44.5時間未着手、2026-08-30時点）。BL-313と全く同じ土台（plan_revision_reason/
+    # plan_revision_issue_ids/_mark_issue_planned）を再利用し、トリガー条件だけをBL-313の
+    # 「受け皿への過集中」から「受け皿が一度も無い」へ変える。discussion_statusは上書きしない
+    # （BL-313と同じ理由：facilitation_countの猶予を消費させない）。
+    # [独立レビュー指摘・高1] 対象は_UNDEFERRED_OPEN_ISSUE_BATCH_CAP件までに限定する。無制限に
+    # plan_revision_issue_idsへ積むと、task_plannerが実際には拾わなかったissueまで
+    # _mark_issue_planned経由で機械的に「組み込み済み」扱いになり、偽の状態を_build_
+    # planned_issue_pin_text経由でUser AIへ表示し続けるため（cela_main.py:15878の
+    # embedded_task_ids[0]は新計画の先頭task_idを一律採用するのみで、実際の組み込みを保証しない）。
+    if not state.get("plan_revision_reason"):
+        _bl315_undeferred = _get_undeferred_open_issues(get_active_conn(), state["run_id"])
+        if len(_bl315_undeferred) >= _UNDEFERRED_OPEN_ISSUE_THRESHOLD:
+            # 古い順（ORDER BY rowid）に上限件数だけを今回処理対象とする。残りは
+            # _get_undeferred_open_issuesのCOUNTに残り続けるため、次回reflectionで
+            # 再評価される（段階的な消化、一括の偽planned化を避ける）。
+            _bl315_batch = _bl315_undeferred[:_UNDEFERRED_OPEN_ISSUE_BATCH_CAP]
+            _bl315_lines = [
+                f"- topic={i['topic']}（起票元task_id={i.get('task_id') or '(不明)'}）: "
+                f"{i['description'][:80]}"
+                for i in _bl315_batch
+            ]
+            state["plan_revision_reason"] = (
+                "[BL-315] 受け皿（defer_to_task_id）が一度も割り当てられていないopen issueが"
+                f"{len(_bl315_undeferred)}件溜まっています（うち今回は古い順{len(_bl315_batch)}件を"
+                "対象とします。残りは次回計画再構成で改めて引き継がれます）。これらは軽微な懸念として"
+                "毎ターン参考表示はされていますが、対応が強制されないため誰からも能動的に拾われて"
+                "いません。次の計画において、内容を精査した上で、既存タスクのacceptance_criteriaへ"
+                "組み込む・専用の受け皿タスクを新設する等、いずれかの形で対応の道筋をつけることを"
+                "検討してください（新規タスクである必要はなく、同じタスク内で同時に検討すべき内容なら"
+                "そちらへ統合してください。各issue_idにつき最低1つのtask説明・acceptance_criteriaに"
+                "対応するtopic文字列を明記し、後から追跡可能にしてください。【重要】ここで計画へ"
+                "明示的に組み込まなかったissueも、システム側の記録整理上、機械的に'planned'状態へ"
+                "遷移し、便宜上どこかのtask_idが対応予定として記録されます——これは実際の組み込みを"
+                "意味しないため、本当に対応が必要な内容は必ず計画へ明示してください）:\n"
+                + "\n".join(_bl315_lines)
+            )
+            state["plan_revision_issue_ids"] = [i["id"] for i in _bl315_batch]
+            print(
+                f"  📌 [BL-315] 受け皿未割り当てのopen issue{len(_bl315_undeferred)}件中"
+                f"{len(_bl315_batch)}件をplan_revision_reasonとして次回計画再構成に引き継ぎました"
+                f"（issue_ids={state['plan_revision_issue_ids']}）。"
+            )
+    elif len(_get_undeferred_open_issues(get_active_conn(), state["run_id"])) >= _UNDEFERRED_OPEN_ISSUE_THRESHOLD:
+        # [BL-315][§14.3] plan_revision_reasonが既に別要因（BL-145/BL-313等）でセット済みのため
+        # 今回はスキップし、発火有無をログから追跡できるようにする（次回reflectionで再評価）。
+        print(
+            "  ⚠️ [BL-315] 受け皿未割り当てのopen issue集中を検知しましたが、plan_revision_reasonが"
+            "既に別要因でセット済みのため今回はスキップします（次回reflectionで再評価）。"
         )
 
     _was_escalation_active = state.get("escalation_active", False)
@@ -18472,7 +18819,7 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
                 "web_search_call_count": 0,
                 "web_fetch_call_count": 0,
                 "web_search_provider_unavailable_message": "",  # [BL-270]
-                "max_web_search_calls": config.get("max_web_search_calls", 200),
+                "max_web_search_calls": config.get("max_web_search_calls", 400),
                 "max_web_fetch_calls": config.get("max_web_fetch_calls", 30),
                 "road_route_call_count": 0,
                 "max_road_route_calls": config.get("max_road_route_calls", 30),
@@ -19031,6 +19378,7 @@ if __name__ == "__main__":
         "agent_has_guardrail" : True,
         "chat_history_window": 4,
         "expert_history_window": 6,
+        "agreements_context_recency_window": 40,  # [BL-317][AGENTS.md §7 承認済み]
         # [BL-199] log/2026-08-09/2222で、read_goal_reference未導入だった当時のExpertが
         # docs/refs/chino_city/chino_city_data.mdに既にある施設住所・座標を知らずweb_searchで
         # 再検索し、30回/runの上限を使い果たしていたことが判明。read_goal_reference導入後も、
@@ -19040,7 +19388,10 @@ if __name__ == "__main__":
         # 枯渇し、残り全タスクでweb_searchが使えなくなる実害を確認。100→200へ再緩和
         # （ユーザー承認済み、AGENTS.md §7）。同時にmax_results既定も10→15へ引き上げ、
         # 1回の呼び出しで得られる候補を増やし同一query言い換えの再検索を減らす。
-        "max_web_search_calls": 200,
+        # [BL-314] log/2026-08-30/1105（同run再開後）で、Turn 8/30という序盤で200/200が
+        # 再び枯渇（D-174によりresumeでもカウンタ自体はリセットされない設計のため、複数回の
+        # resumeを経た累積消費が響いた）。200→400へ再緩和（ユーザー承認済み、AGENTS.md §7）。
+        "max_web_search_calls": 400,
         "max_web_fetch_calls": 100,
         "max_road_route_calls": 100,
         "goal_reference_dir": "docs/refs/chino_city",

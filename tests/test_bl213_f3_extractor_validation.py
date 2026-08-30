@@ -201,8 +201,8 @@ def _fake_query_factory(responses):
 def test_validation_failure_triggers_retry_with_reason_in_prompt(monkeypatch):
     """[F3の核心] 検証不合格時、次の問い合わせプロンプトへ「なぜ不正か・どうすべきか」が
     追記されること。これがツール失敗時の自己修正と等価な機構になる。"""
-    bad = '{"extracted_events": [{"action_type": "CREATE", "entry_type": "", "status": "Proposed", "topic": "t", "proposed_by": "User"}]}'
-    good = '{"extracted_events": [{"action_type": "CREATE", "entry_type": "Directive", "status": "Proposed", "topic": "t", "proposed_by": "User"}]}'
+    bad = '{"extracted_events": [{"action_type": "CREATE", "entry_type": "", "status": "Proposed", "topic": "t", "content": "c", "proposed_by": "User"}]}'
+    good = '{"extracted_events": [{"action_type": "CREATE", "entry_type": "Directive", "status": "Proposed", "topic": "t", "content": "c", "proposed_by": "User"}]}'
     fake, seen = _fake_query_factory([bad, good])
     monkeypatch.setattr(cela_main, "query_AI", fake)
 
@@ -241,7 +241,7 @@ def test_retry_exhaustion_returns_last_output_for_caller_policy(monkeypatch):
 
 def test_valid_first_response_does_not_retry(monkeypatch):
     """[非退行/コスト] 一発で正しい出力なら再問い合わせしないこと。"""
-    good = '{"extracted_events": [{"action_type": "CREATE", "entry_type": "Directive", "status": "Proposed", "topic": "t", "proposed_by": "User"}]}'
+    good = '{"extracted_events": [{"action_type": "CREATE", "entry_type": "Directive", "status": "Proposed", "topic": "t", "content": "c", "proposed_by": "User"}]}'
     fake, seen = _fake_query_factory([good])
     monkeypatch.setattr(cela_main, "query_AI", fake)
 
@@ -308,9 +308,9 @@ def test_end_to_end_self_correction_recovers_the_item(monkeypatch):
     """[振る舞い] 1回目が不正でも、理由を伝えた再問い合わせで正しい出力が得られれば採用されること。
     `validator`の配線が外れると、1回目の不正な出力がそのまま採用され（entry_type=""）ここが落ちる。"""
     bad = ('{"extracted_events": [{"action_type": "CREATE", "entry_type": "", "status": "Proposed",'
-           ' "topic": "task_4_3着手指示", "proposed_by": "User"}]}')
+           ' "topic": "task_4_3着手指示", "content": "c", "proposed_by": "User"}]}')
     good = ('{"extracted_events": [{"action_type": "CREATE", "entry_type": "Directive", "status": "Proposed",'
-            ' "topic": "task_4_3着手指示", "proposed_by": "User"}]}')
+            ' "topic": "task_4_3着手指示", "content": "c", "proposed_by": "User"}]}')
     items, _, seen = _call_extractor(monkeypatch, [bad, good])
 
     assert len(items) == 1, f"自己修正後の項目が採用されていない: {items}"
@@ -321,7 +321,7 @@ def test_end_to_end_self_correction_recovers_the_item(monkeypatch):
 def test_end_to_end_minor_problems_are_normalized_not_dropped(monkeypatch):
     """[振る舞い] 軽微な欠落は記録を失わずに正規化されること。"""
     payload = ('{"extracted_events": [{"action_type": "CREATE", "entry_type": "Directive", "status": "",'
-               ' "topic": "t", "proposed_by": ""}]}')
+               ' "topic": "t", "content": "c", "proposed_by": ""}]}')
     items, _, seen = _call_extractor(monkeypatch, [payload])
 
     assert len(items) == 1
@@ -333,7 +333,7 @@ def test_end_to_end_minor_problems_are_normalized_not_dropped(monkeypatch):
 def test_end_to_end_valid_payload_untouched(monkeypatch):
     """[非退行] 正常な出力はそのまま通り、transitionも従来通り取り出せること。"""
     payload = ('{"extracted_events": [{"action_type": "CREATE", "entry_type": "Directive", "status": "Proposed",'
-               ' "topic": "t", "proposed_by": "User"}],'
+               ' "topic": "t", "content": "c", "proposed_by": "User"}],'
                ' "advances_to_phase_id": null, "advances_to_task_id": "task_4_3"}')
     items, transition, seen = _call_extractor(monkeypatch, [payload])
 

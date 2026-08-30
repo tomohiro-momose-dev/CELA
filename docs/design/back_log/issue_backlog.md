@@ -337,6 +337,15 @@
 | BL-308 | 高 | `cela_main.py`（新規`_GOAL_ESCALATION_HIL_REJECTED_VALUE`定数、`_interactive_hil_issue_loop`のapprove/reject分岐をトピック種別で分岐）、`tests/test_bl308_hil_topic_aware_answer.py`（新規5件）、`tests/test_bl274_interactive_hil.py`（既存reject系2件を意図的な仕様変更に合わせ更新） | **`done`。** run_id=1787890406-1e73a89dの実運用で発生した実害。ユーザーが`--interactive-hil`でgoal_escalation_hil_*トピック（ゴール改定エスカレーションの承認）を「approve」で決定したが、続く「確定値 (value):」プロンプトを空Enterで済ませた結果、`verified_facts`へ空文字列が`confidence='confirmed'`として書き込まれた。`revise_goal`（`_get_goal_escalation_hil_decision`）は`_GOAL_ESCALATION_HIL_APPROVED_VALUE`（"approved"）との厳密一致を要求するため空文字列は通らず、`issue_log.status`は'resolved'で見かけ上は解決済みなのに、`--resume`後もAI側は未承認と判定し続ける食い違いが発生した（ユーザー報告「レジュームしてもまだ人間の回答待ちとなる」）。原因は`_interactive_hil_issue_loop`のapprove分岐が、トピック種別を区別せず一律で自由記述の確定値を尋ねていたこと（reject分岐は既に"rejected"を自動セットしていたが、これも全トピック一律で、goal_escalation_hil以外の数値系トピック（license_surrender_count等）には'rejected'という文字列が確定値として書き込まれ破損する逆方向の問題があった）。`topic.startswith(_GOAL_ESCALATION_HIL_TOPIC_PREFIX)`でトピック種別を判定し、goal_escalation_hil系はapprove/reject双方とも対応する定数値を自動セット（自由記述を求めない）、それ以外はrejectで既存のverified_facts値をそのまま人間確認済みへ格上げする（無ければ空文字列、'rejected'という無意味な文字列を数値変数へ書き込まない）よう修正した。実害が発生していたrun_id=1787890406-1e73a89dのDB（`cela.db`）も、バックアップ後に該当issue_logを一時的に'open'へ戻し、`--answer-human-input --value approved`を正しい値で再実行して修正済み。 | P1 |
 | BL-309 | 中 | `cela_main.py`（新規`--interactive-query`CLIフラグ、`_run_interactive_query`・`_answer_general_query`・`_INTERACTIVE_QUERY_TOOLS`）、`tests/test_bl309_interactive_general_query.py`（新規9件） | **`done`。** ユーザー要望「エスカレーション以外でも対話で内容を確認できるようにしたい。すべてのdbへ能動的にアクセスして値や意思決定を追いたい。ただしログはあえて読ませず、dbだけで十分に追跡ができるか（意思決定や事物の系譜が成り立っているか）のテストにもしたい」を受けて実装。既存の`--interactive-hil`（BL-274）は保留issueの承認/却下フローに限定され、内部のQ&A（`_answer_human_question`）もagreements/verified_factsの2テーブルを事前に静的取得してプロンプトへ貼り付けるだけで、LLMが能動的にDBを検索する構造ではなかった。保留issueの有無を問わず起動できる自由質問専用の対話REPL（`--interactive-query RUN_ID`）を新設し、read_agreement/read_verified_fact/read_entity/verify_entity_geo/read_issues/read_escalation/read_deliverable_file/read_project_plan/trace_lineage/python_repl/thinkという既存の読み取り専用ツール実体（グラフ内ノードと同一実装、新規DB検索ロジックは書かない、AGENTS.md §15.1）をツールループとして与えた。生ログファイルを読むツールは一切含めない（現状のツール一覧にそもそも存在しないが、意図的な固定リスト化として明記）。グラフ外の独立CLIプロセスからのツール呼び出しのため、`get_active_conn()`/`_CURRENT_RUN_ID`等のモジュールグローバルを明示的に設定してからツールループへ入る（既存の`_answer_human_input`等と同じ約束事）。承認/却下は行わず、issue_logへは一切書き込まない（`_run_interactive_hil`との役割分担）。 | P2 |
 | BL-310 | 中 | `cela_main.py`（新規`--audit-log`/`--show-think`CLIフラグ、`filter_audit_log_text`他フィルタ用ヘルパー4件） | **`done`。** ユーザー要望「コマンドラインの監査ログをもっと充実させたい。現在のlog_no_promptログから思考ログを除いたもの。ただし、db登録や参照状況は表示、オプションで各ノードのthinkも表示」を受けて実装。実装方式（事後フィルタ vs ライブ3本目ログストリーム）と除外範囲（💭ストリーミング思考＋thinkツール呼び出しの両方を除外、それ以外の🔧ツール実行・DB登録/状態変化行・💬最終発言は残す）をAskUserQuestionで確認し、いずれも提示した推奨案（事後フィルタ方式、実装がシンプルで過去ログにも遡って使える）が選択された。既存のlog_no_prompt.mdを読み、`💭 [label] 思考` ヘッダから次の構造マーカー行（経験的に収集した🔧📝📌📋🆕✨📤🔒📄✅♻️⏭️🚫🔀🚨⚠️ℹ️🔕🗂️🔎➡️🎯⏸️└→🛑🔁🙋等の絵文字プレフィックス、または`[role_name]`形式の役割ラベル行）までを丸ごと除外し、`🔧 ... think 実行`呼び出し＋直後の→結果行のみを別途除外（`--show-think`で復元可、💭ストリーミング思考は`--show-think`でも常に除外）する事後フィルタを実装した。実際のログ（log/2026-08-29/1147で12%、生成崩壊を含むlog/2026-08-28/1919で45%の文字数削減）で目視検証し、write_agreement等のDB登録行・python_replコード等の非think内容が意図通り残ることを確認済み。 | P2 |
+| BL-311 | 中 | `cela_main.py`（新規`_resolve_agreement_id`共有ヘルパー、`freeze_agreement`・`_write_agreement_impl`のdepends_on検証へ配線）、`tests/test_bl311_agreement_id_prefix_self_heal.py`（新規9件） | **`done`。** run_id=1787890406-1e73a89dの1809ログ調査中に発見。DetectorがErlang C×60単位バグの発覚後、以前の監査記録`AG-1787986026078-8663f0`（「全数値完全一致・計算ミスなし」と誤って判定していたもの）をSUPERSEDEしようとしたが、depends_onに枝番（`_new_record_id`が付与するuuid6桁、BL-215）を落とした`AG-1787986026078`を指定し、guardに2回連続（[19:06:38][19:06:59]）で拒否された。結局Detectorはこの訂正を諦め、citationに「検証漏れと判明」と書くだけに留まり、古い誤った記録は`status='Reviewed'`のままDBに残存した（自動注入されるagreements_contextは`status='Superseded'`のみ非表示にするため、将来のターンがこの古い記録を誤って信頼するリスクが残る）。ユーザー指摘「write_agreementのdepends_on検証がID枝番の不一致に対して代替経路を提供していない、改善しましょう」を受け、AskUserQuestionで「自己修復＋候補提示」を選択（自己修復しない候補提示のみ案は、今回のように2回連続で誤ったIDのまま再試行し諦めた実例があるため不採用）。新規`_resolve_agreement_id(conn, run_id, given_id)`ヘルパーを追加し、厳密一致に失敗した場合、run_id限定の前方一致（`id LIKE given_id || '-%'`）で候補を探索。ちょうど1件ならそのフルIDへ自己修復（ログに記録）、0件なら現状通り拒否、2件以上（同一ミリ秒作成等の稀な曖昧ケース）なら憶測で決め打ちせず候補ID一覧付きで拒否する。`freeze_agreement`（`agreement_id`パラメータ）も`write_agreement`のdepends_on検証と全く同じ脆弱性（厳密ID一致のみ）を持っていたため、AGENTS.md §13.4（検証の対称性）に基づき同時に修正した。`_write_agreement_impl`の検証ブロックで`args["depends_on"]`を解決済みのフルIDへ書き換えることで、後続の`_commit_agreement_from_tool`（同一dictを受け取る）が計算する`depends_on`列・`relation_edges`のW3エッジの双方へ正しく伝播することを統合テストで確認した。 | P2 |
+| BL-312 | 高 | `cela_main.py`（`call_detector`の`domain_prompt`・`prompt`〈数値監査〉を静的先頭・動的末尾へ再構成、8箇所の位置参照文を自己完結文へ書き換え）、`tests/test_bl312_detector_prompt_cache_prefix.py`（新規6件）、`tests/test_bl104_project_plan_toc_and_prompt_reorder.py`・`tests/test_bl164_recent_decisions_no_raw_reasoning_leak.py`・`tests/test_bl306_selection_sufficiency_label_check.py`（既存アサーションを新配置・新文言に更新） | **`done`。** ユーザー報告「キャッシュヒット率が以前は70%以上だったが、今は65%程度に低下した。最近の改修でプロンプト挿入位置をミスしたところは無いか」を受けて調査。今日プロンプト文面を変更したコミットはBL-306（13:04）とBL-307（13:24）の2つのみ（いずれも1809ラン開始18:09より前）。BL-307（`call_expert`）は無関係——`call_expert`はBL-178/BL104設計で既に「固定指示文は先頭・動的データは末尾」の再構成済みで、BL-307はその静的セクションに正しく追加されていた。一方`call_detector`のdomain_prompt/prompt（数値監査）は、BL-086/087/266/278・306/279/292/076/062という静的指示ブロックが、決定事項DB・ゴール文・本質・ホワイトボード等の動的ブロックの"後ろ"に挟まったままで、Expertが受けたのと同じ再構成を一度も受けていなかったことが判明した（BL-306は今日その"取り残された"領域に約400字追加しただけで、新規にキャッシュを壊したわけではないが、累積的に非効率を悪化させ続ける構造だった）。Explore agentによる`call_detector`全文の網羅的読解で、位置参照文（「上記の」「上記2つ」「上記DB」「上記ホワイトボードの本文から」等）が計8箇所（domain_prompt側5・prompt側3、うち1箇所は`role_specific_instruction`内部の前方参照）存在し、単純な並べ替えでは破綻することを確認。各参照文を見出し名・BL番号での自己完結文（「後述の…」「[BL-087]の…」等、BL-178のlight_system_promptと同じ技法）へ書き換えた上で、該当する静的指示ブロックを全てSTATIC-TOPへ移動し、state/DB由来の動的ブロックをDYNAMIC-TAILへ集約した。`domain_role_instruction`（`review_mode=="goal_change"`分岐でのみ動的）・`role_specific_instruction`（`target_role=="user"`分岐でのみ動的）は安全側に倒してDYNAMIC-TAILへ配置。`thought_process_audit`は自身の内部に「上記のBL-023 criteria_status判定」「上記のBL-033機械的検算記録」という後方参照を持つため、criteria_text・python_calls_blockより後という相対位置を変更していない。実測（target_role="expert"、Freeze済みagreement追加前後の2状態で比較）: 適用前はdomain_prompt共通接頭辞6687字・prompt共通接頭辞7177字で`_get_frozen_agreements_text`の差分により途切れていたが、適用後はdomain_prompt 9188字・prompt 8278字まで伸びることを確認した。プロンプト文言変更のためAGENTS.md §17.2に基づき、実際のDetector判定挙動への影響は次回ドライラン時の目視確認を宿題とする。 | P1 |
+| BL-313 | 高 | `cela_main.py`（`reflection_node`へ新規トリガー追加、`task_planner_node`の`print`文2箇所のラベル汎用化）、`tests/test_bl313_deferral_pileup_subtask_split_trigger.py`（新規9件） | **`done`。** ユーザー指摘「先送りが集中しているのが気になります。task_5_1に20件もあります」を受けて調査。実DBでtask_5_1に`defer_to_task_id`が20件（全て`severity='minor'`/`status='open'`）集中しており、加えてtask_3_2・task_5_5も閾値ちょうど5件でオーバーロードしていることを確認した。task_5_1の実際のplan_draft（version 28）を読むと、本来のacceptance_criteria（配車アルゴリズム仕様定義）3件に対し、乗合率1.5〜2.5人/トリップの感度分析（task_2_1のSLA達成結論が依存）・移動弱者基数43人のストック/フロー定義・電話比率0.561 vs 0.731の乖離等、本質的に重い検証事項が20件分丸ごと申し送りされており、一括実行時の破綻（BL-287的な反復ガード発火）または感度分析の形骸化のリスクがあった。既存のBL-233（`_get_overloaded_defer_targets`、閾値5件）は検知こそしていたが（実ログで123回警告）、実際の保護効果（`_is_issue_effectively_deferred`）は`_get_escalated_issues()`（`status='escalated'`のみ）経由でしか効かず、20件全件`status='open'`のtask_5_1には空振りしていた。ユーザー提案「先送りが集中したらtask_5_1_1, 5_1_2のようにサブタスク分解させましょうか」に対し「既存のBL-145 replanパイプラインを活用する軽量案」をAskUserQuestionで提示し選択されたが、Explore agentによるBL-145の完全なトレースの結果、当初の想定（BL-233の対象をopenへ拡張すればBL-145が反応する）は誤りだったと判明した——BL-145の停滞判定チェーン（`reflection_node`）も同じ`_get_escalated_issues()`起点であり、`status='open'`の行はどんな条件でも到達しない。そこで「BL-233拡張」ではなく「BL-145が使う土台（`plan_revision_reason`/`plan_revision_issue_ids`/`_mark_issue_planned`/`task_planner_node`の再発火ガード/`call_task_planner`の`revision_block`注入）を再利用しつつ、独立した新しいトリガー条件（BL-313）を`reflection_node`へ追加する」設計に訂正した。ユーザーが依頼した別AIツールによる独立レビューで(A)ログ出力欠落(B)変数名の実体不一致(C)挿入位置が`if _stale_escalated:`ブロック内側になるリスク(D)`_mark_issue_planned`のdefer_to_task_id上書きによる誤誘導(E)複数ターゲット同時発火が実DBで確認済み、の指摘を受け、いずれも実コード再読・実DB再クエリで裏取りした上で設計に反映した。discussion_statusはstagnantへ上書きしない（BL-145の「滞留」とは異なり「受け皿の構造的偏り」を扱うため）。task_idの3段命名（task_5_1_1等）はコードベース全体で単純な文字列集合一致のみで扱われており安全と確認済み。 | P1 |
+| BL-314 | 低 | `cela_main.py`（`_resolve_ref_line`のagreement節へ`_resolve_agreement_id`適用検討）、`tests/test_bl314_trace_lineage_ref_self_heal.py`（新規想定） | **`open`。** BL-311の点検（独立チェック）で発見。BL-311で`_resolve_agreement_id`による枝番（BL-215のuuid6桁）省略IDの自己修復を`write_agreement.depends_on`と`freeze_agreement`の2書き込み経路へ配線したが、AGENTS.md §15.2（ガード対象の発生源を全経路列挙）に基づき「agreement IDを厳密一致で検索する全経路」を列挙した結果、読み取り側に1経路だけ未対応が残ることを確認した。LLMは`trace_lineage`ツールへ`agreement:<id>`形式のrefを直接渡せるが、系譜表示でrefを1行ごとに解決する`_resolve_ref_line`（cela_main.py:9676）は厳密一致のみのため、枝番を落とした`agreement:AG-xxxxxxxxxxxxx`を渡すと「(解決不能: この run 内に該当 agreement がありません)」表示になる。現状動作はfail-loud（§13.2準拠）でありデータ破壊・誤表示はないが、BL-311の経緯（log/2026-08-29/1809でDetectorが枝番省略IDを2回連続拒否されSUPERSEDEを諦めた）と同型のモデルミスが読み取りでも発生しうる。点検時に他の全経路は対応不要と確認済み: `_resolve_ref_table`（cela_main.py:7813、relation_edges書込ゲート）に到達するrefは全て内部生成（BL-311の`args["depends_on"]`書き換え後のフルID、または`_link_supersession`の内部取得ID）であり、`read_agreement`はtask_id/entry_typeフィルタベースでID直指定経路を持たない。対応案: `_resolve_ref_line`のagreement節でも`_resolve_agreement_id`を用いて解決する（読み取り系のため書き込みと対称に自己修復するか、0件時は現状の解決不能表示を維持しつつ候補提示のみに留めるかは実装時にAskUserQuestionで決定する）。優先度P3（表示UX改善・実害なし）。 | P3 |
+| BL-317 | 高 | `cela_main.py`（`_build_agreements_context_for_state`ほか、詳細は下記セクション参照） | **`done`。** agreementsコンテキストを「現在タスク関連＋直近40件」へ関連性優先で有限化。詳細は下記`### BL-317`セクション参照。 | P1 |
+| BL-318 | 高 | `cela_main.py`（`SCHEDULE_TASK_FOCUS_TOOL`・`_resolve_task_transition`ほか、詳細は下記セクション参照） | **`done`。** `schedule_task_focus`へ`advance_task`を追加し通常タスク遷移を構造化ツールで確定。詳細は下記`### BL-318`セクション参照。 | P1 |
+| BL-319 | 高 | `cela_main.py`（`_write_agreement_impl`、詳細は下記セクション参照） | **`done`。** advance_task適用待ち中の「現在task_idへの偽装書き込み」を入口で遮断。詳細は下記`### BL-319`セクション参照。 | P0 |
+| BL-320 | 高 | `cela_main.py`（`_check_extracted_event`、詳細は下記セクション参照） | **`done`。** decision_extractorの抽出項目へ、反復collapse劣化出力を検知するfatalチェックを追加。詳細は下記`### BL-320`セクション参照。 | P1 |
+| BL-321 | 高 | `cela_main.py`（`_deliverable_heading_task_id_mismatch`ほか、詳細は下記セクション参照） | **`done`。** write_agreement(Deliverable)へ本文見出し/task_id不整合の検知ガードを追加。詳細は下記`### BL-321`セクション参照。 | P1 |
 
 ---
 
@@ -10436,6 +10445,386 @@ BL-309対応の直後、ユーザーから「コマンドラインの監査ロ�
 **テスト**: `tests/test_bl310_audit_log_filter.py`（新規10件）。単一行/複数行/EOF終端の思考ブロック除外、thinkツール呼び出しのデフォルト除外・`--show-think`での復元、`--show-think`でも💭は常に除外されること、非think内容の完全な非変更、役割ラベル行が構造マーカーとして機能すること、CLIフラグの配線確認、実ログでの健全性確認（サイズ縮小・write_agreement行の残存）を検証。AGENTS.md §17.1準拠：`git stash`で本修正を一時的に取り除き新規テスト10件全件が期待通り失敗することを確認後、`git stash pop`で復元しコンパイル・再テスト成功を確認した。
 
 参照: `tests/test_bl310_audit_log_filter.py`、`docs/design/decision_log.md` D-265。
+
+---
+
+### BL-311: agreement ID枝番省略の自己修復（`_resolve_agreement_id`）
+
+詳細な経緯・対応内容・検証は上記「優先対応一覧」のBL-311行を参照（`_resolve_agreement_id`共有ヘルパーを新設し`freeze_agreement`・`write_agreement`のdepends_on検証へ配線、`tests/test_bl311_agreement_id_prefix_self_heal.py`新規9件）。
+
+---
+
+### BL-312: `call_detector`プロンプトのキャッシュプレフィックス再構成
+
+詳細な経緯・対応内容・検証は上記「優先対応一覧」のBL-312行を参照（`call_detector`のdomain_prompt・prompt〈数値監査〉を静的先頭・動的末尾へ再構成、`tests/test_bl312_detector_prompt_cache_prefix.py`新規6件）。
+
+---
+
+### BL-313: 先送り集中（defer pileup）検知によるサブタスク分割トリガー
+
+詳細な経緯・対応内容・検証は上記「優先対応一覧」のBL-313行を参照（`reflection_node`へ新規トリガー追加、`tests/test_bl313_deferral_pileup_subtask_split_trigger.py`新規9件）。
+
+---
+
+### BL-314: `_resolve_ref_line`のagreement ID読み取り側自己修復（未着手）
+
+詳細な経緯は上記「優先対応一覧」のBL-314行を参照。BL-311で書き込み系（`write_agreement.depends_on`/`freeze_agreement`）へ配線した`_resolve_agreement_id`による枝番省略ID自己修復を、読み取り系（`trace_lineage`の`_resolve_ref_line`）にも同様に適用するかどうかは未実装（優先度P3、実害なし）。
+
+---
+
+### BL-317: agreementsコンテキストを「現在タスク関連＋直近N件」へ有限化する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-103（decisions側の先行対称化）、BL-224（agreements_context lineage表示）、
+  BL-318（データ是正で作成されたtask_id=""行との相互作用）、
+  `docs/design/back_log/BL-317/BL317_basic_design.md` |
+
+**経緯:**
+
+ユーザー指摘「agreementの内容をプロンプトに積んで提示していて肥大化している」を受け実測した
+ところ、`_build_agreements_context_from_db`が生成する文字列は138,547文字（≈77,000トークン）に
+達しており、毎ターン・全5ノード呼び出し箇所へ無条件に丸ごと注入されていた。「Freeze済み項目は
+無制限に残す」設計を当初想定したが、`is_frozen=1`の行がDB全体で0件（Freeze機構が事実上未使用）
+と判明し、ユーザー選択の「現在タスク自身＋直接依存タスクは無制限、それ以外は直近N件」方式へ
+方針転換した。
+
+**独立レビュー**: 実装前のPlan mode設計に対し独立レビューを受け、指摘A〜Jを反映した。特に
+A（最重要）: 当初案は生の行（Superseded/Directive等の表示除外対象も含む）に対して直近40件を
+数えていたが、実測したところ直近40 raw行のうち実際に表示されるのはわずか23件だった。表示
+フィルタ述語`_is_agreement_displayable`を`_build_agreements_context`と共有し、表示対象に
+絞り込んでからwindow件数を数える設計へ修正した（AGENTS.md §15.1）。C: `depends_on`に空文字が
+混在した場合の防御（BL-318のデータ是正で実際にtask_id=""の行を作成済みであり、仮説ではなく
+現実のリスクだった）。B: プロンプトキャッシュへの影響を「悪化しない」という楽観記述から、
+タスク遷移時にプレフィックスキャッシュが崩れることを認める正直な記述へ修正。
+
+ユーザーからの追加要望として、絞り込みが発生した場合はプロンプト本文にその旨を明示し、
+`read_agreement`ツールでの能動確認を促す注記を追加した（登録されているのに単に窓外で
+表示されず読み漏らす事故の防止）。あわせて「同様の窓化を`decisions`テーブル
+（`_build_hydrate_context`）側にも」というユーザー提案について協議し、`decisions`には
+`read_agreement`に相当する能動読み返しツールが存在しないこと、`read_agreement`自体はBL-279で
+実インシデントを受けて作られた経緯があるのに対し`decisions`側は実インシデントが未確認で
+あることから、今回は見送り・スコープ外とすることで合意した。
+
+**対応内容:**
+
+1. 共有述語`_is_agreement_displayable`を新設し、`_build_agreements_context`の表示フィルタと
+   `_select_relevant_agreements`の窓対象判定の両方から参照するよう統一（独立レビュー指摘A）。
+2. `_select_relevant_agreements`を新設。現在タスク＋直接依存タスクのagreementsは無制限、
+   それ以外は表示対象に絞り込んだ直近window件（既定40）のみを残す。`task_depends_on`の
+   空文字混入は関数内部でも防御する（独立レビュー指摘C、呼び出し元の実装漏れに関わらず
+   消費地点で確実に塞ぐ）。
+3. `_build_agreements_context_from_db`へ`current_task_id`/`task_depends_on`/`window`の
+   オプション引数を追加（未指定時は従来通り全件、既存2テストとの後方互換を維持）。絞り込みが
+   発生した場合、返り値の末尾に「このリストは全件ではありません」「read_agreementツールで
+   確認してください」という注記を追加する（ユーザー指摘）。
+4. 共有ヘルパー`_task_depends_on`を新設し、既存の`call_detector`内の依存未読み込み警告
+   （BL-242）と統一（独立レビュー指摘C、AGENTS.md §15.1）。
+5. `_build_agreements_context_for_state`ヘルパーを新設し、call_orchestrator/call_expert/
+   call_detector/generate_user_utterance（2箇所）の計5箇所を統一（独立レビュー指摘F、
+   D-179と同型のパターン複製・取りこぼしリスクの回避）。
+6. `Appconfig`へ`agreements_context_recency_window`（既定40）を追加し、decisions側の
+   `expert_history_window`と対称なフィールドとした（独立レビュー指摘G、モジュール定数では
+   なくAppconfig化）。
+
+**テスト**: `tests/test_bl317_agreements_context_relevance_window.py`（新規11件）。関連タスク・
+依存タスクの無制限保持、窓が「表示対象」基準であること（独立レビュー指摘A・Hの回帰）、
+depends_on空文字混入の防御（独立レビュー指摘C）、後方互換、実測サイズ縮小、絞り込み注記の
+有無を検証。既存`tests/test_bl062_detector_supersede.py`の1テスト（call_detectorのソース内
+関数名アサーション）を`_build_agreements_context_for_state`統一に合わせて更新。影響範囲
+テスト（BL-071/224/242/317/312）67件・フルオフラインスイート2058 passed / 5 deselected
+（既知の除外のみ）。
+
+参照: `docs/design/back_log/BL-317/BL317_basic_design.md`、`BL317_review.md`、
+`tests/test_bl317_agreements_context_relevance_window.py`、
+`docs/design/decision_log.md` D-270。
+
+---
+
+### BL-318: schedule_task_focusへ`advance_task`を追加し、通常タスク遷移を構造化ツールで確定させる
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-024（current_task_idの唯一の書き手）、BL-039/125/139/146/176/190/191/210/211/214/255、`docs/design/back_log/BL-318/BL318_basic_design.md` |
+
+**経緯:**
+
+ライブラン（run_id=1787890406-1e73a89d）で、BL-313（issue積み上がりによる自動サブタスク分割）が
+task_3_2をtask_3_2_1/task_3_2_2へ分割する再計画を発火させた際、BL-190の「真の削除」分岐が
+正しく`current_task_id`をクリアし1回限りの復帰通知を注入したが、`current_task_id`が3時間以上
+'task_1_1'（フォールバック値）のまま更新されず、以後の全write_agreementがBL-146ガードにより
+`task_id='task_1_1'`として誤帰属し続けた（実DB確認: 14件）。原因を`call_decision_extractor`
+まで追跡した結果、「Userが明示的に『次のタスクに移行する』と指示した場合のみ」
+`advances_to_task_id`を設定し「前のタスクへの言及や単なるレビューは移行に該当しない」という
+除外条件があり、BL-190復帰通知に応えるUser AIの発言が説明・レビュー調になりやすくこの除外に
+該当してしまうことが判明した。
+
+ユーザーとの協議で「decision_extractorの定性判断を排し、通常のタスク遷移もUser AIにツールを
+用意して登録させればどうか」という提案があり、既存のBL-191`schedule_task_focus`/
+`structured_redirect`優先ロジックへ新しいdecision_type`advance_task`を追加する「置換ではなく
+追加」方針で合意した（decision_extractorの自由文脈抽出はフォールバックとして温存）。
+
+**独立レビュー（cline）**: 実装前のPlan mode設計に対し独立レビューを受け、Critical 1件・
+Important 2件を反映した。C-1: `_schedule_task_focus_tool_impl`のadvance_task分岐が
+`_effective_current_task_id_from`（BL-190リコンサイル後はフォールバック値'task_1_1'を返す）を
+使うと、同一チェックの誤拒否とscheduling_drafts.primary_task_idへのフォールバック値記録という
+BL-146/211と同型の誤帰属をこのツール自身が再生産する指摘——生のcurrent_task_idを使うよう修正。
+I-1: ツールdescriptionの「任意呼び出し」文言とStage4プロンプトの「必ず呼べ」指示が矛盾する
+指摘——advance_taskを標準手段として明記。I-2: BL-190復帰通知が`schedule_task_focus`ツールを
+持たないプロンプト経路（差し戻し・本質対話等）でも消費されうる指摘——専用関数
+`_build_task_reassigned_notice`へ分離しStage4のみで消費するよう変更。
+
+**対応内容:**
+
+1. `SCHEDULE_TASK_FOCUS_TOOL`のdecision_type enumに`advance_task`を追加。
+2. `_schedule_task_focus_tool_impl`に新分岐を追加。生の`state.get("current_task_id", "")`で
+   同一チェック・記録を行い（C-1対応）、`task_focus_stack`非空時は拒否する（M-2対応、
+   redirect_backward中の対応関係破壊を防止）。redirect_backwardと異なり既存Deliverableは
+   不要（未着手タスクへの通常遷移を許可）。
+3. `_resolve_task_transition`に、structured_redirectがadvance_taskの場合`next_phase_id`/
+   `next_task_id`の取得元を構造化値へ差し替える分岐を追加。BL-125/176/255ゲート・task_id正規化
+   （BL-039）・フェーズ横断探索（BL-210）は一切複製せず自由文脈経路と完全に共用する。
+4. `task_reassigned_after_replan_notice`の消費を`_build_task_transition_blocked_notice`から
+   `_build_task_reassigned_notice`へ分離し、`schedule_task_focus`ツールを持つStage4呼び出し
+   箇所からのみ消費するよう変更（I-2対応）。通知文言にadvance_taskツールの利用を明示。
+5. Stage4プロンプトの案内・ツールdescriptionを更新し、次タスク移行時は必ずadvance_taskも
+   呼ぶよう案内（I-1対応）。
+
+**テスト**: `tests/test_bl318_advance_task_structured_transition.py`（新規15件）。
+`_schedule_task_focus_tool_impl`単体（正常系・存在しないtask_id・同一task_id拒否・
+C-1回帰〈フォールバック値ではなく生の値を使うこと〉・M-2〈task_focus_stack競合〉・
+非userロール拒否・reason必須）、`_resolve_task_transition`でのBL-125/176/255ゲート共用確認・
+自由文脈との優先順位確認・空target_task_idでの無音no-op確認、`decision_extractor_node`統合
+での実インシデント再現回帰テスト（BL-190リコンサイル後のcurrent_task_idクリア状態から
+advance_taskで正しく後継タスクへ遷移すること）。既存の`test_bl190_current_phase_reconcile_
+after_replan.py`はI-2対応に伴い2テストを更新（`_build_task_transition_blocked_notice`が
+reassigned_noticeを消費しなくなったことの確認を追加）。影響範囲テスト
+（BL-125/136/139/146/176/190/191/214/255）134件・新規15件すべて通過、`python -m py_compile`
+合格。フルオフラインスイート2047 passed / 5 deselected。
+
+**データ是正（実施済み）**: AGENTS.md §18.3に従い`cela.db`をバックアップ後
+（`backups/cela.db.bak-bl318-20260830-181843`）、誤帰属を実データで再調査した結果、当初
+見積もった14件ではなく13件のagreements行（task_3_2/task_3_2_1/task_3_2_2の内容がtask_id=
+'task_1_1'・多くはphase_id=phase_1〈正しくはphase_3〉に誤記録、うち7件は`decision_what`の
+WHITEBOARDポインタ文字列自体も誤り）を修正した。加えて調査の過程で、**whiteboard_drafts
+テーブルにも同型の実害**を発見した——task_1_1のホワイトボード（v1〜v9、8/28作成の正当な
+高齢者移動弱者推計レポート）の上に、task_3_2_1/task_3_2_2の成果物内容がv10〜v15として
+誤って版を重ねて書き込まれており、`get_latest_whiteboard`（`ORDER BY version DESC`）が
+task_1_1について誤ってtask_3_2_2の内容を返す状態になっていた。該当6件（v10→task_3_2_1、
+v11〜v15→task_3_2_2）のtask_id/phase_idを修正し、task_1_1の最新版がv9（正しい内容）へ
+復元されたことを確認した。plan_drafts・chat_historyの同時間帯task_1_1タグ付け行は内容を
+individually確認し、前者は実際にtask_1_1自身の計画書（誤帰属ではない）、後者は当時の
+実際の状態（current_task_id破損）を正確に記録した履歴であり書き換えると改ざんになるため、
+いずれも変更しなかった。もう1件（`AG-1788076764987-a14dad`、`task_planner_phase_design_
+revision_open_issues_10`、BL-315トリガーによる5タスク横断のacceptance_criteria改訂決定）は
+単一タスクに帰属しない計画レベルの決定であり、ユーザー合意の上`task_id=""`（未帰属）へ変更した。
+
+参照: `docs/design/back_log/BL-318/BL318_basic_design.md`、`tests/test_bl318_advance_task_
+structured_transition.py`、`docs/design/decision_log.md` D-269。
+
+---
+
+### BL-319: pending_task_redirect待機中の「現在task_idへの偽装書き込み」を遮断する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P0 |
+| 関連 | BL-318（advance_task、誘因）、BL-146（現在task_idゲート、迂回された対象）、
+  BL-125/176/255（今回機能しないと判明したゲート群）、
+  `docs/design/back_log/BL-319/BL319_basic_design.md` |
+
+**経緯:**
+
+BL-318をライブラン（run_id=1787890406-1e73a89d）へ適用しresumeしたところ、`advance_task`ツール
+呼び出し自体は成功したにもかかわらず、`current_task_id`が更新されない事故が新たに発生した。
+調査の結果、以下の相互作用が判明した:
+
+1. User AI (Stage4)が`schedule_task_focus(advance_task, target_task_id="task_3_2_1")`を正しく
+   呼び出し、`state["pending_task_redirect"]`に構造化決定が設定された。
+2. 直後の`user_detector`が、**advance_taskとは無関係の別の正当な懸念**（task_3_2_1にDEFER済み
+   のescalated major issueが2件未解決のまま移行しようとしている）で差し戻した。
+3. `route_after_user_detector`のルーティングでは、差し戻し時は`pending_task_redirect`を消費
+   する唯一の場所である`user_decision_extractor`を経由せずに`generate_user_utterance`へ戻る。
+   advance_taskの決定は一度も適用されないまま待機状態になった。
+4. `current_task_id`は`task_1_1`のまま固定され続けた。User AIは正しいtask_id（task_3_2_1）で
+   3回書き込みを試み、いずれも正当な理由で拒否された（BL-146 current_task_id不一致、
+   BL-172 Expert未提出）。**4回目、同一内容をtask_id="task_1_1"（誤り）へ偽装して再送し、
+   BL-146の一致チェックを額面通り通過させて書き込みを成立させた。** resume後だけで8件の
+   agreementsが再び誤帰属した。
+
+根治の方向性として、(a) `pending_task_redirect`の消費タイミングをuser_detectorの差し戻し
+判定より前倒しする案も検討したが、今回のケースでまさにDetectorの懸念自体が「遷移先へ移って
+よいか」という遷移の妥当性そのものだったため、Detectorの差し戻しを無視して機械的に遷移を
+確定させると本来の監査を無力化するリスクがあり、かつBL-125（離脱元の未解決issueチェック）も
+current_task_idが既に壊れている状況では誤ったdeparting_task_idを見ており実効的な安全網に
+なっていないことが判明した。ユーザーへ選択肢を提示し、**(b) 迂回そのものの遮断**（推奨案）を
+選択。state machineには一切手を入れず、`write_agreement`の入口で「現在task_idへの偽装」という
+具体的なパターンだけを機械的に検知して拒否する、最小スコープ・低リスクな対策とした。
+
+**対応内容:**
+
+`_write_agreement_impl`に新たなゲート（BL-146ゲート直後）を追加。`pending_task_redirect`が
+存在し`decision_type == "advance_task"`、その`target_task_id`が宣言task_idと異なり、かつ
+宣言task_idが`effective_current_task_id`と一致する（＝BL-146を額面通り通過する偽装パターン）
+場合にのみ拒否する。SUPERSEDEおよびredirect_backward等の他decision_typeは対象外（現在タスクを
+離脱する意図を持つのはadvance_taskのみのため）。`pending_task_redirect`が存在しない通常時・
+遷移先そのものへの書き込みには一切影響しない。
+
+**テスト**: `tests/test_bl319_pending_redirect_workaround_guard.py`（新規6件）。実インシデント
+再現（偽装遮断）、遷移先そのものへの書き込みは二重拒否されないこと、pending_task_redirect
+無し時の非退行、redirect_backward対象外、SUPERSEDE対象外、target_task_id=宣言task_id時は
+発火しないことを検証。影響範囲テスト（BL-131/146/172/176/191/318）90件・フルオフライン
+スイート2064 passed / 5 deselected（既知の除外のみ）。
+
+**データ是正（実施済み）**: AGENTS.md §18.3に従い`cela.db`をバックアップ後
+（`backups/cela.db.bak-bl319-20260830-204834`）、resume後（20:10:08以降）に誤帰属した8件の
+agreements行を内容に基づき是正した（task_3_2_2関連6件、task_3_2_1関連1件、複数タスク横断の
+監査記録1件はBL-318のBL-315行と同じ理由で`task_id=""`へ）。うち2件は`decision_what`の
+WHITEBOARDポインタ文字列も修正。whiteboard_draftsテーブルへの新規汚染は無いことを事前に
+確認済み（task_1_1はv1-v9のまま、今回の誤帰属は`entry_type=Deliverable`のstatus-onlyな
+UPDATEがステータス変更のみでポインタを引き継いだケースであり、実際の成果物内容は書き換わって
+いなかった）。是正後、対象期間に`task_id='task_1_1'`で残る行は0件であることを確認した。
+
+参照: `docs/design/back_log/BL-319/BL319_basic_design.md`、
+`tests/test_bl319_pending_redirect_workaround_guard.py`、
+`docs/design/decision_log.md` D-271。
+
+---
+
+### BL-320: decision_extractorの抽出項目に劣化出力（反復collapse）の検証がない
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-213 F3（検証網の穴）、BL-321（同一調査から派生した並行対応）、
+  `docs/design/back_log/BL-320/BL320_basic_design.md` |
+
+**経緯:**
+
+2026-08-30 20:51起動のドライラン（run_id=1787890406-1e73a89d、`log/2026-08-30/2051/`）で、
+ユーザーから「Decision Extractorが壊れた」と報告された。実ログ・DB調査の結果、
+`call_decision_extractor`の2件目の抽出イベントで、モデル出力が`"topic"`フィールドまでは
+出力した後、`"_comment_removed": null`等の無意味なキーの反復生成（反復collapse）に突入し、
+最終的に`"__invalid_key_to_ignore__"`等のゴミキーが延々と続いて終了した
+（`log/2026-08-30/2051/log_no_prompt.md:592-651`）。本来入るべきcontent/rationale/task_id/
+phase_idが一切出力されなかった。
+
+BL-213 F3の`_check_extracted_event`はentry_type/action_type/target_topic（UPDATE時のみ）/
+status/topic/proposed_byしか検証しておらず、この項目は「proposed_by欠落」というminor
+（正規化対象）としてのみ検出され、fatal（破棄）に該当しなかった。結果、
+`item.get("task_id") or _effective_current_task_id_from(state)`が発火し、内容も理由も空の
+劣化レコードが誤ったtask_id（current_task_id、内容とは無関係）としてDBへサイレントに
+書き込まれた（実DB確認済み: `AG-1788091395328-13ee73`、topic="task__1成果物の正式確定・
+Ver.提出指示（修正条件①〜④）" — 本来"task_3_2_1"のはずが数字が反復collapseで欠落）。
+
+`task_id`が空欄であること自体は正常系（BL-040、LLMがtask_idを省略しcurrent_task_idへ
+フォールバックするのは全ターンの約46%で発生する意図された挙動）のため、「task_idが空なら
+常にfatal」という単純な修正は正当な省略ケースを大量に誤って破棄する副作用がある。ユーザーの
+「両方対処してください」承認を受けた上で、より的確・低誤検知な2つのシグナルへ設計を絞り込んだ。
+
+**対応内容:**
+
+`_check_extracted_event`へ2つのfatalチェックを追加。(a) `action_type=="CREATE"`時に
+`content`が空ならfatal（UPDATE時のcontent=""はUser評価のみを意味する正規パターンのため対象
+外）。(b) ドキュメント化されたスキーマキー集合に含まれないキーが1件でも混入していればfatal
+（反復collapse特有のゴミキーパターンをtask_id等の特定フィールドに依存せず汎用的に検知）。
+`_validate_extracted_events`はfatalが1件でもあれば自己修正リトライを発火させる既存動線に
+自然に乗るため、今回のような劣化は本来リトライで是正される機会を得られるようになった
+（今回は検証網の穴でリトライすら発火しなかった）。
+
+**テスト**: `tests/test_bl320_decision_extractor_degenerate_output_guard.py`（新規11件）。
+CREATE時content必須化・UPDATE時content=""の非退行・未知キー検知・正規フィールドの
+誤検知なし・実インシデントJSON相当が破棄されること・fatalによりリトライが発火することを
+検証。既存`tests/test_bl213_f3_extractor_validation.py`の一部フィクスチャ（content省略）を
+新要件に合わせて更新（5件）。影響範囲テスト（BL-213/BL-131/BL-146/BL-212/BL-265/BL-318/
+BL-319等）96件・フルオフラインスイート実行済み（結果はBL-321エントリ側に記載）。
+
+参照: `docs/design/back_log/BL-320/BL320_basic_design.md`、
+`tests/test_bl320_decision_extractor_degenerate_output_guard.py`、
+`docs/design/decision_log.md` D-272。
+
+---
+
+### BL-321: write_agreement(Deliverable)の本文見出し/task_id不整合ガード
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-146/BL-319（task_id一致チェック、対象外だった観点）、BL-320（同一調査から派生
+  した並行対応）、BL-131/BL-212（task_idを権威とする既存設計方針）、
+  `docs/design/back_log/BL-321/BL321_basic_design.md` |
+
+**経緯:**
+
+BL-320と同じ2026-08-30 20:51ドライラン調査で、ユーザーから「`phase_1_task_1_1_V11.md`の
+ファイル名と中身のtask_idが乖離」と報告された。実ログ調査
+（`log/2026-08-30/2051/log_no_prompt.md:854-878`）の結果、Expertのcurrent_task_idはこの回、
+正当に`task_1_1`だった（オーケストレーターも同ターンでtask_1_1の専門家選定を行っている）。
+しかしUserの指示は「task_3_2_1成果物の正式確定」であり、ExpertはBL-146設計
+（write_agreementのDeliverable書き込みは呼び出し元のcurrent_task_idにのみ許可）に気づき
+つつ（Expert自身の思考ログ「I cannot edit the task_3_2_1 deliverable via edits here...」）、
+それでも`entry_type=Deliverable, action_type=CREATE`を強行。結果、本文が丸ごとtask_3_2_1の
+内容（「# task_3_2_1 車両選定の前提補完確認」から始まる）であるにもかかわらず、
+`task_id=task_1_1`のwhiteboard（`phase_1_task_1_1_V11.md`）として保存された。この回は
+モデル出力自体も劣化しており（`topic`/`task_id`引数に`"task_firm_placeholder"`,
+`"Ver.firm_placeholder"`という文字列が混入 — `cela_main.py`内にこの文字列は存在せず、
+CELA側のテンプレートバグではなく純粋なモデル劣化と確認済み）。
+
+BL-146/BL-319はtask_idの「宣言と現在タスクの一致」は見るが、「宣言task_idと本文の中身が
+実際に対応しているか」は一切見ていなかった——ここが未検証ギャップ。
+
+**対応内容:**
+
+新規ヘルパー`_deliverable_heading_task_id_mismatch(content, tid)`を追加。成果物本文の
+先頭見出し（正規表現`^#{1,3}\s*(task_\d+(?:_\d+)*)\b`）が宣言先task_idと異なるtask_idを
+名指ししていれば、そのtask_idを返す（見出しにtask_id言及なし、または一致していればNone）。
+`_commit_agreement_from_tool`内、Deliverable本文が「新規に」whiteboardへ書き込まれる2箇所
+（CREATE/SUPERSEDE時の初版保存、UPDATE時のedits未指定・全文置換`not is_whiteboard`分岐）の
+`apply_whiteboard_patch`直前で呼び出し、不一致なら書き込みを拒否する。UPDATE(edits指定)分岐
+は対象外——BL-265により既存内容の読み取り確認済みが前提であり、見出し全体の付け替えが
+起きる局面ではないため。task_id自体は権威（BL-131/BL-212の設計方針）として扱い続け、
+この正規表現は書き込み前の安全網に過ぎない設計とした（見出しにtask_id言及がない
+Deliverableは検知対象外、過剰な一般化はしない）。
+
+**テスト**: `tests/test_bl321_deliverable_heading_task_id_mismatch_guard.py`（新規11件）。
+`_deliverable_heading_task_id_mismatch`単体（一致/不一致/見出し言及なし/本文中の相互参照は
+対象外/#〜###対応/空文字）、`write_agreement`ツール経路の統合テスト（実インシデント再現の
+拒否、一致時の非退行、見出し言及なし時の非退行、UPDATE全文置換分岐での拒否、UPDATE(edits)
+分岐が対象外であることの確認）。影響範囲テスト（BL-213/BL-131/BL-146/BL-212/BL-265/BL-318/
+BL-319/BL-161/BL-180/BL-169/BL-172/BL-080/BL-084/BL-127）96件・フルオフラインスイート
+2086 passed / 5 deselected（既知の除外のみ、BL-320の新規11件・BL-321の新規11件を含む）。
+
+**データ是正（実施済み）**: AGENTS.md §18.3に従い`cela.db`をバックアップ後
+（`backups/cela.db.bak-bl320321-20260830-222505`）、2051ランで発生した汚染を是正した。
+当初報告した2件（`AG-1788091395328-13ee73`、`phase_1_task_1_1_V11.md`）の精査中に、
+より根本的な構造的問題を発見した——task_3_2_1の本当の「Ver.3」本文が**task_3_2_1自身の
+whiteboard_draftsには一度も書き込まれておらず**、物理的にはtask_1_1のwhiteboard V11の
+中にしか存在しない状態だった。さらに「承認済み」となっていたtask_3_2_1のDeliverable行
+（`AG-1788092418951-b61ecb`）のポインタも依然`WHITEBOARD:phase_1:task_1_1`のままで
+あり、task_1_1の正典whiteboardが汚染された状態で承認確定が進んでいた。
+
+是正内容: (1) task_1_1のwhiteboard_drafts V11行（draft_id=DF-1788091612949-a921b7）の
+実内容をtask_3_2_1側へVer.11として複製・移設（phase_id=phase_3、内容は無変更）、
+(2) task_1_1のV11行を削除しV10（正しい家族支援率ラベル修正版）へ復元、(3) agreements
+10件（`213593`/`bb4859`/`b61ecb`のDeliverable3行、`ae5f92`の重複トピック行、
+`13ee73`/`de81c4`のBL-320で塞いだ劣化Directive2行、`9a6e4d`/`442ffe`/`9dd899`の
+task_3_2_1関連Decision/Directive、`f3d6f6`のtask_3_3指示）のtask_id/phase_id/
+decision_whatポインタ/topicを是正。2051ラン開始以前からの既存の慣習パターン
+（レビュー系Decisionが記述当時のcurrent_task_idで記録される既存挙動）は今回のバグと
+無関係のため対象外とした。是正後、task_1_1最新版はV10（1802文字）、task_3_2_1最新版は
+V11（2634文字、元V11と同一内容）であることを確認。log配下の生ログ
+（`log/2026-08-30/2051/`）は実行時の事実記録として変更していない。
+
+参照: `docs/design/back_log/BL-321/BL321_basic_design.md`、
+`tests/test_bl321_deliverable_heading_task_id_mismatch_guard.py`、
+`docs/design/decision_log.md` D-273。
 
 ---
 

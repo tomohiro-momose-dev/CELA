@@ -183,26 +183,37 @@ def test_task_planner_node_additive_reconfiguration_keeps_current_phase(db_conn,
     assert result["current_task_id"] == "task_2_1"
 
 
-# --- _build_task_transition_blocked_notice の3段目分岐 ---
+# --- _build_task_transition_blocked_notice / _build_task_reassigned_notice ---
+# [BL-318][独立レビュー指摘I-2] task_reassigned_after_replan_noticeの消費は、
+# schedule_task_focusツールを持たないプロンプト経路でone-shotが無為に失われるのを防ぐため、
+# _build_task_transition_blocked_noticeから_build_task_reassigned_noticeへ分離された。
 
-def test_notice_third_branch_returns_and_consumes_reassigned_notice():
+def test_reassigned_notice_consumed_only_by_dedicated_function():
     state = {"task_reassigned_after_replan_notice": "[BL-190] テスト通知"}
-    text = cela_main._build_task_transition_blocked_notice(state)
+    text = cela_main._build_task_reassigned_notice(state)
     assert "テスト通知" in text
     assert state["task_reassigned_after_replan_notice"] == ""
     # 二度目の呼び出しでは何も返さない（one-shot消費済み）
-    assert cela_main._build_task_transition_blocked_notice(state) == ""
+    assert cela_main._build_task_reassigned_notice(state) == ""
 
 
-def test_notice_bl125_and_bl176_flags_take_priority_over_bl190():
-    """3つのフラグが同時にセットされることは実際には起きないが、優先順位（BL-125→BL-176→BL-190）
+def test_blocked_notice_no_longer_touches_reassigned_notice():
+    """[BL-318][独立レビュー指摘I-2] _build_task_transition_blocked_noticeは
+    task_reassigned_after_replan_noticeを一切消費・参照しない（ツールを持たないプロンプト
+    経路から呼ばれてもone-shotが失われないことの保証）。"""
+    state = {"task_reassigned_after_replan_notice": "[BL-190] 消費されないはずの通知"}
+    text = cela_main._build_task_transition_blocked_notice(state)
+    assert text == ""
+    assert state["task_reassigned_after_replan_notice"] == "[BL-190] 消費されないはずの通知"
+
+
+def test_notice_bl125_and_bl176_flags_take_priority():
+    """2つのフラグが同時にセットされることは実際には起きないが、優先順位（BL-125→BL-176）
     が意図通りであることを確認する。"""
     state = {
         "task_transition_blocked_issue_topics": ["issue_a"],
         "task_transition_blocked_unapproved_task_id": "task_x",
-        "task_reassigned_after_replan_notice": "[BL-190] 無視されるはずの通知",
     }
     text = cela_main._build_task_transition_blocked_notice(state)
     assert "BL-125" in text
-    assert "無視されるはずの通知" not in text
-    assert state["task_reassigned_after_replan_notice"] == "[BL-190] 無視されるはずの通知"
+    assert state["task_transition_blocked_unapproved_task_id"] == "task_x"
