@@ -15870,17 +15870,19 @@ Sets the starting phase for subsequent execution steps within the lineage state.
 
         state["phases"] = phases
         if revision_issue_ids:
-            # [BL-145] Reflectorのissue formalizationが引き金だった場合、対象issue_log行を
-            # 'planned'状態へ遷移させる（resolvedにはしない。真の解決確認はuser roleが
-            # 別途write_issue(RESOLVE)で行う）。
+            # [BL-145/BL-313] Reflectorのissue formalization（滞留escalated issueまたは
+            # 先送り集中）が引き金だった場合、対象issue_log行を'planned'状態へ遷移させる
+            # （resolvedにはしない。真の解決確認はuser roleが別途write_issue(RESOLVE)で行う）。
+            # plan_revision_reasonの発生源（BL-145/BL-186/BL-313等）を問わない汎用パスの
+            # ため、ログラベルも特定BL番号に決め打ちしない（AGENTS.md 9章: 帰属の正確性）。
             _new_task_ids = sorted({t["task_id"] for p in phases for t in p.get("tasks", [])})
             for _issue_id in revision_issue_ids:
                 _planned = _mark_issue_planned(get_active_conn(), state["run_id"], _issue_id,
                                                 embedded_task_ids=_new_task_ids)
                 if _planned:
-                    print(f"  📋 [BL-145] issue_id='{_issue_id}'をplanned状態にし、計画再構成へ組み込みました。")
+                    print(f"  📋 [計画再構成] issue_id='{_issue_id}'をplanned状態にし、計画再構成へ組み込みました。")
                 else:
-                    print(f"  ⚠️ [BL-145] issue_id='{_issue_id}'は対象外でした（既にresolved等、冪等スキップ）。")
+                    print(f"  ⚠️ [計画再構成] issue_id='{_issue_id}'は対象外でした（既にresolved等、冪等スキップ）。")
         if phases:
             _reconcile_current_phase_after_replan(state, phases)
             print(f"  📍 [task_planner] current_phaseをphase_id={state['current_phase'].get('phase_id')}に設定しました。")
@@ -17486,6 +17488,61 @@ It generates a formal decision based on reflection results, updating the overall
                 "  ⚠️ [BL-145] plan_revision_reasonが既に別要因でセット済みのため、"
                 "今回のissue formalizationはスキップします（次回reflectionで再評価）。"
             )
+
+    # [BL-313] 先送りが特定タスクへ集中している場合、サブタスク分解の検討をtask_plannerへ
+    # 促す。BL-233（_get_overloaded_defer_targets）は検知のみで是正しない。BL-145の停滞
+    # トリガーは上のブロックの通りstatus='escalated'限定（_get_escalated_issues起点）の
+    # ため、status='open'のminor issueの集中（task_5_1で20件・task_3_2/task_5_5で各5件、
+    # 2026-08-30時点で確認）には一切反応しなかった。BL-145と同じ土台（plan_revision_reason/
+    # plan_revision_issue_ids/_mark_issue_planned）を再利用し、新しいトリガー条件だけを
+    # 追加する。discussion_statusはstagnantへ上書きしない（BL-145の「滞留」とは異なり
+    # 「受け皿の構造的な偏り」を扱うため、facilitation_countの猶予を消費させない）。
+    # [CONSTRAINT] if _stale_escalated: ブロックの外側（このインデントレベル）に置くこと。
+    # 内側に置くと滞留escalated issueが同時に存在する時しか評価されなくなる。
+    if not state.get("plan_revision_reason"):
+        _overloaded_targets = _get_overloaded_defer_targets(get_active_conn(), state["run_id"])
+        if _overloaded_targets:
+            _bl313_piled_issues = [
+                i for i in (
+                    _get_open_issues(get_active_conn(), state["run_id"])
+                    + _get_escalated_issues(get_active_conn(), state["run_id"])
+                )
+                if i.get("defer_to_task_id") in _overloaded_targets
+            ]
+            if _bl313_piled_issues:
+                _bl313_by_target: dict[str, list[dict]] = {}
+                for i in _bl313_piled_issues:
+                    _bl313_by_target.setdefault(i["defer_to_task_id"], []).append(i)
+                _bl313_reason_lines = [
+                    f"- task_id={_target}: {len(_items)}件の先送り事項が集中（例: "
+                    + "、".join(i["topic"] for i in _items[:8])
+                    + ("…" if len(_items) > 8 else "") + "）"
+                    for _target, _items in _bl313_by_target.items()
+                ]
+                state["plan_revision_reason"] = (
+                    "[BL-313] 以下のtask_idへ、他タスクからの先送り事項（defer_to_task_id）が"
+                    f"{_DEFERRAL_PILEUP_THRESHOLD}件以上集中しています。1つのタスクのまま実行すると"
+                    "内容過多で実行が破綻するか、重要な検証（感度分析等）が形だけの通過になる"
+                    "おそれがあります。対象タスクを番号付きサブタスク（例: task_5_1_1,"
+                    "task_5_1_2, ...）へ分割することを検討してください（本来のacceptance_"
+                    "criteriaを担うサブタスクと、先送り事項の検証を担うサブタスクを分ける等）。"
+                    "ただし分割が最善とは限りません——内容を精査した上で、既存タスクへ整理して"
+                    "統合する判断も可とします:\n" + "\n".join(_bl313_reason_lines)
+                )
+                state["plan_revision_issue_ids"] = [i["id"] for i in _bl313_piled_issues]
+                print(
+                    f"  📌 [BL-313] {len(_bl313_piled_issues)}件の先送り集中（対象task_id="
+                    f"{sorted(_bl313_by_target.keys())}）をplan_revision_reasonとして"
+                    f"次回計画再構成に引き継ぎました（issue_ids={state['plan_revision_issue_ids']}）。"
+                )
+    elif _get_overloaded_defer_targets(get_active_conn(), state["run_id"]):
+        # [BL-313][§14.3] plan_revision_reasonが既に別要因（BL-145/BL-186/BL-126 Stage D）
+        # でセット済みのため今回はスキップし、発火有無をログから追跡できるようにする
+        # （次回reflectionで再評価される）。
+        print(
+            "  ⚠️ [BL-313] 先送り集中を検知しましたが、plan_revision_reasonが既に別要因で"
+            "セット済みのため今回はスキップします（次回reflectionで再評価）。"
+        )
 
     _was_escalation_active = state.get("escalation_active", False)
     state["escalation_active"] = bool(_escalated_now)
