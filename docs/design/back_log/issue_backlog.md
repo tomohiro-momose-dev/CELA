@@ -10882,7 +10882,7 @@ Expertの修復ターンという実コストは残るため不採用とし、�
 統合テスト（実インシデント再現：部分行excerptでもテーブル行が分断されないこと、完全一致・
 緩い一致の両方で機能すること、テーブル外の通常文への挿入は非退行、行全体を含むexcerptは
 非退行）。影響範囲テスト（BL-074/076/081/131/212/180/127/080）49件・フルオフラインスイート
-実行済み（結果は本エントリ更新時に追記）。
+2094 passed / 5 deselected（既知の除外のみ、BL-322の新規8件を含む）。
 
 参照: `docs/design/back_log/BL-322/BL322_basic_design.md`、
 `tests/test_bl322_detector_annotation_table_row_split_guard.py`、
