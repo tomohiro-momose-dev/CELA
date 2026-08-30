@@ -9321,6 +9321,23 @@ def _find_loose_match_spans(content: str, old_text: str) -> list[tuple[int, int]
     return spans
 
 
+def _shift_insertion_point_past_table_row(content: str, insertion_point: int) -> int:
+    """[BL-322] 挿入位置が丁度Markdownテーブル行の途中（セル境界の間）に来る場合、
+    テーブル構造を壊さないよう行末まで挿入位置をずらす。
+    実インシデント（task_2_1 whiteboard V11）: 3列テーブル行の2列目セル直後に注釈が
+    挿入された結果、3列目セルと行末の`|`が注釈の後ろへ押し出され、Markdownとして
+    破綻した（後続の注釈削除でも復元されず、別途「行末パイプの修復」編集が必要になった）。
+    挿入位置から次の改行までの間に`|`が残っていれば、その行はまだ終わっていない
+    （テーブル行の途中）と判断し、挿入位置を行末（次の改行の直前、無ければ文書末）まで
+    ずらす——注釈は独立した行としてテーブル行の直後に挿入される。
+    """
+    newline_pos = content.find("\n", insertion_point)
+    line_end = newline_pos if newline_pos != -1 else len(content)
+    if "|" in content[insertion_point:line_end]:
+        return line_end
+    return insertion_point
+
+
 def _annotate_whiteboard_with_detector_comment(
     conn: sqlite3.Connection, run_id: str, phase_id: str, task_id: str,
     target_excerpt: str, comment: str, decision_id: str
@@ -9341,7 +9358,9 @@ def _annotate_whiteboard_with_detector_comment(
 
     exact_count = content.count(target_excerpt)
     if exact_count == 1:
-        new_content = content.replace(target_excerpt, target_excerpt + annotation, 1)
+        start = content.find(target_excerpt)
+        insertion_point = start + len(target_excerpt)
+        match_desc = "完全一致で挿入"
     else:
         norm_content, index_map = _normalize_for_loose_match(content)
         norm_excerpt, _ = _normalize_for_loose_match(target_excerpt)
@@ -9356,14 +9375,19 @@ def _annotate_whiteboard_with_detector_comment(
         norm_start = norm_content.find(norm_excerpt)
         norm_end = norm_start + len(norm_excerpt) - 1
         orig_end = index_map[norm_end]
-        new_content = content[: orig_end + 1] + annotation + content[orig_end + 1 :]
+        insertion_point = orig_end + 1
+        match_desc = "正規化後の緩い一致で挿入"
+
+    # [BL-322] テーブル行途中への挿入によるMarkdown破壊を防ぐ。
+    insertion_point = _shift_insertion_point_past_table_row(content, insertion_point)
+    new_content = content[:insertion_point] + annotation + content[insertion_point:]
 
     apply_whiteboard_patch(
         conn, run_id, phase_id, task_id, new_content,
         author_role="system_detector_annotation",
         edit_summary=f"[Detector注釈] {comment[:80]}"
     )
-    return True, "完全一致で挿入" if exact_count == 1 else "正規化後の緩い一致で挿入"
+    return True, match_desc
 
 
 def get_agreements_from_db(conn: sqlite3.Connection, run_id: str) -> list[dict]:
