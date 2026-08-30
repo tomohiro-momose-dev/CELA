@@ -3815,6 +3815,20 @@
 
 ---
 
+### D-274: BL-322 — Detector注釈の挿入位置が丁度Markdownテーブル行の途中に来る欠陥を、指標除外ではなく挿入位置の根本修正で対処する
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-30 |
+| 状態 | `decided` |
+| 決定者 | t-momose（独立レビュー（cline）の指摘を受け「根本修正を行ってください」と選択。指標除外案は不採用） |
+| **決定理由** | cline指摘（2051ランのwhiteboard版数の大半が「整形修復」でありedit適用ツールの欠陥が議論コストを2〜3倍に膨らませている）を実データ（whiteboard_drafts version 11-13の実内容）で検証したところ、task_2_1のV13は実際に「整形修復のみ」だった一方、task_5_2のV1〜V5を同種の欠陥とみなすcline指摘は不正確（正当なレビュー往復）と判定した。根本原因は`_annotate_whiteboard_with_detector_comment`が`_normalize_for_loose_match`（`\|`を正規化対象に含む）で一致判定するため、target_excerptがテーブル行の一部しか引用していない場合、注釈の挿入位置が行の途中に決まりMarkdown構造を破壊すること。cline提案の「edit_summaryで区分し指標から除外する」は症状（版数の見かけの水増し）を隠すだけでテーブル破壊自体・Expertの修復ターンという実コストは残るため、挿入位置そのものを直す根本修正を採用した。 |
+| 決定内容 | 新規ヘルパー`_shift_insertion_point_past_table_row(content, insertion_point)`を追加。挿入位置から次の改行までの間に`\|`が残っていれば（テーブル行の途中と判断）、挿入位置を行末までずらす。`_annotate_whiteboard_with_detector_comment`の完全一致・緩い一致の両分岐を「挿入位置を求める→共通の調整・スプライス」の形へ統一。`_apply_text_edits`（Expertの通常edits経路、同じ正規化関数を共有）は同種破壊の実証拠が無いため対象外とした。 |
+| 影響 | `cela_main.py`（`_shift_insertion_point_past_table_row`新規ヘルパー、`_annotate_whiteboard_with_detector_comment`の改修）、`tests/test_bl322_detector_annotation_table_row_split_guard.py`（新規8件）。影響範囲テスト（BL-074/076/081/131/212/180/127/080）49件・フルオフラインスイート実行済み（結果は本エントリ更新時に追記）。設計書は`docs/design/back_log/BL-322/BL322_basic_design.md`に実装前保存済み。 |
+| 関連 BL | BL-322（本件）、BL-076/BL-074（対象関数の原設計）、BL-081（`\|`を正規化対象に追加した経緯） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
