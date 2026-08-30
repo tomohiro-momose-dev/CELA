@@ -346,6 +346,7 @@
 | BL-319 | 高 | `cela_main.py`（`_write_agreement_impl`、詳細は下記セクション参照） | **`done`。** advance_task適用待ち中の「現在task_idへの偽装書き込み」を入口で遮断。詳細は下記`### BL-319`セクション参照。 | P0 |
 | BL-320 | 高 | `cela_main.py`（`_check_extracted_event`、詳細は下記セクション参照） | **`done`。** decision_extractorの抽出項目へ、反復collapse劣化出力を検知するfatalチェックを追加。詳細は下記`### BL-320`セクション参照。 | P1 |
 | BL-321 | 高 | `cela_main.py`（`_deliverable_heading_task_id_mismatch`ほか、詳細は下記セクション参照） | **`done`。** write_agreement(Deliverable)へ本文見出し/task_id不整合の検知ガードを追加。詳細は下記`### BL-321`セクション参照。 | P1 |
+| BL-322 | 中 | `cela_main.py`（`_shift_insertion_point_past_table_row`・`_annotate_whiteboard_with_detector_comment`、詳細は下記セクション参照） | **`done`。** Detector注釈挿入がMarkdownテーブル行を分断する欠陥を根本修正。詳細は下記`### BL-322`セクション参照。 | P1 |
 
 ---
 
@@ -10825,6 +10826,67 @@ V11（2634文字、元V11と同一内容）であることを確認。log配下�
 参照: `docs/design/back_log/BL-321/BL321_basic_design.md`、
 `tests/test_bl321_deliverable_heading_task_id_mismatch_guard.py`、
 `docs/design/decision_log.md` D-273。
+
+---
+
+### BL-322: Detector注釈挿入がMarkdownテーブル行を分断する欠陥の根本修正
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-076/BL-074（対象関数の原設計）、BL-081（`_normalize_for_loose_match`が`\|`を
+  正規化対象に追加した経緯）、`docs/design/back_log/BL-322/BL322_basic_design.md` |
+
+**経緯:**
+
+ユーザーが依頼した独立レビュー（cline）で、2051ラン（run_id=1787890406-1e73a89d）の
+whiteboard版数の大半が「内容の議論」ではなく「整形修復」であり、edit適用ツールの欠陥が
+議論コストを2〜3倍に膨らませているとの指摘があった。cline提案は「edit_summaryで内容変更版/
+整形修復版を区分し、phase gate進捗指標から整形版を除外する」という症状側の対処だった。
+
+実データで検証した結果、指摘の一部は正確で一部は不正確だった。task_2_1のV13は実際に
+「整形修復のみ」だった（正確）。V11の実内容を確認すると、Detector注釈が3列markdownテーブル
+行の2列目セルの直後・3列目セルの直前に挿入され、行が改行を挟んで分断されていた
+（`...乗車率2.1%（空車率97.9%）**\n> 🔴 **[Detector指摘 #D-1787998072012-d5eb96]**: ...`）。
+V12で注釈を削除した際、`...）**\n | 最大トリップ...`という壊れた形のまま残り、V13で
+「行末パイプの修復（内容変更なし）」という追加の整形専用編集が必要になった。一方、
+task_5_2のV1〜V5を同種の欠陥とみなすのは不正確と判断した（却下）。中身を確認したところ、
+User承認条件①②③へ個別に対応した正当なレビュー往復であり、ツールの欠陥ではなくレビューが
+機能して実際の誤りを潰した記録そのものだった。
+
+根本原因は`_annotate_whiteboard_with_detector_comment`が`target_excerpt`の一致判定に
+`_normalize_for_loose_match`（BL-081でtarget_excerpt/edits共通の一致精度向上のため追加）の
+緩い一致を使うこと。この正規化は空白・`*`（太字記法）に加え`|`（テーブル区切り）も除去
+対象であるため、Detector指摘の`target_excerpt`がテーブル行の一部しか引用していない場合、
+注釈の挿入位置がその引用の末尾＝行の途中に決まってしまい、Markdownテーブル構造を破壊する。
+完全一致分岐でも同様に発生しうる（target_excerptが行の途中で終わっていれば同じ問題）。
+
+cline提案の「指標から除外」は症状（版数の見かけの水増し）を隠すだけでテーブル破壊自体・
+Expertの修復ターンという実コストは残るため不採用とし、挿入位置の根本修正を採用した
+（ユーザー承認：「根本修正を行ってください」）。
+
+**対応内容:**
+
+新規ヘルパー`_shift_insertion_point_past_table_row(content, insertion_point)`を追加。
+挿入位置から次の改行までの間に`|`が残っていれば（＝テーブル行の途中）、挿入位置を
+行末（次の改行の直前、無ければ文書末）までずらす。`_annotate_whiteboard_with_detector_comment`
+の完全一致・緩い一致の両分岐を「挿入位置（int）を求める→共通の調整・スプライス」の形へ
+統一し、この調整ロジックを一箇所に集約した。`_apply_text_edits`（Expertの通常edits経路、
+`_normalize_for_loose_match`を共有）は同種の破壊の実証拠が無いため今回は対象外とした
+（根拠のない拡大解釈をしない、AGENTS.md §14）。
+
+**テスト**: `tests/test_bl322_detector_annotation_table_row_split_guard.py`（新規8件）。
+`_shift_insertion_point_past_table_row`単体（行途中→行末へシフト、既に行末→不変、
+テーブル外→不変、文書末尾のテーブル行→文書末へ）、`_annotate_whiteboard_with_detector_comment`
+統合テスト（実インシデント再現：部分行excerptでもテーブル行が分断されないこと、完全一致・
+緩い一致の両方で機能すること、テーブル外の通常文への挿入は非退行、行全体を含むexcerptは
+非退行）。影響範囲テスト（BL-074/076/081/131/212/180/127/080）49件・フルオフラインスイート
+実行済み（結果は本エントリ更新時に追記）。
+
+参照: `docs/design/back_log/BL-322/BL322_basic_design.md`、
+`tests/test_bl322_detector_annotation_table_row_split_guard.py`、
+`docs/design/decision_log.md` D-274。
 
 ---
 
