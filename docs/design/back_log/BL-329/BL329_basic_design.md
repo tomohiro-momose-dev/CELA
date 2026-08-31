@@ -388,3 +388,26 @@ for tid in sorted(removed_task_ids):
   別BLとして再検討する。
 - 承認済み成果物と新task_idの重複（例: task_5_2とtask_5_2_1が両方存在し得る）を自動で
   検知・統合する機能は今回追加しない。
+
+## 実装後に発覚した追加の設計判断（フルオフラインスイート実行時に発見）
+
+Cline実装後diffレビュー（§19.4、`--path cela_main.py --path tests/...`）は限定的な影響範囲
+テスト（BL-126/283/213系122件）のみを対象にしており全件検出できなかったが、フルオフライン
+スイート実行で`tests/test_bl191_task_focus_scheduling.py`の2件が回帰した。原因はBL-191
+（`schedule_task_focus`のredirect_backward）との設計上の衝突: BL-191は既にApproved済みの
+過去タスクへ一時的にフォーカスを戻し、その後`_reconcile_current_phase_after_replan`
+（本ループの後で実行される）が「フォーカス中task_idが新計画から消えた」ことを検知して
+強制的にfocus_stackをクリアしフォワードタスクへ復帰する設計だった。BL-329がこの
+「消えるべきtask_id」まで機械的に計画へ復元すると、BL-191のreconcile分岐が発火しなくなる。
+
+対応: `state.get("task_focus_stack", [])`の各エントリの`focused_task_id`をBL-329の保護対象
+から除外し（`tid not in _focused_task_ids and _is_task_completed(...)`という条件へ変更）、
+BL-191が既に「一時的に消えうる」と認識しているtask_idについては既存のBL-191側reconcile処理
+に委ねることにした。新規回帰テスト`test_bl329_does_not_block_bl191_focus_vanish_
+reconciliation`を追加し、AGENTS.md §17.1に従いこの除外条件を一時的にrevertして3件
+（新規1件＋既存2件）が失敗することを確認した上で復元した。
+
+この経緯自体が、AGENTS.md §17.3（フルオフラインスイートはマイルストーン前に必須）と
+§19.4（diffレビューは実コードの一部しか見ない）の限界を示す実例——**影響範囲を絞った
+レビュー・テストだけでは検出できない他機構との相互作用は、フルスイートでしか捕まらない
+ことがある**——として記録する。
