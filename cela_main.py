@@ -3033,18 +3033,25 @@ WRITE_AGREEMENT_TOOL = {
                         "may be stale. Keep each old_text as SHORT as possible (just the line(s) you are "
                         "actually changing, not a whole section), and fix ONE place per call rather than "
                         "batching many replacements: if any single old_text mismatches, the entire edits "
-                        "array is rejected and no change is applied. Never include a "
-                        "'> [Detector指摘 #...]' annotation block inside an old_text that also covers body "
-                        "text -- remove such annotations as their own separate, small edits entry."
+                        "array is rejected and no change is applied. "
+                        "[BL-326] To remove a '> [Detector指摘 #...]' annotation block, do NOT reconstruct "
+                        "it verbatim as old_text -- these blocks can be long and a single mistyped character "
+                        "(e.g. a duplicated digit in a number) makes the whole edit fail repeatedly. Instead, "
+                        "set remove_annotation_id to the ID after the '#' (e.g. 'D-1788150538640-f6dd80') on "
+                        "its own edits entry, leaving old_text/new_text unset. This deletes the entire block "
+                        "mechanically. Optionally set new_text to a short replacement note (e.g. a one-line "
+                        "resolution summary) -- if you want it on its own line, start new_text with '\\n', "
+                        "otherwise it is appended directly after the preceding line."
                     ),
                     "items": {
                         "type": "object",
                         "properties": {
-                            "old_text": {"type": "string", "description": "Exact text to find in the current whiteboard version"},
-                            "new_text": {"type": "string", "description": "Replacement text"},
-                            "replace_all": {"type": "boolean", "default": False, "description": "Replace every occurrence instead of requiring a unique match"}
+                            "old_text": {"type": "string", "description": "Exact text to find in the current whiteboard version. Omit if using remove_annotation_id instead."},
+                            "new_text": {"type": "string", "description": "Replacement text (or the resolution note to leave behind when using remove_annotation_id; omit for a pure deletion)."},
+                            "replace_all": {"type": "boolean", "default": False, "description": "Replace every occurrence instead of requiring a unique match (ignored when remove_annotation_id is set)"},
+                            "remove_annotation_id": {"type": "string", "description": "[BL-326] Alternative to old_text: the decision_id of a '> [Detector指摘 #<id>]' annotation block to remove mechanically, without needing to quote the block verbatim. Do not combine with old_text in the same entry."}
                         },
-                        "required": ["old_text", "new_text"]
+                        "required": []
                     }
                 }
             },
@@ -9283,11 +9290,38 @@ def _apply_text_edits(
                 f"edits[{i}]: old_text/new_textを持つオブジェクト（辞書）である必要がありますが、"
                 f"{type(e).__name__}型の値が渡されました。"
             )
+
+        # [BL-326] Detector注釈ブロックの削除は、old_textでの逐語再現を経由せず、注釈自身の
+        # 短く誤記しにくいdecision_idを指定して機械的に境界検出・削除できる（1307ログの
+        # 実インシデント：約1900字の注釈本文の数字1文字を誤記し5回連続失敗した根本原因への
+        # 対処）。old_text/new_text方式と排他的な独立ブランチとして扱う。
+        remove_annotation_id = e.get("remove_annotation_id", "")
         old_text = e.get("old_text", "")
+        if remove_annotation_id and old_text:
+            return None, (
+                f"edits[{i}]: old_textとremove_annotation_idは同時に指定できません。"
+                f"いずれか一方のみを指定してください。"
+            )
+        if remove_annotation_id:
+            span = _find_detector_annotation_span(content, remove_annotation_id)
+            if span is None:
+                existing_ids = _list_detector_annotation_ids(content)
+                ids_text = "、".join(existing_ids) if existing_ids else "(現在、Detector注釈は存在しません)"
+                return None, (
+                    f"edits[{i}]: decision_id='{remove_annotation_id}'のDetector注釈が"
+                    f"{content_label}に見つかりませんでした。現在存在する注釈のdecision_id: {ids_text}"
+                )
+            start, end = span
+            # block_startは先行改行を消費するため（純粋削除時に余分な空行を残さないための
+            # 設計）、new_textを独立行として挿入したい場合は呼び出し側がnew_textの先頭に
+            # "\n"を含める必要がある（WRITE_AGREEMENT_TOOLのdescriptionで明記）。
+            content = content[:start] + e.get("new_text", "") + content[end:]
+            continue
+
         new_text = e.get("new_text", "")
         replace_all = bool(e.get("replace_all", False))
         if not old_text:
-            return None, f"edits[{i}]: old_textが空です。"
+            return None, f"edits[{i}]: old_textまたはremove_annotation_idのいずれかを指定してください。"
 
         exact_count = content.count(old_text)
         if exact_count == 1 or (exact_count > 1 and replace_all):
@@ -9344,6 +9378,86 @@ _DETECTOR_COMMENT_TEMPLATE = (
     "\n> 🔴 **[Detector指摘 #{decision_id}]**: {comment}\n"
     "> （この注釈は指摘箇所を修正すると同時に削除してください）\n"
 )
+
+# [BL-326] 1307ログ実インシデント（run_id=1787890406-1e73a89d、task_3_5）: Expertが約1900字の
+# Detector注釈ブロックをold_text/new_textで削除しようとし、注釈本文中の「1億1,850万」を
+# 「1億11,850万」と誤記（数字1文字のtranscription error）したまま5回連続失敗した。
+# read_whiteboard_excerptで正しい全文を2回確認した後も同じ誤記を繰り返しており、
+# 長文の一字一句正確な再現という設計自体が失敗しやすいことが判明した（BL-202と同型の再発）。
+# decision_idは短く誤記しにくい一意な識別子であるため、これを指定してブロック全体を機械的に
+# 境界検出・削除する経路を追加する（old_textでの逐語再現を経由しない）。
+# 閉じマーカー・開始マーカー接頭辞は新規リテラルで複製せず_DETECTOR_COMMENT_TEMPLATE自身から
+# 導出する（AGENTS.md §15.1: 同じルールを2箇所で表現しない。テンプレート文言が将来変わった際に
+# 片方だけ取り残されサイレントに壊れることを防ぐ、Cline独立レビュー§19.1指摘1）。
+_DETECTOR_COMMENT_CLOSE_MARKER = _DETECTOR_COMMENT_TEMPLATE.strip("\n").split("\n")[-1]
+_DETECTOR_COMMENT_START_PREFIX = _DETECTOR_COMMENT_TEMPLATE.split("{decision_id}")[0].lstrip("\n")
+
+
+def _find_detector_annotation_span(content: str, decision_id: str) -> tuple[int, int] | None:
+    """[BL-326] decision_idで特定されるDetector注釈ブロック（開始マーカー直前の改行～閉じ
+    マーカー直後の改行まで）の(start, end)半開区間を返す。見つからなければNone。commentが
+    複数行にわたっても（embedded改行があっても）、閉じマーカーは_DETECTOR_COMMENT_TEMPLATEに
+    より必ずcomment直後の固定行として続くため、開始マーカー以降で最初に現れる行頭の閉じ
+    マーカーがこの注釈自身の終端となる。
+
+    [既知の制限] commentの本文が、たまたま閉じマーカーと全く同じ文字列を行頭に含む場合
+    （極めて稀）、そこで誤って終端と判定されうる。発生確率が無視できる水準のため、検出ロジック
+    の複雑化は行わずこの制限を明記するに留める（Cline独立レビュー§19.1指摘F5）。
+
+    [Cline独立レビュー§19.4指摘1・2で発覚・修正済み] 当初の実装は(a)開始マーカーの検索に
+    行頭条件がなく、他の注釈のcomment本文等に偶然「decision_idを含む開始マーカー文字列」が
+    引用されているとそちらを誤って本物の開始マーカーとみなしうる、(b)閉じマーカーの検索が
+    対象注釈のブロック内で打ち切られず、対象注釈自身の閉じマーカーが（過去の部分編集等で）
+    欠損・改変されていた場合、次の別の注釈の閉じマーカーまでサイレントに踏み込んで削除範囲を
+    誤って広げうる（＝エラーにならず「もっともらしいが壊れた」結果がDBに永続化される、
+    AGENTS.md §13.2が最も警戒するfailure mode）、という2つの非対称性があった。開始マーカーも
+    行頭条件で検索し、かつ対象注釈自身の閉じマーカーに到達する前に「別の注釈の開始マーカー」
+    （decision_id不問）に遭遇した場合は、対象注釈の閉じマーカーが欠損しているとみなしNoneを
+    返す（サイレントな過剰削除よりfail-loudを優先）よう修正した。
+    """
+    start_marker = f"{_DETECTOR_COMMENT_START_PREFIX}{decision_id}]**:"
+    search_from = 0
+    while True:
+        start_idx = content.find(start_marker, search_from)
+        if start_idx == -1:
+            return None
+        if start_idx == 0 or content[start_idx - 1] == "\n":
+            break
+        search_from = start_idx + 1
+    block_start = start_idx - 1 if start_idx > 0 and content[start_idx - 1] == "\n" else start_idx
+
+    marker_end = start_idx + len(start_marker)
+    # 対象注釈自身の閉じマーカーに到達する前に、別の注釈の開始マーカー（decision_id不問）に
+    # 遭遇した場合、対象注釈の閉じマーカーは欠損・改変されているとみなす。
+    next_start_idx = content.find(_DETECTOR_COMMENT_START_PREFIX, marker_end)
+    # commentの本文に偶然閉じマーカーと同じ文字列が含まれる誤検出を防ぐため、閉じマーカーは
+    # 行頭（直前が改行）にあるものだけを見る（Cline独立レビュー§19.1指摘5）。
+    search_from = marker_end
+    while True:
+        close_idx = content.find(_DETECTOR_COMMENT_CLOSE_MARKER, search_from)
+        if close_idx == -1:
+            return None
+        if next_start_idx != -1 and next_start_idx < close_idx:
+            return None
+        if close_idx == 0 or content[close_idx - 1] == "\n":
+            break
+        search_from = close_idx + 1
+    block_end = close_idx + len(_DETECTOR_COMMENT_CLOSE_MARKER)
+    if block_end < len(content) and content[block_end] == "\n":
+        block_end += 1
+    return block_start, block_end
+
+
+_ANNOTATION_ID_RE = re.compile(re.escape(_DETECTOR_COMMENT_START_PREFIX) + r"([^\]]+)\]\*\*:")
+
+
+def _list_detector_annotation_ids(content: str) -> list[str]:
+    """[BL-326] 診断用: content内に現存する全Detector注釈のdecision_id一覧を出現順で返す
+    （remove_annotation_idが見つからなかった場合のエラーメッセージで、実際に存在するIDを
+    提示するため）。正規表現は_DETECTOR_COMMENT_START_PREFIXから導出する（新規リテラルでの
+    複製を避ける、Cline独立レビュー§19.1指摘F1）。
+    """
+    return _ANNOTATION_ID_RE.findall(content)
 
 
 def _normalize_for_loose_match(s: str) -> tuple[str, list[int]]:
@@ -11280,10 +11394,14 @@ def _build_task_scope_context(state: LineageState, conn: sqlite3.Connection) -> 
             "大幅な構成変更の場合のみ、decision_whatに全文を渡してください。\n"
             "【BL-193: old_textは最小限に】old_textには変更したい箇所そのものだけを含め、"
             "無関係な前後（特にDetector指摘の注釈「> 🔴 [Detector指摘 #...]」ブロック全体など）を"
-            "巻き込んで1つの巨大なold_textにしないでください。注釈の削除が必要な場合は、"
-            "本文修正とは別のeditsの要素として、注釈のブロックだけを対象にした短いold_textで"
-            "個別に削除してください。1つのeditsが大きいほど、一字一句の不一致で全体が失敗する"
-            "リスクが上がります。\n"
+            "巻き込んで1つの巨大なold_textにしないでください。1つのeditsが大きいほど、"
+            "一字一句の不一致で全体が失敗するリスクが上がります。\n"
+            "【BL-326: 注釈の削除はremove_annotation_idで】注釈の削除は、old_textでブロックを"
+            "逐語再現するのではなく、write_agreementのeditsの要素にremove_annotation_id"
+            "（注釈内の「#」直後のID、例: 'D-1788150538640-f6dd80'）を指定して行ってください"
+            "（old_text/new_textは指定しない）。長文の一字一句再現は数字1文字の誤記等で失敗"
+            "しやすく、old_textより確実です。削除と同時に短い訂正記録を残したい場合はnew_textに"
+            "書けます（独立行にしたい場合は先頭に改行を含めてください）。\n"
             "【BL-202: 編集は「読む→1箇所だけ直す」を繰り返す（厳守）】このプロンプトに表示された"
             "本文は生成時点のスナップショットであり、Detector注釈の挿入等で既に変わっている"
             "可能性があります。したがって、次の手順を必ず守ってください。\n"
@@ -12724,8 +12842,10 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
             このとき、**本文の修正と注釈の削除は必ず別々のeditsの要素に分けてください**。1つのold_textに\n
             「本文＋注釈ブロック全体」をまとめて入れると、old_textが数千字規模になり一字一句の再現に失敗して\n
             edits全体が却下されます（log/2026-08-09/2348で同一ターン内20回連続の不一致を実測）。\n
-            注釈の削除は、「> 🔴 **[Detector指摘 #<ID>]**:」で始まるそのブロックだけを対象にした\n
-            独立したeditsの要素として行ってください。修正の影響が他の箇所（関連する数値・前提）にも\n
+            [BL-326] 注釈の削除は、old_textでブロックを逐語再現するのではなく、editsの要素に\n
+            remove_annotation_id（注釈内の「#」直後のID、例: 'D-1788150538640-f6dd80'）を\n
+            指定して行ってください（old_text/new_textは指定しない）。長文の一字一句再現は\n
+            数字1文字の誤記等で失敗しやすく、old_textより確実です。修正の影響が他の箇所（関連する数値・前提）にも\n
             及ぶ場合は、その範囲も併せて見直し、必要であればdecision_whatによる全文更新（SUPERSEDE）を使ってください。\n
             既に正しく確定していた他の記述内容（例：以前のDetector指摘で修正済みの箇所）を、今回とは無関係な\n
             理由で元に戻さないよう特に注意してください。\n
@@ -12885,9 +13005,10 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
             "該当箇所のみを部分修正してください。\n"
             "[BL-202] このとき、本文の修正と注釈の削除は必ず別々のeditsの要素に分けてください。"
             "1つのold_textに「本文＋注釈ブロック全体」をまとめて入れると、old_textが数千字規模になり"
-            "一字一句の再現に失敗してedits全体が却下されます。注釈の削除は、"
-            "「> 🔴 **[Detector指摘 #<ID>]**:」で始まるそのブロックだけを対象にした独立した"
-            "editsの要素として行ってください。\n"
+            "一字一句の再現に失敗してedits全体が却下されます。"
+            "[BL-326] 注釈の削除は、old_textでブロックを逐語再現するのではなく、editsの要素に"
+            "remove_annotation_id（注釈内の「#」直後のID）を指定して行ってください"
+            "（old_text/new_textは指定しない）。長文の一字一句再現より確実です。\n"
         )
 
     global _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
