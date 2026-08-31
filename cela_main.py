@@ -9707,6 +9707,30 @@ _INTERACTIVE_QUERY_TOOLS = [
 ]
 
 
+def _load_phases_from_checkpoint(run_id: str) -> list:
+    """[BL-325] read_project_planツール（cela_main.py:1861、_CURRENT_PHASESを返すだけの薄い
+    ラッパー）は、通常はグラフノード内での代入（12078/12217付近）でしかデータが供給されない。
+    --interactive-query（BL-309）はグラフを経由しない独立プロセスのため、このツールを
+    ツールリストへ配線しただけでは常に空リストが返っていた（AGENTS.md §15.4:
+    入口＝ツール配線だけでなく出口＝データソースの配線も必要）。
+    list_checkpoints（cela_main.py:19379-19385）と同じ「SqliteSaver + build_graph +
+    app.get_state」パターンで、LangGraph checkpointに永続化済みの最新state["phases"]を
+    独立プロセスから読み込む。checkpointが存在しない場合は空リストにフォールバックする
+    （従来の「フェーズ計画がまだありません」という表示に自然に収まり、新規runでも安全）。
+    """
+    checkpointer_conn = sqlite3.connect(CELA_CHECKPOINT_DB_PATH, check_same_thread=False)
+    try:
+        checkpointer = SqliteSaver(checkpointer_conn)
+        checkpointer.setup()
+        app = build_graph(checkpointer=checkpointer)
+        snapshot = app.get_state({"configurable": {"thread_id": run_id}})
+        if snapshot is None or not snapshot.values:
+            return []
+        return list(snapshot.values.get("phases", []))
+    finally:
+        checkpointer_conn.close()
+
+
 def _answer_general_query(conn: sqlite3.Connection, run_id: str, question: str) -> dict:
     """[BL-309] `--interactive-query`向け。`_answer_human_question`（BL-274）とは異なり、
     (1) 特定の保留issueに紐づかない自由な質問を受け付け、(2) 事前に固定した2テーブル
@@ -9720,11 +9744,14 @@ def _answer_general_query(conn: sqlite3.Connection, run_id: str, question: str) 
     各ノード呼び出し時に設定される）ため、ここで明示的に同じグローバルを設定してから
     ツールループへ入る（_answer_human_input等、既存のCLI関数と同じ約束事）。
     """
-    global _DB_CONN, _CURRENT_RUN_ID, _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID
+    global _DB_CONN, _CURRENT_RUN_ID, _CURRENT_CALLER_ROLE, _CURRENT_TASK_ID, _CURRENT_PHASES
     _DB_CONN = conn
     _CURRENT_RUN_ID = run_id
     _CURRENT_CALLER_ROLE = "human_query"
     _CURRENT_TASK_ID = ""
+    # [BL-325] read_project_planが独立CLIプロセスでも実データを返せるよう、呼び出し前に
+    # チェックポイントから読み込む（_load_phases_from_checkpoint参照）。
+    _CURRENT_PHASES = _load_phases_from_checkpoint(run_id)
 
     goal_essence_text = _get_goal_essence_text(conn, run_id)
     prompt = (
