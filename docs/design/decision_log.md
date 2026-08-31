@@ -3899,6 +3899,20 @@
 
 ---
 
+### D-280: Cline独立レビューのexecuteSafeCommands許可を維持する（AGENTS.md §19.2の記述精度修正）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-31 |
+| 状態 | `decided` |
+| 決定者 | t-momose（設定は現状維持と判断、AGENTS.md §19.2の記述修正も承認） |
+| **決定理由** | BL-326のCline第2回独立レビュー中、Cline側が`executeSafeCommands=true`（シェルコマンド実行の自動承認）を使い、検証用Pythonスクリプト2件を`artifacts/`配下へ書き込んでいたことをAI（Claude Sonnet 5）が`git status`で発見した。`editFiles`/`editFilesExternally`/`executeAllCommands`は設定通り`false`のままだったため、専用の編集ツール経由の書き込みは防がれていたが、AGENTS.md §19.2の「read-for-research-but-never-write」という記述は、シェルコマンド経由の書き込みまでは防げていない点で不正確だった。対応方針として、(a) `executeSafeCommands`も`false`にする案、(b) `--data-dir`でレビュー専用の隔離設定を用意し、そこだけ完全read-onlyにする案、(c) 現状維持しAGENTS.mdの記述だけ実態に合わせる案、をAIが提示した。ユーザーは(c)を選択した。理由は、`executeSafeCommands`が有効だったからこそCline自身が実際にPythonコードを実行して検証でき（BL-326/327の両レビューで、机上の読解だけでは見落とされたであろう非対称クリップ・往復一致・1307インシデント再現等の実行ベースの指摘が得られた）、この検証価値を失ってまで完全な書き込み不可を保証する必要はないという判断。 |
+| 決定内容 | Cline CLIの許可設定（`readFiles`/`readFilesExternally`/`executeSafeCommands`/`useMcp`/`useBrowser`auto-approve、`editFiles`/`editFilesExternally`/`executeAllCommands`=false）は変更しない。AGENTS.md §19.2の記述を、「専用の編集ツール経由の書き込みは防げるが、`executeSafeCommands`経由のシェルコマンドによるファイル書き込みは理論上可能」という実態に合わせて修正し、レビュー呼び出し後は`git status`で確認する運用注記を追加した。 |
+| 影響 | `AGENTS.md`§19.2の記述更新のみ。コード・設定への変更なし。 |
+| 関連 BL | なし（プロセス・ドキュメントの決定） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
