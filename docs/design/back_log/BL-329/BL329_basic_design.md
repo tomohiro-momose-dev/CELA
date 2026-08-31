@@ -129,7 +129,7 @@ for tid in sorted(removed_task_ids):
             _target_phase["tasks"].append(_old_task_obj)
         print(
             f"  🛡️ [BL-329] task_id='{tid}'は承認済みDeliverable（status="
-            f"'{_existing.get('status')}'）を持つため、計画再構成による廃止を見送り"
+            f"'{_existing_status}'）を持つため、計画再構成による廃止を見送り"
             f"計画へ復元しました（理由: {revision_reason}）。"
         )
         _write_agreement_impl(
@@ -138,7 +138,7 @@ for tid in sorted(removed_task_ids):
                 "topic": f"task_plan_{tid}_restored_by_bl329", "task_id": tid, "phase_id": old_phase_id,
                 "decision_what": (
                     f"task_id='{tid}'は計画再構成の対象でしたが、既にstatus="
-                    f"'{_existing.get('status')}'のDeliverableを持つため、廃止せず"
+                    f"'{_existing_status}'のDeliverableを持つため、廃止せず"
                     "計画に復元しました（BL-329：承認済み成果物の機械的保護）。"
                 ),
                 "reason_why": revision_reason,
