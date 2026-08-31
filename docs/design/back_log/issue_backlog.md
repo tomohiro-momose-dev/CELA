@@ -351,7 +351,7 @@
 | BL-323 | 高 | `docs/design/experiment_design_baseline_comparison.md`（実験実施時はログ抽出スクリプト等、詳細は下記セクション参照） | **`open`。** 単独LLM基線との対照実験（矛盾残存率・コスト・時間の定量比較）の設計完了・実施未着手。詳細は下記`### BL-323`セクション参照。 | P1 |
 | BL-325 | 中 | `cela_main.py`（新規`_load_phases_from_checkpoint`、`_answer_general_query`）、`tests/test_bl325_interactive_query_project_plan.py`（新規4件） | **`done`。** `--interactive-query`の`read_project_plan`が常に空リストを返していた欠陥を修正。詳細は下記`### BL-325`セクション参照。 | P2 |
 | BL-326 | 高 | `cela_main.py`（`_find_detector_annotation_span`ほか、詳細は下記セクション参照） | **`open`（実装着手）。** Detector注釈をdecision_id指定で機械的に削除する経路を追加。詳細は下記`### BL-326`セクション参照。 | P1 |
-| BL-327 | 中 | `cela_main.py`（`_adjacent_divergence_hint`ほか、詳細は下記セクション参照） | **`open`（実装着手）。** old_text不一致エラーへ機械的diffヒントを追加。詳細は下記`### BL-327`セクション参照。 | P2 |
+| BL-327 | 中 | `cela_main.py`（`_adjacent_divergence_hint`ほか、詳細は下記セクション参照） | **`done`。** old_text不一致エラーへ機械的diffヒントを追加。詳細は下記`### BL-327`セクション参照。 | P2 |
 | BL-328 | 低 | 未定（発想のみ） | **`open`。** ツール失敗が繰り返された際に`--interactive-query`型のヘルパーAIを呼び診断させる汎用機構の提案。詳細は下記`### BL-328`セクション参照。 | P3 |
 
 ---
