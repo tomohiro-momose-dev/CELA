@@ -11001,7 +11001,7 @@ facilitation_countの条件付きリセット・halt優先順位）。AGENTS.md 
 ガード拡張を一時的にrevertして関連2テストが失敗することを確認した上で復元した。
 既存`tests/test_bl217_human_in_the_loop.py`のexpert専用前提テストを新権限セットへ更新
 （1件）。影響範囲テスト（BL-236/194/217/126/313/158/086）202件・フルオフラインスイート
-実行済み（結果は本エントリ更新時に追記）。
+2128 passed / 5 deselected（既知の除外のみ、BL-324の新規34件を含む）。
 
 参照: `docs/design/back_log/BL-324/BL324_basic_design.md`、
 `tests/test_bl324_human_judgment_escalation.py`、`docs/design/decision_log.md` D-276。
