@@ -11148,22 +11148,46 @@ new_text型安全性、既存old_text経路と同等のリスクで非退行と�
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（設計完了・実装未着手） |
+| 状態 | `done` |
 | 優先度 | P2 |
 | 関連 | BL-326（同一インシデントに端を発する先行対応）、BL-151/BL-193（`_nearest_content_snippet`の原設計）、BL-328（ヘルパーAI案、本BLの軽量な代替として採用された経緯） |
 
-BL-326の議論の中で、ユーザーから「ツール失敗が続いた時にinteractive-query型のヘルパーAIを
-呼んで診断させてはどうか」という提案があり、AIは「1307ログの実例（金額表記の数字1文字誤記）は
-LLMをもう1体呼ばなくても`difflib`による機械的な文字単位diffで同じ効果が得られる、コスト・
-レイテンシ・誤診断リスクがなく汎用性もある」という軽量な代替案を提示、ユーザーが「まずは機械
-diffを実装してヘルパーAI案はBL表記」と承認した。`_nearest_content_snippet`が既に計算済みの
-LCS（`difflib.Match`）を再利用し、LCSブロックの直前・直後の短い窓をold_text側とcontent側で
-突き合わせて「あなたの記述 / 実際の内容」を機械的に提示する`_adjacent_divergence_hint`を
-新設する設計。Cline独立レビュー（AGENTS.md §19.1、実際にPythonコードを実行して検証）で
-F1〜F5の指摘を受け、設計へ反映済み（`docs/design/back_log/BL-326/BL326_327_basic_design.md`
-参照）。実装はBL-326の完了後に着手する。
+**経緯**: BL-326の議論の中で、ユーザーから「ツール失敗が続いた時にinteractive-query型の
+ヘルパーAIを呼んで診断させてはどうか」という提案があり、AIは「1307ログの実例（金額表記の
+数字1文字誤記）はLLMをもう1体呼ばなくても`difflib`による機械的な文字単位diffで同じ効果が
+得られる、コスト・レイテンシ・誤診断リスクがなく汎用性もある」という軽量な代替案を提示、
+ユーザーが「まずは機械diffを実装してヘルパーAI案はBL表記」と承認した。
 
-参照: `docs/design/back_log/BL-326/BL326_327_basic_design.md`。
+**対応内容**: `_nearest_content_snippet`が既に計算済みのLCS（`difflib.Match`）を再利用し、
+LCSブロックの直前・直後の短い窓をold_text側とcontent側で突き合わせて「あなたの記述 / 実際の
+内容」を機械的に提示する新規`_adjacent_divergence_hint`を追加し、有意な一致がある場合に
+`_nearest_content_snippet`の返り値末尾へ追記するようにした。`find_longest_match`の最大性
+保証（前後いずれにも延長不可能）により、before/after双方の窓が非空である限りヒントは実質
+常に発火する。窓の比較長はcontent側/old_text側の残り文字数とcontext_charsの最小値に揃え、
+非対称な長さでの誤解を招く表示を防いだ。新規のツール・schemaは不要（既存のold_text不一致
+エラーメッセージへの受動的な追記のみ）。
+
+Plan mode設計はCline独立レビュー（AGENTS.md §19.1、実際にPythonコードを実行して検証）で
+F1〜F5の指摘（`_adjacent_divergence_hint`の命名・docstring不正確、非対称な窓長、docstring
+の実際挙動との齟齬等）を受け設計へ反映済み。
+
+**テスト**: `tests/test_bl327_text_edit_diff_hint.py`（新規12件）——`_adjacent_divergence_
+hint`単体（直後/直前/両方での食い違い、文書境界での空文字列、非対称窓長の正規化確認）、
+1307ログの実インシデント再現（短文・長文2パターン）、`_nearest_content_snippet`統合
+（ヒント付加・フォールバック時の非付加・既存BL-151/BL-193挙動の非退行）、`_apply_text_edits`
+経由の統合テスト。AGENTS.md §17.1に従い、`_adjacent_divergence_hint`の呼び出し・追記部分を
+一時的にrevertし4件のテストが失敗することを確認した上で復元した。影響範囲テスト
+（BL-151/193/202/326/327）73件・フルオフラインスイート2171 passed。
+
+**実装後レビュー（Cline CLI、AGENTS.md §19.4 diff-based）**: 実施し承認（Approve）判定。
+実際にPythonコードを実行して1307インシデント再現を再検証した上での承認。軽微な指摘4件
+（複数箇所相違時は最長一致ブロックに隣接する1箇所のみをピンポイントする制限の明記、
+`autojunk=False`依存の明示、表示の分かりやすさ、プロンプト長上限の意味論）はすべて任意
+改善と判定されたが、うち2件（制限の明記・autojunk依存の明示）はコストが低く将来の理解を
+助けるため反映した。
+
+参照: `docs/design/back_log/BL-326/BL326_327_basic_design.md`、
+`tests/test_bl327_text_edit_diff_hint.py`、`docs/design/decision_log.md` D-279。
 
 ---
 
