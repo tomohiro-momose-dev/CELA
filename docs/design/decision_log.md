@@ -3857,6 +3857,20 @@
 
 ---
 
+### D-277: BL-325 — --interactive-queryのread_project_planが常に空リストを返す欠陥の修正方法
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-31 |
+| 状態 | `decided` |
+| 決定者 | t-momose（BL-324完了直後のHIL片付けの流れで`--interactive-query`を実使用し欠陥を発見・報告。修正方針は提示のみで承認取得の上、フェーズ・タスク一覧全体の確認要望と合わせて実装依頼） |
+| **決定理由** | `read_project_plan`ツールの実体は、グラフ実行中のノードだけが設定するモジュールグローバル`_CURRENT_PHASES`をそのまま返す薄いラッパーであり、グラフを経由しない`--interactive-query`（BL-309）はこのグローバルへ書き込む機会が構造的に存在しなかった。修正方法として、(a) 独自にDBへ`phases`を永続化する新テーブルを設ける案と、(b) 既に`--list-checkpoints`が使っているLangGraph checkpoint読み出しパターンを再利用する案を検討し、後者を採用した。理由は、`state["phases"]`はLangGraph checkpointに既に確実に永続化されており、二重の永続化経路を新設するとAGENTS.md §15.1（単一の情報源）に反する上、`--list-checkpoints`で実証済みの安全なパターンをそのまま流用できるため実装・レビューコストが小さいこと。 |
+| 決定内容 | 新規ヘルパー`_load_phases_from_checkpoint(run_id)`（`SqliteSaver`＋`build_graph`＋`app.get_state`）を追加し、`_answer_general_query`の冒頭で`_CURRENT_PHASES`へ設定してからツールループへ入るようにした。checkpoint未存在時は空リストへフォールバックし、既存の「まだフェーズ・タスク計画がありません」表示に自然に収まる。 |
+| 影響 | `cela_main.py`（`_load_phases_from_checkpoint`新規、`_answer_general_query`拡張）、`tests/test_bl325_interactive_query_project_plan.py`（新規4件）。AGENTS.md §17.1に従い修正箇所を一時的にrevertし新規統合テストが失敗することを確認した上で復元。既存BL-309（13件）・BL-174/checkpoint_resume関連の非退行を確認。 |
+| 関連 BL | BL-325（本件）、BL-309（--interactive-query本体）、BL-104（read_project_plan/`_CURRENT_PHASES`の元設計）、BL-174（`--list-checkpoints`の再利用元パターン） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
