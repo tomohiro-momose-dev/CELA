@@ -11535,9 +11535,11 @@ Cline hub daemonの不安定化（"hook dispatch failed"エラー、再起動後
 - 現在Approved_with_Conditionsの`AG-1788174245452-3d60bd`（`task_id='task_4_2'`、正しいtask_id）は、`decision_what='WHITEBOARD:phase_4:task_4_1'`——task_4_1のホワイトボードスロットを指すポインタを持ったまま生きている。`whiteboard_drafts`にtask_4_2用の行は一度も作られていない（`phase_4`配下はtask_4_1のv1のみ）。
 - task_4_1自身のホワイトボード内容（CapEx本文）はv1のまま実在し、失われてはいない——壊れているのは`agreements`側のポインタ・生存状態のみ。
 
-**根本原因**: `cela_main.py:17957-17964`（decision_extractor経由の直接書き込み時、UPDATE/Approved_with_Conditionsの旧レコードをSuperseded化してポインタを引き継ぐ処理）が、`a["topic"] == target_topic and a.get("entry_type") == entry_type`のみで対象行を特定しており、`task_id`の一致を検証しない。同型の未検証topic一致パターンが他に4箇所（`cela_main.py:4047`/`4113`/`4247`/`_find_prior_superseded`〜`11012`）独立に存在し、AGENTS.md §15.1（同じ判定ロジックの重複）違反。`b6f773`自体のtask_idがどのターンでどう誤登録されたか（発生源）は未特定のまま。
+**根本原因**: `cela_main.py:17957-17964`（decision_extractor経由の直接書き込み時、UPDATE/Approved_with_Conditionsの旧レコードをSuperseded化してポインタを引き継ぐ処理）が、`a["topic"] == target_topic and a.get("entry_type") == entry_type`のみで対象行を特定しており、`task_id`の一致を検証しない。
 
-**未着手**: 修正方針（該当箇所へ`task_id`一致条件を追加する／`_find_active_deliverable_agreement`等の既存の権威ある識別ロジックへ寄せる、のいずれか）はPlan modeで設計する。あわせて1917の実データ（task_4_2の`decision_what`ポインタ破損）の是正要否・スコープはAGENTS.md §18.3（バックアップ・スコープ明示・承認）に従いユーザーと別途合意する。ライブランは本セッション時点で稼働中（`log/2026-08-31/1917`が最新）。
+**訂正（当初「5箇所の重複」と報告したが深掘りで訂正）**: `_write_agreement_impl`内の同型箇所3件（`cela_main.py:4041-4049`のSUPERSEDE分岐・`4098-4119`のUPDATE分岐・`4241-4250`のsupersede実行分岐）は、いずれも既にBL-084で`entry_type=="Deliverable"`時のみ`_find_active_deliverable_agreement`（(phase_id, task_id)基準）を使う分岐が入っており、topic文字列一致はDecision/Directive限定（BL-084で意図的にスコープ外とされた設計、コメント明記）——**バグではない**。`_find_prior_superseded`（`11012`）は「前版」ヒント文言を出すだけの表示専用フォールバックで、データを書き換えない——**低リスク、対象外**。実際にBL-084の修正が漏れているのは`17957-17964`の1箇所のみで、これは`_write_agreement_impl`（write_agreementツール本体）とは別の書き込み経路（decision_extractorノード自身の直接書き込みフォールバック）であり、AGENTS.md §13.4（同じ不変条件を全ての書き込み経路で揃える）が想定する型の欠落。`b6f773`自体のtask_idがどのターンでどう誤登録されたか（発生源）は未特定のまま。
+
+**未着手**: 修正方針は、`17957-17964`へBL-084と同型の`entry_type=="Deliverable"`分岐を追加し`_find_active_deliverable_agreement`を再利用する（既存の権威ある識別ロジックへ寄せる、AGENTS.md §15.1）方向で、Plan modeで設計する。あわせて1917の実データ（task_4_2の`decision_what`ポインタ破損）の是正要否・スコープはAGENTS.md §18.3（バックアップ・スコープ明示・承認）に従いユーザーと別途合意する。ライブランは本セッション時点で稼働中（`log/2026-08-31/1917`が最新）。
 
 ### BL-331: task_id/phase_id/Deliverable識別のDAG（グラフ）ベース再設計
 
