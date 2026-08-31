@@ -347,6 +347,8 @@
 | BL-320 | 高 | `cela_main.py`（`_check_extracted_event`、詳細は下記セクション参照） | **`done`。** decision_extractorの抽出項目へ、反復collapse劣化出力を検知するfatalチェックを追加。詳細は下記`### BL-320`セクション参照。 | P1 |
 | BL-321 | 高 | `cela_main.py`（`_deliverable_heading_task_id_mismatch`ほか、詳細は下記セクション参照） | **`done`。** write_agreement(Deliverable)へ本文見出し/task_id不整合の検知ガードを追加。詳細は下記`### BL-321`セクション参照。 | P1 |
 | BL-322 | 中 | `cela_main.py`（`_shift_insertion_point_past_table_row`・`_annotate_whiteboard_with_detector_comment`、詳細は下記セクション参照） | **`done`。** Detector注釈挿入がMarkdownテーブル行を分断する欠陥を根本修正。詳細は下記`### BL-322`セクション参照。 | P1 |
+| BL-324 | 高 | `cela_main.py`（`_flag_needs_human_input_tool_impl`・`reflection_node`・`facilitator_node`ほか、詳細は下記セクション参照） | **`done`。** 「真に人間の判断が必要」なissueを、Reflector監査を経て（または監査役自身の判断で）グラフ全体の一時停止へ接続。詳細は下記`### BL-324`セクション参照。 | P0 |
+| BL-323 | 高 | `docs/design/experiment_design_baseline_comparison.md`（実験実施時はログ抽出スクリプト等、詳細は下記セクション参照） | **`open`。** 単独LLM基線との対照実験（矛盾残存率・コスト・時間の定量比較）の設計完了・実施未着手。詳細は下記`### BL-323`セクション参照。 | P1 |
 
 ---
 
@@ -10887,6 +10889,122 @@ Expertの修復ターンという実コストは残るため不採用とし、�
 参照: `docs/design/back_log/BL-322/BL322_basic_design.md`、
 `tests/test_bl322_detector_annotation_table_row_split_guard.py`、
 `docs/design/decision_log.md` D-274。
+
+---
+
+### BL-323: 単独LLM基線との対照実験（矛盾残存率・コスト・時間の定量比較）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（**設計完了・実施未着手**。Stage 2 の予算はユーザー承認待ち） |
+| 優先度 | P1 |
+| 関連 | [experiment_design_baseline_comparison.md](../experiment_design_baseline_comparison.md)、[decision_log.md D-275](../decision_log.md)、[experiment_decision_record_ablation.md](../experiment_decision_record_ablation.md)（未決事項の共通化）、[phase_gates.md P3a-4](../phase_gates.md)（指標C。置き換えではなく補完）、run `1787890406-1e73a89d` |
+
+**内容:**
+
+2026-08-28〜30 の継続ドライラン（`run_id=1787890406-1e73a89d`、GLM-5.3-flash、実費約$8、Whiteboard 71版）の
+評価とユーザーとの対話（decision_lineage 論点167）を通じて、「CELAには商用エージェントには無い深さと
+正確性がある」という主張の唯一の未証明点が「単独LLM基線との矛盾残存率比較」であると特定され、
+これを定量実測に変換する対照実験の設計がユーザー承認された（D-275）。
+
+- **条件**: A（単独LLM強モデル・構造化プロンプト・検算/検索ツールあり）／B（CELA×GLM-5.3-flash、
+  既存runデータで追加$0）／C（CELA×異種構成、割り当て未決）。
+- **指標**: 矛盾残存率（主指標・分類法K1〜K6。K6はCELA固有の失敗クラスのため比較除外）、出典実在率、
+  検証済み申告の正確率、壁時計時間、実費、整形修復版比率（B/C）、HIL発生数（B/C）。
+- **検出**: 3段（python_repl機械検証 → ブラインドLLM審査〔来源不明化〕→ ユーザー最終判定・機械再現確認必須）。
+- **段階制**: Stage 1（単一タスク再現、第一候補task_3_3、各条件3試行、予算目標≤$100）→
+  Stage 2（フルラン A×5・C×5、指標C規約の最低5試行準拠。見積り上限~$4,291、承認待ち）。
+
+**実施時の注意:**
+
+- 実験開始時の git sha・モデル名・APIパラメータを記録固定する（BL-317〜322 の修正が稼働中のため）。
+- A条件のプロンプトは「わざと弱い基線」にしない（AC・制約・成果物形式・検算ツールを与え、構造の差だけを測る）。
+- コスト見積りの前提（bytes/token仮定等）は実行前に実測へ置換する。
+
+**完了条件:**
+
+- Stage 1 の実施と3条件間の K1/K2 残存率比較が記録される。（☐）
+- 3段審査の判定再現性が確認される。（☐）
+- Stage 2 実施可否の判断がユーザーへ報告される。（☐）
+
+---
+
+### BL-324: 「真に人間の判断が必要」なissueを、Reflector監査を経て（または監査役自身の判断で）グラフ全体の一時停止へ接続する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P0 |
+| 関連 | BL-217（flag_needs_human_inputの原設計）、BL-236（escalate_premise_concernの一時停止機構、
+  本BLが再利用）、BL-194（ACKNOWLEDGE上限）、BL-158（副次修正）、BL-096（write_issue全般）、
+  `docs/design/back_log/BL-324/BL324_basic_design.md` |
+
+**経緯:**
+
+現在HILで一時停止中のライブラン（run_id=1787890406-1e73a89d）で、User AIが
+`escalate_premise_concern`によりプロセス上の矛盾（ESC-1788103398227-4a6f3f）を提起した。
+実DB調査（issue_log id=9df606db-996e-4796-a678-a93767d42e02、
+topic=`existing_power_contract_capacity_verification`）で、`human_research_prompt`が
+設定された人間専用issue（車庫候補地の電力契約容量、AIには照会手段なし）に対し、
+`write_issue(RESOLVE)`/`write_issue(DEFER)`は`_is_human_only_issue`（BL-236の意図的な
+保護）により拒否され、`ACKNOWLEDGE`も`_BL194_ACK_MAX_GRANTS=2`で使い切り済みで、AI側で
+このissueを「今回のターンで正式に対処した」と記録する手段が一つも残っていない状態だった。
+
+当初提案（BL-158の機械的差し戻しをhuman-onlyで除外するだけの修正）は、ユーザーから2回の
+訂正を受けて撤回した。1回目：「human-onlyのissueが立った時点で即座にHILへ移行し人間の
+回答を待つべき——必要な情報・判断をペンディングしたままタスクが進むと、人間回答後に手戻りが
+発生するリスクがある」との指摘を受け、`escalate_premise_concern`が持つ「グラフ全体を一時停止
+しHIL回答後に--resumeで復帰する」既存機構を`flag_needs_human_input`にも適用する方向へ設計
+変更した。2回目：「即座に」の意味をさらに精緻化——(a) User AI/Expert/Detectorが「AIの知見・
+WEB検索では埒が明かない（合理的仮定値の使用が危険で実世界の判断が必要）」と判断した場合は、
+即座に一時停止するのではなく、まずReflectorへ回し、HIL候補の内容と周辺議論を俯瞰した監査で
+「合理的」と認められて初めて一時停止を発行する。(b) Reflector/Facilitator自身が定期監査の
+中で「指摘を重ねても停滞する」「前提・条件の根本的な食い違い」と判断した場合は、追加監査を
+挟まず直接一時停止する。
+
+Plan mode設計後、AGENTS.md §19（Independent Design Review via Cline CLI）に基づき独立
+レビューを実施し、2件の必須修正（実コード確認の上で反映）を得た：resumeガードがissue_log系
+の新経路（`flag_needs_human_input`由来の一時停止）に対応しておらず未回答でも素通り/永久に
+resume不可のいずれかになる欠陥、および`facilitation_count`がresume時にリセットされず
+halt（不可逆）→一時停止（可逆）変更後に無限再一時停止ループになる欠陥。いずれも実コードで
+検証した上で設計へ反映した。
+
+**対応内容:**
+
+`flag_needs_human_input`（従来expert専用）をuser/detector/reflector/facilitatorへ拡大。
+issue_logへ`human_judgment_status`列を追加し、caller_roleに応じて初期値を分岐する：
+user/expert/detector起票時は`'pending_reflector_review'`（次回reflection_node巡回で
+Reflectorが監査し、confirmなら一時停止・insufficientならReflectorの根拠付きで即座に
+`status='resolved'`）、reflector/facilitator起票時は`'confirmed'`（既に監査・調停の
+役割を担うため、追加監査を挟まず直接一時停止）。
+
+新規`_should_pause_for_human`拡張（既存の`paused_for_premise_escalation`と`pending_
+human_judgment_issue_id`のいずれかで一時停止）、`pause_for_human_node`拡張（issue_log
+からの理由報告）、resumeガード拡張（issue_log.status=='resolved'を権威ストアとして確認）、
+facilitator起票の一時停止解除時のみ`facilitation_count`をリセット。Facilitatorの既存
+「facilitation_count > 5 → halt（不可逆停止）」は、issue_logへ直接confirmed状態で起票し
+グラフ全体を可逆的に一時停止する形へ置き換えた。Reflectorはtool-callingループを持たない
+単発JSON応答（`call_reflection`）のため、ツール呼び出しではなくJSON応答スキーマの拡張
+（`human_judgment_reviews`/`new_human_judgment_escalation`）で扱う。
+
+副次的に発見したBL-158の不整合（`_get_blocking_issues_for_transition`呼び出しが
+`exclude_acknowledged`を渡しておらずdocstringの意図と実装が乖離、ACK猶予期間中でも
+無条件にmajorを強制し続けていた）も同時に修正した。BL-125の実離脱ゲートは対象外
+（「今対応中でも未解決のまま離脱させない」という既存の歯止め、BL-194 D-164、を維持）。
+
+**テスト**: `tests/test_bl324_human_judgment_escalation.py`（新規34件）。マイグレーション
+冪等性、5role許可・human_judgment_status分岐、`_should_pause_for_human`/
+`pause_for_human_node`、Facilitatorのブリッジ配線とhalt→一時停止変更（実インシデント
+再現含む）、Reflectorの監査（confirm/insufficient/新規起票/対称性不変条件の誤指定無視）、
+BL-158の`exclude_acknowledged=True`、resumeガード拡張（未回答ブロック・解決済み通過・
+facilitation_countの条件付きリセット・halt優先順位）。AGENTS.md §17.1に従い、resume
+ガード拡張を一時的にrevertして関連2テストが失敗することを確認した上で復元した。
+既存`tests/test_bl217_human_in_the_loop.py`のexpert専用前提テストを新権限セットへ更新
+（1件）。影響範囲テスト（BL-236/194/217/126/313/158/086）202件・フルオフラインスイート
+実行済み（結果は本エントリ更新時に追記）。
+
+参照: `docs/design/back_log/BL-324/BL324_basic_design.md`、
+`tests/test_bl324_human_judgment_escalation.py`、`docs/design/decision_log.md` D-276。
 
 ---
 
