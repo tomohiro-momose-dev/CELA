@@ -353,6 +353,7 @@
 | BL-326 | 高 | `cela_main.py`（`_find_detector_annotation_span`ほか、詳細は下記セクション参照） | **`open`（実装着手）。** Detector注釈をdecision_id指定で機械的に削除する経路を追加。詳細は下記`### BL-326`セクション参照。 | P1 |
 | BL-327 | 中 | `cela_main.py`（`_adjacent_divergence_hint`ほか、詳細は下記セクション参照） | **`done`。** old_text不一致エラーへ機械的diffヒントを追加。詳細は下記`### BL-327`セクション参照。 | P2 |
 | BL-328 | 低 | 未定（発想のみ） | **`open`。** ツール失敗が繰り返された際に`--interactive-query`型のヘルパーAIを呼び診断させる汎用機構の提案。詳細は下記`### BL-328`セクション参照。 | P3 |
+| BL-329 | 高 | `cela_main.py`（`_validate_task_plan_depends_on_integrity`・`_build_protected_task_id_validator`・`_enforce_decision_lineage_json`・`task_planner_node`ほか、詳細は下記セクション参照） | **`open`（設計完了・Cline独立レビュー実施中、実装未着手）。** 計画再構成が承認済みDeliverableを除去しないよう、生成時点で検証・自己修正させる。詳細は下記`### BL-329`セクション参照。 | P0 |
 
 ---
 
@@ -11214,6 +11215,35 @@ hint`単体（直後/直前/両方での食い違い、文書境界での空文�
 より広い停滞パターンも含め、汎用的な「行き詰まったAIを診断するAI」機構は、本セッションでは
 設計・実装せず発想のみ記録する。将来着手する際は、`--interactive-query`（BL-309）の
 読み取り専用ツール構成・DBのみでの追跡可能性という設計思想を踏襲することが自然な出発点となる。
+
+---
+
+### BL-329: 計画再構成が承認済みDeliverableを除去しないよう、生成時点で検証・自己修正させる
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計完了・Cline独立レビュー実施中、実装未着手） |
+| 優先度 | P0 |
+| 関連 | BL-313（今回の実インシデントの引き金）、BL-126 Stage C（計画再構成の汎用インフラ原設計）、BL-213 F3（`validator`フックの原設計）、BL-283（`_enforce_decision_lineage_json`）、BL-167（`_is_task_completed`/`RESOLVING_DELIVERABLE_STATUSES`原設計） |
+
+**経緯**: 1633ログ（run_id=1787890406-1e73a89d）で`read_deliverable_file`の「該当する
+Deliverableが見つかりませんでした」が24回連発しているとユーザーから報告。BL-313の
+サブタスク分割トリガーが、既に承認済みだったtask_5_2/task_5_5のDeliverableごとタスクを
+「廃止」し、分割後の新task_idからは参照不能になっていたことが判明した
+（詳細はBL-329設計書のContext節参照）。ユーザーは当初の事後修正案（機械的復元のみ）に
+対し「タスクプランナーに1タスクずつ登録させ、保護対象task_idの変更をDB登録時点で拒否
+できないか」「depends_on等の紐づけチェックをcheck_docs_consistency.py的な仕組みで
+できないか」と、より根本的な改善を提案。調査の結果、既存の`_query_and_parse_with_retry`
+の`validator`フック（BL-213 F3、実装済み・実運用中）を使えば、大改修なしで「生成時点で
+検証し、その場でLLMに自己修正させる」という同じ効果を実現できることが判明し、この軽量案を
+ユーザーが承認した。
+
+**設計**: 詳細は`docs/design/back_log/BL-329/BL329_basic_design.md`参照（Cline独立レビュー
+3回実施・全指摘反映済み）。一次防御（`_query_and_parse_with_retry`・`_enforce_decision_
+lineage_json`双方への`validator`適用、depends_on整合性・保護task_id維持の2検証を合成）と
+二次防御（validatorのretryが尽きた場合・JSONパース全滅の場合の機械的復元）の二段構え。
+
+参照: `docs/design/back_log/BL-329/BL329_basic_design.md`。
 
 ---
 
