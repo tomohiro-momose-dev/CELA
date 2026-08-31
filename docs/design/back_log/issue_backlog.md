@@ -10992,16 +10992,31 @@ facilitator起票の一時停止解除時のみ`facilitation_count`をリセッ�
 無条件にmajorを強制し続けていた）も同時に修正した。BL-125の実離脱ゲートは対象外
 （「今対応中でも未解決のまま離脱させない」という既存の歯止め、BL-194 D-164、を維持）。
 
-**テスト**: `tests/test_bl324_human_judgment_escalation.py`（新規34件）。マイグレーション
+**テスト**: `tests/test_bl324_human_judgment_escalation.py`（新規37件）。マイグレーション
 冪等性、5role許可・human_judgment_status分岐、`_should_pause_for_human`/
 `pause_for_human_node`、Facilitatorのブリッジ配線とhalt→一時停止変更（実インシデント
 再現含む）、Reflectorの監査（confirm/insufficient/新規起票/対称性不変条件の誤指定無視）、
 BL-158の`exclude_acknowledged=True`、resumeガード拡張（未回答ブロック・解決済み通過・
-facilitation_countの条件付きリセット・halt優先順位）。AGENTS.md §17.1に従い、resume
-ガード拡張を一時的にrevertして関連2テストが失敗することを確認した上で復元した。
-既存`tests/test_bl217_human_in_the_loop.py`のexpert専用前提テストを新権限セットへ更新
-（1件）。影響範囲テスト（BL-236/194/217/126/313/158/086）202件・フルオフラインスイート
-2128 passed / 5 deselected（既知の除外のみ、BL-324の新規34件を含む）。
+facilitation_countの条件付きリセット・halt優先順位・複数confirmed行の連鎖消費）、
+facilitation上限時のissue起票失敗時halt fallback。AGENTS.md §17.1に従い、resumeガード
+拡張・複数confirmed行の連鎖消費・halt fallbackをそれぞれ一時的にrevertして関連テストが
+失敗することを確認した上で復元した。既存`tests/test_bl217_human_in_the_loop.py`の
+expert専用前提テストを新権限セットへ更新（1件）。影響範囲テスト
+（BL-236/194/217/126/313/158/086）205件・フルオフラインスイート実行済み
+（結果は本エントリ更新時に追記）。
+
+**実装後レビュー（Cline CLI、AGENTS.md §19.4 diff-based）**: `scripts/cline_review_diff.py`
+で`cela_main.py`・新規/更新テストファイルの差分を、本設計書に対する充足確認込みでレビューし、
+3件の指摘を実コードで検証の上すべて反映した。①resumeガードのコメントブロックが6行分
+verbatimで重複していた（削除）。②Reflectorが1回の監査で複数issueをconfirmした場合、
+`reflection_node`はstateへ最初の1件のissue_idしか載せず、残りのconfirmed行が誰にも
+消費されないまま取り残される欠陥（AGENTS.md §15.4「入口はあるが出口がない」）——resume
+ガードで、追跡中のissueが解決した直後に他のconfirmed・未解決行が残っていないか確認し、
+あれば次の一時停止対象として連鎖的に消費する修正を追加。③facilitation_count>5の分岐で
+`_flag_needs_human_input_tool_impl`自体が失敗（DB異常等）した場合、旧コード（無条件halt）
+と異なりpending/haltいずれも立たないまま`return`し、理由の分からない停止に陥る
+（fail-loudでない、AGENTS.md §13.2）欠陥——旧コードと同じ「確実に止める」安全側
+（`state["halt"]=True`）へのフォールバックを追加。
 
 参照: `docs/design/back_log/BL-324/BL324_basic_design.md`、
 `tests/test_bl324_human_judgment_escalation.py`、`docs/design/decision_log.md` D-276。
