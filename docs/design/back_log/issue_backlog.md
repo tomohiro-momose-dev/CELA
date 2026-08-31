@@ -11002,8 +11002,8 @@ facilitation上限時のissue起票失敗時halt fallback。AGENTS.md §17.1に�
 拡張・複数confirmed行の連鎖消費・halt fallbackをそれぞれ一時的にrevertして関連テストが
 失敗することを確認した上で復元した。既存`tests/test_bl217_human_in_the_loop.py`の
 expert専用前提テストを新権限セットへ更新（1件）。影響範囲テスト
-（BL-236/194/217/126/313/158/086）205件・フルオフラインスイート実行済み
-（結果は本エントリ更新時に追記）。
+（BL-236/194/217/126/313/158/086）205件・フルオフラインスイート
+2131 passed / 5 deselected（既知の除外のみ、BL-324の新規37件を含む）。
 
 **実装後レビュー（Cline CLI、AGENTS.md §19.4 diff-based）**: `scripts/cline_review_diff.py`
 で`cela_main.py`・新規/更新テストファイルの差分を、本設計書に対する充足確認込みでレビューし、
