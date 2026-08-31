@@ -166,6 +166,14 @@ for tid in sorted(removed_task_ids):
 クラッシュはしないが、依存関係の意味的な整合までは保証しない。いずれも既知の限界として
 記録するに留め、本BLでは対応しない。
 
+**[既知の限界・Cline指摘「小1」]** 復元後、`plan_review_done = False`（16493行）により
+task_plan_reviewerの再審査を通るため、reviewerやtask_plannerが再び同じtask_idの削除を
+提案すれば、このガードが再度復元し「復元→再審査→再削除提案→再復元」を繰り返しうる。
+無限ループにはならない（`plan_revision_count`で反復回数が管理されている、既存機構）が、
+上限到達時の挙動は本BLの変更範囲外。復元監査Directive（後述）がreviewerの文脈へ
+届くかどうかは未確認で、届けば「復元理由をreviewerが知り得る」ため反復の抑止根拠になりうる
+——将来この反復が実際に問題化した場合の調査の手がかりとして記録する。
+
 ## Critical Files
 
 - `cela_main.py`: `task_planner_node`（16404付近）の`removed_task_ids`ループ
