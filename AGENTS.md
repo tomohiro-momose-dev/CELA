@@ -577,3 +577,104 @@ and must be committed explicitly.
 Before deleting or rewriting rows in `cela.db`, or discarding uncommitted work, back up the target,
 state the exact scope (row counts, file list) to the user, and obtain approval. Prefer official APIs
 (LangGraph state updates) over raw SQL when correcting a live run.
+
+---
+
+## 19. Independent Design Review via Cline CLI (Plan -> Cline Review -> Re-plan)
+
+For non-trivial plans (a Plan-mode design, a `docs/design/back_log/BL-xxx/BLxxx_basic_design.md`,
+or a phase-level `cela_phaseN_design_vX.md`), get an independent review from Cline — a separate
+agent/model running non-interactively via its CLI — before finalizing the plan with the user. This
+operationalizes §16.2 (verify review findings against the code) with a review source that has no
+continuity bias from this session.
+
+### 19.1 How to invoke it
+
+```
+python scripts/cline_review.py <path-to-plan.md> [--thinking none|low|medium|high|xhigh] [--timeout SECONDS]
+```
+
+Default `--thinking` is `high` (per user decision 2026-08-31 — plan/implementation review benefits
+from more reasoning effort than the default `medium`).
+
+The script prints Cline's review text to stdout (nothing else). Read it, verify each claim against
+the actual code/docs per §16.2, and fold what survives verification back into the plan — do not
+paste the review to the user unfiltered and do not treat it as authoritative.
+
+`--timeout` is the budget given to the `cline` CLI itself (`-t`); the Python subprocess call waits
+`--timeout + 30`s before giving up, so a slow review surfaces as a `cline CLI exited`/`did not
+finish` error rather than a silent hang — no extra margin needs to be added by the caller.
+
+### 19.2 Safety posture (do not change without user approval)
+
+Cline is invoked with `--auto-approve true`, but its local config
+(`~/.cline/data/globalState.json` -> `autoApprovalSettings.actions`) is kept with `editFiles`,
+`editFilesExternally`, and `executeAllCommands` forced to `false`. `readFiles`, `readFilesExternally`,
+`executeSafeCommands`/`useMcp`, and (per user decision 2026-08-31) `useBrowser` stay auto-approved.
+This makes Cline read-for-research-but-never-write in this workflow — a review agent must not be
+able to mutate the repo it is reviewing, but may browse external docs to ground a review. Both
+`scripts/cline_review.py` and `scripts/cline_review_diff.py` (§19.4) share this config and must
+never be changed to grant edit/execute-all write-back access without an explicit, separate user
+decision recorded in `decision_log.md`.
+
+**Self-enforcing, because the config can drift.** `~/.cline/data/globalState.json` is one
+machine-wide file shared by *every* Cline CLI invocation on the machine, including other, unrelated
+Claude Code sessions running concurrently against this or another repo. On 2026-08-31 this file was
+found reset to all-`true` (write actions included) partway through a session, with a concurrent
+session's own Cline usage as the likely but not fully confirmed cause. Because the file cannot be
+trusted to stay as last set, `cline_review.py`'s `_ensure_readonly_auto_approve()` re-asserts
+`editFiles`/`editFilesExternally`/`executeAllCommands` = `false` immediately before every single
+Cline invocation (both scripts call it, since `cline_review_diff.py` goes through
+`cline_review.invoke_cline`). Do not remove this call, and do not assume the file's on-disk state
+reflects what was last configured — re-read it if reasoning about current safety posture.
+
+If another Claude Code session is running Cline reviews against this repo at the same time, treat
+that as a real possibility, not a hypothetical — check `cline history --json` (look at `status`,
+`source`, and `cwd`/`prompt`) before assuming a stray file or an unexpected auto-approve value came
+from this session's own actions.
+
+### 19.3 Known constraints (established 2026-08-31, do not rediscover by trial and error)
+
+- **Never pass `-p`/`--plan` to the `cline` CLI in this workflow.** Cline has its own plan/act mode;
+  in plan mode it presents a plan and then stops, waiting for a human to approve switching to act
+  mode. Combined with non-interactive/headless invocation this hangs indefinitely (observed: a task
+  sat unanswered for 7+ minutes before being force-terminated by Cline's own stale-session
+  reconciler). Plain act-mode invocation (no `-p`) is what `scripts/cline_review.py` uses, and is
+  safe here because write actions are already disabled per §19.2.
+- The Cline CLI and the Cline VS Code extension share one local hub daemon per workspace
+  (`ws://127.0.0.1:<port>`, `cline hub status`). A CLI task can therefore surface inside the VS Code
+  extension's chat UI for the same workspace.
+- `-z`/`--zen` (documented as "run in the background hub") timed out with `zen_error` on CLI v3.0.60
+  and is not a working workaround for the above — do not rely on it without re-verifying against a
+  newer CLI version first.
+- The CLI resolves to `cline.cmd` on Windows via npm global install; a plain
+  `subprocess.run(["cline", ...])` fails to find it. Resolve the real path with `shutil.which("cline")`
+  first (already done in `scripts/cline_review.py`).
+- Auth is a device-code flow (`cline auth --provider cline`, prints a URL + code); it requires a
+  human to complete the login in a browser and cannot be scripted further.
+
+### 19.4 Implementation review (diff-based)
+
+After implementing a plan, review the actual diff the same way — this is the "Cline(review)" step
+for implementation, not just design:
+
+```
+python scripts/cline_review_diff.py [--range RANGE] [--path PATH ...] [--plan PLAN_FILE ...] \
+    [--thinking LEVEL] [--timeout SECONDS]
+```
+
+- `--range` is passed straight to `git diff` (e.g. `HEAD~1`, `main...HEAD`, `--staged`); omitted,
+  it reviews the working tree against `HEAD` (uncommitted changes — the common case right after
+  implementing).
+- `--path` restricts the diff to specific files/dirs (repeatable).
+- `--plan` names the plan/design doc(s) this implementation is supposed to satisfy (repeatable);
+  when given, Cline is asked to check the diff against the plan for gaps, not just for bugs in
+  isolation. Omit it when there is no plan doc for the change.
+- The diff is written to a temp file (outside the repo) and Cline is pointed at that file rather
+  than having the diff text pasted into the prompt — keeps the invocation working for diffs of any
+  size and avoids shell-escaping the diff content. This relies on `readFilesExternally: true`
+  staying enabled per §19.2.
+- Same output contract as §19.1: review text on stdout only, verify each claim against the actual
+  diff/code per §16.2 before acting on it, and don't accept it as authoritative.
+- `git diff` with no changes in range/paths raises an error (nothing to review) instead of calling
+  Cline with an empty diff.
