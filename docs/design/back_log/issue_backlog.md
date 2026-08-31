@@ -11222,9 +11222,9 @@ hint`単体（直後/直前/両方での食い違い、文書境界での空文�
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（設計完了・Cline独立レビュー実施中、実装未着手） |
+| 状態 | `done` |
 | 優先度 | P0 |
-| 関連 | BL-313（今回の実インシデントの引き金）、BL-126 Stage C（計画再構成の汎用インフラ原設計）、BL-213 F3（`validator`フックの原設計）、BL-283（`_enforce_decision_lineage_json`）、BL-167（`_is_task_completed`/`RESOLVING_DELIVERABLE_STATUSES`原設計） |
+| 関連 | BL-313（今回の実インシデントの引き金）、BL-126 Stage C（計画再構成の汎用インフラ原設計）、BL-213 F3（`validator`フックの原設計）、BL-283（`_enforce_decision_lineage_json`）、BL-167（`_is_task_completed`/`RESOLVING_DELIVERABLE_STATUSES`原設計）、BL-191（redirect_backwardとの相互作用調整） |
 
 **経緯**: 1633ログ（run_id=1787890406-1e73a89d）で`read_deliverable_file`の「該当する
 Deliverableが見つかりませんでした」が24回連発しているとユーザーから報告。BL-313の
