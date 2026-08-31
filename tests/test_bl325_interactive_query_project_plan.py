@@ -9,7 +9,7 @@ BL-325: `--interactive-query`の`read_project_plan`が常にフェーズ・タ�
 機会が一度もなく、`read_project_plan`は常に空リストを返していた（AGENTS.md §15.4:
 ツールをツールリストへ配線しただけで、データソース側の配線を忘れていたパターン）。
 
-修正: `list_checkpoints`（cela_main.py:19379-19385）と同じ
+修正: `list_checkpoints`（cela_main.py:19372〜、checkpointer構築部は19406以降）と同じ
 「SqliteSaver + build_graph + app.get_state」パターンで、LangGraph checkpointに
 永続化済みの最新`state["phases"]`を独立プロセスから読み込む
 （新規関数`_load_phases_from_checkpoint`）。

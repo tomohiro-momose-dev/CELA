@@ -9709,11 +9709,12 @@ _INTERACTIVE_QUERY_TOOLS = [
 
 def _load_phases_from_checkpoint(run_id: str) -> list:
     """[BL-325] read_project_planツール（cela_main.py:1861、_CURRENT_PHASESを返すだけの薄い
-    ラッパー）は、通常はグラフノード内での代入（12078/12217付近）でしかデータが供給されない。
+    ラッパー）は、通常はグラフノード内での代入（call_expert等のノード内、`global _CURRENT_PHASES`
+    直後の`_CURRENT_PHASES = state.get("phases", [])`）でしかデータが供給されない。
     --interactive-query（BL-309）はグラフを経由しない独立プロセスのため、このツールを
     ツールリストへ配線しただけでは常に空リストが返っていた（AGENTS.md §15.4:
     入口＝ツール配線だけでなく出口＝データソースの配線も必要）。
-    list_checkpoints（cela_main.py:19379-19385）と同じ「SqliteSaver + build_graph +
+    list_checkpoints（cela_main.py:19372〜、checkpointer構築部は19406以降）と同じ「SqliteSaver + build_graph +
     app.get_state」パターンで、LangGraph checkpointに永続化済みの最新state["phases"]を
     独立プロセスから読み込む。checkpointが存在しない場合は空リストにフォールバックする
     （従来の「フェーズ計画がまだありません」という表示に自然に収まり、新規runでも安全）。
