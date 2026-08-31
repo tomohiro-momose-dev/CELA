@@ -9224,6 +9224,48 @@ def _get_escalation_status_text_for_expert(conn: sqlite3.Connection, run_id: str
 
 _TEXT_EDIT_SNIPPET_MAX_CHARS = 400  # [BL-151] 不一致時プレビューの上限（プロンプト肥大化を抑制）
 _EDIT_SNIPPET_MIN_MATCH_SIZE = 20  # [BL-193] この文字数未満の最長一致は「無関係」とみなし先頭スニペットへフォールバック
+_TEXT_EDIT_DIVERGENCE_CONTEXT_CHARS = 30  # [BL-327] 機械diffヒントの一致ブロック前後の表示文字数
+
+
+def _adjacent_divergence_hint(content: str, old_text: str, match: "difflib.Match",
+                               context_chars: int = _TEXT_EDIT_DIVERGENCE_CONTEXT_CHARS) -> str:
+    """[BL-327] 1307ログ実インシデント（run_id=1787890406-1e73a89d、task_3_5）: Expertが
+    Detector注釈本文中の金額表記「1億1,850万」を「1億11,850万」と誤記したまま、
+    `_nearest_content_snippet`が示す「最も近い実際の内容」を2回確認した後も同じ誤記を
+    繰り返した。人間がログを見れば一瞬で気づく類の相違（数字1文字の重複・脱落等）を、
+    追加のLLM呼び出しなしで機械的（difflib）にピンポイント指摘するため、
+    `_nearest_content_snippet`が既に検出した最長一致ブロック（match）に隣接する
+    （直後・直前の）old_text側とcontent側の食い違いを「あなたの記述 / 実際の内容」として
+    示す。最長一致ブロックそのものは両者で完全に一致することが保証されている
+    （SequenceMatcherの定義）ため、その直後・直前の短い窓を見るだけで済む。
+
+    find_longest_matchの最大性保証により、before/after双方の窓が非空である限りヒントは
+    実質常に発火する（食い違わないなら一致をさらに延長できたはずで矛盾するため）。
+    空文字列を返すのは、文書境界で片側・両側の窓が空になる場合のみ。
+
+    比較長はcontent側/old_text側それぞれの残り文字数とcontext_charsの最小値に揃える
+    （非対称な長さで比較すると、実際の相違以上に大きく見える表示になるため）。
+
+    [既知の制限・Cline独立レビュー§19.4指摘1] old_textに複数箇所の相違が散在する場合、
+    ピンポイントできるのは最長一致ブロックに隣接する1箇所のみ（全ての相違を網羅する
+    ものではない）。1307ログの実インシデントのように相違が1箇所の場合には十分だが、
+    複数箇所ある場合は残りが自己修復されるまで再試行が必要になりうる。
+    """
+    n_after = min(context_chars, len(content) - (match.a + match.size), len(old_text) - (match.b + match.size))
+    n_before = min(context_chars, match.a, match.b)
+    after_content = content[match.a + match.size: match.a + match.size + n_after]
+    after_old = old_text[match.b + match.size: match.b + match.size + n_after]
+    before_content = content[match.a - n_before: match.a]
+    before_old = old_text[match.b - n_before: match.b]
+
+    hints = []
+    if after_old != after_content:
+        hints.append(f"  [一致ブロック直後] あなたの記述: …{after_old}…\n                実際の内容 : …{after_content}…")
+    if before_old != before_content:
+        hints.append(f"  [一致ブロック直前] あなたの記述: …{before_old}…\n                実際の内容 : …{before_content}…")
+    if not hints:
+        return ""
+    return "\n【一致ブロックに隣接する食い違い箇所（機械diff・BL-327）】\n" + "\n".join(hints)
 
 
 def _nearest_content_snippet(content: str, old_text: str, max_chars: int = _TEXT_EDIT_SNIPPET_MAX_CHARS) -> str:
@@ -9240,7 +9282,14 @@ def _nearest_content_snippet(content: str, old_text: str, max_chars: int = _TEXT
     old_textがcontentとほぼ無関係（有意な共通部分がない）な場合は、BL-151の元の挙動
     （文書先頭のスニペット）にフォールバックする——完全に無関係なold_textに対しては
     「近傍」という概念自体が意味を持たないため。
+
+    ★修正（BL-327）: 1307ログの実インシデントで、上記の周辺窓を提示されてもExpertは
+    相違点（1文字の数字重複）自体には自力で気づけず、同じ誤記を3回繰り返した。有意な一致が
+    ある場合、`_adjacent_divergence_hint`による機械diffヒントを末尾に追記する。
     """
+    # [BL-327] _adjacent_divergence_hintの「最大性保証によりヒントは実質常に発火する」
+    # という前提はautojunk=Falseに依存する（Cline独立レビュー§19.4指摘4）。将来ここを
+    # autojunk=Trueへ変更する場合は_adjacent_divergence_hintのdocstringも見直すこと。
     matcher = difflib.SequenceMatcher(None, content, old_text, autojunk=False)
     match = matcher.find_longest_match(0, len(content), 0, len(old_text))
     if match.size < _EDIT_SNIPPET_MIN_MATCH_SIZE:
@@ -9251,7 +9300,8 @@ def _nearest_content_snippet(content: str, old_text: str, max_chars: int = _TEXT
     window_end = min(len(content), match.a + match.size + half)
     prefix = "…（中略）" if window_start > 0 else ""
     suffix = "…（以下省略）" if window_end < len(content) else ""
-    return prefix + content[window_start:window_end] + suffix
+    snippet = prefix + content[window_start:window_end] + suffix
+    return snippet + _adjacent_divergence_hint(content, old_text, match)
 
 
 def _apply_text_edits(
