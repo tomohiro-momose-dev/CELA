@@ -11238,12 +11238,51 @@ Deliverableが見つかりませんでした」が24回連発しているとユ�
 検証し、その場でLLMに自己修正させる」という同じ効果を実現できることが判明し、この軽量案を
 ユーザーが承認した。
 
-**設計**: 詳細は`docs/design/back_log/BL-329/BL329_basic_design.md`参照（Cline独立レビュー
-3回実施・全指摘反映済み）。一次防御（`_query_and_parse_with_retry`・`_enforce_decision_
-lineage_json`双方への`validator`適用、depends_on整合性・保護task_id維持の2検証を合成）と
-二次防御（validatorのretryが尽きた場合・JSONパース全滅の場合の機械的復元）の二段構え。
+**設計**: 詳細は`docs/design/back_log/BL-329/BL329_basic_design.md`参照（Plan mode独立
+レビュー3回・実装後diffレビュー1回、全指摘反映済み）。一次防御（`_query_and_parse_with_
+retry`・`_enforce_decision_lineage_json`双方への`validator`適用、depends_on整合性・
+保護task_id維持の2検証を合成）と二次防御（validatorのretryが尽きた場合・JSONパース全滅の
+場合の機械的復元）の二段構え。
 
-参照: `docs/design/back_log/BL-329/BL329_basic_design.md`。
+**対応内容**: `_validate_task_plan_depends_on_integrity`（task_id非空・重複無し・depends_on
+実在性を検証）・`_build_protected_task_id_validator`（再構成時のみ、`RESOLVING_DELIVERABLE_
+STATUSES`相当のtask_idが新計画から消えていないか検証）の2関数を新設し合成、
+`call_task_planner`から`_query_and_parse_with_retry`と`_enforce_decision_lineage_json`
+（BL-283差し戻し再出力にも同じvalidatorを適用するよう`validator`引数を新規追加、
+デフォルトNoneで他5箇所の呼び出し元は非退行）の両方へ渡す。二次防御として
+`task_planner_node`の`removed_task_ids`ループへ、完了相当のDeliverableを持つtask_idを
+無条件廃止せず計画へ機械的に復元するガードを追加した。
+
+**実装後に発覚した相互作用（フルオフラインスイートで発見）**: Cline実装後diffレビューは
+限定的な影響範囲テストのみ対象で全件検出できなかったが、フルスイート実行で
+`test_bl191_task_focus_scheduling.py`の2件が回帰した。BL-191（`schedule_task_focus`の
+redirect_backward）は既にApproved済みの過去タスクへ一時的にフォーカスを戻し、その後
+`_reconcile_current_phase_after_replan`が「フォーカス中task_idが新計画から消えた」ことを
+検知して強制的にfocus_stackをクリアする設計だが、BL-329がこの「消えるべきtask_id」まで
+機械的に復元するとBL-191のreconcile分岐が発火しなくなっていた。`state["task_focus_stack"]`
+の`focused_task_id`をBL-329の保護対象から除外し、BL-191側の既存reconcile処理に委ねる
+よう修正、回帰テストを追加した。
+
+**テスト**: `tests/test_bl329_task_plan_validator_and_deliverable_protection.py`（新規23件）
+——depends_on整合性・保護task_id検証の単体テスト、`call_task_planner`統合テスト
+（validator retryによる自己修正、BL-283再出力への適用確認含む）、`task_planner_node`の
+二次防御統合テスト（Approved/Approved_with_Conditions/Implicitly_Accepted全ステータス・
+phase消失エッジケース・read_deliverable_file経由のE2E確認・パース全滅シナリオ）、
+BL-191相互作用の回帰テスト。AGENTS.md §17.1に従い、(a) 一次防御の2箇所の`validator=`配線、
+(b) 二次防御の機械的復元、(c) BL-191除外条件、をそれぞれ個別に一時的にrevertし対応する
+テストが失敗することを確認した上で復元した。影響範囲テスト185件・フルオフラインスイート
+2193 passed。
+
+**実装後レビュー（Cline CLI、AGENTS.md §19.4 diff-based）**: 承認（マージ可）判定。軽微な
+指摘3件（`_enforce_decision_lineage_json`のdocstringの保証過大、保護task_id収集の
+`.get()`化、エラーメッセージのステータス列挙の`RESOLVING_DELIVERABLE_STATUSES`からの導出）
+をすべて実コードで検証の上反映した。なお、設計段階のCline独立レビュー（§19.1）は
+Cline hub daemonの不安定化（"hook dispatch failed"エラー、再起動後も再発）により最終確認
+パスのみ実施できず、ユーザーの事前承認（「ダメなら省略」）に従い省略した。
+
+参照: `docs/design/back_log/BL-329/BL329_basic_design.md`、
+`tests/test_bl329_task_plan_validator_and_deliverable_protection.py`、
+`docs/design/decision_log.md` D-281。
 
 ---
 
