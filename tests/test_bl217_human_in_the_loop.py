@@ -80,12 +80,23 @@ def test_ensure_issue_log_human_input_columns_is_idempotent(db_conn):
 
 # --- flag_needs_human_input ---------------------------------------------------
 
-def test_flag_needs_human_input_allowed_only_for_expert(db_conn):
+def test_flag_needs_human_input_allowed_roles(db_conn):
+    """[BL-324] expert専用だった許可roleを、user/detector/reflector/facilitatorへ拡大した
+    （詳細はtest_bl324_human_judgment_escalation.pyのcaller_role別human_judgment_status
+    テスト参照）。expert/user/detector/reflector/facilitator以外の役割ラベル
+    （detector_auto/decision_extractor_auto等、他ツールが内部的に使う合成roleでこの
+    ツールを直接呼ぶことはない）は引き続き拒否されること。"""
     conn, run_id = db_conn
-    for role in ("user", "detector", "detector_auto", "decision_extractor_auto"):
+    for role, i in zip(("user", "detector", "reflector", "facilitator"), range(4)):
+        args = _flag_args()
+        args["topic"] = f"{args['topic']}_{role}"
+        result = cela_main._flag_needs_human_input_tool_impl(
+            args, conn, run_id, role, "phase_1", "task_1_1")
+        assert result["success"] is True, f"role={role}はBL-324で許可されるべき: {result}"
+    for role in ("detector_auto", "decision_extractor_auto"):
         result = cela_main._flag_needs_human_input_tool_impl(
             _flag_args(), conn, run_id, role, "phase_1", "task_1_1")
-        assert result["success"] is False, f"role={role}は拒否されるべき"
+        assert result["success"] is False, f"role={role}は引き続き拒否されるべき"
 
 
 def test_flag_needs_human_input_rejects_missing_required_fields(db_conn):

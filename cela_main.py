@@ -1059,12 +1059,18 @@ FLAG_NEEDS_HUMAN_INPUT_TOOL = {
         "name": "flag_needs_human_input",
         "description": (
             "計画中のどのtask_idにも解決能力がない懸念（実地ヒアリング・電話確認・現地調査など、"
-            "AIには原理的に実行できないこと）を、正直に「人間の回答待ち」として記録します。"
+            "AIには原理的に実行できないこと。あるいは合理的な仮定値を使うこと自体が危険で、"
+            "実世界の判断が必要な場合）を、正直に「人間の回答待ち」として記録します。"
             "write_issueのDEFERとは異なり、先送り先のtask_idは指定しません（存在しないため）。"
-            "この懸念は、開発者が専用CLI（--answer-human-input）で回答するまで未解決のまま残ります"
-            "（severity='major'の場合、write_issueの未解決majorと同様にタスク遷移をブロックします）。"
             "少しでもAI自身の推測・web_search・python_replで導出できる可能性がある値には使わず、"
-            "先にそれらを試してください。"
+            "先にそれらを試してください——単に「まだ調べていない」「時間がかかる」は理由に"
+            "なりません。"
+            "[BL-324] user/expert/detectorが呼んだ場合、即座には停止しません。まずReflectorが"
+            "次回の定期監査で「本当に人間の判断が必要か」を独立に監査し、認められて初めて"
+            "グラフ全体が一時停止します（合理的仮定値で足りると判断されれば、Reflectorの根拠"
+            "付きでこの懸念自体が解決されます）。reflector/facilitatorが呼んだ場合は、"
+            "既に監査・調停の役割を担っているため、追加監査を挟まず直ちにグラフ全体を一時停止し、"
+            "開発者が専用CLI（--answer-human-input）で回答して--resumeするまで進行しません。"
             "[BL-110] Optionally call `think` (with a `summary`) alongside this or any other tool call "
             "to record your reasoning -- it is no longer required, and other tool calls are no "
             "longer rejected for omitting it."
@@ -4936,16 +4942,31 @@ def _write_issue_impl(args: dict, conn: sqlite3.Connection, run_id: str, caller_
     }
 
 
+_FLAG_NEEDS_HUMAN_INPUT_ALLOWED_ROLES = ("expert", "user", "detector", "reflector", "facilitator")
+# [BL-324] Reflector/Facilitatorは既に監査・調停の役割を担っているため、自身の判断で
+# 直接「人間の判断が必要」と確定できる。それ以外（user/expert/detector）はReflectorの
+# 監査（reflection_node）を経て初めて確定する（後述human_judgment_status参照）。
+_HUMAN_JUDGMENT_DIRECT_CONFIRM_ROLES = ("reflector", "facilitator")
+
+
 def _flag_needs_human_input_tool_impl(args: dict, conn: sqlite3.Connection, run_id: str,
                                        caller_role: str, phase_id: str, task_id: str) -> dict:
-    """[BL-217] flag_needs_human_inputツールの実体。expertのみ許可。write_issueのCREATE分岐と
+    """[BL-217/BL-324] flag_needs_human_inputツールの実体。write_issueのCREATE分岐と
     違い、defer_to_task_id相当のパラメータを一切受け取らない（構造的にDEFERと排他）ため、
     重複・再発カウントロジックは流用せず独立実装とする（BL-096の再発検知は「同じ懸念が
     何度も繰り返し起きている」ことを捉える設計だが、本ツールは初回時点で「人間にしか解決
     できない」と分かっている前提のため、再発カウントの意味が異なる）。
+
+    [BL-324] 呼び出し可能roleをexpert専用からuser/detector/reflector/facilitatorへ拡大した。
+    ただしグラフ全体の一時停止（pause_for_human_node）へ直結するのはreflector/facilitator
+    自身が起票した場合のみ（`human_judgment_status='confirmed'`）。それ以外
+    （user/expert/detector）は`'pending_reflector_review'`として記録され、次回の
+    reflection_node巡回でReflectorが「本当に人間の判断が必要か」を監査してから確定する
+    （ユーザー要望：「調査不足や合理的な仮定値を使う事が危険」という判断の妥当性を、
+    起票者自身ではなく監査役に確認させる）。
     """
-    if caller_role != "expert":
-        return {"success": False, "error": f"{caller_role}はflag_needs_human_inputを呼び出せません（expertロールのみ許可）"}
+    if caller_role not in _FLAG_NEEDS_HUMAN_INPUT_ALLOWED_ROLES:
+        return {"success": False, "error": f"{caller_role}はflag_needs_human_inputを呼び出せません（{_FLAG_NEEDS_HUMAN_INPUT_ALLOWED_ROLES}のみ許可）"}
 
     topic = args.get("topic")
     variable_name = args.get("variable_name")
@@ -4975,21 +4996,29 @@ def _flag_needs_human_input_tool_impl(args: dict, conn: sqlite3.Connection, run_
 
     now = time.time()
     issue_id = str(uuid.uuid4())
+    _human_judgment_status = (
+        "confirmed" if caller_role in _HUMAN_JUDGMENT_DIRECT_CONFIRM_ROLES else "pending_reflector_review"
+    )
     conn.execute(
         "INSERT INTO issue_log (id, run_id, topic, raised_by, phase_id, task_id, severity, status, "
         "description, occurrence_count, last_seen_task_id, defer_to_task_id, human_research_prompt, "
-        "human_variable_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, '', ?, ?, ?, ?)",
+        "human_variable_name, human_judgment_status, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, '', ?, ?, ?, ?, ?)",
         (issue_id, run_id, topic, caller_role, phase_id, task_id, severity, status,
-         description, task_id, human_research_prompt, variable_name, now, now)
+         description, task_id, human_research_prompt, variable_name, _human_judgment_status, now, now)
     )
     conn.commit()
     print(f"  🙋 [flag_needs_human_input] {caller_role}が人間の回答待ちissueを起票しました: "
-          f"topic={topic}, variable_name={variable_name}, severity={severity}, id={issue_id}")
+          f"topic={topic}, variable_name={variable_name}, severity={severity}, id={issue_id}, "
+          f"human_judgment_status={_human_judgment_status}")
     print(f"     └ 確認事項: {human_research_prompt}")
+    if _human_judgment_status == "pending_reflector_review":
+        print(f"     └ [BL-324] {caller_role}起票のためReflectorの監査待ち（即座には一時停止しません）。")
     return {
         "success": True,
         "message": "人間の回答待ちとして記録しました。--pending-human-inputで確認できます。",
         "id": issue_id,
+        "human_judgment_status": _human_judgment_status,
     }
 
 
@@ -5871,6 +5900,13 @@ _LAST_GOAL_REVISION: dict | None = None
 # ため、_LAST_GOAL_REVISIONと同じブリッジパターンで運ぶ。query_AI()呼び出しごとにリセットされる。
 _LAST_PREMISE_ESCALATION: dict | None = None
 
+# [BL-324] 直前のquery_AI呼び出しのツールループ内でflag_needs_human_inputが成功した場合、
+# その{issue_id, caller_role, human_judgment_status}を記録する（_LAST_PREMISE_ESCALATIONと
+# 同じブリッジパターン）。facilitator_nodeがhuman_judgment_status=='confirmed'の場合のみ
+# state["pending_human_judgment_issue_id"]へ反映する（expert/user/detector起票時は
+# 'pending_reflector_review'のため、ここで消費されるのは実質facilitator起票時のみ）。
+_LAST_HUMAN_JUDGMENT_FLAG: dict | None = None
+
 # [BL-126 Stage D] 直前のquery_AI呼び出しのツールループ内でwrite_agreement
 # (entry_type="EssenceProposal")が成功した場合、その{topic, status, action_type, reason_why}を
 # 記録する（_LAST_GOAL_REVISIONと同じパターン）。facilitator_node/generate_user_utterance_node
@@ -5973,6 +6009,14 @@ def get_last_premise_escalation() -> dict | None:
     return dict(_LAST_PREMISE_ESCALATION) if _LAST_PREMISE_ESCALATION else None
 
 
+def get_last_human_judgment_flag() -> dict | None:
+    """[BL-324] 直前のquery_AI呼び出しのツールループ内でflag_needs_human_inputが成功した場合、
+    その{issue_id, caller_role, human_judgment_status}を返す。facilitator_nodeが
+    state["pending_human_judgment_issue_id"]へ反映するために使う。
+    """
+    return dict(_LAST_HUMAN_JUDGMENT_FLAG) if _LAST_HUMAN_JUDGMENT_FLAG else None
+
+
 def get_last_ask_user_question() -> dict | None:
     """[BL-130] 直前のquery_AI呼び出しのツールループ内でask_user_questionが成功した場合、
     その{question_text, blocking_reason}を返す。expert_nodeがstateへ反映するために使う。
@@ -6033,7 +6077,7 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
     [BL-131/TOOL_DISPATCH state化] `state`は_query_AI_liveへそのまま透過する（レコード/リプレイの
     キャッシュキーには影響しない）。
     """
-    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_PREMISE_ESCALATION, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION, _LAST_REPETITION_GUARD_TRIPPED, _LAST_DELIVERABLE_READ_TASK_IDS, _LAST_WHITEBOARD_READS
+    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_PREMISE_ESCALATION, _LAST_HUMAN_JUDGMENT_FLAG, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION, _LAST_REPETITION_GUARD_TRIPPED, _LAST_DELIVERABLE_READ_TASK_IDS, _LAST_WHITEBOARD_READS
     _LAST_PYTHON_CALLS = []
     _LAST_DELIVERABLE_READ_TASK_IDS = []
     _LAST_WHITEBOARD_READS = set()  # [BL-265]
@@ -6045,6 +6089,7 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
     _LAST_REASONING_TEXT = ""
     _LAST_GOAL_REVISION = None
     _LAST_PREMISE_ESCALATION = None  # [BL-236拡張]
+    _LAST_HUMAN_JUDGMENT_FLAG = None  # [BL-324]
     _LAST_ASK_USER_QUESTION = None
     _LAST_ESSENCE_PROPOSAL = None
     _LAST_SCHEDULING_DECISION = None  # [BL-191]
@@ -6937,6 +6982,16 @@ def _query_AI_live(messages: list[dict], client: OpenAI, model: str, label: str 
                                         global _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED
                                         _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED = True
                                         print(f"  ✅ [BL-158] write_issue({args.get('action_type')})成功を記録しました（今回のターンの機械的差し戻し判定に使用）。")
+                                elif tc.function.name == "flag_needs_human_input":
+                                    # [BL-324] success=Falseの場合は絶対に反映しない
+                                    # （AGENTS.md §13、escalate_premise_concernの消費パターンと同じ二重ガード）。
+                                    if isinstance(result, dict) and result.get("success"):
+                                        global _LAST_HUMAN_JUDGMENT_FLAG
+                                        _LAST_HUMAN_JUDGMENT_FLAG = {
+                                            "issue_id": result.get("id"),
+                                            "caller_role": _CURRENT_CALLER_ROLE,
+                                            "human_judgment_status": result.get("human_judgment_status", ""),
+                                        }
                                 print(f"🔧 [{label}] {tc.function.name} 実行（iter={iteration}）: {json.dumps(args, ensure_ascii=False)}\n→ {result}\n")
 
                         loop_messages.append({
@@ -7677,6 +7732,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure_issue_log_defer_column(conn)
     _ensure_issue_log_acknowledge_columns(conn)
     _ensure_issue_log_human_input_columns(conn)
+    _ensure_issue_log_human_judgment_status_column(conn)
     _ensure_chat_history_lineage_columns(conn)
 
 
@@ -7760,6 +7816,19 @@ def _ensure_issue_log_human_input_columns(conn: sqlite3.Connection) -> None:
         # [BL-217] --answer-human-inputがupsert_verified_factへ渡すvariable_name。write_issueの
         # 既存列と衝突しない名前にする（issue_log自体にvariable_nameという概念は元々無い）。
         conn.execute("ALTER TABLE issue_log ADD COLUMN human_variable_name TEXT DEFAULT ''")
+        conn.commit()
+
+
+def _ensure_issue_log_human_judgment_status_column(conn: sqlite3.Connection) -> None:
+    """[BL-324] issue_logへhuman_judgment_statusを追加する。flag_needs_human_input成功時、
+    起票者roleに応じて'pending_reflector_review'（user/expert/detector、Reflectorの監査待ち）
+    または'confirmed'（reflector/facilitator自身が起票、直ちにグラフ全体を一時停止する）の
+    いずれかが入る。既存行（本機構導入前のflag_needs_human_input行を含む）は空文字のまま
+    （本機構と無関係）。"""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(issue_log)").fetchall()}
+    if "human_judgment_status" not in cols:
+        print("  🛠️ [schema migration] issue_logへhuman_judgment_status列を追加します（BL-324）。")
+        conn.execute("ALTER TABLE issue_log ADD COLUMN human_judgment_status TEXT DEFAULT ''")
         conn.commit()
 
 
@@ -10517,6 +10586,12 @@ class LineageState(TypedDict):
     # [BL-236拡張] 上記フラグがTrueの間、どのescalation_id（goal_escalationsテーブル）が
     # 未決定のままrunをブロックしているかを保持する。空文字列＝未設定。
     pending_premise_escalation_id: str
+    # [BL-324] flag_needs_human_input経由（issue_logテーブル、human_judgment_status='confirmed'）
+    # で一時停止がトリガーされた場合のissue_log行id。paused_for_premise_escalationと同じ
+    # 「永続フラグ」として扱うが、権威ストアはissue_logの該当行のstatusであり、stateには
+    # id（空文字＝未設定）だけを持たせる（AGENTS.md §13.3：派生表現ではなく権威ストアを見る）。
+    # resumeガードがissue_log.status=='resolved'を確認できた時のみリセットする。
+    pending_human_judgment_issue_id: str
 
 class Appconfig(TypedDict):
     pattern: int
@@ -13337,7 +13412,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f'\nReturn ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用(無ければ空文字)", "observations": "気づき・懸念（自由記述、無ければ空文字）", "essence_sufficiency_concern": true/false, "essence_sufficiency_reason": "trueの場合、本質のどの記述が計画のどこにも反映されていないか（falseなら空文字）", "quantitative_sufficiency_concern": true/false, "quantitative_sufficiency_reason": "trueの場合、どの規模適合性の主張がどの規模指標に対して未検証か（falseなら空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
-    _detector_domain_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, MARK_FACT_AUDITED_TOOL, THINK_TOOL]  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線 [BL-294] 定義監査の記録用 [BL-300] log/2026-08-28/2049でgrep不可能な略号コード表を手作業突合しようとして生成崩壊したため、_detector_numeric_toolsとの唯一の差分だったPYTHON_REPL_TOOLを追加
+    _detector_domain_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, MARK_FACT_AUDITED_TOOL, THINK_TOOL]  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線 [BL-294] 定義監査の記録用 [BL-300] log/2026-08-28/2049でgrep不可能な略号コード表を手作業突合しようとして生成崩壊したため、_detector_numeric_toolsとの唯一の差分だったPYTHON_REPL_TOOLを追加 [BL-324] FLAG_NEEDS_HUMAN_INPUT_TOOLを追加
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
         domain_prompt, client=client_detector_domain, model=model_detector_domain, label="Detector (Domain Review)",
         tools=_detector_domain_tools,
@@ -13589,7 +13664,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由", "criteria_status": [true/false, ...], "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用（無ければ空文字）", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
-    _detector_numeric_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
+    _detector_numeric_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]  # [BL-324] FLAG_NEEDS_HUMAN_INPUT_TOOLを追加
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_detector_numeric, model=model_detector_numeric, label="Detector",
         tools=_detector_numeric_tools, fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
@@ -14237,6 +14312,22 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
 
     constraint_log_text = "\n".join(constraint_log_lines) if constraint_log_lines else "(なし)"
 
+    # [BL-324] user/expert/detectorがflag_needs_human_inputで起票し、まだReflectorの監査を
+    # 経ていない（human_judgment_status='pending_reflector_review'）issue一覧。Reflectorが
+    # 「本当に人間の判断が必要か（合理的仮定値では危険か）」を監査し、human_judgment_reviews
+    # で確定/差し戻しを判定する。
+    _pending_human_judgment_issues = _conn.execute(
+        "SELECT id, topic, raised_by, human_research_prompt, description FROM issue_log "
+        "WHERE run_id=? AND human_judgment_status='pending_reflector_review' AND status != 'resolved' "
+        "ORDER BY rowid",
+        (state["run_id"],)
+    ).fetchall()
+    pending_human_judgment_text = "\n".join(
+        f"- issue_id={i['id']} (起票者={i['raised_by']}, topic={i['topic']}): "
+        f"{i['human_research_prompt'] or i['description']}"
+        for i in _pending_human_judgment_issues
+    ) or "(なし)"
+
     # ドメイン固有キーワードに頼らず、Proposedのまま残っている項目を全件提示する
     unresolved_critical = [a for a in agreements if a["status"] == "Proposed"]
     unresolved_text = "\n".join(
@@ -14349,11 +14440,36 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
 
        {_build_decision_lineage_directive('"Rejected"（懸念を指摘する場合）または"Reviewed"（問題なしと判断した場合）')}
 
+        【BL-324: 人間の判断が必要かの監査】User AI/Expert/Detectorが「AIの知見・web_search・
+        python_replでは埒が明かず、合理的仮定値を使うこと自体が危険で実世界の判断が必要」と
+        判断し、flag_needs_human_inputで起票したがまだ監査を経ていない懸念が以下にあります:
+        {pending_human_judgment_text}
+        各issue_idについて、本当に人間の実世界判断（現地調査・関係者への確認等）が必要か、
+        それともAI自身が既存データ・合理的仮定値・追加の調査（web_search/python_repl）で
+        十分に代替できるかを判定してください。「合理的仮定値を使うこと自体が危険」（例：
+        安全基準・金額規模の前提が数百万円単位で変わりうる等）と判断した場合のみconfirmと
+        してください。単なる「まだ調査していない」「時間がかかる」は理由にしないでください
+        （それはAI自身が追加調査すべき状況であり、insufficientと判定してください）。
+        human_judgment_reviewsが空配列でも構いません（対象issueが無い場合）。
+
+        さらに、あなた自身が今回の監査全体（会話ログ・decision_log・issue_logの俯瞰）を通じて、
+        「指摘を重ねても議論が改善しない」「前提・条件に根本的な食い違いがある」等、人間の
+        介入が必要だと**あなた自身が新たに**判断した場合は、new_human_judgment_escalationへ
+        その内容を設定してください（無ければnullのまま省略）。既存issueの監査
+        （human_judgment_reviews）とは別物です——こちらはReflector自身の新規提起です。
+
         Return ONLY JSON in the exact format below:
         {{
             "still_aligned": true/false,
             "discussion_status": "continuing" or "completed" or "stagnant",
-            "note": "分析理由（矛盾・欠落の解消状況について必ず言及すること）"
+            "note": "分析理由（矛盾・欠落の解消状況について必ず言及すること）",
+            "human_judgment_reviews": [
+                {{"issue_id": "...", "decision": "confirm または insufficient", "reasoning": "..."}}
+            ],
+            "new_human_judgment_escalation": {{
+                "topic": "...", "variable_name": "...", "human_research_prompt": "...",
+                "description": "...", "severity": "major"
+            }} または null
         }}
 
     """
@@ -14400,6 +14516,10 @@ def call_reflection(state: LineageState, config: Appconfig) -> dict:
         "still_aligned": str(aligned_val).lower() == "true" if isinstance(aligned_val, str) else bool(aligned_val),
         "discussion_status": parsed.get("discussion_status", "continuing"),
         "note": parsed.get("note", ""),
+        # [BL-324] parse_failed時はfallbackにこれらのキーが無いため、常に.get()で欠落を吸収する
+        # （AGENTS.md §13.1: キー欠落とNoneを区別せず「無ければ空扱い」で安全側に倒す）。
+        "human_judgment_reviews": parsed.get("human_judgment_reviews") or [],
+        "new_human_judgment_escalation": parsed.get("new_human_judgment_escalation") or None,
     }
 
 def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str = "", goal_essence_text: str = "",
@@ -14565,7 +14685,7 @@ def call_facilitator(goal: str, chat_history: list[dict], reflection_note: str =
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
     _facilitator_messages = [{"role": "user", "content": prompt}]
-    _facilitator_tools = [THINK_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, WRITE_AGREEMENT_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL]
+    _facilitator_tools = [THINK_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, WRITE_AGREEMENT_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL]  # [BL-324] FLAG_NEEDS_HUMAN_INPUT_TOOLを追加
     _facilitator_content = query_AI(
         _facilitator_messages, client=client_facilitator, model=model_facilitator, label="Facilitator",
         tools=_facilitator_tools, state=state,
@@ -14954,7 +15074,8 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
         issue_parsed, issue_parse_failed = _query_and_parse_with_retry(
             issue_prompt, client=client_user, model=model_user, label="User AI (Stage2: issue確認)",
             tools=[READ_ISSUES_TOOL, WRITE_ISSUE_TOOL, ESCALATE_PREMISE_CONCERN_TOOL,
-                   RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, THINK_TOOL],
+                   RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL,
+                   FLAG_NEEDS_HUMAN_INPUT_TOOL, THINK_TOOL],  # [BL-324]
             fallback={"issues_handled": True, "remaining_concerns": ""},
             state=state,
         )
@@ -15654,7 +15775,7 @@ def generate_user_utterance(state: LineageState , config: Appconfig) -> str:
     _CURRENT_TASK_ID = _effective_current_task_id_from(state)
     _CURRENT_PHASE_ID = state.get("current_phase", {}).get("phase_id", "")  # [BL-096] write_issueのphase_id用
     _CURRENT_GOAL_TEXT = user_goal  # [BL-086] revise_goalの編集対象
-    _user_ai_main_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
+    _user_ai_main_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, RESOLVE_PREMISE_CONCERN_TOOL, REVISE_GOAL_TOOL, FREEZE_AGREEMENT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]  # [BL-324] FLAG_NEEDS_HUMAN_INPUT_TOOLを追加
     _reset_think_scratchpad()  # [BL-093]
     content = query_AI(messages, client=client_user, model=model_user, label="User AI", tools=_user_ai_main_tools, state=state)
 
@@ -15762,11 +15883,12 @@ def _is_detector_redo_required(state: dict) -> bool:
 
 
 def _should_pause_for_human(state: dict) -> bool:
-    """[BL-236拡張] escalate_premise_concernによりグラフ全体の一時停止が要求されているか。
+    """[BL-236拡張/BL-324] escalate_premise_concern、またはflag_needs_human_input経由
+    （human_judgment_status='confirmed'）によりグラフ全体の一時停止が要求されているか。
     [CONSTRAINT] haltより優先度が低い——呼び出し側5箇所すべてが必ずstate["halt"]を先に
     チェックしてから本関数を呼ぶこと（AGENTS.md §15.1、既存のhalt-first構造に合わせる）。
     """
-    return bool(state.get("paused_for_premise_escalation"))
+    return bool(state.get("paused_for_premise_escalation")) or bool(state.get("pending_human_judgment_issue_id"))
 
 
 def generate_user_utterance_node(state: LineageState) -> LineageState:
@@ -16716,8 +16838,13 @@ Manages state updates including risk levels, constraint logging, and decision re
         # ブロック対象issueが残っている限り、前進を試みる発言かどうかに関わらず毎ターン
         # 発火する（BL-136の強制文言自体が無条件であることと整合）。
         if target_role == "user":
+            # [BL-324] exclude_acknowledged=Trueを渡す。従来これが未指定（既定False）のまま
+            # 呼ばれており、docstring（_get_blocking_issues_for_transition）が意図する
+            # 「ACK猶予期間中は督促を止める」という設計と実装が乖離していた
+            # （ACK猶予中でも無条件にmajorを強制し続けていた）。
             _blocking_issues = _get_blocking_issues_for_transition(
-                get_active_conn(), state["run_id"], _effective_current_task_id_from(state)
+                get_active_conn(), state["run_id"], _effective_current_task_id_from(state),
+                exclude_acknowledged=True, round_count=state.get("round_count", 0),
             )
             print(
                 f"  🔎 [BL-158] 現在タスク'{_effective_current_task_id_from(state)}'のブロック対象issueチェック: "
@@ -17713,6 +17840,67 @@ It generates a formal decision based on reflection results, updating the overall
     print(f"\n------ 完了 ------")
     state["discussion_status"] = result["discussion_status"]
 
+    # [BL-324] Reflectorの監査結果（human_judgment_reviews）を反映する。user/expert/detectorが
+    # flag_needs_human_inputで起票した'pending_reflector_review'のissueを、confirm（人間の
+    # 判断が真に必要→グラフ全体を一時停止）またはinsufficient（合理的仮定値で足りる→
+    # Reflectorの判断根拠付きで直ちに解決）のいずれかへ確定する。
+    _conn_reflect = get_active_conn()
+    for _review in result.get("human_judgment_reviews", []):
+        _issue_id = _review.get("issue_id")
+        _decision = _review.get("decision")
+        _reasoning = _review.get("reasoning", "")
+        if not _issue_id or _decision not in ("confirm", "insufficient"):
+            continue
+        _target_issue = _conn_reflect.execute(
+            "SELECT id, human_judgment_status FROM issue_log WHERE run_id=? AND id=?",
+            (state["run_id"], _issue_id)
+        ).fetchone()
+        # [BL-324/AGENTS.md §13.4] 対称性の不変条件: pending_reflector_reviewの行のみを
+        # 更新対象とする。存在しない行・既にconfirmed/reviewed_insufficientの行への
+        # 誤指定（モデルの取り違え等）は無視する（正規write経路のガードと対称に扱う）。
+        if not _target_issue or _target_issue["human_judgment_status"] != "pending_reflector_review":
+            continue
+        if _decision == "confirm":
+            _conn_reflect.execute(
+                "UPDATE issue_log SET human_judgment_status='confirmed', updated_at=? WHERE id=? AND run_id=?",
+                (time.time(), _issue_id, state["run_id"])
+            )
+            _conn_reflect.commit()
+            print(f"  ⏸️ [BL-324] Reflectorがissue_id={_issue_id}を「人間の判断が必要」と確認しました: {_reasoning}")
+            if not state.get("pending_human_judgment_issue_id"):
+                state["pending_human_judgment_issue_id"] = _issue_id
+        else:  # insufficient
+            _conn_reflect.execute(
+                "UPDATE issue_log SET human_judgment_status='reviewed_insufficient', status='resolved', "
+                "resolved_by='reflector', resolved_at=?, resolution_note=?, updated_at=? WHERE id=? AND run_id=?",
+                (time.time(), _reasoning, time.time(), _issue_id, state["run_id"])
+            )
+            _conn_reflect.commit()
+            print(f"  ✅ [BL-324] Reflectorがissue_id={_issue_id}は「人間の判断不要、合理的仮定値で対応可能」と判定し解決しました: {_reasoning}")
+
+    # [BL-324] Reflector自身が定期監査中に新たに「人間の介入が必要」と判断した場合の直接起票。
+    # reflector/facilitatorは監査・調停の役割自体を担うため、他roleのような監査待ちを経ず
+    # 直ちにhuman_judgment_status='confirmed'で記録される（_flag_needs_human_input_tool_impl参照）。
+    _new_escalation = result.get("new_human_judgment_escalation")
+    if _new_escalation and isinstance(_new_escalation, dict) and _new_escalation.get("human_research_prompt"):
+        _new_issue_result = _flag_needs_human_input_tool_impl(
+            {
+                "topic": _new_escalation.get("topic") or f"reflector_human_judgment_{state['run_id']}_{state.get('round_count', 0)}",
+                "variable_name": _new_escalation.get("variable_name") or f"reflector_escalation_{state.get('round_count', 0)}",
+                "human_research_prompt": _new_escalation["human_research_prompt"],
+                "description": _new_escalation.get("description") or "Reflectorが定期監査中に人間の判断が必要と判定しました。",
+                "severity": _new_escalation.get("severity") or "major",
+            },
+            _conn_reflect, state["run_id"], "reflector",
+            state.get("current_phase", {}).get("phase_id", ""), _effective_current_task_id_from(state),
+        )
+        if _new_issue_result.get("success"):
+            print(f"  ⏸️ [BL-324] Reflector自身が新たな人間判断要求issueを起票しました: id={_new_issue_result['id']}")
+            if not state.get("pending_human_judgment_issue_id"):
+                state["pending_human_judgment_issue_id"] = _new_issue_result["id"]
+        else:
+            print(f"  ⚠️ [BL-324] Reflectorの新規issue起票が失敗しました: {_new_issue_result.get('error')}")
+
     # [BL-096/BL-144] 当初はissue_logにstatus='escalated'の行が1件でもあれば、モデルの判定に
     # 関わらずdiscussion_statusを機械的に"stagnant"へ上書きしていた（BL-099対策：モデル遵守に
     # 依存しない）。しかし実ドライラン（log/2026-08-02/0832）で、reflection自身が"continuing"
@@ -17991,10 +18179,56 @@ def facilitator_node(state: LineageState) -> LineageState:
     if not state.get("essence_dialogue_active"):
         state["facilitation_count"] += 1
         if state["facilitation_count"] > 5:
-            print(f"🛑 [Facilitator] facilitation_countが上限(5回)を超えた（{state['facilitation_count']}回目）ため、state['halt']=Trueで強制停止します。")
-            state["halt"] = True
-            decision = make_decision("system", "強制停止", "ファシリテーションの上限回数(5回)を超えても議論が改善されませんでした。")
-            db_append_decision(decision, get_active_conn(), state["run_id"])
+            # [BL-324] 従来は不可逆なhalt（risk=high等と同型の終端）だったが、「facilitation_
+            # countが上限に達しても議論が改善しない」は「前提・条件の根本的な食い違いで
+            # 人間の介入が必要」というBL-324の直接確定条件そのものであり、runを永久に
+            # 終わらせる必要はない。issue_logへ直接confirmed状態で起票し、グラフ全体を
+            # 可逆的に一時停止する（人間回答後--resumeで復帰可能）。
+            print(f"⏸️ [Facilitator] facilitation_countが上限(5回)を超えた（{state['facilitation_count']}回目）ため、"
+                  f"人間の判断が必要と判定し一時停止します（旧: 不可逆停止だったが、BL-324で可逆な一時停止へ変更）。")
+            _conn_halt = get_active_conn()
+            _human_judgment_result = _flag_needs_human_input_tool_impl(
+                {
+                    "topic": f"facilitation_stalemate_{state['run_id']}_{state.get('round_count', 0)}",
+                    "variable_name": "facilitation_stalemate_human_decision",
+                    "human_research_prompt": (
+                        "Facilitatorによる議論の調停がfacilitation_count上限(5回)に達しても"
+                        "議論を改善できませんでした。会話ログ・decision_log・issue_logを確認し、"
+                        "前提・ゴール・タスク分解のどこに根本的な食い違いがあるか判断し、"
+                        "対応方針（ゴール改定・タスク再分解・特定の懸念への回答等）を人間として"
+                        "決定してください。"
+                    ),
+                    "description": (
+                        f"facilitation_countが上限(5回)に達しても議論が改善しませんでした"
+                        f"（{state['facilitation_count']}回目）。"
+                    ),
+                    "severity": "major",
+                },
+                _conn_halt, state["run_id"], "facilitator", state.get("current_phase", {}).get("phase_id", ""),
+                _effective_current_task_id_from(state),
+            )
+            if _human_judgment_result.get("success"):
+                state["pending_human_judgment_issue_id"] = _human_judgment_result["id"]
+                decision = make_decision(
+                    "system", "人間のHIL回答待ちのため一時停止",
+                    "ファシリテーションの上限回数(5回)を超えても議論が改善されませんでした。",
+                )
+                db_append_decision(decision, _conn_halt, state["run_id"])
+            else:
+                # [BL-324/実装後レビュー(Cline)指摘/AGENTS.md §13.2] issue起票自体が失敗した
+                # 場合（DB異常等）、pending_human_judgment_issue_idもhaltも立たないまま
+                # returnすると、次ターンも同じ分岐へ入り続け、理由の分からない停止に陥る
+                # （fail-loudでない）。旧コード（無条件halt）と同じ「確実に止める」安全側へ
+                # フォールバックし、失敗理由を明示する。
+                print(f"  🚨 [BL-324] 人間判断要求issueの起票自体が失敗したため、"
+                      f"state['halt']=Trueで確実に停止します: {_human_judgment_result.get('error')}")
+                state["halt"] = True
+                decision = make_decision(
+                    "system", "強制停止",
+                    f"ファシリテーションの上限回数(5回)を超え、人間判断要求issueの起票も"
+                    f"失敗したため停止しました: {_human_judgment_result.get('error')}",
+                )
+                db_append_decision(decision, _conn_halt, state["run_id"])
             return state
 
     print(f"\n------ [facilitator] が思考中 ------")
@@ -18042,6 +18276,16 @@ def facilitator_node(state: LineageState) -> LineageState:
         state["pending_premise_escalation_id"] = _premise_escalation["escalation_id"]
         print(f"⏸️ [BL-236拡張] escalation_id={_premise_escalation['escalation_id']}の提起により、"
               f"次のルーティングチェックポイントでグラフの実行を一時停止します。")
+
+    # [BL-324] Facilitatorがflag_needs_human_inputを直接呼んだ場合（human_judgment_status=
+    # 'confirmed'）も同様に一時停止する。user/expert/detector起票時はpending_reflector_review
+    # のためここでは素通りする（Reflectorの監査を経て確定するまで一時停止しない設計）。
+    _human_judgment = get_last_human_judgment_flag()
+    if _human_judgment and _human_judgment.get("human_judgment_status") == "confirmed":
+        state["pending_human_judgment_issue_id"] = _human_judgment["issue_id"]
+        print(f"⏸️ [BL-324] issue_id={_human_judgment['issue_id']}のflag_needs_human_input"
+              f"（Facilitator起票・確定済み）により、次のルーティングチェックポイントで"
+              f"グラフの実行を一時停止します。")
 
     if state["chat_history"] and state["chat_history"][-1]["role"] == "assistant":
         state["chat_history"][-1]["content"] += (
@@ -18315,24 +18559,38 @@ def halt_node(state: LineageState) -> LineageState:
 
 
 def pause_for_human_node(state: LineageState) -> LineageState:
-    """[BL-236拡張] escalate_premise_concernの成功を検知した直後、グラフの実行を一時停止する。
+    """[BL-236拡張/BL-324] escalate_premise_concern、またはflag_needs_human_input
+    （human_judgment_status='confirmed'）の成功を検知した直後、グラフの実行を一時停止する。
     halt_nodeと同型だが意味は全く異なる——haltは不可逆な終端（risk=high等）、こちらは
     「人間のHIL回答（--answer-human-input）を待つだけの可逆な一時停止」であり、--resumeで
-    通常フローへ復帰できる。
+    通常フローへ復帰できる。2つのトリガーは排他想定（同一ターンで両方成立しない設計）だが、
+    念のため独立してチェックし、premise_escalation側を優先して報告する。
     """
-    _escalation_id = state.get("pending_premise_escalation_id", "")
     _conn = get_active_conn()
-    _escalation = get_goal_escalation(_conn, state["run_id"], _escalation_id) if _escalation_id else None
-    _summary = _escalation["concern_summary"] if _escalation else "(詳細不明)"
+    _escalation_id = state.get("pending_premise_escalation_id", "")
+    _human_judgment_issue_id = state.get("pending_human_judgment_issue_id", "")
     print(f"\n⏸️⏸️⏸️ [Pause] グラフの実行を一時停止します（turn_count={state.get('turn_count', '?')}）。")
-    print(f"    escalation_id={_escalation_id}: {_summary}")
-    print(f"    人間が --answer-human-input で承認/却下を回答した後、"
-          f"python cela_main.py --resume {state['run_id']} で再開してください。")
-    decision = make_decision(
-        who="system", what="人間のHIL回答待ちのため一時停止",
-        why=f"escalate_premise_concern（escalation_id={_escalation_id}）が未決定のため、"
-            f"グラフ全体の進行を停止します。",
-    )
+    if _escalation_id:
+        _escalation = get_goal_escalation(_conn, state["run_id"], _escalation_id)
+        _summary = _escalation["concern_summary"] if _escalation else "(詳細不明)"
+        print(f"    escalation_id={_escalation_id}: {_summary}")
+        print(f"    人間が --answer-human-input で承認/却下を回答した後、"
+              f"python cela_main.py --resume {state['run_id']} で再開してください。")
+        _why = f"escalate_premise_concern（escalation_id={_escalation_id}）が未決定のため、グラフ全体の進行を停止します。"
+    else:
+        _issue = _conn.execute(
+            "SELECT topic, human_research_prompt, description, raised_by FROM issue_log "
+            "WHERE run_id=? AND id=?", (state["run_id"], _human_judgment_issue_id)
+        ).fetchone() if _human_judgment_issue_id else None
+        if _issue:
+            print(f"    issue_id={_human_judgment_issue_id}（起票者={_issue['raised_by']}）: {_issue['topic']}")
+            print(f"    確認事項: {_issue['human_research_prompt'] or _issue['description']}")
+        else:
+            print(f"    issue_id={_human_judgment_issue_id}: (詳細不明)")
+        print(f"    人間が --answer-human-input で確定値を回答した後、"
+              f"python cela_main.py --resume {state['run_id']} で再開してください。")
+        _why = f"flag_needs_human_input（issue_id={_human_judgment_issue_id}）が未回答のため、グラフ全体の進行を停止します。"
+    decision = make_decision(who="system", what="人間のHIL回答待ちのため一時停止", why=_why)
     db_append_decision(decision, _conn, state["run_id"])
     return state
 
@@ -18899,6 +19157,7 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
                 "last_essence_proposal": None,
                 "paused_for_premise_escalation": False,
                 "pending_premise_escalation_id": "",
+                "pending_human_judgment_issue_id": "",
             }
 
         global _CURRENT_RUN_ID
@@ -18931,6 +19190,60 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
                   f"（{_hil_decision}）を確認しました。一時停止を解除して再開します。")
             state["paused_for_premise_escalation"] = False
             state["pending_premise_escalation_id"] = ""
+
+        # [BL-324] flag_needs_human_input経由の一時停止は、issue_log（権威ストア、§13.3）の
+        # 該当行がstatus='resolved'（--answer-human-inputが _answer_human_input 経由で
+        # セットする）になっているかどうかで再開可否を判定する。goal_escalations系の
+        # 上のブロックとは別テーブル・別チェックのため独立して扱う。
+        if resume_run_id and state.get("pending_human_judgment_issue_id"):
+            _pending_issue_id = state["pending_human_judgment_issue_id"]
+            _issue_row = _DB_CONN.execute(
+                "SELECT status, raised_by FROM issue_log WHERE run_id=? AND id=?",
+                (run_id, _pending_issue_id)
+            ).fetchone()
+            _issue_status = _issue_row["status"] if _issue_row else ""
+            if _issue_status != "resolved":
+                print(f"\n⏸️ [Resume/PAUSE] issue_id={_pending_issue_id}はまだ人間の回答待ちです"
+                      f"（status={_issue_status or '不明'}）。")
+                print(f"    先に python cela_main.py --answer-human-input {run_id} "
+                      f"--topic <topic> --value <確定値> --unit <単位> --source <出典> で回答してください。")
+                print("============================================================")
+                print("🏁 評価ループが終了しました。（再開時点で未回答のため一時停止を継続）")
+                print("============================================================")
+                return  # [BL-324] _DB_CONNのクローズは末尾のfinally節が保証する
+            print(f"✅ [Resume/PAUSE] issue_id={_pending_issue_id}への人間の回答を確認しました。"
+                  f"一時停止を解除して再開します。")
+            state["pending_human_judgment_issue_id"] = ""
+            # [BL-324] facilitation_count>5起因の一時停止（旧: halt）だった場合のみリセットする。
+            # 他の起票元（reflector等）由来の一時停止では、無関係なfacilitation_countには
+            # 触れない（同じカウンタを別の目的で誤って巻き戻さないため）。
+            if _issue_row and _issue_row["raised_by"] == "facilitator":
+                state["facilitation_count"] = 0
+                print("  🔄 [BL-324] Facilitator起票の一時停止解除に伴い、facilitation_countを"
+                      "リセットしました（resume直後の再一時停止ループを防止）。")
+
+            # [BL-324/実装後レビュー(Cline)指摘/AGENTS.md §15.4] Reflectorが1回の監査で
+            # 複数件をconfirmした場合、reflection_nodeはstateへ最初の1件のissue_idしか
+            # 載せない（設計上の単純化）。残りのconfirmed行は、この解決チェックが1件しか
+            # 見ないと誰にも消費されないまま取り残される（「入口はあるが出口がない」）。
+            # 直前に解決したissueと同じrun内に、他のconfirmed・未解決行が残っていないか
+            # 確認し、あればそれを次の一時停止対象としてresumeを継続拒否する
+            # （既存の単一idというstate形状を変えず、resume毎に1件ずつ消費していく）。
+            _other_confirmed = _DB_CONN.execute(
+                "SELECT id FROM issue_log WHERE run_id=? AND human_judgment_status='confirmed' "
+                "AND status != 'resolved' AND id != ? ORDER BY rowid LIMIT 1",
+                (run_id, _pending_issue_id)
+            ).fetchone()
+            if _other_confirmed:
+                state["pending_human_judgment_issue_id"] = _other_confirmed["id"]
+                print(f"\n⏸️ [Resume/PAUSE] 他にも人間の回答待ちのissue_id={_other_confirmed['id']}"
+                      f"が残っているため、一時停止を継続します。")
+                print(f"    先に python cela_main.py --answer-human-input {run_id} "
+                      f"--topic <topic> --value <確定値> --unit <単位> --source <出典> で回答してください。")
+                print("============================================================")
+                print("🏁 評価ループが終了しました。（再開時点で未回答のため一時停止を継続）")
+                print("============================================================")
+                return
 
         mode_str = "【ステートレス（決定事項DBによる知識永続化）】" if config["is_stateless_mode"] else "【ステートフル（生ログ全蓄積）】"
 
