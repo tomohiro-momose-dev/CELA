@@ -3913,6 +3913,20 @@
 
 ---
 
+### D-281: BL-329 — 計画再構成の承認済みDeliverable保護方式（validator一次防御＋機械的復元二次防御）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-31 |
+| 状態 | `decided` |
+| 決定者 | t-momose（1633ログの「該当するDeliverableが見つかりません」連発を報告し正しく根本原因を言い当てた。当初の事後修正案に対しより根本的な改善案を提案、AIが提示した軽量な既存機構再利用案を承認。BL-191相互作用の修正・§19.1省略の判断も承認） |
+| **決定理由** | BL-313の分割トリガーが、既に承認済みだったtask_5_2/task_5_5のDeliverableごとタスクを無条件で「廃止」し、参照不能にした。根本原因は`call_task_planner`がLLM出力に意味的検証を一切行っていないこと（AGENTS.md §15.3違反）。ユーザーは「task_plannerに1タスクずつ登録させ、DB登録時点で拒否する」というより重い改善案を提案したが、AIは既存の`_query_and_parse_with_retry`の`validator`フック（BL-213 F3で導入済み）を再利用すれば、大改修なしで「生成時点で検証しその場で自己修正させる」という同じ効果が得られることを発見し提示、ユーザーが採用した（AGENTS.md §16.1: 軽量案の提示）。ユーザーが同時に提案した「depends_on整合性のcheck_docs_consistency.py的チェック」も同じvalidator機構に統合できたため、1つの合成validatorとして実装した。 |
+| 決定内容 | 一次防御: `_validate_task_plan_depends_on_integrity`（task_id非空・重複無し・depends_on実在性）と`_build_protected_task_id_validator`（再構成時、RESOLVING_DELIVERABLE_STATUSES相当のtask_idが消えていないか）を合成した`validator`を、`call_task_planner`内の`_query_and_parse_with_retry`と`_enforce_decision_lineage_json`（BL-283差し戻し再出力にも適用、`validator`引数を新規追加）の両方へ渡す。二次防御: `task_planner_node`の`removed_task_ids`ループへ、完了相当のDeliverableを持つtask_idを無条件廃止せず機械的に復元するガードを追加（一次防御のretry失敗・JSONパース全滅時の保険）。ただしBL-191（redirect_backwardによる一時的フォーカス）が既に「消えうる」と認識しているtask_id（task_focus_stackのfocused_task_id）はこの保護対象から除外し、BL-191側の既存reconcile処理に委ねる（フルオフラインスイート実行で発覚した相互作用、実装後に追加）。 |
+| 影響 | `cela_main.py`（`_validate_task_plan_depends_on_integrity`・`_build_protected_task_id_validator`新規、`_enforce_decision_lineage_json`拡張、`call_task_planner`・`task_planner_node`拡張）、`tests/test_bl329_task_plan_validator_and_deliverable_protection.py`（新規23件）。AGENTS.md §17.1に従い一次防御2箇所・二次防御・BL-191除外条件をそれぞれ個別にrevert確認。影響範囲テスト185件・フルオフラインスイート2193 passed。設計はPlan mode独立レビュー3回・実装後diffレビュー1回（すべて実コード検証の上反映）。Plan mode最終確認パスはCline hub daemonの不安定化により実施できず、ユーザーの事前承認に従い省略した（唯一の例外、他はすべて実施）。 |
+| 関連 BL | BL-329（本件）、BL-313（引き金）、BL-126 Stage C（計画再構成インフラ）、BL-213 F3（validatorフック原設計）、BL-283（`_enforce_decision_lineage_json`）、BL-167（`_is_task_completed`）、BL-191（redirect_backwardとの相互作用調整） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
