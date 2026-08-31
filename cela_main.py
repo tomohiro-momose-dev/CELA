@@ -7415,11 +7415,26 @@ def _enforce_decision_lineage_freetext(
 def _enforce_decision_lineage_json(
     prompt: str, parsed: dict | list, client: OpenAI, model: str, label: str,
     tools: list[dict], state: dict | None,
+    validator: "Callable[[dict], tuple[bool, str]] | None" = None,
 ) -> dict | list:
     """[BL-283] `_query_and_parse_with_retry`経由のJSON出力ノード（task_planner/detector×2/
     reflection/reviewer/goal_essence_analyst/task_plan_reviewer）向け。`_enforce_decision_lineage_freetext`
     と同じ方針・同じ1回差し戻しポリシーだが、JSON再パースを伴う点のみ異なる。task_plannerの
     戻り値はdictではなくlist（フェーズ配列）のため、型はdict|listを許容する。
+
+    [BL-329] この関数のBL-283差し戻し再出力（retried_parsed）は、呼び出し元が
+    `_query_and_parse_with_retry`へ渡した`validator`を一切経由しない独立した再生成経路
+    だった。呼び出し元がvalidatorを持つ場合（`validator`非None）、この再出力にも同じ
+    validatorを適用し、不合格ならfail-safe側で直前の`parsed`（引数として渡された時点の
+    値）を採用する。
+    [Cline独立レビュー§19.4指摘F1] このfallback先の`parsed`は「validator合格済み」とは
+    限らない——`_query_and_parse_with_retry`自身がretryを使い切った場合、validator不合格の
+    まま`parse_failed=False`で返す（7288-7291）ため、その出力がそのままこの関数へ渡される
+    こともある。その場合でも「既に採用が確定していた計画をこれ以上悪化させない」という
+    意味でfail-safeであり、7289で既にloudな警告が出ている（記録漏れの警告も
+    `_record_decision_lineage_gap_issue`で別途出るため、情報は失われない）。`validator`
+    省略時（デフォルトNone）は従来通りの挙動——他の呼び出し元（detector×2/reflection/
+    reviewer/goal_essence_analyst/task_plan_reviewer）は非退行。
     """
     pending = _pending_decision_candidates()
     if not pending:
@@ -7435,6 +7450,12 @@ def _enforce_decision_lineage_json(
     retry_writes = sum(1 for item in _LAST_WRITE_AGREEMENT_ITEMS if item.get("entry_type") == "Decision")
     if retry_writes < len(pending):
         _record_decision_lineage_gap_issue(label, pending, retry_writes, state)
+    if validator is not None:
+        ok, _ = validator(retried_parsed)
+        if not ok:
+            print(f"  ⚠️ [{label}][BL-329] BL-283差し戻し再出力がvalidator不合格のため、"
+                  f"採用せず直前の出力を維持します（記録漏れ自体は別途issue化済み）。")
+            return parsed
     return retried_parsed
 
 # ---------------------------------------------------------------------------
@@ -11927,6 +11948,75 @@ _MEMORY_TRAP_GUARD_PARAGRAPH = (
 # 残した（call_task_planner/call_resource_arbiterで一度試みて実際に検証済み）。
 
 
+# [BL-329] 1633ログ実インシデント（run_id=1787890406-1e73a89d）: task_planner_nodeの
+# 計画再構成が、既に承認済みだったtask_5_2/task_5_5のDeliverableごとタスクを無条件で
+# 「廃止」し、分割後の新task_idからは参照不能になった。call_task_plannerが返すJSON全体に
+# 意味的な検証が一切なかったことが根本原因（AGENTS.md §15.3違反）。
+# _query_and_parse_with_retryのvalidatorフック（BL-213 F3で導入済み、_validate_extracted_
+# eventsが既存の使用例）を再利用し、生成時点で検証・自己修正させる（一次防御）。
+def _validate_task_plan_depends_on_integrity(phases) -> tuple[bool, str]:
+    """[BL-329] 各タスクのtask_idが非空・重複無しであること、depends_onが同じphases内に
+    実在するtask_idを指していることを検証する。_query_and_parse_with_retryのvalidator
+    フック（BL-213 F3）として使う。ユーザー提案（check_docs_consistency.py的な宣言↔実体の
+    双方向対応チェック）をtask_idのdepends_on↔実在tasksの対応に適用したもの。
+    """
+    if not isinstance(phases, list):
+        return True, ""
+    all_tasks = [
+        t for p in phases if isinstance(p, dict)
+        for t in p.get("tasks", []) if isinstance(t, dict)
+    ]
+    problems: list[str] = []
+    seen_ids: set[str] = set()
+    for t in all_tasks:
+        tid = t.get("task_id")
+        if not tid:
+            problems.append(f"- title={t.get('title')!r}のタスクにtask_idがありません（必須）。")
+        elif tid in seen_ids:
+            problems.append(f"- task_id={tid!r}が複数のタスクで重複しています。")
+        else:
+            seen_ids.add(tid)
+    all_task_ids = {t.get("task_id") for t in all_tasks}
+    problems += [
+        f"- task_id={t.get('task_id')!r}のdepends_onに、存在しないtask_id {dep!r} が"
+        f"指定されています。"
+        for t in all_tasks
+        for dep in (t.get("depends_on") or [])
+        if dep not in all_task_ids
+    ]
+    if not problems:
+        return True, ""
+    return False, (
+        "以下の不整合を修正し、JSON全体を出力し直してください:\n" + "\n".join(problems)
+    )
+
+
+def _build_protected_task_id_validator(protected_task_ids: set[str]):
+    """[BL-329] 再プラン時、既に完了相当（RESOLVING_DELIVERABLE_STATUSES）のDeliverableを
+    持つtask_idが新しい計画から除去されていないかを検証するvalidatorを生成する。
+    """
+    def _validator(phases) -> tuple[bool, str]:
+        if not isinstance(phases, list) or not protected_task_ids:
+            return True, ""
+        new_task_ids = {
+            t.get("task_id") for p in phases if isinstance(p, dict)
+            for t in p.get("tasks", []) if isinstance(t, dict)
+        }
+        missing = protected_task_ids - new_task_ids
+        if not missing:
+            return True, ""
+        # [Cline指摘F3・軽微] ステータス列挙をRESOLVING_DELIVERABLE_STATUSES（8483付近）
+        # から導出し、定数側が将来変更されてもメッセージが陳腐化しないようにする（§15.1）。
+        _status_list = "/".join(sorted(RESOLVING_DELIVERABLE_STATUSES))
+        return False, (
+            f"以下のtask_idは既に承認済み（{_status_list}）のDeliverableを持つため、"
+            "計画から除去してはいけません。廃止・リネームせず、既存のまま維持するか、"
+            "新しいtask_idを追加した上でこれらは変更せず残してください: "
+            + "、".join(sorted(missing))
+        )
+    return _validator
+
+
 def call_task_planner(goal: str, reviewer_feedback: str = "", goal_essence_text: str = "", state: dict | None = None,
                        existing_phases: list[dict] | None = None, revision_reason: str = "") -> list[dict]:
     """【SLM要約】
@@ -12238,17 +12328,43 @@ It serves as the initial planning layer for breaking down complex objectives acr
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
     _task_planner_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, READ_PLAN_DRAFT_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
+
+    # [BL-329] 再構成時（revision_reason非空）のみ、既に完了相当のDeliverableを持つ
+    # 既存task_idを「保護対象」として収集し、生成された新計画から除去されていないかを
+    # 一次防御（validator）で検証させる。depends_on整合性検証は初回計画・再構成の両方で
+    # 常時有効。
+    _protected_task_ids: set[str] = set()
+    if revision_reason and state:
+        _conn_guard = get_active_conn()
+        # [Cline指摘F2・軽微] t["task_id"]直接索引ではなくt.get("task_id")にし、旧計画の
+        # タスクにtask_idが欠落していてもKeyErrorでクラッシュせずBL-214のloud警告経路
+        # （空task_idで_is_task_completedは常にFalseを返す）へ素直に流す。
+        _protected_task_ids = {
+            t.get("task_id") for p in (existing_phases or []) for t in p.get("tasks", [])
+            if _is_task_completed(_conn_guard, state["run_id"], t.get("task_id", ""))
+        }
+    _protected_validator = _build_protected_task_id_validator(_protected_task_ids)
+
+    def _task_plan_validator(phases_candidate) -> tuple[bool, str]:
+        ok1, msg1 = _validate_task_plan_depends_on_integrity(phases_candidate)
+        ok2, msg2 = _protected_validator(phases_candidate)
+        if ok1 and ok2:
+            return True, ""
+        return False, "\n\n".join(m for m in (msg1, msg2) if m)
+
     phases, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_task_planner, model=model_task_planner, label="Task Planner",
         tools=_task_planner_tools, fallback=fallback_phase,
-        state=state,
+        state=state, validator=_task_plan_validator,
     )
     if parse_failed:
         print("🚨 [Task Planner] JSON分解結果の取得に失敗しました。縮退計画にフォールバックします。")
     else:
+        # [BL-329] BL-283差し戻し再出力にもvalidatorを適用する（cela_main.py:7415参照）。
         phases = _enforce_decision_lineage_json(prompt, phases, client=client_task_planner,
                                                  model=model_task_planner, label="Task Planner",
-                                                 tools=_task_planner_tools, state=state)
+                                                 tools=_task_planner_tools, state=state,
+                                                 validator=_task_plan_validator)
     return phases
 
 def call_orchestrator(state: LineageState, config: Appconfig ) -> dict:
@@ -16467,8 +16583,65 @@ Sets the starting phase for subsequent execution steps within the lineage state.
             new_task_ids = {t["task_id"] for p in phases for t in p.get("tasks", [])}
             removed_task_ids = old_task_ids - new_task_ids
             _conn = get_active_conn()
+            # [BL-329/Cline指摘§19.4] BL-191（schedule_task_focus redirect_backward）は、
+            # 既にApproved済みの過去タスクへ一時的にフォーカスを戻し、その後
+            # _reconcile_current_phase_after_replan（本ループの後で実行される、16661行）で
+            # 「フォーカス中task_idが新計画から消えた」ことを検知してforce-resumeする設計
+            # （test_bl191_task_focus_scheduling.pyで実測回帰確認）。BL-329がこの種の
+            # task_idまで機械的に計画へ復元すると、消えたことにならずBL-191の設計上の
+            # reconcile分岐（フォーカス消失時の強制復帰）が発火しなくなる。BL-191が既に
+            # 「消えうる」と認識しているtask_id（task_focus_stackのfocused_task_id）は
+            # BL-329の保護対象から除外し、既存のBL-191側のreconcile処理に委ねる。
+            _focused_task_ids = {
+                entry.get("focused_task_id") for entry in state.get("task_focus_stack", [])
+            }
             for tid in sorted(removed_task_ids):
                 old_phase_id = _find_phase_id_for_task(old_phases, tid) or ""
+
+                # [BL-329] 二次防御（機械的復元）: 一次防御（call_task_planner内のvalidator、
+                # cela_main.py:12323/12331）のretryを使い切った場合や、JSONパースが全滅して
+                # fallback_phaseが採用された場合（この場合removed_task_ids=旧計画の全task_id
+                # となり一次防御は最初から機能しない）に備え、既に完了相当
+                # （RESOLVING_DELIVERABLE_STATUSES）のDeliverableを持つtask_idは無条件で
+                # 「廃止」扱いにせず計画へ復元する。1633ログの実インシデント
+                # （run_id=1787890406-1e73a89d）：task_5_2/task_5_5が承認済み成果物ごと
+                # 廃止され、read_deliverable_fileがnot_foundを返すようになっていた。
+                if tid not in _focused_task_ids and _is_task_completed(_conn, state["run_id"], tid):
+                    _existing = _find_active_deliverable_agreement(_conn, state["run_id"], old_phase_id, tid)
+                    _existing_status = _existing.get("status") if _existing else "completed(RESOLVING_DELIVERABLE_STATUSES)"
+                    _old_task_obj = _find_task_by_id(old_phases, tid)
+                    # 復元先のphaseが新計画に既に存在する場合はそのtasks配列へ挿入し、
+                    # 存在しない場合（フェーズ自体が消えたエッジケース）は旧phaseオブジェクトを
+                    # 浅コピーした新規phaseエントリとして追加する。
+                    _target_phase = next((p for p in phases if p.get("phase_id") == old_phase_id), None)
+                    if _target_phase is None:
+                        _old_phase_obj = next((p for p in old_phases if p.get("phase_id") == old_phase_id), None)
+                        _target_phase = dict(_old_phase_obj) if _old_phase_obj else {"phase_id": old_phase_id, "title": old_phase_id}
+                        _target_phase["tasks"] = []
+                        phases.append(_target_phase)
+                    if _old_task_obj and not any(t.get("task_id") == tid for t in _target_phase.setdefault("tasks", [])):
+                        _target_phase["tasks"].append(_old_task_obj)
+                    print(
+                        f"  🛡️ [BL-329] task_id='{tid}'は承認済みDeliverable（status="
+                        f"'{_existing_status}'）を持つため、計画再構成による廃止を見送り"
+                        f"計画へ復元しました（理由: {revision_reason}）。"
+                    )
+                    _write_agreement_impl(
+                        {
+                            "action_type": "CREATE", "status": "Proposed", "entry_type": "Directive",
+                            "topic": f"task_plan_{tid}_restored_by_bl329", "task_id": tid, "phase_id": old_phase_id,
+                            "decision_what": (
+                                f"task_id='{tid}'は計画再構成の対象でしたが、既にstatus="
+                                f"'{_existing_status}'のDeliverableを持つため、廃止せず"
+                                "計画に復元しました（BL-329：承認済み成果物の機械的保護）。"
+                            ),
+                            "reason_why": revision_reason,
+                        },
+                        _conn, state["run_id"], "task_planner", tid,
+                        phases=old_phases, pending_task_ids=state.get("pending_task_ids", []),
+                    )
+                    continue
+
                 state.setdefault("phases_superseded", []).append({
                     "task_id": tid, "phase_id": old_phase_id, "reason": revision_reason,
                     "superseded_at_round": state.get("round_count", 0),
