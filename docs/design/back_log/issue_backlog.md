@@ -353,7 +353,7 @@
 | BL-326 | 高 | `cela_main.py`（`_find_detector_annotation_span`ほか、詳細は下記セクション参照） | **`open`（実装着手）。** Detector注釈をdecision_id指定で機械的に削除する経路を追加。詳細は下記`### BL-326`セクション参照。 | P1 |
 | BL-327 | 中 | `cela_main.py`（`_adjacent_divergence_hint`ほか、詳細は下記セクション参照） | **`done`。** old_text不一致エラーへ機械的diffヒントを追加。詳細は下記`### BL-327`セクション参照。 | P2 |
 | BL-328 | 低 | 未定（発想のみ） | **`open`。** ツール失敗が繰り返された際に`--interactive-query`型のヘルパーAIを呼び診断させる汎用機構の提案。詳細は下記`### BL-328`セクション参照。 | P3 |
-| BL-329 | 高 | `cela_main.py`（`_validate_task_plan_depends_on_integrity`・`_build_protected_task_id_validator`・`_enforce_decision_lineage_json`・`task_planner_node`ほか、詳細は下記セクション参照） | **`open`（設計完了・Cline独立レビュー実施中、実装未着手）。** 計画再構成が承認済みDeliverableを除去しないよう、生成時点で検証・自己修正させる。詳細は下記`### BL-329`セクション参照。 | P0 |
+| BL-329 | 高 | `cela_main.py`（`_validate_task_plan_depends_on_integrity`・`_build_protected_task_id_validator`・`_enforce_decision_lineage_json`・`task_planner_node`ほか、詳細は下記セクション参照） | **`done`。** 計画再構成が承認済みDeliverableを除去しないよう、生成時点で検証・自己修正させる。詳細は下記`### BL-329`セクション参照。 | P0 |
 
 ---
 
