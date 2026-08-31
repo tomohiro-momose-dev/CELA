@@ -76,8 +76,9 @@ Deliverableのstatus」だけを見るため、承認済み版の上にさらに
 
 設計判断（軽い代替の検討）：
 - 案A（採用）: 承認済みtask_idを新計画へ機械的に復元し、廃止をブロックする。既存の
-  「完全版Deliverableの上書きを保護する」既存パターン（BL-180/BL-261、`_write_agreement_
-  impl`の同様の保護ロジック）と同じ設計哲学の踏襲であり、実装コストが低い。復元されたtask_id
+  「完全版Deliverableの上書きを保護する」既存パターン（BL-180/BL-261、`_commit_agreement_
+  from_tool`のUPDATE分岐/全文置換ガード）と同じ設計哲学の踏襲であり、実装コストが低い。
+  復元されたtask_id
   と、task_plannerが新設した類似スコープの新task_id（例: task_5_2_1）が並存しうるが、
   これは**データ消失より安全な失敗モード**（AGENTS.md §13.2: fail-safe > silently wrong）。
   重複が生じた場合は後続のReflector監査や人間判断で整理すればよく、承認済み成果物を
