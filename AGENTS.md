@@ -584,9 +584,22 @@ state the exact scope (row counts, file list) to the user, and obtain approval. 
 
 For non-trivial plans (a Plan-mode design, a `docs/design/back_log/BL-xxx/BLxxx_basic_design.md`,
 or a phase-level `cela_phaseN_design_vX.md`), get an independent review from Cline — a separate
-agent/model running non-interactively via its CLI — before finalizing the plan with the user. This
-operationalizes §16.2 (verify review findings against the code) with a review source that has no
-continuity bias from this session.
+agent/model running non-interactively via its CLI — and fold its findings into the plan **before
+calling `ExitPlanMode`**. This operationalizes §16.2 (verify review findings against the code) with
+a review source that has no continuity bias from this session.
+
+This is a two-part gate, not one: §19.1 covers reviewing the plan before implementing, §19.4
+covers reviewing the diff after implementing. **They are independent obligations.** A change with
+no plan doc still owes the diff a review (§19.4) — plan-mode usage is not the trigger for either
+half, non-triviality is.
+
+**Sequencing is mandatory, not advisory (established 2026-08-31 after a violation):** `ExitPlanMode`
+is what hands the plan to the user for approval. If the Cline review happens *after* `ExitPlanMode`
+is called, the user is being asked to approve a plan that was never actually reviewed — Cline's
+findings, however good, arrive too late to shape what the user is looking at. Never call
+`ExitPlanMode` for a non-trivial plan without having already run §19.1's review and folded the
+surviving findings in. If you notice you are about to call `ExitPlanMode` and have not yet run the
+review, stop, run it, revise the plan, and only then call `ExitPlanMode`.
 
 ### 19.1 How to invoke it
 
@@ -599,7 +612,8 @@ from more reasoning effort than the default `medium`).
 
 The script prints Cline's review text to stdout (nothing else). Read it, verify each claim against
 the actual code/docs per §16.2, and fold what survives verification back into the plan — do not
-paste the review to the user unfiltered and do not treat it as authoritative.
+paste the review to the user unfiltered and do not treat it as authoritative. Do this before
+calling `ExitPlanMode` (see the sequencing note above), not after.
 
 `--timeout` is the budget given to the `cline` CLI itself (`-t`); the Python subprocess call waits
 `--timeout + 30`s before giving up, so a slow review surfaces as a `cline CLI exited`/`did not
@@ -611,11 +625,22 @@ Cline is invoked with `--auto-approve true`, but its local config
 (`~/.cline/data/globalState.json` -> `autoApprovalSettings.actions`) is kept with `editFiles`,
 `editFilesExternally`, and `executeAllCommands` forced to `false`. `readFiles`, `readFilesExternally`,
 `executeSafeCommands`/`useMcp`, and (per user decision 2026-08-31) `useBrowser` stay auto-approved.
-This makes Cline read-for-research-but-never-write in this workflow — a review agent must not be
-able to mutate the repo it is reviewing, but may browse external docs to ground a review. Both
-`scripts/cline_review.py` and `scripts/cline_review_diff.py` (§19.4) share this config and must
-never be changed to grant edit/execute-all write-back access without an explicit, separate user
-decision recorded in `decision_log.md`.
+This makes Cline unable to mutate the repo it is reviewing *through its dedicated file-edit
+tools* — `editFiles`/`editFilesExternally`/`executeAllCommands` are forced off, so it cannot
+open-and-save a file or run an arbitrary/unrestricted command. It is not, however, strictly
+read-only: `executeSafeCommands` stays auto-approved (needed for the valuable case of Cline
+actually running Python to verify its own review claims — this caught real edge-case bugs in
+2026-08-31's BL-326/327 reviews), and a "safe" shell command can itself write files (observed in
+practice: Cline wrote two disposable verification scripts under `artifacts/` via a shell
+one-liner during a review, with `editFiles` confirmed still `false` at the time). Treat this as
+"cannot edit tracked files through its own tools, but *can* write scratch files via shell" rather
+than "never writes anything" — check `git status` after any Cline review invocation and clean up
+or inspect anything unexpected before trusting the working tree, per §16.2. Revisited and kept
+as-is (accepted trade-off, favoring the execution-verification value) 2026-08-31; see
+`decision_lineage.md` 論点170/171 for the fuller discussion. Both `scripts/cline_review.py` and
+`scripts/cline_review_diff.py` (§19.4) share this config and must never be changed to grant
+edit/execute-all write-back access without an explicit, separate user decision recorded in
+`decision_log.md`.
 
 **Self-enforcing, because the config can drift.** `~/.cline/data/globalState.json` is one
 machine-wide file shared by *every* Cline CLI invocation on the machine, including other, unrelated
@@ -655,8 +680,16 @@ from this session's own actions.
 
 ### 19.4 Implementation review (diff-based)
 
-After implementing a plan, review the actual diff the same way — this is the "Cline(review)" step
-for implementation, not just design:
+Run this after implementing *any* non-trivial change — this is the "Cline(review)" step for
+implementation, not just design. **Whether the change went through Plan mode / has a plan doc is
+not the criterion for whether to run this step.** A fix that felt too small to write a plan for is
+not, by itself, a reason to skip the review — the criterion is whether the diff is worth a second
+pair of eyes, and Cline is free (this provider's cost is $0), so the honest default is to run it
+whenever there is a non-trivial diff, plan or no plan. Skip only for genuinely trivial edits (typo
+fixes, comment-only changes, pure formatting, doc-only wording tweaks). This was established
+2026-08-31 after a plan-less small fix was implemented and committed without a Cline review because
+the absence of a plan was (wrongly) treated as the absence of an obligation to review — do not
+repeat that reasoning.
 
 ```
 python scripts/cline_review_diff.py [--range RANGE] [--path PATH ...] [--plan PLAN_FILE ...] \
