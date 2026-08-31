@@ -411,3 +411,9 @@ reconciliation`を追加し、AGENTS.md §17.1に従いこの除外条件を一�
 §19.4（diffレビューは実コードの一部しか見ない）の限界を示す実例——**影響範囲を絞った
 レビュー・テストだけでは検出できない他機構との相互作用は、フルスイートでしか捕まらない
 ことがある**——として記録する。
+
+Cline実装後diffレビュー（§19.4）自体は承認（マージ可）判定で、軽微な指摘3件（F1: 
+`_enforce_decision_lineage_json`のdocstringが「validator合格済みの直前のparsed」と過大に
+保証していた実際は不合格の可能性もある、F2: 保護task_id収集で`t["task_id"]`直接索引を
+`t.get("task_id")`へ、F3: エラーメッセージのステータス列挙を`RESOLVING_DELIVERABLE_
+STATUSES`から導出しドリフトを防ぐ）を受け、いずれも実コードで検証の上反映した。
