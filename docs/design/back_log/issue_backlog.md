@@ -349,6 +349,7 @@
 | BL-322 | 中 | `cela_main.py`（`_shift_insertion_point_past_table_row`・`_annotate_whiteboard_with_detector_comment`、詳細は下記セクション参照） | **`done`。** Detector注釈挿入がMarkdownテーブル行を分断する欠陥を根本修正。詳細は下記`### BL-322`セクション参照。 | P1 |
 | BL-324 | 高 | `cela_main.py`（`_flag_needs_human_input_tool_impl`・`reflection_node`・`facilitator_node`ほか、詳細は下記セクション参照） | **`done`。** 「真に人間の判断が必要」なissueを、Reflector監査を経て（または監査役自身の判断で）グラフ全体の一時停止へ接続。詳細は下記`### BL-324`セクション参照。 | P0 |
 | BL-323 | 高 | `docs/design/experiment_design_baseline_comparison.md`（実験実施時はログ抽出スクリプト等、詳細は下記セクション参照） | **`open`。** 単独LLM基線との対照実験（矛盾残存率・コスト・時間の定量比較）の設計完了・実施未着手。詳細は下記`### BL-323`セクション参照。 | P1 |
+| BL-325 | 中 | `cela_main.py`（新規`_load_phases_from_checkpoint`、`_answer_general_query`）、`tests/test_bl325_interactive_query_project_plan.py`（新規4件） | **`done`。** `--interactive-query`の`read_project_plan`が常に空リストを返していた欠陥を修正。詳細は下記`### BL-325`セクション参照。 | P2 |
 
 ---
 
@@ -11020,6 +11021,53 @@ verbatimで重複していた（削除）。②Reflectorが1回の監査で複�
 
 参照: `docs/design/back_log/BL-324/BL324_basic_design.md`、
 `tests/test_bl324_human_judgment_escalation.py`、`docs/design/decision_log.md` D-276。
+
+---
+
+### BL-325: --interactive-queryのread_project_planが常に空リストを返す欠陥の修正
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P2 |
+| 関連 | BL-309（--interactive-query本体）、BL-104（read_project_plan/`_CURRENT_PHASES`の元設計） |
+
+**経緯**: ユーザーがBL-324完了直後のHIL片付けに続けて`--interactive-query`で
+「現在のタスク表を表示」と質問したところ、`read_project_plan`ツールが`[]`（空リスト）を
+返し「無し」と回答された。実行中のライブランには実際には8フェーズ68タスクの計画が
+存在しており（チェックポイントから直接確認）、ツール側の欠陥と判明した。
+
+**原因**: `read_project_plan`ツールの実体`_read_project_plan_handler`
+（cela_main.py:1861-1865）は、モジュールグローバル`_CURRENT_PHASES`
+（既定値`[]`、cela_main.py:2791）をそのまま返すだけの薄いラッパー。このグローバルは
+グラフ実行中の2ノード内（cela_main.py:12078-12080、12217-12219）でのみ
+`state["phases"]`からコピーされる設計であり、グラフを一切経由しない独立CLIプロセス
+（`_answer_general_query`、BL-309）には設定機会が一度もなかった。BL-309で
+`READ_PROJECT_PLAN_TOOL`をツールリストへ配線した際、データソース側の配線
+（AGENTS.md §15.4「入口を考えたら出口も考えろ」の逆——ここではツール＝出口は
+配線したがデータ供給＝入口を配線し忘れたパターン）が漏れていた。
+
+**対応内容**: `--list-checkpoints`（cela_main.py:19379-19385）が既に使っている
+「`SqliteSaver`＋`build_graph`＋`app.get_state({"configurable":{"thread_id": run_id}})`」
+パターンをそのまま再利用し、新規ヘルパー`_load_phases_from_checkpoint(run_id)`で
+LangGraph checkpointに永続化済みの最新`state["phases"]`を独立プロセスから読み込む。
+`_answer_general_query`の冒頭（他のグローバル設定と同じ箇所）でこれを呼び出し
+`_CURRENT_PHASES`へ設定してからツールループへ入るようにした。checkpointが
+存在しない（例: run開始直後）場合は例外を出さず空リストへフォールバックし、
+従来の「まだフェーズ・タスク計画がありません」表示に自然に収まる（非退行）。
+新規ロジックは追加せず既存の読み取りパターンの流用のみ。
+
+**テスト**: `tests/test_bl325_interactive_query_project_plan.py`（新規4件）——
+チェックポイントからの実データ読込、未知run_idでの空フォールバック、
+`_answer_general_query`がツールループ突入前に`_CURRENT_PHASES`を設定していることの
+統合確認（test_bl174と同型の合成グラフでchekpointへ実書き込みした上で検証）、
+checkpoint未存在時の非退行確認。AGENTS.md §17.1に従い、修正箇所
+（`_CURRENT_PHASES = _load_phases_from_checkpoint(run_id)`の1行）を一時的にrevertし
+統合テストが失敗することを確認した上で復元した。既存BL-309（13件）・
+BL-174/checkpoint_resume関連（非退行）と合わせて25件通過確認。
+
+参照: `tests/test_bl325_interactive_query_project_plan.py`、
+`docs/design/decision_log.md` D-277。
 
 ---
 
