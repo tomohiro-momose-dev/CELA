@@ -3871,6 +3871,20 @@
 
 ---
 
+### D-278: BL-326 — Detector注釈をdecision_id指定で機械的に削除する経路の追加方式
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-08-31 |
+| 状態 | `decided` |
+| 決定者 | t-momose（1307ログのedit失敗5連続を報告、根本修正の方針提示に「これで行きましょう」と承認。Plan mode設計をCline独立レビュー2回分の指摘反映後に承認） |
+| **決定理由** | Detector注釈削除がold_text方式（長文の一字一句正確な再現）に依存する限り、BL-202で一度対策したはずの失敗クラス（数字1文字等の些細な誤記による繰り返し失敗）が再発し続ける構造的な脆さがある。修正方式として、(a) 新規の専用ツール（remove_detector_annotation等）を追加する案と、(b) 既存の`write_agreement`のedits要素へ`remove_annotation_id`という新フィールドを追加し`old_text`と排他的に扱う案を検討し、後者を採用した。理由は、Expertの既存の編集手段（write_agreement）を変えずに済み、ツール一覧を増やさない軽量な拡張であること（AGENTS.md §16.1）、Detector注釈は`_DETECTOR_COMMENT_TEMPLATE`により短く誤記しにくい一意なdecision_idを既に持っており、これを鍵にすれば長文の逐語再現という失敗しやすい経路を完全に迂回できること。 |
+| 決定内容 | `_apply_text_edits`へ`remove_annotation_id`分岐を追加し、新規`_find_detector_annotation_span`（テンプレート自身から導出したマーカーで境界検出、AGENTS.md §15.1準拠）でDetector注釈ブロックを機械的に削除する。`WRITE_AGREEMENT_TOOL`のschemaとExpertへの注釈削除ガイダンス3箇所を、remove_annotation_id使用を推奨する文言へ更新した。`old_text`と同時指定時は明示エラー、`revise_goal`との共有経路（ゴール文にはDetector注釈が存在しない）はcontent_label非依存の中立的なエラー文言で対応する。 |
+| 影響 | `cela_main.py`（`_find_detector_annotation_span`・`_list_detector_annotation_ids`・`_apply_text_edits`拡張・`WRITE_AGREEMENT_TOOL`schema・ガイダンス3箇所）、`tests/test_bl326_detector_annotation_removal_by_id.py`（新規24件）。AGENTS.md §17.1に従い新規分岐を一時的にrevertし11件のテストが失敗することを確認した上で復元。影響範囲テスト129件・フルオフラインスイート実行。Plan mode独立レビュー（Cline CLI、§19.1）を2回実施し指摘1〜7・F1〜F5をすべて実コード検証の上反映。実装後diffレビュー（§19.4）でさらに2件（対象注釈自身の閉じマーカーが欠損時に次の別注釈の閉じマーカーまでサイレントに過剰削除しうる欠陥、開始マーカー検索の非対称性）を検出、`_find_detector_annotation_span`へ境界強化（開始マーカーの行頭条件化、対象注釈の閉じマーカーに到達する前に他注釈の開始マーカーへ遭遇したらNoneを返す）として反映し新規回帰テスト3件を追加した。設計書は`docs/design/back_log/BL-326/BL326_327_basic_design.md`（BL-327と共通）に実装前保存済み。 |
+| 関連 BL | BL-326（本件）、BL-076（Detector注釈の原設計）、BL-081/BL-151/BL-193/BL-202（old_text不一致対策の系譜）、BL-322（Markdownテーブル行保護）、BL-327/BL-328（同一インシデントに端を発する派生対応） |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）

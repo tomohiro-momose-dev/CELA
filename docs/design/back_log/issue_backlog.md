@@ -350,6 +350,9 @@
 | BL-324 | 高 | `cela_main.py`（`_flag_needs_human_input_tool_impl`・`reflection_node`・`facilitator_node`ほか、詳細は下記セクション参照） | **`done`。** 「真に人間の判断が必要」なissueを、Reflector監査を経て（または監査役自身の判断で）グラフ全体の一時停止へ接続。詳細は下記`### BL-324`セクション参照。 | P0 |
 | BL-323 | 高 | `docs/design/experiment_design_baseline_comparison.md`（実験実施時はログ抽出スクリプト等、詳細は下記セクション参照） | **`open`。** 単独LLM基線との対照実験（矛盾残存率・コスト・時間の定量比較）の設計完了・実施未着手。詳細は下記`### BL-323`セクション参照。 | P1 |
 | BL-325 | 中 | `cela_main.py`（新規`_load_phases_from_checkpoint`、`_answer_general_query`）、`tests/test_bl325_interactive_query_project_plan.py`（新規4件） | **`done`。** `--interactive-query`の`read_project_plan`が常に空リストを返していた欠陥を修正。詳細は下記`### BL-325`セクション参照。 | P2 |
+| BL-326 | 高 | `cela_main.py`（`_find_detector_annotation_span`ほか、詳細は下記セクション参照） | **`open`（実装着手）。** Detector注釈をdecision_id指定で機械的に削除する経路を追加。詳細は下記`### BL-326`セクション参照。 | P1 |
+| BL-327 | 中 | `cela_main.py`（`_adjacent_divergence_hint`ほか、詳細は下記セクション参照） | **`open`（実装着手）。** old_text不一致エラーへ機械的diffヒントを追加。詳細は下記`### BL-327`セクション参照。 | P2 |
+| BL-328 | 低 | 未定（発想のみ） | **`open`。** ツール失敗が繰り返された際に`--interactive-query`型のヘルパーAIを呼び診断させる汎用機構の提案。詳細は下記`### BL-328`セクション参照。 | P3 |
 
 ---
 
@@ -11068,6 +11071,125 @@ BL-174/checkpoint_resume関連（非退行）と合わせて25件通過確認。
 
 参照: `tests/test_bl325_interactive_query_project_plan.py`、
 `docs/design/decision_log.md` D-277。
+
+---
+
+### BL-326: Detector注釈をdecision_id指定で機械的に削除する経路を追加する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1 |
+| 関連 | BL-076（Detector注釈の原設計）、BL-081/BL-151/BL-193/BL-202（old_text不一致対策の系譜）、BL-322（Markdownテーブル行保護）、BL-327/BL-328（同一インシデントに端を発する派生対応） |
+
+**経緯**: BL-325のHIL片付け直後、ユーザーが`--interactive-query`で1307ログ
+（run_id=1787890406-1e73a89d、task_3_5）を調査したところ、Expertが約1900字のDetector指摘
+注釈ブロックをwrite_agreementのedits（old_text/new_text）で削除しようとして5回連続失敗して
+いることが判明した。原因は、注釈本文中の金額表記「1億1,850万」を毎回「1億**11**,850万」と
+誤記（数字1文字のtranscription error）したこと。`read_whiteboard_excerpt`で正しい全文を
+2回確認した後も同じ誤記を3回繰り返しており、BL-287の反復検知ナッジが5回目で介入するまで
+自己修復できなかった。これはCELAのガード機構（old_textの厳密一致検証、失敗時の詳細diff
+表示、BL-287の反復検知）が正しく機能した結果（サイレント破損なし）だが、「注釈削除には長文の
+一字一句正確な再現が必須」という設計自体が失敗しやすいことが露呈した（BL-202・
+log/2026-08-09/2348の20回連続不一致と同型の再発）。
+
+ユーザーから「ツール失敗が繰り返された時にinteractive-query型のヘルパーAIを呼んで診断させ
+てはどうか」という提案があり、AIは「今回のケースは機械的diffで同じ効果が得られる、より軽量な
+代替（BL-327）」を提示、両者を段階的に採用する方針で合意した（ヘルパーAI案はBL-328として
+発想のみ記録）。
+
+**対応内容**: Detector注釈は`_DETECTOR_COMMENT_TEMPLATE`により短く誤記しにくい一意な
+`decision_id`（例: 'D-1788150538640-f6dd80'）を持つことに着目し、`write_agreement`の
+editsへ`remove_annotation_id`（`old_text`/`new_text`と排他）を追加。新規
+`_find_detector_annotation_span`が、テンプレート自身から導出したマーカー
+（`_DETECTOR_COMMENT_CLOSE_MARKER`/`_DETECTOR_COMMENT_START_PREFIX`、新規リテラル複製を
+避けるAGENTS.md §15.1準拠）で注釈ブロックの境界を機械的に検出・削除する。`_apply_text_edits`
+（`write_agreement`のDeliverable UPDATE editsおよび`revise_goal`のゴール文editsが共有する
+唯一の実処理関数）へ分岐を追加し、old_text方式と同時指定時は明示エラーとした。
+`WRITE_AGREEMENT_TOOL`のschemaとExpertへの注釈削除ガイダンス（call_expertのフル版/軽量版/
+Detector差し戻し時プロンプトの3箇所）を更新し、old_textでの逐語再現ではなく
+remove_annotation_idの使用を強く推奨する文言へ改めた。
+
+Plan mode設計はCline独立レビュー（AGENTS.md §19.1）を2回実施——1回目でBL-326単体の指摘1〜7
+（マーカーのテンプレート導出化・往復一致テストの必須化・old_text同時指定時の明示エラー・
+revise_goalとの共有経路対応等）、2回目（BL-327追加後の全体レビュー）でF1〜F5（`_list_
+detector_annotation_ids`の正規表現も同様にテンプレート導出化する指摘F1等）をすべて実コード
+検証の上反映した。
+
+**テスト**: `tests/test_bl326_detector_annotation_removal_by_id.py`（新規24件）——
+`_find_detector_annotation_span`/`_list_detector_annotation_ids`単体（テンプレート整合性・
+embedded改行comment・close markerハードニング含む）、BL-322のテーブル行末シフト挿入を含む
+2パターンの挿入→削除往復一致テスト、`_apply_text_edits`統合（純粋削除・独立行への訂正記録
+置換・存在しないID・old_text同時指定エラー・非退行）、1307ログの実インシデント再現
+（誤記入りold_textは引き続き失敗・remove_annotation_id方式は一発成功）、`revise_goal`との
+共有経路の中立的エラー確認、`write_agreement`ツール経由の統合テスト。AGENTS.md §17.1に従い、
+`_apply_text_edits`の新規分岐を一時的にrevertし11件のテストが失敗することを確認した上で
+復元した。影響範囲テスト（BL-074/081/151/193/202/076/322/321/217/309/325）129件・
+フルオフラインスイート2156→2159 passed（BL-326の新規テスト分含む）。
+
+**実装後レビュー（Cline CLI、AGENTS.md §19.4 diff-based）**: 実施し4件の指摘（実コード検証
+込み）を得た。うち指摘1（重要・§13.2該当）は、対象注釈自身の閉じマーカーが欠損・改変されて
+いた場合に次の別の注釈の閉じマーカーまでサイレントに踏み込んで過剰削除しうる欠陥、指摘2
+（低・非対称性）は開始マーカー検索に行頭条件がなく他の注釈の引用文中の文字列を誤って開始
+マーカーとみなしうる欠陥——いずれも「もっともらしいが壊れた結果がエラーなくDBへ永続化される」
+failure modeのため、実コードで検証の上、開始マーカーの行頭条件化と「対象注釈自身の閉じ
+マーカーに到達する前に別の注釈の開始マーカーへ遭遇したらNoneを返す」境界強化として反映した。
+新規回帰テスト3件を追加し、AGENTS.md §17.1に従いこの強化部分のみを一時的にrevertして2件が
+失敗することを確認した上で復元した。指摘3（微小・description文言の近似性）・指摘4（微小・
+new_text型安全性、既存old_text経路と同等のリスクで非退行と確認済み）はCline自身の判断で
+非ブロッカーとされ、対応を見送った。
+
+参照: `docs/design/back_log/BL-326/BL326_327_basic_design.md`（BL-326/327共通の設計書）、
+`tests/test_bl326_detector_annotation_removal_by_id.py`、`docs/design/decision_log.md` D-278。
+
+---
+
+### BL-327: old_text不一致エラーへ機械的diffヒントを追加する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（設計完了・実装未着手） |
+| 優先度 | P2 |
+| 関連 | BL-326（同一インシデントに端を発する先行対応）、BL-151/BL-193（`_nearest_content_snippet`の原設計）、BL-328（ヘルパーAI案、本BLの軽量な代替として採用された経緯） |
+
+BL-326の議論の中で、ユーザーから「ツール失敗が続いた時にinteractive-query型のヘルパーAIを
+呼んで診断させてはどうか」という提案があり、AIは「1307ログの実例（金額表記の数字1文字誤記）は
+LLMをもう1体呼ばなくても`difflib`による機械的な文字単位diffで同じ効果が得られる、コスト・
+レイテンシ・誤診断リスクがなく汎用性もある」という軽量な代替案を提示、ユーザーが「まずは機械
+diffを実装してヘルパーAI案はBL表記」と承認した。`_nearest_content_snippet`が既に計算済みの
+LCS（`difflib.Match`）を再利用し、LCSブロックの直前・直後の短い窓をold_text側とcontent側で
+突き合わせて「あなたの記述 / 実際の内容」を機械的に提示する`_adjacent_divergence_hint`を
+新設する設計。Cline独立レビュー（AGENTS.md §19.1、実際にPythonコードを実行して検証）で
+F1〜F5の指摘を受け、設計へ反映済み（`docs/design/back_log/BL-326/BL326_327_basic_design.md`
+参照）。実装はBL-326の完了後に着手する。
+
+参照: `docs/design/back_log/BL-326/BL326_327_basic_design.md`。
+
+---
+
+### BL-328: ツール失敗の反復時にヘルパーAIで診断させる汎用機構（発想のみ）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（発想のみ・設計未着手） |
+| 優先度 | P3 |
+| 関連 | BL-326/BL-327（同一インシデントから派生、より軽量な代替としてBL-327が先に採用された） |
+
+1307ログのDetector注釈削除失敗（BL-326）の調査中、ユーザーから「ツール失敗が繰り返された時に
+`--interactive-query`型のヘルパーAIを呼んで診断させてはどうか。第三者（AI）が見れば数字が
+1桁多いとすぐ分かる。機械判定は壊さないためには堅牢だが、何が悪いかを突き止めるのは容易では
+ない」という提案があった。ユーザーの言葉をそのまま記録する:「人間がログで見ればシンプルなのに
+作業中AIがかたくなに失敗する、例えばdetector指摘を一向に直さないなど、ちょっとした介入を
+してあげればスムーズに動くのにといった場面があるので、汎用ヘルパーとしてあったらよいと
+思っている」。
+
+1307ログの具体的な失敗（長文中の数字1文字の相違）についてはBL-327（機械的diffヒント、LLM
+呼び出し不要でコスト・レイテンシ・誤診断リスクが小さい）を軽量な代替として先に採用したが、
+機械的diffでは説明しづらい種類の不一致（意味的な言い換え、構造のズレ、繰り返し失敗の背景に
+ある方針の誤り等）には対応できない。ユーザーが挙げた「Detector指摘を一向に直さない」等の
+より広い停滞パターンも含め、汎用的な「行き詰まったAIを診断するAI」機構は、本セッションでは
+設計・実装せず発想のみ記録する。将来着手する際は、`--interactive-query`（BL-309）の
+読み取り専用ツール構成・DBのみでの追跡可能性という設計思想を踏襲することが自然な出発点となる。
 
 ---
 
