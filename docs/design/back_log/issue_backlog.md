@@ -11539,7 +11539,33 @@ Cline hub daemonの不安定化（"hook dispatch failed"エラー、再起動後
 
 **訂正（当初「5箇所の重複」と報告したが深掘りで訂正）**: `_write_agreement_impl`内の同型箇所3件（`cela_main.py:4041-4049`のSUPERSEDE分岐・`4098-4119`のUPDATE分岐・`4241-4250`のsupersede実行分岐）は、いずれも既にBL-084で`entry_type=="Deliverable"`時のみ`_find_active_deliverable_agreement`（(phase_id, task_id)基準）を使う分岐が入っており、topic文字列一致はDecision/Directive限定（BL-084で意図的にスコープ外とされた設計、コメント明記）——**バグではない**。`_find_prior_superseded`（`11012`）は「前版」ヒント文言を出すだけの表示専用フォールバックで、データを書き換えない——**低リスク、対象外**。実際にBL-084の修正が漏れているのは`17957-17964`の1箇所のみで、これは`_write_agreement_impl`（write_agreementツール本体）とは別の書き込み経路（decision_extractorノード自身の直接書き込みフォールバック）であり、AGENTS.md §13.4（同じ不変条件を全ての書き込み経路で揃える）が想定する型の欠落。`b6f773`自体のtask_idがどのターンでどう誤登録されたか（発生源）は未特定のまま。
 
-**未着手**: 修正方針は、`17957-17964`へBL-084と同型の`entry_type=="Deliverable"`分岐を追加し`_find_active_deliverable_agreement`を再利用する（既存の権威ある識別ロジックへ寄せる、AGENTS.md §15.1）方向で、Plan modeで設計する。あわせて1917の実データ（task_4_2の`decision_what`ポインタ破損）の是正要否・スコープはAGENTS.md §18.3（バックアップ・スコープ明示・承認）に従いユーザーと別途合意する。ライブランは本セッション時点で稼働中（`log/2026-08-31/1917`が最新）。
+**実装**: `17957-17964`を`entry_type=="Deliverable"`分岐（`_find_active_deliverable_agreement`
+再利用、BL-084同様に実体topicへ`target_topic`をスナップ）と非Deliverable分岐（従来のtopic一致を
+維持）へ分割。新規テスト4件（1917再現・非Deliverable非退行・アクティブ行なし時の非退行・
+target_topicドリフト時のスナップ確認）、§17.1リバート確認済み（2/4件が修正なしで失敗することを
+確認）。既存のBL-084/206/212関連テスト24件・decision_extractor系51件で非退行確認、フル
+オフラインスイート2197 passed / 5 deselected。
+
+**§19.1設計レビュー**でCline（`deepseek/deepseek-v4-flash`、デフォルトモデルの日次無料枠上限に
+より一時的に切替。`scripts/cline_review.py`/`cline_review_diff.py`へ`--model`一時上書き引数を
+新設）が、計画作成時点のDBスナップショットが古く、**Deliverable行がもう1件（`AG-1788174791944-9e5eac`、
+task_id='task_4_1'だが内容はtask_4_2のOpEx、2026-08-31 20:13:11作成）新たに生きている**ことを
+発見。ログ精査の結果、これは本BLの修正対象（decision_extractorのfallback経路）とは別に、
+`write_agreement`ツール本体（既にBL-084保護済み）で、User AIの呼び出しが`task_id`引数を
+省略し`_write_agreement_impl`の`tid = args.get("task_id") or task_id`が暗黙に
+`current_task_id`（当時task_4_1のまま、BL-176ブロックの結果）へフォールバックしたことによる、
+**第2の・別種の**識別子不整合と判明（§13.1と同型だが対象が`task_id`引数）。本BLの修正では
+防げないため、スコープ外として明記し別途判断とする。ランは稼働中ではなくPAUSE中
+（`--resume`で再開可能）と訂正。
+
+**§19.4実装後レビュー**でCline（同モデル）が、`git apply -R`による独立revert実験を含めて
+承認（「問題なし、要件どおり実装」）。非ブロッカーの所見3点：①本節のドキュメント更新未反映
+（→本更新で対応）、②fallback経路にはfreezeチェックが元々ない（既存の非対称、スコープ外として
+記録）、③`_write_agreement_impl`の`tid`暗黙フォールバック（上述、BL-331または新規BLへ）。
+
+**残タスク**: (a) 1917実データの是正（`3d60bd`のポインタ修正、`9e5eac`のsupersede化、
+task_4_1の生きている行の復元）はAGENTS.md §18.3に従いユーザーと別途最終確認の上で実施。
+(b) `_write_agreement_impl`の`tid`暗黙フォールバック問題は新規スコープとして別途判断。
 
 ### BL-331: task_id/phase_id/Deliverable識別のDAG（グラフ）ベース再設計
 
