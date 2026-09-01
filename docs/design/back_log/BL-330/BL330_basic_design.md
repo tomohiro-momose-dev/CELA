@@ -181,3 +181,16 @@ else:
 
 実装前に、本計画書を`docs/design/back_log/BL-330/BL330_basic_design.md`として保存する
 （AGENTS.md §4.7、Clineレビュー指摘D）。
+
+---
+
+## 実装後の追記（2026-09-01）
+
+- コード修正・テスト4件・§19.1/§19.4 Clineレビューはすべて完了（`issue_backlog.md` BL-330節、
+  `decision_log.md` D-283参照）。
+- 1917の実データ是正は、DB前方修正案（3d60bdポインタ修正・9e5eac supersede・task_4_1行復元、
+  run以後resume不可）と、checkpoint巻き戻し案（BL-174の`--checkpoint-id`、step=424・
+  checkpoint_id=`1f1a52a2-e16e-64b9-81a8-20cabb45f620`・19:53:20が破損直前の最終クリーン点、
+  ただしtask_4_2のレビュー〜承認〜task_4_5_1指示がすべてやり直しになる）の2案を提示したが、
+  ユーザーが「BL-331でタスクのDAG化をするので、このrunの修正はこれ以上不要」と判断し、
+  どちらも実施せず見送り。run_id=1787890406-1e73a89dは破損したままPAUSE状態で凍結される。

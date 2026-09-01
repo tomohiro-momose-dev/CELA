@@ -110,20 +110,23 @@ CREATE INDEX IF NOT EXISTS idx_relation_edges_run_to ON relation_edges(run_id, t
 - **裸の`entity:<entity_id>`は不可**: `entities`表は`canonical_name`/`entity_type`/`aliases`/`origin`
   のみで値を持たず（値を持つのは`entity_attributes`の各行）、「エンティティそのものを導出する」
   概念が実データ上存在しないため。BL-204の「属性ごとに出典と確度が付く」思想とも整合する。
-- **`task:<task_id>`は不可**: タスクは`state["phases"]`のJSON内にしか存在せず、実表の行として
+- **`task:<task_id>`は不可**（本設計当時。**[BL-331により解消]** BL-331で`tasks`/`phases`実表が
+  導入され、`task:`/`phase:`参照は`_resolve_ref_table`で検証可能になった。以下の却下理由は
+  当時の前提であり、現在は成立しない）: タスクは`state["phases"]`のJSON内にしか存在せず、実表の行として
   検証できない。検証不能な参照型を混ぜることは、まさに`agreements.depends_on`が陥った
   「受理されるが意味を持たない」状態を新テーブル内で再現することになる。タスク粒度の依存は
   既存の`Task.depends_on`＋`_build_task_scope_context`（実際に動いている唯一の機構）のまま残す。
 
-### 関係種別（relation_type）— 3種のみ
+### 関係種別（relation_type）— 4種（当初3種、BL-331で`split_from`追加）
 
 | 種別 | 意味 | 由来する要件 |
 |------|------|--------------|
 | `depends_on` | `to_ref`は`from_ref`を前提として成立する判断・値 | 要件定義§4.2「DAG系譜」 |
 | `supersedes` | `from_ref`（旧案・棄却）が`to_ref`（新案・採用）に置き換えられた。`reason`に負の理由 | F-3.6・F-8.2「正負の理由」 |
 | `derived_from` | `to_ref`は`from_ref`から計算・仮定して導出された値 | F-3.9・BL-219（8,500人問題） |
+| `split_from`（BL-331） | `to_ref`（分割後の新task）は`from_ref`（分割元task）の分割で生まれた | BL-331（task_5_2→task_5_2_1等の分割系譜） |
 
-グラフ走査上は3種とも同一に扱う（`relation_type IN (...)`で絞れる形にする）。種別を分けるのは
+グラフ走査上は4種とも同一に扱う（`relation_type IN (...)`で絞れる形にする）。種別を分けるのは
 表示・説明のためであり、`confirms`/`contradicts`等の投機的な語彙は追加しない。
 
 ---
