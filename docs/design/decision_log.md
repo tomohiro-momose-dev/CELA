@@ -3987,3 +3987,4 @@
 | 2026-08-30 | D-275を追記（単独LLM基線対照実験の設計採用、BL-323起票）。`docs/design/experiment_design_baseline_comparison.md` を新規作成。 |
 | 2026-09-01 | D-282を追記（task_id/phase_id/Deliverable識別のDAGベース化、方向性採用）。BL-330・BL-331を新規起票。 |
 | 2026-09-01 | D-283を追記（BL-330実装完了）。`cela_main.py`修正・テスト4件追加、§19.1/§19.4 Clineレビュー完了。 |
+| 2026-09-01 | D-284を追記（BL-331実装完了、Phase 1）。`tasks`/`phases`テーブル新設・テスト21件追加、§19.1/§19.4 Clineレビュー完了。 |
