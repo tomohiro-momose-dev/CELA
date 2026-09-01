@@ -358,6 +358,7 @@
 | BL-331 | 中 | `cela_main.py`（`tasks`/`phases`テーブル新設、`_sync_task_phase_identity`新設、`_resolve_ref_table`等7箇所へのref語彙追加、`split_from`フィールド・validator拡張）、`tests/test_bl331_tasks_phases_identity.py`（新規21件） | **`done`（Phase 1）。** task_id/phase_id/Deliverable識別をtopic文字列一致でなくDAG（グラフ）ベースの機械的紐づけへ再設計。BL-224（判断の系譜＝なぜ）とは別物で、「今どの記録が生きているか」という識別自体が対象。ユーザーが「CELAは当初state onlyの簡易アーキテクチャで実証確認が目的だったが、実証は十分済んだため堅牢な構造（グラフ等）へ改める」という方向性を明言（2026-09-01）。詳細は下記`### BL-331`セクション参照。 | P2 |
 | BL-332 | 中 | `cela_main.py`（`_validate_task_plan_depends_on_integrity`のsplit_from検証・`call_task_planner`のJSON自己修正リトライループ・`_task_plan_validator`クロージャ、詳細は下記セクション参照） | **`open`。** BL-331の`split_from`系譜が、初回計画のreviewer自己修正ループ内（コミット前）で発生する分割を捕捉できていないスコープギャップ。りんご音楽祭シナリオ実ラン（run_id=1788237935-49645c44）で発見。詳細は下記`### BL-332`セクション参照。 | P2 |
 | BL-333 | 高 | `cela_main.py`（`_query_AI_live`のツールループ、`6709-6802`付近。最終iterationでの`tools`除去処理・ストリームからのtool_calls蓄積処理、詳細は下記セクション参照） | **`open`。** 「最終iterationはtoolsを外してテキスト最終応答を保証する」安全策（BL-016/BL-056b）が実際には保証になっておらず、モデル/プロバイダがtools無しでもtool_calls形式の出力を返し、コード側がそれを無条件実行してしまうためツールループ非収束クラッシュを防げない。りんご音楽祭シナリオ実ラン（run_id=1788237935-49645c44）のクラッシュで発見。詳細は下記`### BL-333`セクション参照。 | P1 |
+| BL-334 | 低 | `scripts/cline_review.py`（`invoke_cline`、詳細は下記セクション参照） | **`open`。** Cline CLIレビュー（AGENTS.md §19）のタイムアウトが繰り返し発生。固定秒数の待機のみでは推論中か本当にフリーズかを区別できないため、ディスクI/O・ネットワークI/Oの両方を監視し、両方が一定時間沈黙したらフリーズとみなす仕組みを検討する。詳細は下記`### BL-334`セクション参照。 | P3 |
 
 ---
 
@@ -11714,3 +11715,23 @@ split_from系譜が記録される再計画（re-plan）後の分割よりも、
 3. 今回のガベージトークン反復（`citations_placeholder`等の大量反復）自体はBL-231/297/298の各反復ガードの対象範囲外だった。tool_calls無視で今回のクラッシュは防げるはずだが、同種の生成崩壊がcontent側の最終テキストで起きた場合に備え、最終iteration専用の反復ガードが必要かも合わせて検討する。
 
 ユーザーへの提示・判断待ち。設計時はPlan mode + Cline独立レビュー（AGENTS.md §19.1）の対象とする。
+
+### BL-334: Cline CLIレビューのタイムアウトを、ディスク/ネットワークI/O沈黙によるフリーズ判定へ拡張する
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P3 |
+| 関連 | AGENTS.md §19（Independent Design Review via Cline CLI）、`scripts/cline_review.py`（`invoke_cline`） |
+
+**発見経緯**: AGENTS.md §19のワークフローでClineへ複数回自動レビューを依頼したところ、タイムアウトがしばしば発生した（2026-08-31にデフォルトタイムアウトを600秒→1200秒へ延長済みだが、根本対策ではない）。ユーザーが「タスクマネージャーでcline.exeのディスクI/Oを見ていると、動いているうちは推論中（コードなどを読んでいる）はず」と指摘し、単純な固定秒数の待機だけでは「まだ処理中で単に時間がかかっている」のか「実際にハングして応答が返らないフリーズ状態」なのかを区別できていない点が課題として明確になった。
+
+**現状の実装**（`scripts/cline_review.py` `invoke_cline`）: `subprocess.run(cmd, timeout=timeout + 30)` による固定秒数の同期待機のみ。プロセスの活動状況を監視する仕組みは無い。
+
+**対応方針（未着手・要設計）**: 以下を軸に検討する。
+1. `cline`プロセスのPIDに対して、ディスクI/O（Windowsでは`Get-Process -Id <PID>`の`ReadTransferCount`/`WriteTransferCount`等、追加の依存関係不要）とネットワークI/O（`Get-Process`には直接のI/Oカウンタが無いため、`Get-Counter`のProcessカウンタセット等、別途調査が必要）を一定間隔でポーリングする。
+2. **両方**が一定時間（閾値は要検討）変化しなければフリーズとみなし、タイムアウト満了を待たずに早期終了・再試行するか、ユーザーに通知する。ディスクI/Oのみ・ネットワークI/Oのみでは、推論中でも「モデルの応答待ちでどちらも動かない」瞬間が普通に存在するため誤検知しうる——両方の沈黙を条件にする設計はユーザー指定通り。
+3. 現在の`invoke_cline`は`subprocess.run`による同期ブロック実装のため、監視ループを組み込むには`subprocess.Popen`＋ポーリングループへの書き換えが必要（設計変更を伴う）。
+4. psutilは未インストール（2026-09-01時点確認）。追加する場合はAGENTS.md ルール2（Controlled Dependencies）に従い、必要性を提案し承認を得てから`requirements.txt`に追加する。PowerShell単体で完結できるなら追加依存を避けられないか先に検討する。
+
+設計時はPlan mode + Cline独立レビュー（AGENTS.md §19.1）の対象とする。
