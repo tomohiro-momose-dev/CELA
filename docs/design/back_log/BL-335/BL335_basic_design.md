@@ -1,4 +1,4 @@
-# BL-334: web_fetch/PDFレンダリング/xlsx実務限界の3段階改善（Phase 1〜3）
+# BL-335: web_fetch/PDFレンダリング/xlsx実務限界の3段階改善（Phase 1〜3）
 
 ## Context
 
@@ -10,7 +10,7 @@
 
 ### ユーザー決定済み事項（前提として扱う）
 
-- **単一BL-334・3 Phase構成**（3つの別BL番号ではない）。`docs/design/back_log/BL-331/BL331_basic_design.md`の形式を踏襲する。
+- **単一BL-335・3 Phase構成**（3つの別BL番号ではない）。`docs/design/back_log/BL-331/BL331_basic_design.md`の形式を踏襲する。
 - **Visionモデルは`glm-5.3-flash`**（`cela_main.py:362`の`glm_5_3_flash`定数、`client_openrouter`経由。OpenRouter公式で"native multimodal model"としてtext/image/video入力対応を確認済み。D-162の13ロール変数、`cela_main.py:411-465`、が既に全てこのモデルを指しており新規モデル配線は不要）。`mimo-v2.5`（`cela_main.py:360`、未配線・テキスト生成崩壊の既往歴あり）は使わない。
 - **Playwrightは`web_fetch`の既定パス**（オプトインではなく常時有効）。Playwright失敗時のみ既存の`httpx`静的取得へフォールバック。キャッシュがURLキー・グローバル・永続（BL-200）であるため、Playwrightのコストは「URLごとに生涯1回」しか発生しない。これは`docs/design/back_log/BL-184/BL184_basic_design.md`が記録するD-157（Google検索自動化のためのChromium/ChromeDriverをユーザー提案→依存重量・ToS・`MAX_TOOL_ITER`圧迫の懸念からBrave Search APIへ変更）とは異なるリスクプロファイルである：検索クエリは呼ぶたびに変化しキャッシュヒットしないため起動コストを毎回払うが、`web_fetch`はURL単位でキャッシュヒットするため償却される。「一度起動したブラウザプロセスをプロセス生涯にわたって使い回す」設計は`_PythonReplSession`（`cela_main.py:644-732`）の「毎回起動コストを払わない」思想と同型。ページ/コンテキストごとにクローズ、ブラウザ自体は使い回す。
 - **PDFラスタライズライブラリはpypdfium2**（BSD/Apache系のクリーンなライセンス、Google PDFiumのバインディング）。PyMuPDF（AGPL-3.0）は不採用。
@@ -32,7 +32,7 @@ _BROWSER = None                # Chromium Browserインスタンス（プロセ�
 _PAGES_RENDERED_SINCE_LAUNCH = 0
 
 def _ensure_browser():
-    """[BL-334] プロセス生涯で1つのChromiumを起動・使い回す遅延シングルトン。
+    """[BL-335] プロセス生涯で1つのChromiumを起動・使い回す遅延シングルトン。
     _PythonReplSession（cela_main.py）の「起動コストを毎回払わない」思想と同型。"""
     global _PLAYWRIGHT, _BROWSER
     if _BROWSER is not None:
@@ -43,7 +43,7 @@ def _ensure_browser():
     return _BROWSER
 
 def _shutdown_browser() -> None:
-    """[BL-334] atexitフックとテストのteardown両方から呼ぶ。"""
+    """[BL-335] atexitフックとテストのteardown両方から呼ぶ。"""
     global _PLAYWRIGHT, _BROWSER
     if _BROWSER is not None:
         try:
@@ -194,7 +194,7 @@ def fetch_and_extract(url: str) -> str:
 _RAW_CACHEABLE_EXTENSIONS = (".pdf", ".xlsx", ".xls")
 
 def raw_cache_file_path(url: str, extension: str) -> Path:
-    """[BL-334] cache_file_path()と同じsha256(url)[:16]ハッシュを使い、拡張子だけ差し替える
+    """[BL-335] cache_file_path()と同じsha256(url)[:16]ハッシュを使い、拡張子だけ差し替える
     （.mdと同じキーで見つけられるようにする、AGENTS.md §15.1）。"""
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
     return Path(WEB_CACHE_DIR) / f"{digest}{extension}"
@@ -206,9 +206,9 @@ def write_raw_cache(path: Path, raw: bytes) -> None:
 
 `fetch_and_extract`内、サイズ上限チェック通過後・`convert_stream`呼び出し前に、`url_extension in _RAW_CACHEABLE_EXTENSIONS`なら`write_raw_cache`する（markitdown変換が例外送出しても既に書き込み済みのため、テキスト抽出が完全失敗したPDFでもPhase 2のvisionツールは使える）。
 
-**既存キャッシュ済みURLに対する出口の欠落（Cline手動レビューR2、要対応）**: この生バイト保存は`fetch_and_extract`の実取得経路にしか無く、`web_fetch_handler`は`.md`キャッシュヒット時に実取得自体をスキップする（`web_tools.py:649-679`）。したがって**BL-334適用前に既に`.md`だけキャッシュ済みのPDF/xlsx URLは、再度`web_fetch`してもキャッシュヒットで終わるため兄弟の生バイトファイルが永久に生成されない**。「もう一度fetchすればrawが手に入る」という案内はこのケースで嘘になる（AGENTS.md §15.4: 出口を明示しないまま入口だけ作らない）。
+**既存キャッシュ済みURLに対する出口の欠落（Cline手動レビューR2、要対応）**: この生バイト保存は`fetch_and_extract`の実取得経路にしか無く、`web_fetch_handler`は`.md`キャッシュヒット時に実取得自体をスキップする（`web_tools.py:649-679`）。したがって**BL-335適用前に既に`.md`だけキャッシュ済みのPDF/xlsx URLは、再度`web_fetch`してもキャッシュヒットで終わるため兄弟の生バイトファイルが永久に生成されない**。「もう一度fetchすればrawが手に入る」という案内はこのケースで嘘になる（AGENTS.md §15.4: 出口を明示しないまま入口だけ作らない）。
 
-**採用する解決策**: `read_pdf_page_as_image`/Phase 3のREPL読み取りヘルパーは、対応する兄弟の生バイトファイルが存在しない場合、再ダウンロードを試みず**「このPDF/xlsxはBL-334適用前にキャッシュされたため生バイトが無く、画像化/pandas読み込みはできません。再度web_fetchで生成し直すには、キャッシュファイルを手動で削除する必要があります」という恒久的な明示エラー**を返す（軽量案）。生バイトのみの再ダウンロードを許す案は、予算管理・SSRF経路の再考が必要になる重量案のため本BLではスコープ外とする（既存の「スコープ外」節に追記）。この挙動を`_PDF_VISION_USAGE_PARAGRAPH`・`PYTHON_REPL_TOOL`descriptionの両方に明記する。
+**採用する解決策**: `read_pdf_page_as_image`/Phase 3のREPL読み取りヘルパーは、対応する兄弟の生バイトファイルが存在しない場合、再ダウンロードを試みず**「このPDF/xlsxはBL-335適用前にキャッシュされたため生バイトが無く、画像化/pandas読み込みはできません。再度web_fetchで生成し直すには、キャッシュファイルを手動で削除する必要があります」という恒久的な明示エラー**を返す（軽量案）。生バイトのみの再ダウンロードを許す案は、予算管理・SSRF経路の再考が必要になる重量案のため本BLではスコープ外とする（既存の「スコープ外」節に追記）。この挙動を`_PDF_VISION_USAGE_PARAGRAPH`・`PYTHON_REPL_TOOL`descriptionの両方に明記する。
 
 #### 2.3 新規ツール: `read_pdf_page_as_image`（AIオプトイン）
 
@@ -216,7 +216,7 @@ def write_raw_cache(path: Path, raw: bytes) -> None:
 
 ```python
 def render_pdf_page_to_png_bytes(pdf_bytes: bytes, page_number: int, dpi: int = 150) -> bytes:
-    """[BL-334] 1-indexed page_number をPNGへレンダリングする（pypdfium2使用）。"""
+    """[BL-335] 1-indexed page_number をPNGへレンダリングする（pypdfium2使用）。"""
 ```
 
 ツールスキーマ・ハンドラ・vision呼び出しはcela_main.py側に置く：
@@ -227,7 +227,7 @@ READ_PDF_PAGE_AS_IMAGE_TOOL = {
     "function": {
         "name": "read_pdf_page_as_image",
         "description": (
-            "[BL-334] Render a specific page of a cached PDF as an image and get a vision-model "
+            "[BL-335] Render a specific page of a cached PDF as an image and get a vision-model "
             "transcription/description of it. Use this INSTEAD OF trusting the plain-text extraction "
             "when that text looks broken: single kanji/kana characters split onto separate lines "
             "(vertical Japanese table headers often extract this way, e.g. '青森' becoming two lines "
@@ -306,7 +306,7 @@ import socket as _socket_module
 
 class _NetworkDisabledSocket:
     def __init__(self, *args, **kwargs):
-        raise OSError("[BL-334] Network access is disabled inside the python_repl sandbox. "
+        raise OSError("[BL-335] Network access is disabled inside the python_repl sandbox. "
                       "Use read_cached_bytes(path) to read files from web_cache/ instead.")
 
 _socket_module.socket = _NetworkDisabledSocket
@@ -323,14 +323,14 @@ from pathlib import Path
 
 class _NetworkDisabledSocket:
     def __init__(self, *args, **kwargs):
-        raise OSError("[BL-334] Network access is disabled inside the python_repl sandbox. "
+        raise OSError("[BL-335] Network access is disabled inside the python_repl sandbox. "
                       "Use read_cached_bytes(path) to read files from web_cache/ instead.")
 _socket_module.socket = _NetworkDisabledSocket
 
 _WEB_CACHE_BASE_DIR = Path({{web_cache_dir!r}}).resolve()
 
 def read_cached_bytes(path):
-    # [BL-334] web_cache/配下のみ読める限定ファイルIO。read_reference_file_handler
+    # [BL-335] web_cache/配下のみ読める限定ファイルIO。read_reference_file_handler
     # （web_tools.py）と同じresolve-and-containパターン。open()自体は禁止のまま、
     # この1関数だけがLLM生成コードから呼べる例外。パス脱出はValueErrorとして
     # 通常のREPLランタイムエラーと同様にtracebackで可視化される。
@@ -363,13 +363,13 @@ while True:
 - Phase 2: 動画/音声等、markitdownの他の未配線コンバータ（既存スコープ外のまま）。
 - Phase 3: `_ALLOWED_IMPORTS`へのopenpyxl直接追加（pandas内部呼び出しのみで足りるため不要と結論、再検討の必要が生じたら別途）。
 - 3 Phaseいずれも: 既存run群への遡及適用（過去のキャッシュ済み`.md`に対する再fetch/再rasterize等のバックフィル）は対象外。
-- Phase 2/3: BL-334適用前にキャッシュ済み（`.md`のみ・兄弟の生バイトファイル無し）のPDF/xlsx URLに対する生バイトのみの再ダウンロード救済（Cline手動レビューR2の重量案）。恒久的な明示エラーで対応する軽量案を採用（§2.2参照）。
+- Phase 2/3: BL-335適用前にキャッシュ済み（`.md`のみ・兄弟の生バイトファイル無し）のPDF/xlsx URLに対する生バイトのみの再ダウンロード救済（Cline手動レビューR2の重量案）。恒久的な明示エラーで対応する軽量案を採用（§2.2参照）。
 
 ---
 
 ## テスト方針（§17.1）
 
-**Phase 1（`tests/test_bl334_playwright_fetch.py`新設）**
+**Phase 1（`tests/test_bl335_playwright_fetch.py`新設）**
 1. `web_tools._ensure_browser`/`sync_playwright`をmonkeypatchで完全に差し替え、テストで実ブラウザを一切起動しない。
 2. `.pdf`等の`_DOCUMENT_EXTENSIONS`URLはPlaywrightに一切触れず既存httpx経路へ直行すること。
 3. Playwright成功（HTML返却）→`_MARKITDOWN.convert_stream`が呼ばれ、既存のリンク解決・切り詰め処理が変わらず適用されること。
@@ -381,10 +381,10 @@ while True:
 9. **[Cline手動レビューR1]** リダイレクト方針転換後: httpx経路が`follow_redirects=True`で301/302等を追従し、最終着地URLが`validate_url_for_fetch`で検証されること（従来の「301/302は即`SsrfBlockedError`」という既存テストは新方針に合わせて更新）。プライベートIPへのリダイレクトはブロックされること。
 10. **[Cline手動レビューR3]** Playwright経由のHTMLが`_MAX_FETCH_BYTES`を超える場合、httpx経路へフォールスルーすること（巨大SPA HTMLの模擬データで検証）。
 11. **[Cline手動レビューR4]** `page.goto()`の応答が4xx/5xxの場合、Playwright結果を破棄しhttpx経路へフォールスルーし、httpx側の`raise_for_status()`で従来通りエラー化されること。
-12. **[Cline手動レビューR2]** BL-334適用前にキャッシュ済み（`.md`のみ、兄弟の生バイトファイル無し）のPDF URLに対し`read_pdf_page_as_image`を呼ぶと、再ダウンロードせず恒久的な明示エラーを返すこと（`tests/test_bl334_pdf_vision.py`側に配置）。
+12. **[Cline手動レビューR2]** BL-335適用前にキャッシュ済み（`.md`のみ、兄弟の生バイトファイル無し）のPDF URLに対し`read_pdf_page_as_image`を呼ぶと、再ダウンロードせず恒久的な明示エラーを返すこと（`tests/test_bl335_pdf_vision.py`側に配置）。
 13. 各項目を個別にrevertし、対応するテストが失敗することを確認した上で復元する。
 
-**Phase 2（`tests/test_bl334_pdf_vision.py`新設、実PDFフィクスチャが必要）**
+**Phase 2（`tests/test_bl335_pdf_vision.py`新設、実PDFフィクスチャが必要）**
 1. 最小限の有効なPDFバイト列を新規フィクスチャとして用意し、`render_pdf_page_to_png_bytes`が実際にPNGバイト列を返すことを検証（実PDFパースを伴う初のテスト）。
 2. `client_openrouter.chat.completions.create`をmonkeypatchし、実API呼び出しなしで`_read_pdf_page_as_image_handler`のフルパスを検証。
 3. `max_pdf_vision_calls`上限到達時のエラー化、キャッシュヒット時に上限を消費せずAPI呼び出しをスキップすること。
@@ -392,7 +392,7 @@ while True:
 5. 生バイト列キャッシュ（`write_raw_cache`）: markitdown変換が例外を送出しても`.pdf`ファイルが書き込み済みであること。
 6. Vision API呼び出し失敗時、カウンタ・キャッシュとも変更されず`{"status":"error"}`が返ること。
 
-**Phase 3（`tests/test_bl334_repl_pandas.py`新設、実xlsxフィクスチャが必要）**
+**Phase 3（`tests/test_bl335_repl_pandas.py`新設、実xlsxフィクスチャが必要）**
 1. `openpyxl.Workbook()`で最小xlsxバイト列を生成し`web_cache/`に配置、`read_cached_bytes`経由で`pandas.read_excel`が実際に読めることをサブプロセス経由（`_PythonReplSession`実運用相当）で検証。
 2. `read_cached_bytes`のパス脱出拒否（`../`等）。
 3. `_ALLOWED_IMPORTS`に`pandas`/`io`が追加され、それ以外の未許可importは従来通り拒否されること（`_check_repl_code_safety`の既存テストとの非退行）。
@@ -424,8 +424,8 @@ while True:
   - `PYTHON_REPL_TOOL`説明文更新。
   - `LineageState`/`AppConfig`/`_RUNTIME_TOOL_LIMIT_KEYS`/`_resume_config_overrides_from`: `max_pdf_vision_calls`追加。
 - `requirements.txt`: `playwright`・`pandas`・`openpyxl`・`pypdfium2`追加、`playwright install chromium`のセットアップ手順注記。
-- `tests/test_bl334_playwright_fetch.py`・`tests/test_bl334_pdf_vision.py`・`tests/test_bl334_repl_pandas.py`（いずれも新規）。
-- `docs/design/back_log/BL-334/BL334_basic_design.md`（本計画を保存）。
+- `tests/test_bl335_playwright_fetch.py`・`tests/test_bl335_pdf_vision.py`・`tests/test_bl335_repl_pandas.py`（いずれも新規）。
+- `docs/design/back_log/BL-335/BL335_basic_design.md`（本計画を保存）。
 
 ### 実装着手前にユーザー判断が必要な未確定事項（一覧）
 
@@ -435,9 +435,9 @@ while True:
 3. `requirements.txt`新規4依存（playwright/pandas/openpyxl/pypdfium2）のバージョンpin方針。
 4. Vision呼び出しヘルパーをリトライなし単発呼び出しとする設計判断の是非。
 
-## 独立レビュー所見（自動Cline §19.1レビューは実行環境の不調で完走せず省略、ユーザー自身が手動でCline相当のレビューを実施——`docs/design/back_log/BL-334/BL334_review.md`）
+## 独立レビュー所見（自動Cline §19.1レビューは実行環境の不調で完走せず省略、ユーザー自身が手動でCline相当のレビューを実施——`docs/design/back_log/BL-335/BL335_review.md`）
 
-自動`scripts/cline_review.py`はモデル・ハブ再起動を変えても4回連続でタイムアウトしたため、ユーザー了承のもと自動実行は省略。代わりにユーザーが計画書をCline（相当）へ手動投入しレビューさせ、その結果を`docs/design/back_log/BL-334/BL334_review.md`として保存した。指摘4件（R1〜R4）はいずれも実コードと突き合わせ確認済み（§16.2）で、上記の設計本文へ全て反映済み——R1（リダイレクト方針転換）・R2（既存キャッシュ済みURLの生バイト欠落への恒久エラー対応）・R3（Playwright経路へのサイズ上限チェック追加）・R4（4xx/5xxのフォールスルー）。「0. 検証済み事実」節（同レビューファイル内）で計画の全ファイル:行番号主張・実データ証拠主張も実コードと突合済みであることが確認されている。
+自動`scripts/cline_review.py`はモデル・ハブ再起動を変えても4回連続でタイムアウトしたため、ユーザー了承のもと自動実行は省略。代わりにユーザーが計画書をCline（相当）へ手動投入しレビューさせ、その結果を`docs/design/back_log/BL-335/BL335_review.md`として保存した。指摘4件（R1〜R4）はいずれも実コードと突き合わせ確認済み（§16.2）で、上記の設計本文へ全て反映済み——R1（リダイレクト方針転換）・R2（既存キャッシュ済みURLの生バイト欠落への恒久エラー対応）・R3（Playwright経路へのサイズ上限チェック追加）・R4（4xx/5xxのフォールスルー）。「0. 検証済み事実」節（同レビューファイル内）で計画の全ファイル:行番号主張・実データ証拠主張も実コードと突合済みであることが確認されている。
 
 さらに私自身のセルフレビューとして以下3点を追加で反映する：
 
@@ -448,5 +448,5 @@ while True:
 ## 実装後の手順
 
 - AGENTS.md §19.4（diff-based独立レビュー）を実施し、指摘を実コードで検証の上反映。
-- `issue_backlog.md`（BL-334節を`open`→`done`）を更新。
+- `issue_backlog.md`（BL-335節を`open`→`done`）を更新。
 - ロールアウト後、既存の正常系フェッチ（httpx時代に問題なく取得できていたURL）に対しPlaywright経由での応答内容差異が無いか、直近のドライランログで確認する（上記所見3）。

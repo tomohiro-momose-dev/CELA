@@ -3969,17 +3969,17 @@
 
 ---
 
-### D-285: BL-334 Phase 1 — web_fetchのリダイレクト追従方針をPlaywright導入に合わせて転換
+### D-285: BL-335 Phase 1 — web_fetchのリダイレクト追従方針をPlaywright導入に合わせて転換
 
 | 項目 | 内容 |
 |------|------|
 | 日付 | 2026-09-01 |
 | 状態 | `decided` |
 | 決定者 | t-momose（AskUserQuestionで「追従する方針へ転換（推奨）」を選択） |
-| **決定理由** | BL-334でCELAの外部情報取得パイプラインにPlaywright（ヘッドレスChromium）による描画フェッチを導入するにあたり、既存の`fetch_and_extract`（`web_tools.py`）が301/302/303/307/308を`SsrfBlockedError`で明示的に拒否していた設計（BL-184時、リダイレクト経由のSSRFバイパスを構造的に防ぐ意図）と、Playwrightの`page.goto()`が透過的にリダイレクトを追従する挙動が矛盾することが独立レビュー（ユーザーが手動でCline相当のレビューを実施、`docs/design/back_log/BL-334/BL334_review.md` R1）で指摘された。同じ`web_fetch`ツールが経路（Playwright/httpx）によって振る舞いが変わる二重動作（AGENTS.md §15.1違反）を放置するか、Playwright側も非追従に制限するか、リダイレクト追従自体を許可する方向へ転換するかの3案のうち、ユーザーは「追従する方針へ転換」を選択した。SSRFバイパス対策は最終着地URLの再検証（`validate_url_for_fetch`をリダイレクト後の`resp.url`/`page.url`に対しても呼ぶ）と、Playwright側のサブリソースroute guard（`context.route("**/*", _ssrf_route_guard)`、全リクエストを個別に検証）で構造的に維持されるため、追従を許可してもSSRF安全性は損なわれないと判断した。 |
+| **決定理由** | BL-335でCELAの外部情報取得パイプラインにPlaywright（ヘッドレスChromium）による描画フェッチを導入するにあたり、既存の`fetch_and_extract`（`web_tools.py`）が301/302/303/307/308を`SsrfBlockedError`で明示的に拒否していた設計（BL-184時、リダイレクト経由のSSRFバイパスを構造的に防ぐ意図）と、Playwrightの`page.goto()`が透過的にリダイレクトを追従する挙動が矛盾することが独立レビュー（ユーザーが手動でCline相当のレビューを実施、`docs/design/back_log/BL-335/BL335_review.md` R1）で指摘された。同じ`web_fetch`ツールが経路（Playwright/httpx）によって振る舞いが変わる二重動作（AGENTS.md §15.1違反）を放置するか、Playwright側も非追従に制限するか、リダイレクト追従自体を許可する方向へ転換するかの3案のうち、ユーザーは「追従する方針へ転換」を選択した。SSRFバイパス対策は最終着地URLの再検証（`validate_url_for_fetch`をリダイレクト後の`resp.url`/`page.url`に対しても呼ぶ）と、Playwright側のサブリソースroute guard（`context.route("**/*", _ssrf_route_guard)`、全リクエストを個別に検証）で構造的に維持されるため、追従を許可してもSSRF安全性は損なわれないと判断した。 |
 | 決定内容 | `web_tools.fetch_and_extract`のhttpx経路を`follow_redirects=False`＋301/302等の即時`SsrfBlockedError`化から、`follow_redirects=True`＋最終着地URL（`resp.url`）の`validate_url_for_fetch`再検証へ変更した。Playwright経路（`_fetch_html_via_playwright`）も同じ最終URL再検証パターンを採用し、両経路でリダイレクト追従の扱いを統一した（AGENTS.md §15.1）。`WEB_FETCH_TOOL`のdescription文言（`cela_main.py`）から「Redirects are NOT followed」を削除し、リダイレクトは追従され最終URLもSSRF検証される旨に更新した。 |
 | 影響 | `web_tools.py`（`fetch_and_extract`/`_fetch_via_httpx_and_convert`/`_fetch_html_via_playwright`）、`cela_main.py`（`WEB_FETCH_TOOL`description）、`tests/test_bl184_web_tools.py`（`test_fetch_and_extract_blocks_redirect`を`test_fetch_and_extract_follows_redirect_and_validates_final_url`・`test_fetch_and_extract_blocks_redirect_to_private_ip`へ置き換え）。§17.1リバート確認済み——初回の revert-verify では`follow_redirects`の値をfakeクライアントが実際には解釈しないため検証が素通りする弱いテストだったことが判明し、`httpx.Client(**kwargs)`へ渡された引数自体を捕捉して直接アサートする形へ強化した上で再度リバート確認（不在時に実際に失敗することを確認）。 |
-| 関連 BL | BL-334（本件）、BL-184（元の非追従設計の起点）、AGENTS.md §15.1・§17.1 |
+| 関連 BL | BL-335（本件）、BL-184（元の非追従設計の起点）、AGENTS.md §15.1・§17.1 |
 
 ---
 
@@ -4006,4 +4006,4 @@
 | 2026-09-01 | D-282を追記（task_id/phase_id/Deliverable識別のDAGベース化、方向性採用）。BL-330・BL-331を新規起票。 |
 | 2026-09-01 | D-283を追記（BL-330実装完了）。`cela_main.py`修正・テスト4件追加、§19.1/§19.4 Clineレビュー完了。 |
 | 2026-09-01 | D-284を追記（BL-331実装完了、Phase 1）。`tasks`/`phases`テーブル新設・テスト21件追加、§19.1/§19.4 Clineレビュー完了。 |
-| 2026-09-01 | D-285を追記（BL-334 Phase 1実装、web_fetchのリダイレクト追従方針転換）。Playwright常設フェッチ・raw_cache_file_path等をweb_tools.pyへ追加、tests/test_bl334_playwright_fetch.py新規14件、既存test_bl184_web_tools.py改修、§17.1リバート確認済み。 |
+| 2026-09-01 | D-285を追記（BL-335 Phase 1実装、web_fetchのリダイレクト追従方針転換）。Playwright常設フェッチ・raw_cache_file_path等をweb_tools.pyへ追加、tests/test_bl335_playwright_fetch.py新規14件、既存test_bl184_web_tools.py改修、§17.1リバート確認済み。 |

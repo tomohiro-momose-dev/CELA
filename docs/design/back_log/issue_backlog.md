@@ -359,6 +359,7 @@
 | BL-332 | 中 | `cela_main.py`（`_validate_task_plan_depends_on_integrity`のsplit_from検証・`call_task_planner`のJSON自己修正リトライループ・`_task_plan_validator`クロージャ、詳細は下記セクション参照） | **`open`。** BL-331の`split_from`系譜が、初回計画のreviewer自己修正ループ内（コミット前）で発生する分割を捕捉できていないスコープギャップ。りんご音楽祭シナリオ実ラン（run_id=1788237935-49645c44）で発見。詳細は下記`### BL-332`セクション参照。 | P2 |
 | BL-333 | 高 | `cela_main.py`（`_query_AI_live`のツールループ、`6709-6802`付近。最終iterationでの`tools`除去処理・ストリームからのtool_calls蓄積処理、詳細は下記セクション参照） | **`open`。** 「最終iterationはtoolsを外してテキスト最終応答を保証する」安全策（BL-016/BL-056b）が実際には保証になっておらず、モデル/プロバイダがtools無しでもtool_calls形式の出力を返し、コード側がそれを無条件実行してしまうためツールループ非収束クラッシュを防げない。りんご音楽祭シナリオ実ラン（run_id=1788237935-49645c44）のクラッシュで発見。詳細は下記`### BL-333`セクション参照。 | P1 |
 | BL-334 | 低 | `scripts/cline_review.py`（`invoke_cline`・`_drain_stream`、詳細は下記セクション参照） | **`done`。** Cline CLIレビュー（AGENTS.md §19）のタイムアウト連発を解消。当初案（プロセスI/Oカウンタ監視）は2回とも実運用で誤検知（正常な長考中にkill）したため設計変更し、このタスク自身の`--json`stdout行到着間隔を監視する方式へ切替。実測で誤検知なく591秒のレビューが完走することを確認。詳細は下記`### BL-334`セクション参照。 | P3 |
+| BL-335 | 中 | `web_tools.py`（`fetch_and_extract`・`_fetch_html_via_playwright`・`_ssrf_route_guard`・`raw_cache_file_path`等）、`cela_main.py`（`WEB_FETCH_TOOL`description）、`tests/test_bl335_playwright_fetch.py`（新規14件）、`tests/test_bl184_web_tools.py`（改修）、詳細は下記セクション参照 | **`open`（Phase 1のみ`done`）。** web_fetch/PDFレンダリング/xlsx実務限界の3段階改善。Phase 1（Playwright描画フェッチを既定パス化、リダイレクト追従方針転換＝D-285）は実装・テスト済み。Phase 2（PDFページ画像化→glm-5.3-flash Vision）・Phase 3（python_repl内pandasアクセス、socket無効化によるSSRF迂回対策）は未着手。設計は`docs/design/back_log/BL-335/BL335_basic_design.md`参照（旧BL-334番号から本セッションで振り直し、Cline CLIレビュー機構自体の改善＝別件がBL-334番号を先取していたための衝突解消）。詳細は下記`### BL-335`セクション参照。 | P2 |
 
 ---
 
@@ -11733,3 +11734,23 @@ split_from系譜が記録される再計画（re-plan）後の分割よりも、
 **採用実装: stdout行到着間隔の監視**: `invoke_cline`が既に持っていた`--json`stdout/stderrの非同期読み取りスレッド（`_drain_stream`、パイプのフルバッファによるデッドロック回避のため元々必要）に、行を受信するたびに`activity["last"] = time.monotonic()`を刻む処理を追加。メインループは`_ACTIVITY_CHECK_INTERVAL_SECONDS`（10秒）ごとにこの値を確認し、`_FREEZE_SILENCE_SECONDS`（300秒）沈黙したらプロセスをkillする。プロセスI/Oカウンタと異なり「このタスク固有の出力ストリーム」だけを見るため、hub共有による誤検知が構造的に起きない。`--json`出力を実地観察すると、モデルの`reasoning`思考中もトークン単位でcontent deltaイベントがストリーミングされるため、本当に何も届かない状態はプロバイダが実際に無応答（レート制限・接続断等）になっているケースに限られると判断した。`timeout`パラメータ（デフォルト3600秒）は安全網として残し、フリーズ検知の主判定はI/O沈黙側に委ねる形へ設計変更した。
 
 **検証**: 誤検知を起こした`docs/design/experiment_design_baseline_comparison.md`のレビュー（`thinking=medium`）を新実装で再実行し、591.2秒かけてkillされることなく完走、86行の実質的なレビュー内容を得たことを確認した（2026-09-01）。
+
+### BL-335: web_fetch/PDFレンダリング/xlsx実務限界の3段階改善（Phase 1〜3）
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open`（Phase 1のみ`done`） |
+| 優先度 | P2 |
+| 関連 | BL-184/BL-188/BL-200/BL-221（web_fetch/markitdown系譜）、D-157（Chromium常設化はD-157のBrave Search API採用時とはコスト構造が異なると判断、`docs/design/back_log/BL-184/BL184_basic_design.md`参照）、D-285（Phase 1のリダイレクト追従方針転換）、AGENTS.md §13・§15.1・§15.4・§17.1・§19.1・§19.4 |
+
+**発見経緯**: りんご音楽祭シナリオ実ランのログ監査中、ユーザーから3件の実害が指摘された：(1) CAMPFIREクラウドファンディングページ（JS描画コンテンツ）が静的`httpx`取得では本文を一切拾えていない、(2) 警察庁PDF等の縦書き表ヘッダがpdfminer抽出で「青森」→「森」「青」のように分離・意味不明化する、地図PDFはテキスト抽出自体が原理的に無意味、(3) 茅野市の人口統計xlsxがブロック横並び＋装飾ガター列構成のため、markitdown経由のMarkdownダンプがNaNだらけで実質使えない。
+
+**設計方針**: 単一BL・3 Phase構成。設計書は`docs/design/back_log/BL-335/BL335_basic_design.md`（旧称BL-334、Cline CLIレビュー機構自体の改善＝上記`### BL-334`セクションが別件として先にBL-334番号を占めていたため、本セッション中に番号衝突を解消してBL-335へ振り直した。フォルダ名・テストファイル名・decision_log.mdのD-285本文も合わせて改名済み）。
+
+1. **Phase 1（`done`）**: `web_tools.fetch_and_extract`にPlaywright（ヘッドレスChromium、プロセス生涯で1つ使い回す遅延シングルトン）による描画フェッチを既定パスとして追加し、失敗時のみ既存の静的`httpx`取得へフォールバックする。副次的に、Cline独立レビュー（ユーザー手動実施、`BL335_review.md` R1）の指摘を受け、リダイレクト追従方針を「非追従（即`SsrfBlockedError`）」から「追従を許可し最終着地URLを`validate_url_for_fetch`で再検証」へ転換した（D-285、httpx・Playwright双方の経路で統一）。全サブリソースリクエストに対する`context.route`ベースのSSRF route guardも追加。`tests/test_bl335_playwright_fetch.py`（新規14件）・`tests/test_bl184_web_tools.py`（改修）で検証済み、§17.1リバート確認済み。
+   **実装後diffレビュー（AGENTS.md §19.4、Cline CLI・glm-5.3-flash明示指定・2026-09-01）で2件の確定バグを検出し即日修正**（§16.2に基づき実コードで再現確認済み、§17.1リバート確認済み）：(F1・高) `_fetch_html_via_playwright`の`_ensure_browser()`/`browser.new_context()`/`context.route()`がtry節の外にあり、chromium未インストール等の起動失敗がdocstringの「httpxへフォールバック」契約に反して例外のまま伝播し、web_fetchが全面的に使用不能になりうる欠陥だった。起動系3行をtry内へ移し修正（`test_playwright_browser_launch_failure_falls_back_to_httpx`・`test_playwright_context_creation_failure_falls_back_to_httpx`で検証）。(F2・中) リダイレクト追従（D-285）後の相対リンク解決が、Playwright・httpx両経路とも着地URLでなく元urlを基準にしており、ホストが変わるリダイレクトで誤った絶対URLを生成していた。`_fetch_html_via_playwright`の戻り値を`(html, landed_url)`のタプルへ変更し、両経路とも着地URLを基準にするよう修正（`test_playwright_relative_links_resolved_against_landed_url`・`test_httpx_relative_links_resolved_against_landed_url`で検証）。テスト計113件（新規4件追加）全パス。なお1回目のレビュー実行はCline CLIの永続デフォルトモデルが`z-ai/glm-5.3-flash`設定にもかかわらず実際には`deepseek/deepseek-v4-flash`で走り（原因未特定）、かつ全出力が`reasoning`型コンテンツに入り最終`text`が空になったため`invoke_cline`が「no run_result text」エラーで失敗する副作用（3.4MBの生JSONがstderrへ丸ごと出力）も観測した——`--model z-ai/glm-5.3-flash`明示指定の再実行で解消。
+2. **Phase 2（未着手）**: pypdfium2でPDFページをPNGラスタライズし、glm-5.3-flash（`client_openrouter`、D-162の既存13ロール変数がいずれも指す現行モデル）へvision入力として渡し、転記/説明を得る新規ツール`read_pdf_page_as_image`。縦書き分離・文字重複・`(cid:xxxx)`未マップグリフ・地図等の空間情報をAIが自己判断でオプトイン利用する設計。既存キャッシュ済み（`.md`のみ、生バイト無し）URLに対する再取得は行わず恒久的な明示エラーを返す（Cline手動レビューR2）。
+3. **Phase 3（未着手）**: `python_repl`サンドボックス（`_PythonReplSession`）の`_ALLOWED_IMPORTS`へ`pandas`・`io`を追加し、`read_cached_bytes(path)`ヘルパー（`web_cache/`配下限定のresolve-and-containパターン）経由でxlsx等をpandasで直接読み込めるようにする。pandas追加は既存の「ゼロI/O/ネットワーク」不変条件を初めて破るため、REPL子プロセス側で`socket.socket`を常時`OSError`にする差し替えを行いSSRF迂回を構造的に遮断する（プロンプト注意書きのみでは不十分と判断、ユーザー承認済み）。`subprocess.Popen(["python", ...])`のPATH解決も`sys.executable`へ変更する。
+
+**未確定事項・実装後の手順**: `BL335_basic_design.md`の「実装着手前にユーザー判断が必要な未確定事項」「独立レビュー所見」「実装後の手順」各節を参照。Phase 2/3完了後、AGENTS.md §19.4のdiff独立レビューを全Phase合算のdiffに対して実施し、本エントリを`done`へ更新すること。
+
