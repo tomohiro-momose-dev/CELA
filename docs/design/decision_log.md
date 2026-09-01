@@ -3941,6 +3941,20 @@
 
 ---
 
+### D-284: BL-331実装 — tasks/phasesテーブル新設によるtask_id/phase_id識別のDAG化（Phase 1）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-09-01 |
+| 状態 | `decided` |
+| 決定者 | t-momose（Plan mode内でAskUserQuestionにより4点の設計判断を確認・選択。§19.1/§19.4のCline指摘反映も承認） |
+| **決定理由** | BL-330の根本原因調査で、CELAには「task_id/phase_idが今現在実在するか」を検証できるDBテーブルが1つも存在しないことが判明した。BL-224の`relation_edges`は`task:<task_id>`参照型を「タスクは`state["phases"]`のJSON内にしか存在せず、実表の行として検証できない」という理由で明示的に却下していた。3並列Explore agent調査（現状のtask_id識別機構・BL-224の却下理由の詳細・task_planner再計画の全体構造）とPlan agentによる設計案を経て、この欠けていた「タスク/フェーズの正本（identity）」を実テーブルとして導入し、`task:`/`phase:`参照をBL-224の既存インフラへ追加することで埋める方針を提示。ユーザーは4点の設計判断（(1) phasesテーブルも今回作る、(2) `task:`参照はstatus不問で解決、(3) タスク分割系譜は新規`split_from` relation_typeを追加、(4) 既存runへのバックフィルは別BLへ分離）を全てAskUserQuestionで確認・選択した。 |
+| 決定内容 | 新規`tasks`/`phases`テーブル（`PRIMARY KEY (run_id, task_id)`/`(run_id, phase_id)`）を導入し、`task_planner_node`が計画確定のたびに`_sync_task_phase_identity`で同期する（BL-329が既に計算済みの復元/supersede判定をそのまま再利用、判定ロジックを重複させない）。`_resolve_ref_table`等7箇所へ`task:`/`phase:`参照プレフィックスを追加。タスク分割系譜（task_5_2→task_5_2_1）は`Task.split_from`フィールド＋新規`split_from` relation_type（4種目）のrelation_edgesエッジとして記録し、`_validate_task_plan_depends_on_integrity`を`existing_phases`引数へ拡張して整合性を検証する。 |
+| 影響 | `cela_main.py`（`tasks`/`phases`テーブル・`_sync_task_phase_identity`新設、`_resolve_ref_table`等7箇所・`Task` TypedDict・`_validate_task_plan_depends_on_integrity`拡張）、`tests/test_bl331_tasks_phases_identity.py`（新規21件）、`tests/test_bl224_relation_edges.py`（`task:`が既知プレフィックス化した影響で1件のテスト文言を訂正）、`docs/design/back_log/BL-224/BL224_basic_design.md`（`task:`却下記載・relation_type種別数の追記更新）。§19.1レビューでH-1（`tasks.depends_on`列の無消費リスク→削除）・H-2（ref語彙更新箇所の網羅、特に共有プロンプト段落）・H-3（split_from検証の不変条件）を反映。§19.4レビューでsplit_fromエッジのresume冪等性ギャップを実行検証の上発見・修正・回帰テスト固定。§17.1リバート確認済み、フルオフラインスイート2218 passed / 5 deselected。 |
+| 関連 BL | BL-331（本件）、BL-330（本BLの直接の引き金）、BL-224（`relation_edges`基盤の再利用元、`task:`却下の解消元）、BL-228（同基盤のPhase 3拡張との整合）、BL-329（`removed_task_ids`判定の再利用元）、AGENTS.md §13.7・§15.1・§15.4・§15.5・§19.1・§19.4 |
+
+---
+
 ### D-283: BL-330実装完了 — decision_extractorのDeliverable旧レコード検索をtask_id基準へ
 
 | 項目 | 内容 |
