@@ -7735,15 +7735,17 @@ def init_db(conn: sqlite3.Connection) -> None:
     -- 本テーブルへ流し込んで実際にたどれる線として復活させる。
     -- agreements(id) / verified_facts(variable_name) / entity_attributes(entity_id, attr_name)は
     -- それぞれ別のIDスペースを持つため、型プレフィックス付きの参照文字列（ref）で統一する。
-    -- 関係種別は3種のみ（§15.1 単一ソース）: depends_on（§4.2のDAG系譜。to_ref は from_ref を前提
+    -- 関係種別は4種（§15.1 単一ソース）: depends_on（§4.2のDAG系譜。to_ref は from_ref を前提
     -- として成立）/ supersedes（F-3.6・F-8.2の正負の理由。from_ref=旧・棄却 → to_ref=新・採用。
-    -- 単独Rejectedは同一topic現行合意Yがあれば from=棄却X → to=Y、無ければ status 表示で可視）/ derived_from（F-3.9）。
+    -- 単独Rejectedは同一topic現行合意Yがあれば from=棄却X → to=Y、無ければ status 表示で可視）/
+    -- derived_from（F-3.9）/ split_from（BL-331: タスク分割の系譜。from_ref=分割元task →
+    -- to_ref=分割後の新task）。
     CREATE TABLE IF NOT EXISTS relation_edges (
         id TEXT PRIMARY KEY,               -- "REL-xxx"（_new_record_id、BL-215の一元採番を使用）
         run_id TEXT NOT NULL,
         from_ref TEXT NOT NULL,            -- 上流（前提・旧版・入力）
         to_ref TEXT NOT NULL,              -- 下流（結論・新版・導出結果）
-        relation_type TEXT NOT NULL,       -- depends_on | supersedes | derived_from
+        relation_type TEXT NOT NULL,       -- depends_on | supersedes | derived_from | split_from
         reason TEXT NOT NULL DEFAULT '',   -- この線が引かれた理由（supersedesでは「なぜ旧案を棄却し新案を採ったか」）
         created_by TEXT NOT NULL,          -- caller_role（confirmed_by/proposed_byと同じ規約）
         created_at REAL NOT NULL,
@@ -7752,6 +7754,38 @@ def init_db(conn: sqlite3.Connection) -> None:
     );
     CREATE INDEX IF NOT EXISTS idx_relation_edges_run_from ON relation_edges(run_id, from_ref);
     CREATE INDEX IF NOT EXISTS idx_relation_edges_run_to ON relation_edges(run_id, to_ref);
+
+    -- [BL-331] task_id/phase_idの「識別（今どれが実在する正本か）」の索引テーブル。
+    -- BL-224/relation_edgesの「なぜ（判断の系譜）」とは異なるレイヤーであり、意図的に別テーブル
+    -- とする。計画内容の正本はstate["phases"]のJSONのまま——本表は内容を複製せず、実在・生存
+    -- 状態のみを保持する索引に限定する（§15.1、ドリフト源を増やさない）。
+    -- statusは「今の計画に実在するか」のみを表し、「タスクが完了したか」ではない
+    -- （完了判定は引き続き_is_task_completedがagreementsから導出する権威のまま）。
+    CREATE TABLE IF NOT EXISTS tasks (
+        task_id      TEXT NOT NULL,
+        run_id       TEXT NOT NULL,
+        phase_id     TEXT NOT NULL,
+        title        TEXT NOT NULL DEFAULT '',
+        status       TEXT NOT NULL DEFAULT 'active',   -- 'active' | 'superseded'
+        superseded_reason TEXT NOT NULL DEFAULT '',
+        created_at   REAL NOT NULL,
+        updated_at   REAL NOT NULL,
+        PRIMARY KEY (run_id, task_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_tasks_run_phase ON tasks(run_id, phase_id);
+    CREATE INDEX IF NOT EXISTS idx_tasks_run_status ON tasks(run_id, status);
+
+    CREATE TABLE IF NOT EXISTS phases (
+        phase_id     TEXT NOT NULL,
+        run_id       TEXT NOT NULL,
+        title        TEXT NOT NULL DEFAULT '',
+        status       TEXT NOT NULL DEFAULT 'active',   -- 'active' | 'superseded'
+        superseded_reason TEXT NOT NULL DEFAULT '',
+        created_at   REAL NOT NULL,
+        updated_at   REAL NOT NULL,
+        PRIMARY KEY (run_id, phase_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_phases_run_status ON phases(run_id, status);
     """)
     _ensure_agreements_task_id_column(conn)
     _ensure_agreements_citations_column(conn)
@@ -8018,9 +8052,11 @@ def db_supersede_agreement(agreement_id: str, conn: sqlite3.Connection, run_id: 
 # =====================================================================
 # [BL-224] 判断の系譜（Decision Lineage）— relation_edges ヘルパ群
 # =====================================================================
-# ref 参照方式: agreement:<id> / fact:<variable_name> / entity:<entity_id>:<attr_name>
-# 3つは別 ID スペースのため、汎用エッジテーブル relation_edges では型プレフィックス付き文字列で統一する。
-# 関係種別は3種のみ（§15.1 単一ソース）: depends_on / supersedes / derived_from。
+# ref 参照方式: agreement:<id> / fact:<variable_name> / entity:<entity_id>:<attr_name> /
+# turn:<id> / issue:<topic> / whiteboard:<phase_id>:<task_id> / detector_review:<id> /
+# task:<task_id> / phase:<phase_id>（task:/phase:はBL-331でtasks/phases実表を導入して追加）。
+# 別 ID スペースのため、汎用エッジテーブル relation_edges では型プレフィックス付き文字列で統一する。
+# 関係種別は4種（§15.1 単一ソース）: depends_on / supersedes / derived_from / split_from（BL-331）。
 # すべて run_id スコープ（M4: 同一 run 内の系譜に限定、クロス run は将来課題）。
 
 
@@ -8077,6 +8113,15 @@ def _resolve_ref_table(query: str, run_id: str, ref: str) -> bool:
         except (TypeError, ValueError):
             return False
         row = query("SELECT 1 FROM detector_reviews WHERE id=? AND run_id=?", (rid, run_id)).fetchone()
+        return row is not None
+    if ref.startswith("task:"):
+        # [BL-331] statusを問わない（supersede済みタスクもagreement:同様に系譜追跡対象とする）。
+        tid = ref[len("task:"):]
+        row = query("SELECT 1 FROM tasks WHERE task_id=? AND run_id=?", (tid, run_id)).fetchone()
+        return row is not None
+    if ref.startswith("phase:"):
+        pid = ref[len("phase:"):]
+        row = query("SELECT 1 FROM phases WHERE phase_id=? AND run_id=?", (pid, run_id)).fetchone()
         return row is not None
     return False
 
@@ -8390,18 +8435,21 @@ TRACE_LINEAGE_TOOL = {
         "name": "trace_lineage",
         "description": (
             "[BL-224] 判断の系譜（lineage）を能動取得する読み取り専用ツール。ある agreement（合意）/ "
-            "fact（変数・値）/ entity 属性 が、どの前提・旧版に立脚し（backward）、何を導出・差し替えたか"
-            "（forward）を、relation_edges のエッジを辿って一覧で返す。'この値はどこから？''この決定は何に"
-            "基づいている？''他はなぜ却下された？' という疑問を持った時に使う。ref には system prompt で"
-            "'[AG-xxx]' のように表示される実際の agreement id、または fact:変数名、entity:entity_id:attr_name "
-            "を指定する。このツール自体は LLM を呼ばず、DB に構造化保存済みの根拠だけを機械的に返す。"
+            "fact（変数・値）/ entity 属性 / task（タスク） が、どの前提・旧版に立脚し（backward）、"
+            "何を導出・差し替えたか（forward）を、relation_edges のエッジを辿って一覧で返す。"
+            "'この値はどこから？''この決定は何に基づいている？''他はなぜ却下された？'"
+            "'このタスクは何の分割で生まれた？' という疑問を持った時に使う。ref には system prompt で"
+            "'[AG-xxx]' のように表示される実際の agreement id、または fact:変数名、entity:entity_id:attr_name、"
+            "task:task_id、phase:phase_id を指定する。task:/phase: は実在確認のみ（BL-331）——task: は "
+            "split_from で分割元タスクへの系譜が辿れるが、phase: は現時点でエッジを持たず lineage は "
+            "常に空になる。このツール自体は LLM を呼ばず、DB に構造化保存済みの根拠だけを機械的に返す。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "ref": {
                     "type": "string",
-                    "description": "取得対象の ref。agreement:<id> / fact:<variable_name> / entity:<entity_id>:<attr_name>。",
+                    "description": "取得対象の ref。agreement:<id> / fact:<variable_name> / entity:<entity_id>:<attr_name> / task:<task_id> / phase:<phase_id>。",
                 },
                 "direction": {
                     "type": "string",
@@ -8441,13 +8489,13 @@ def _trace_lineage_handler(args: dict, state: dict | None = None) -> dict:
         max_depth = 10
     if not ref:
         return {"status": "error",
-                "message": "ref は必須です（agreement:<id> / fact:<name> / entity:<entity_id>:<attr_name>）。"}
+                "message": "ref は必須です（agreement:<id> / fact:<name> / entity:<entity_id>:<attr_name> / task:<task_id> / phase:<phase_id>）。"}
     # [N3/BL-228] 未知プレフィックスは走査せず即時返却（§15.3 機械的検証は _traverse_lineage 入口で）。
-    _LINEAGE_REF_PREFIXES = ("agreement:", "fact:", "entity:", "turn:", "issue:", "whiteboard:", "detector_review:")
+    _LINEAGE_REF_PREFIXES = ("agreement:", "fact:", "entity:", "turn:", "issue:", "whiteboard:", "detector_review:", "task:", "phase:")
     if not ref.startswith(_LINEAGE_REF_PREFIXES):
         return {
             "status": "ok",
-            "result": "未知の ref プレフィックスです。agreement:/fact:/entity:/turn:/issue:/whiteboard:/detector_review: のいずれかで指定してください。",
+            "result": "未知の ref プレフィックスです。agreement:/fact:/entity:/turn:/issue:/whiteboard:/detector_review:/task:/phase: のいずれかで指定してください。",
             "lineage": [],
         }
     # [N3] 対象 ref が現在の run に実在しない（他 run の ref / 存在しない）場合は空リスト＋ヒント。
@@ -10171,7 +10219,25 @@ def _resolve_ref_line(conn: sqlite3.Connection, run_id: str, ref: str) -> str:
         if row is None:
             return f"{ref}: (解決不能: この run 内に該当 detector_review がありません)"
         return f"[detector_review] risk={row['risk']} constraint_issue={row['constraint_issue']} {(row['comment'] or '')[:120]}"
-    return f"{ref}: (未知の ref プレフィックスです。agreement:/fact:/entity:/turn:/issue:/whiteboard:/detector_review: のいずれかを使用)"
+    if ref.startswith("task:"):
+        tid = ref[len("task:"):]
+        row = conn.execute(
+            "SELECT phase_id, title, status FROM tasks WHERE task_id=? AND run_id=?",
+            (tid, run_id)).fetchone()
+        if row is None:
+            return f"{ref}: (解決不能: この run 内に該当 task がありません)"
+        return f"[task:{tid}] {row['title']}（phase={row['phase_id']}, status={row['status']}）"
+    if ref.startswith("phase:"):
+        # [BL-331/L-3] phase:はP1では実在解決のみ。エッジ書込経路が無いためtrace_lineageの
+        # lineageは常に空配列になる（split_fromはtask単位のみが対象）。
+        pid = ref[len("phase:"):]
+        row = conn.execute(
+            "SELECT title, status FROM phases WHERE phase_id=? AND run_id=?",
+            (pid, run_id)).fetchone()
+        if row is None:
+            return f"{ref}: (解決不能: この run 内に該当 phase がありません)"
+        return f"[phase:{pid}] {row['title']}（status={row['status']}）"
+    return f"{ref}: (未知の ref プレフィックスです。agreement:/fact:/entity:/turn:/issue:/whiteboard:/detector_review:/task:/phase: のいずれかを使用)"
 
 
 
@@ -10525,6 +10591,9 @@ class Task(TypedDict):
     depends_on: list[str]            # 前提として使う他タスクのtask_id
     owns_variables: list[str]        # このタスクで初めて確定させる共有変数名
     status: str                      # "pending" / "in_progress" / "completed" / "deferred"
+    split_from: str                  # [BL-331] 既存タスクの分割で生まれた場合、分割元のtask_id。
+                                      # 分割でなければ空文字。task_id命名規則からの推測はしない
+                                      # （AGENTS.md §15.5、ドリフトしうる閾値より不変条件を優先）。
 
 class Phase(TypedDict):
     phase_id: str
@@ -11604,7 +11673,9 @@ _TRACE_LINEAGE_USAGE_PARAGRAPH = (
     "経緯、Detector差戻しの記録）について、trace_lineageで能動的に\n"
     "取得してください。ref には、system prompt上に[AG-xxx]のように表示される実際のagreement\n"
     "id、fact:<変数名>、entity:<entity_id>:<attr_name>、turn:<chat_history.id（発言そのものの\n"
-    "系譜）>、issue:<topic>、detector_review:<id> のいずれかを\n"
+    "系譜）>、issue:<topic>、detector_review:<id>、task:<task_id>（BL-331: タスクが分割で\n"
+    "生まれた場合はsplit_fromで分割元への系譜が辿れる）、phase:<phase_id>（実在確認のみ、\n"
+    "系譜エッジは持たない）のいずれかを\n"
     "指定できます。このツールはLLMを呼ばず、DBに構造化保存済みの根拠のみを機械的に返す\n"
     "読み取り専用ツールです。"
 )
@@ -11954,11 +12025,22 @@ _MEMORY_TRAP_GUARD_PARAGRAPH = (
 # 意味的な検証が一切なかったことが根本原因（AGENTS.md §15.3違反）。
 # _query_and_parse_with_retryのvalidatorフック（BL-213 F3で導入済み、_validate_extracted_
 # eventsが既存の使用例）を再利用し、生成時点で検証・自己修正させる（一次防御）。
-def _validate_task_plan_depends_on_integrity(phases) -> tuple[bool, str]:
+def _validate_task_plan_depends_on_integrity(
+    phases, existing_phases: list[dict] | None = None,
+) -> tuple[bool, str]:
     """[BL-329] 各タスクのtask_idが非空・重複無しであること、depends_onが同じphases内に
     実在するtask_idを指していることを検証する。_query_and_parse_with_retryのvalidator
     フック（BL-213 F3）として使う。ユーザー提案（check_docs_consistency.py的な宣言↔実体の
     双方向対応チェック）をtask_idのdepends_on↔実在tasksの対応に適用したもの。
+
+    [BL-331] あわせてsplit_fromの整合性も検証する。split_fromが非空の場合、それは
+    existing_phases（再プラン前の既存計画）に実在するtask_idを指していなければならない。
+    (a) existing_phasesが空（＝初回計画）の場合、split_from非空は常に不正とする——分割対象は
+    既存タスクに限る（BL-313の分割トリガー自体が既存タスクへの申し送り集中を契機とするため、
+    初回計画にはそもそも分割元となる既存タスクが存在しない）。
+    (b) 同一リビジョン内で新規に生まれたtask_id同士のネスト分割（新規タスクをさらに分割元に
+    指定すること）も不正とする——split_fromはexisting_phasesに実在するtask_idのみを指してよく、
+    今回のphases候補内の新規task_idを指すことはできない。
     """
     if not isinstance(phases, list):
         return True, ""
@@ -11983,6 +12065,17 @@ def _validate_task_plan_depends_on_integrity(phases) -> tuple[bool, str]:
         for t in all_tasks
         for dep in (t.get("depends_on") or [])
         if dep not in all_task_ids
+    ]
+    existing_task_ids = {
+        t.get("task_id") for p in (existing_phases or []) if isinstance(p, dict)
+        for t in p.get("tasks", []) if isinstance(t, dict)
+    }
+    problems += [
+        f"- task_id={t.get('task_id')!r}のsplit_from={t.get('split_from')!r}は既存タスクを"
+        f"指していません（分割元は再プラン前の既存task_idのみ指定できます。新規task_idの"
+        f"ネスト分割や初回計画でのsplit_from指定は不正です）。"
+        for t in all_tasks
+        if t.get("split_from") and t.get("split_from") not in existing_task_ids
     ]
     if not problems:
         return True, ""
@@ -12101,6 +12194,12 @@ It serves as the initial planning layer for breaking down complex objectives acr
        - owns_variables: このタスクで初めて確定させる共有変数名を配列で指定してください
          （例: "unit_count"）。同じ変数を必要とする他タスクは、depends_onでこのタスクを
          指定し、値を再導出せず参照する前提とします（前提がなければ空配列）。
+       - split_from: [BL-331] このタスクが既存タスクの分割で生まれた場合（先送り事項の
+         集中等を理由に既存タスクをサブタスクへ分割する場合）、分割元のtask_id（再構成前の
+         existing_phasesに実在するもの）を指定してください。分割でなければ空文字にして
+         ください。task_idの命名（例: task_5_1 → task_5_1_1）だけでは分割関係は記録されない
+         ため、この明示的な指定が必要です。初回計画（existing_phasesが存在しない場合）や、
+         今回新規に作るtask_id同士を分割元に指定すること（ネスト分割）はできません。
     4. 【曖昧な表記の禁止（重要）】acceptance_criteriaやdescriptionに数量・比率・長さ・面積・
        人数などを書く際は、どの指標（比率か絶対値か、何に対する割合か）を指しているのかを
        一意に確定できる表現にしてください。特に、括弧書きなどの補足情報が本文の数値制約と
@@ -12275,7 +12374,8 @@ It serves as the initial planning layer for breaking down complex objectives acr
                     "description": "具体的な作業内容...",
                     "acceptance_criteria": ["独立検証可能な主張1", "独立検証可能な主張2"],
                     "depends_on": [],
-                    "owns_variables": []
+                    "owns_variables": [],
+                    "split_from": ""
                 }},
                 {{
                     "task_id": "task_1_2",
@@ -12283,7 +12383,8 @@ It serves as the initial planning layer for breaking down complex objectives acr
                     "description": "具体的な作業内容...",
                     "acceptance_criteria": ["独立検証可能な主張1"],
                     "depends_on": ["task_1_1"],
-                    "owns_variables": []
+                    "owns_variables": [],
+                    "split_from": ""
                 }}
             ]
         }},
@@ -12315,7 +12416,8 @@ It serves as the initial planning layer for breaking down complex objectives acr
                 "description": "目標達成に向けた要件定義と最初の分析を行う",
                 "acceptance_criteria": ["目標達成に向けた要件定義と最初の分析結果を提示する"],
                 "depends_on": [],
-                "owns_variables": []
+                "owns_variables": [],
+                "split_from": ""
             }
         ]
     }]
@@ -12346,7 +12448,8 @@ It serves as the initial planning layer for breaking down complex objectives acr
     _protected_validator = _build_protected_task_id_validator(_protected_task_ids)
 
     def _task_plan_validator(phases_candidate) -> tuple[bool, str]:
-        ok1, msg1 = _validate_task_plan_depends_on_integrity(phases_candidate)
+        # [BL-331] split_from整合性検証のためexisting_phasesを渡す。
+        ok1, msg1 = _validate_task_plan_depends_on_integrity(phases_candidate, existing_phases)
         ok2, msg2 = _protected_validator(phases_candidate)
         if ok1 and ok2:
             return True, ""
@@ -16517,6 +16620,132 @@ def goal_essence_node(state: LineageState) -> LineageState:
     return state
 
 
+def _sync_task_phase_identity(
+    conn: sqlite3.Connection,
+    run_id: str,
+    phases: list[dict],
+    old_phases: list[dict],
+    superseded_task_ids: dict[str, tuple[str, str]],
+    revision_reason: str,
+) -> None:
+    """[BL-331] state["phases"]（内容の正本）から tasks/phases テーブル（識別・実在の索引）を
+    同期する。task_planner_node が re-plan のたびに phases 全体を再送出する契約に合わせ、
+    本関数も全件 upsert（差分パッチではない）。BL-329が既に計算済みの
+    removed_task_ids/復元対象/supersede対象（superseded_task_ids）をそのまま再利用し、
+    判定ロジックを重複させない（§15.1）。phaseの生存判定も、BL-329のタスク復元ループが
+    フェーズ自体を浅コピーで復元する既存挙動にただ乗りする形にし、フェーズ用の独立した保護
+    ロジックは新設しない——最終的なphasesに登場するphase_idを'active'、登場しなくなった
+    phase_idを'superseded'とするだけ。
+    """
+    now = time.time()
+    current_task_ids: set[str] = set()
+    current_phase_ids: set[str] = set()
+    for p in phases:
+        phase_id = p.get("phase_id", "")
+        if not phase_id:
+            continue
+        current_phase_ids.add(phase_id)
+        conn.execute(
+            """
+            INSERT INTO phases (phase_id, run_id, title, status, superseded_reason, created_at, updated_at)
+            VALUES (?, ?, ?, 'active', '', ?, ?)
+            ON CONFLICT(run_id, phase_id) DO UPDATE SET
+                title=excluded.title, status='active', superseded_reason='', updated_at=excluded.updated_at
+            """,
+            (phase_id, run_id, p.get("title", ""), now, now),
+        )
+        for t in p.get("tasks", []):
+            tid = t.get("task_id")
+            if not tid:
+                continue
+            current_task_ids.add(tid)
+            conn.execute(
+                """
+                INSERT INTO tasks (task_id, run_id, phase_id, title, status,
+                                    superseded_reason, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'active', '', ?, ?)
+                ON CONFLICT(run_id, task_id) DO UPDATE SET
+                    phase_id=excluded.phase_id, title=excluded.title, status='active',
+                    superseded_reason='', updated_at=excluded.updated_at
+                """,
+                (tid, run_id, phase_id, t.get("title", ""), now, now),
+            )
+
+    # 旧phasesにあり新phasesに登場しなくなったphase_idをsupersededへ（taskと対称にreasonも記録）。
+    # [edge case] このrunで一度もsyncされたことのないphase_id（本BL適用前の稼働runがresumeされた
+    # 場合等、L-1で明記した境界）はUPDATE対象行が無いため、taskと同様に合成行を作る。
+    old_phase_ids = {p.get("phase_id", "") for p in old_phases if p.get("phase_id")}
+    for pid in old_phase_ids - current_phase_ids:
+        conn.execute(
+            "UPDATE phases SET status='superseded', superseded_reason=?, updated_at=? WHERE run_id=? AND phase_id=?",
+            (revision_reason, now, run_id, pid),
+        )
+        conn.execute(
+            """
+            INSERT INTO phases (phase_id, run_id, title, status, superseded_reason, created_at, updated_at)
+            SELECT ?, ?, '', 'superseded', ?, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM phases WHERE run_id=? AND phase_id=?)
+            """,
+            (pid, run_id, revision_reason, now, now, run_id, pid),
+        )
+
+    # BL-329が既に判定済みの「真にsupersedeされたtask_id」を反映（復元されたものは
+    # current_task_idsに含まれているため、この分岐に来ない＝上のupsertでactiveのまま）。
+    for tid, (phase_id, reason) in superseded_task_ids.items():
+        if tid in current_task_ids:
+            continue
+        conn.execute(
+            "UPDATE tasks SET status='superseded', superseded_reason=?, updated_at=? WHERE run_id=? AND task_id=?",
+            (reason, now, run_id, tid),
+        )
+        conn.execute(
+            """
+            INSERT INTO tasks (task_id, run_id, phase_id, title, status,
+                                superseded_reason, created_at, updated_at)
+            SELECT ?, ?, ?, '', 'superseded', ?, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE run_id=? AND task_id=?)
+            """,
+            (tid, run_id, phase_id, reason, now, now, run_id, tid),
+        )
+    conn.commit()
+
+    # [BL-331] split_from系譜エッジ。tasks行が全てコミット済みの後、別ループとして書く
+    # （子task_idの行より先に親task_idの行がコミット済みである必要があるため、同一ループ内
+    # での順序依存を避ける）。
+    # [Cline指摘・§19.4] tasks/phasesはON CONFLICT DO UPDATEで冪等だが、relation_edgesは
+    # 毎回無条件INSERTするため、checkpoint resume等でこの関数が再実行されると同じsplit_from
+    # エッジが重複蓄積してしまう（§15.4/§17.1「resume冪等性」違反）。書込前に同一
+    # (from_ref, to_ref, relation_type)のエッジが既に存在しないか確認し、あればスキップする。
+    for p in phases:
+        for t in p.get("tasks", []):
+            parent = t.get("split_from")
+            tid = t.get("task_id")
+            if not parent or not tid:
+                continue
+            from_ref, to_ref = f"task:{parent}", f"task:{tid}"
+            already_exists = conn.execute(
+                "SELECT 1 FROM relation_edges WHERE run_id=? AND from_ref=? AND to_ref=? AND relation_type='split_from'",
+                (run_id, from_ref, to_ref),
+            ).fetchone() is not None
+            if already_exists:
+                continue
+            _edge_written = _write_relation_edge(
+                conn, run_id,
+                from_ref=from_ref, to_ref=to_ref,
+                relation_type="split_from",
+                reason=f"task_id='{tid}'はtask_id='{parent}'の分割により生成されました（BL-313 split トリガー）。",
+                created_by="task_planner",
+                source_task_id=tid, source_phase_id=p.get("phase_id", ""),
+            )
+            if not _edge_written:
+                # [Cline指摘・軽微] validatorが尽きた/パース全滅でfallback_phaseが採用された
+                # 場合等、親task_idがtasksテーブルへ未コミットのままここに到達しうる
+                # （BL-329と同型の第2経路）。_write_relation_edgeはfail-loudで済ませ黙って
+                # 例外にしないため、ここでも明示的に警告を残す（§13.3）。
+                print(f"  ⚠️ [BL-331] task_id='{tid}'のsplit_fromエッジ書き込みに失敗しました"
+                      f"（split_from='{parent}'が実在しない可能性があります）。")
+
+
 def task_planner_node(state: LineageState) -> LineageState:
     """【SLM要約】
     Initial planning and decomposition of the overall system goal into sequential phases and executable tasks.
@@ -16574,6 +16803,11 @@ Sets the starting phase for subsequent execution steps within the lineage state.
 
         phases_json = json.dumps(phases, ensure_ascii=False, indent=2)
         print(f"\n[task_planner] フェーズとタスクの分解結果:\n{phases_json}\n\n")
+
+        # [BL-331] tasks/phasesテーブル同期用に、真にsupersedeされたtask_idを蓄積する
+        # （復元されたものはこの辞書に入れない＝_sync_task_phase_identity内でactiveのまま扱われる）。
+        # 初回計画（revision_reason空）ではrevision_reason分岐に入らないため空のまま。
+        _superseded_for_tasks_table: dict[str, tuple[str, str]] = {}
 
         if revision_reason:
             # [BL-126 Stage C/§6] 「削除ではなくsupersede」: 新しい計画に含まれなくなった
@@ -16660,12 +16894,19 @@ Sets the starting phase for subsequent execution steps within the lineage state.
                     phases=old_phases, pending_task_ids=state.get("pending_task_ids", []),
                 )
                 print(f"  🔀 [Task Planner] task_id='{tid}'（phase='{old_phase_id}'）をsupersedeしました（理由: {revision_reason}）。")
+                _superseded_for_tasks_table[tid] = (old_phase_id, revision_reason)
             # [BL-126 Stage C/§11(3)] ラン途中再構成後の計画もtask_plan_reviewer_nodeを
             # スキップせず通す（既存の実行前ゲートを再利用、plan_reviewer_retry_countとは
             # 独立にplan_revision_countで上限管理する）。
             state["plan_review_done"] = False
 
         state["phases"] = phases
+        # [BL-331] tasks/phasesテーブルへの同期。初回計画（revision_reason空）でも無条件に呼ぶ
+        # （_superseded_for_tasks_tableはその場合、revision_reason分岐に入らないため空のまま）。
+        _sync_task_phase_identity(
+            get_active_conn(), state["run_id"], phases, old_phases,
+            _superseded_for_tasks_table, revision_reason,
+        )
         if revision_issue_ids:
             # [BL-145/BL-313] Reflectorのissue formalization（滞留escalated issueまたは
             # 先送り集中）が引き金だった場合、対象issue_log行を'planned'状態へ遷移させる

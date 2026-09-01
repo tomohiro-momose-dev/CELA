@@ -336,7 +336,9 @@ def active_handler_ctx(db_conn):
 
 def test_trace_lineage_handler_unknown_prefix(active_handler_ctx):
     _, _ = active_handler_ctx
-    res = cela_main._trace_lineage_handler({"ref": "task:xxx"})
+    # [BL-331] "task:"はBL-331でtasks実表を導入した既知プレフィックスになったため、
+    # 本テストの意図（未知プレフィックス）を保つには別の未知プレフィックスを使う。
+    res = cela_main._trace_lineage_handler({"ref": "bogus_prefix:xxx"})
     assert res["status"] == "ok"
     assert res["lineage"] == []
 
