@@ -3972,3 +3972,4 @@
 | 2026-07-18 | D-007・D-008 の「design v7 §3.5.3 / §3.5.2 への反映（追記予定）」を実行。§3.5.2 に query_AI 集約方針の ★v9 追記、§3.5.3 に random 除外・decimal/fractions 維持・危険呼び出し AST 検査・多層防御の ★v9 追記を実施。issue_backlog.md に BL-006〜BL-009 を新規起票し相互リンク。 |
 | 2026-08-30 | D-275を追記（単独LLM基線対照実験の設計採用、BL-323起票）。`docs/design/experiment_design_baseline_comparison.md` を新規作成。 |
 | 2026-09-01 | D-282を追記（task_id/phase_id/Deliverable識別のDAGベース化、方向性採用）。BL-330・BL-331を新規起票。 |
+| 2026-09-01 | D-283を追記（BL-330実装完了）。`cela_main.py`修正・テスト4件追加、§19.1/§19.4 Clineレビュー完了。 |
