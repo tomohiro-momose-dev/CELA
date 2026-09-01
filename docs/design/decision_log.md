@@ -4011,6 +4011,20 @@
 
 ---
 
+### D-288: BL-335 Phase 3 — pandas経由のローカルファイルアクセスもbuiltins.open/io.open無効化で遮断
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-09-02 |
+| 状態 | `decided` |
+| 決定者 | t-momose（Cline CLIレビュー、glm-5.3-flash明示指定、AGENTS.md §19.4） |
+| **決定理由** | BL335_basic_design.md §3.2はpandas追加による不変条件破壊を「ネットワーク到達経路のみ」として論じ、`socket.socket`の無効化のみで対処していた。Phase 1〜3合算のCline diffレビューで、pandas.read_csv/read_excel/to_csv/to_excel等は`open()`のAST禁止（`_DANGEROUS_NAMES`）を経由せず、内部でPython標準の`builtins.open`/`io.open`を使ってローカルファイルシステムへ任意に読み書きできることが指摘された。実プローブで検証したところ、`pd.read_csv('requirements.txt')`がリポジトリ内ファイルの内容を実際に読み取ること、`pd.DataFrame(...).to_csv(絶対パス)`が任意パスに実際にファイルを作成できることの両方を確認した（§16.2）。`.env`・APIキー等の読み取りや、リポジトリファイルの意図しない改変が理論上可能であり、AGENTS.md §15.2（検証の非対称性——`open()`は禁止されているのにpandas経由では素通り）に該当する重大な見落としだった。 |
+| 決定内容 | `_REPL_NETWORK_DISABLE_PRELUDE`に`builtins.open`/`io.open`自体を常時`OSError`を送出するダミーへ差し替える処理を追加した（`socket.socket`の無効化と同じ「1箇所で遮断する」設計）。`_PythonReplSession`側の`read_cached_bytes`ヘルパーは、この無効化が走る**前**に元の`open`を`_real_open`として捕捉しておき、自身はその捕捉済み関数を使うことで機能を維持した（`Path.read_bytes()`は内部で`io.open`を経由するため、無効化後は使えないことを確認した上で捕捉方式に変更）。`_run_python_repl`（単発版）にも同じpreludeを適用済み（AGENTS.md §13.4）。 |
+| 影響 | `cela_main.py`（`_REPL_NETWORK_DISABLE_PRELUDE`・`_build_repl_session_bootstrap`）、`tests/test_bl335_repl_pandas.py`（新規2件: `test_pandas_cannot_read_arbitrary_local_file`・`test_pandas_cannot_write_arbitrary_local_file`）。§17.1リバート確認済み（無効化を外すと実際にリポジトリファイルの読み取り・任意パスへの書き込みが成立することを確認）。 |
+| 関連 BL | BL-335（本件、Phase 3）、AGENTS.md §13.4・§15.2・§16.2・§17.1・§19.4 |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
@@ -4033,3 +4047,4 @@
 | 2026-09-01 | D-285を追記（BL-335 Phase 1実装、web_fetchのリダイレクト追従方針転換）。Playwright常設フェッチ・raw_cache_file_path等をweb_tools.pyへ追加、tests/test_bl335_playwright_fetch.py新規14件、既存test_bl184_web_tools.py改修、§17.1リバート確認済み。 |
 | 2026-09-01 | D-286を追記（BL-335 Phase 2実装、read_pdf_page_as_imageツール新設）。pypdfium2でPDFページをPNG化しglm-5.3-flash Visionへ渡すツールをcela_main.py/web_tools.pyへ追加、軽いリトライ方針採用、5ノードのツール一覧へ登録、tests/test_bl335_pdf_vision.py新規14件、§17.1リバート確認済み。 |
 | 2026-09-02 | D-287を追記（BL-335 Phase 1のhttpxリダイレクト経路をblind SSRFから防ぐため手動1ホップ追従へ再転換）。Cline diffレビュー（glm-5.3-flash）で中間ホップ未検証を指摘され修正、併せて指摘2（空vision応答の永続キャッシュ）・指摘4（非PDFキャッシュの誤ったエラー文言）も修正、tests新規4件・§17.1リバート確認済み。 |
+| 2026-09-02 | D-288を追記（BL-335 Phase 3のpandas経由ローカルファイルアクセスをbuiltins.open/io.open無効化で遮断）。Phase 1-3合算Cline diffレビューでF1（pandasがopen()禁止を迂回しファイル読み書き可能）・F2（リダイレクト着地PDFの誤拒否）・F3/F4（軽微）を検出、実プローブで確認の上修正、tests新規4件・§17.1リバート確認済み。BL-335全Phase完了。 |

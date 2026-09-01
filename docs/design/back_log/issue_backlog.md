@@ -11760,5 +11760,14 @@ split_from系譜が記録される再計画（re-plan）後の分割よりも、
 いずれもテスト追加・§17.1リバート確認済み（テスト計130件）。Phase 3完了後、AGENTS.md §19.4の追加ラウンドを実施予定（`BL335_basic_design.md`の「実装後の手順」参照）。
 3. **Phase 3（`done`）**: `python_repl`サンドボックス（`_run_python_repl`・`_PythonReplSession`双方）の`_ALLOWED_IMPORTS`へ`pandas`・`io`を追加し、`read_cached_bytes(path)`ヘルパー（`web_cache/`配下限定のresolve-and-containパターン、`_build_repl_session_bootstrap()`内で注入）経由でxlsx等をpandasで直接読み込めるようにした。pandas追加は既存の「ゼロI/O/ネットワーク」不変条件を初めて破るため、REPL子プロセス側で`socket.socket`を常時`OSError`にする差し替え（`_REPL_NETWORK_DISABLE_PRELUDE`）を行いSSRF迂回を構造的に遮断した（プロンプト注意書きのみでは不十分と判断、ユーザー承認済み）。AGENTS.md §13.4（経路間の検証対称性）に従い、`_PythonReplSession`（実運用経路）だけでなく現状未使用の`_run_python_repl`（単発版、TOOL_DISPATCHから到達不能だが将来の第二経路化に備え）にも同じ対策を適用。`subprocess.Popen(["python", ...])`のPATH解決は両経路とも`sys.executable`へ変更（venv不一致でpandas未検出になる問題の解消）。`_REPL_SESSION_BOOTSTRAP`はモジュール定数から`_build_repl_session_bootstrap()`関数へ変更（`web_tools.WEB_CACHE_DIR`をセッション起動のたびに読み直すため、テストでのmonkeypatch追従にも必要）。`tests/test_bl335_repl_pandas.py`（新規9件、実サブプロセス経由）で検証済み——`socket.socket()`無効化は「LLMコードが`import socket`する」パターンではなく「pandas内部が透過的にsocket経由でネットワーク到達する」実際のシナリオ（`pd.read_csv(内部アドレス)`）で検証（自己レビュー所見2の指摘通り、AST許可リストとは独立した検証が必要だった）。§17.1リバート確認済み——保護を無効化すると実際にネットワーク接続がハングすることを確認し、対策が真に効いていることを実証。
 
-**未確定事項・実装後の手順**: `BL335_basic_design.md`の「実装着手前にユーザー判断が必要な未確定事項」「独立レビュー所見」「実装後の手順」各節を参照。Phase 2/3完了後、AGENTS.md §19.4のdiff独立レビューを全Phase合算のdiffに対して実施し、本エントリを`done`へ更新すること。
+**最終実装後diffレビュー（AGENTS.md §19.4、Cline CLI・glm-5.3-flash明示指定・2026-09-02、Phase 1〜3合算1924行の差分に対して実施）**で5件の指摘を検出、うち4件を実コードで再現確認の上で修正：
+- **【中〜高・修正済】** pandas許可がREPLサンドボックスの「ローカルファイルシステム読み書き禁止」を破っていた。`pandas.read_csv`/`to_csv`等は`open()`のAST禁止（`_DANGEROUS_NAMES`）を経由せず、内部でPython標準の`builtins.open`/`io.open`を使ってローカルファイルへ任意に読み書きできることを実プローブで確認（`pd.read_csv('requirements.txt')`が実際にリポジトリ内ファイルを読み取り、`pd.DataFrame(...).to_csv(絶対パス)`が実際にファイルを作成することを確認）。設計書（§3.2）はネットワーク到達経路のみを不変条件破壊として論じており、ファイルシステム経路は見落とされていた。`builtins.open`/`io.open`自体を常時`OSError`のダミーへ差し替えることで対処（D-288）。
+- **【中・修正済】** `read_pdf_page_as_image`が元URL自身の拡張子でPDF判定していたため、リダイレクト着地先が`.pdf`だが元URLに拡張子が無い/異なるケース（例: `/get-report` → `cdn.example.com/report.pdf`）で、生バイトが実在するのに「PDFではない」と永続的に誤拒否する欠陥（直前ラウンドで追加した指摘4の修正自体が持ち込んだ回帰）。判定を「元URLの拡張子」ベースから「実際に`.pdf`生バイトの兄弟ファイルが存在するか」ベースへ変更し修正。
+- **【低・修正済】** コード内`D-xxx`プレースホルダの残置（正しくはD-285）を修正。
+- **【低・修正済】** `_run_python_repl`のpandas cold importテストが既定timeout=5.0秒だと低速環境でflakyになりうる懸念、timeout明示指定（15.0秒）へ修正。
+- **【情報】** BL-314の`max_web_search_calls`緩和（200→400）はこのdiffに含まれるが根拠コメント・承認記録と整合していることを確認済み（対応不要）。
+
+いずれもテスト追加（新規4件）・§17.1リバート確認済み——pandas経由のファイル読み書き遮断は無効化すると実際にファイル読み取り・書き込みが成立することを確認、F2修正も無効化すると回帰テストが失敗することを確認。テスト計143件、フルオフラインスイート2263件全パス。BL-335全Phase完了。
+
+**未確定事項・実装後の手順**: `BL335_basic_design.md`の「実装着手前にユーザー判断が必要な未確定事項」「独立レビュー所見」「実装後の手順」各節を参照。Playwright sync APIのスレッド親和性リスク（前ラウンドの低・情報所見）は実ドライランでの検証が未対応のまま残っている。
 
