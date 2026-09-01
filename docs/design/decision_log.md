@@ -3997,6 +3997,20 @@
 
 ---
 
+### D-287: BL-335 Phase 1 — httpxリダイレクト経路をblind SSRFから防ぐため手動1ホップ追従へ再転換
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-09-02 |
+| 状態 | `decided` |
+| 決定者 | t-momose（Cline CLIレビュー、glm-5.3-flash明示指定、AGENTS.md §19.4） |
+| **決定理由** | D-285で`web_tools._fetch_via_httpx_and_convert`を`httpx.Client(follow_redirects=True)`＋最終着地URL（`resp.url`）のみを`validate_url_for_fetch`で検証する方式へ転換したが、Phase 1+2実装後のCline diffレビューで、この方式には**中間リダイレクトホップが未検証のまま実際に接続される**（blind SSRF）欠陥があると指摘された。httpxの`follow_redirects=True`は複数ホップを自動的に辿るが、各ホップへの実際のHTTP接続はその場で発生し、検証は全ホップ完了後の最終URLに対してしか行われない。攻撃者が公開URLを内部アドレス（例: `http://169.254.169.254/...`）へ301/302リダイレクトさせた場合、最終検証で弾かれる前に内部ホストへの実接続（GET）自体は発生してしまう。実コード（`web_tools.py:613-619`、D-285時点）を確認し、指摘が正しいことを確認した（§16.2）。Playwright経路は`context.route("**/*", _ssrf_route_guard)`で全リクエスト（中間ホップ含む）を個別検証しており、この欠陥はhttpx経路のみに存在し経路間で防護水準が不均等だった（AGENTS.md §15.1）。 |
+| 決定内容 | `httpx.Client(follow_redirects=True)`による自動追従を撤去し、`client.build_request()`＋`client.send(request, follow_redirects=False)`のループで1ホップずつ手動追従する方式へ変更した。各ホップの送信前に必ず`validate_url_for_fetch(str(request.url))`を通す（最初のリクエストURLも含む）。無限リダイレクトを防ぐため`_MAX_REDIRECT_HOPS = 10`（httpxの既定20より保守的）を新設し、超過時は`SsrfBlockedError`とする。これによりhttpx経路もPlaywright経路と同水準（全ホップ個別検証）に揃った（AGENTS.md §15.1）。 |
+| 影響 | `web_tools.py`（`_fetch_via_httpx_and_convert`、`_MAX_REDIRECT_HOPS`新設）、`tests/test_bl184_web_tools.py`（`_FakeRequest`/`_FakeFetchResponse`/`_FakeClient`を`build_request`/`send`/`next_request`を持つ多段ホップ対応フェイクへ再設計、`test_fetch_and_extract_follows_redirect_and_validates_final_url`・`test_fetch_and_extract_blocks_redirect_to_private_ip`を2ホップ構成へ書き換え、新規`test_fetch_and_extract_blocks_intermediate_redirect_hop_before_connecting`で中間ホップが実際にsendされないことを直接検証）、`tests/test_bl335_playwright_fetch.py`（7箇所の簡易フェイクを同API へ追従）。§17.1リバート確認済み（per-hop検証を無効化すると中間ホップ・private IP双方のテストが失敗することを確認）。 |
+| 関連 BL | BL-335（本件、Phase 1）、D-285（本件が転換する前提決定）、AGENTS.md §15.1・§16.2・§17.1・§19.4 |
+
+---
+
 ## 決定の記録ルール
 
 1. 新しい決定は **D-xxx を追記**（連番）
@@ -4018,3 +4032,4 @@
 | 2026-09-01 | D-284を追記（BL-331実装完了、Phase 1）。`tasks`/`phases`テーブル新設・テスト21件追加、§19.1/§19.4 Clineレビュー完了。 |
 | 2026-09-01 | D-285を追記（BL-335 Phase 1実装、web_fetchのリダイレクト追従方針転換）。Playwright常設フェッチ・raw_cache_file_path等をweb_tools.pyへ追加、tests/test_bl335_playwright_fetch.py新規14件、既存test_bl184_web_tools.py改修、§17.1リバート確認済み。 |
 | 2026-09-01 | D-286を追記（BL-335 Phase 2実装、read_pdf_page_as_imageツール新設）。pypdfium2でPDFページをPNG化しglm-5.3-flash Visionへ渡すツールをcela_main.py/web_tools.pyへ追加、軽いリトライ方針採用、5ノードのツール一覧へ登録、tests/test_bl335_pdf_vision.py新規14件、§17.1リバート確認済み。 |
+| 2026-09-02 | D-287を追記（BL-335 Phase 1のhttpxリダイレクト経路をblind SSRFから防ぐため手動1ホップ追従へ再転換）。Cline diffレビュー（glm-5.3-flash）で中間ホップ未検証を指摘され修正、併せて指摘2（空vision応答の永続キャッシュ）・指摘4（非PDFキャッシュの誤ったエラー文言）も修正、tests新規4件・§17.1リバート確認済み。 |
