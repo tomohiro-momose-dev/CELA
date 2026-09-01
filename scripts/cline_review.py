@@ -39,11 +39,29 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLINE_GLOBAL_STATE_PATH = Path.home() / ".cline" / "data" / "globalState.json"
 _WRITE_ACTIONS = ("editFiles", "editFilesExternally", "executeAllCommands")
+
+# [BL-334] Freeze detection watches this task's own --json stdout stream, not
+# process-level disk/network I/O counters. Two counter-based approaches were
+# tried and rejected 2026-09-01: (1) the `cline` CLI subprocess's own I/O --
+# it is a thin client that hands off to the hub daemon and barely moves
+# itself, causing false "frozen" kills mid-review (observed at 328s and
+# 900s+ while the hub was actively working); (2) the hub daemon's I/O -- hub
+# is shared machine-wide across concurrent Claude Code sessions (AGENTS.md
+# 19.2/19.3), so its counters reflect other sessions' work too, masking a
+# genuinely frozen task. Watching this task's own stdout line arrivals is
+# scoped to exactly this invocation and, per observed --json output, the
+# provider streams `reasoning` content deltas token-by-token while "thinking"
+# -- so genuine silence here should mean the provider truly stopped
+# responding, not just "still computing".
+_FREEZE_SILENCE_SECONDS = 300
+_ACTIVITY_CHECK_INTERVAL_SECONDS = 10
 
 REVIEW_INSTRUCTION_TEMPLATE = (
     "{plan_path} を読み込んで、設計・実装計画としてレビューしてください。\n"
@@ -130,7 +148,27 @@ def _hub_stop(cline_exe: str) -> None:
         pass
 
 
-def invoke_cline(prompt: str, thinking: str = "high", timeout: int = 600, model: str | None = None) -> str:
+def _drain_stream(pipe, buffer: list[str], activity: dict, lock: threading.Lock) -> None:
+    """Continuously read a subprocess pipe into `buffer` on a background thread,
+    stamping `activity["last"]` (monotonic time) on every line received.
+
+    Without the background read, a Popen'd process whose stdout/stderr isn't
+    being read can block on a full OS pipe buffer once its (JSON-lines,
+    potentially large) output exceeds it. The activity stamp is what the
+    freeze-detection loop in invoke_cline watches -- see [BL-334 FREEZE
+    DETECTION] there for why this, rather than a process I/O counter, is the
+    signal.
+    """
+    try:
+        for line in iter(pipe.readline, ""):
+            buffer.append(line)
+            with lock:
+                activity["last"] = time.monotonic()
+    finally:
+        pipe.close()
+
+
+def invoke_cline(prompt: str, thinking: str = "high", timeout: int = 3600, model: str | None = None) -> str:
     """Run the Cline CLI non-interactively with `prompt` and return its final answer text.
 
     [CONSTRAINT] Never pass -p/--plan here. Cline has its own plan/act mode; in
@@ -145,6 +183,15 @@ def invoke_cline(prompt: str, thinking: str = "high", timeout: int = 600, model:
     it), it is left alone: shutting down a daemon another session depends on
     would break that session's in-flight work, which is worse than leaving an
     idle daemon running. See AGENTS.md 19.3.
+
+    [BL-334 FREEZE DETECTION] `timeout` is a hard safety-net ceiling, not the
+    primary cutoff -- a fixed wall-clock timeout can't tell "still genuinely
+    working on a heavy review" from "hung", and both were observed at 600s
+    and 900s. Instead, this task's own --json stdout is watched: if no new
+    line arrives for _FREEZE_SILENCE_SECONDS, the process is killed and
+    treated as frozen. See the module-level comment above
+    _FREEZE_SILENCE_SECONDS for why stdout-arrival was chosen over a process
+    I/O counter (two counter-based approaches were tried and rejected first).
     """
     _ensure_readonly_auto_approve()
 
@@ -173,28 +220,70 @@ def invoke_cline(prompt: str, thinking: str = "high", timeout: int = 600, model:
         cmd.append(prompt)
 
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
-                timeout=timeout + 30,
+                bufsize=1,
             )
-        except FileNotFoundError as exc:
+        except OSError as exc:
             raise ClineReviewError(
                 "cline CLI not found on PATH. Install with 'npm i -g cline' and "
                 "authenticate with 'cline auth' first."
             ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise ClineReviewError(f"cline CLI did not finish within {timeout + 30}s") from exc
+
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+        activity_lock = threading.Lock()
+        activity = {"last": time.monotonic()}
+        stdout_thread = threading.Thread(
+            target=_drain_stream, args=(proc.stdout, stdout_lines, activity, activity_lock), daemon=True
+        )
+        stderr_thread = threading.Thread(
+            target=_drain_stream, args=(proc.stderr, stderr_lines, activity, activity_lock), daemon=True
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        start = time.monotonic()
+        killed_reason: str | None = None
+
+        while proc.poll() is None:
+            if time.monotonic() - start > timeout:
+                proc.kill()
+                killed_reason = f"cline CLI exceeded the {timeout}s safety-net timeout"
+                break
+
+            time.sleep(_ACTIVITY_CHECK_INTERVAL_SECONDS)
+
+            with activity_lock:
+                silence = time.monotonic() - activity["last"]
+            if silence > _FREEZE_SILENCE_SECONDS:
+                proc.kill()
+                killed_reason = (
+                    f"cline CLI appears frozen: no output for {_FREEZE_SILENCE_SECONDS}s"
+                )
+                break
+
+        proc.wait(timeout=30)
+        stdout_thread.join(timeout=10)
+        stderr_thread.join(timeout=10)
+
+        if killed_reason:
+            raise ClineReviewError(killed_reason)
+
+        full_stdout = "".join(stdout_lines)
+        full_stderr = "".join(stderr_lines)
 
         if proc.returncode != 0:
             raise ClineReviewError(
-                f"cline CLI exited with code {proc.returncode}:\n{proc.stderr}"
+                f"cline CLI exited with code {proc.returncode}:\n{full_stderr}"
             )
 
         review_text = None
-        for line in proc.stdout.splitlines():
+        for line in full_stdout.splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -207,7 +296,7 @@ def invoke_cline(prompt: str, thinking: str = "high", timeout: int = 600, model:
 
         if not review_text:
             raise ClineReviewError(
-                "cline CLI produced no run_result text; raw stdout:\n" + proc.stdout
+                "cline CLI produced no run_result text; raw stdout:\n" + full_stdout
             )
         return review_text
     finally:
@@ -215,7 +304,7 @@ def invoke_cline(prompt: str, thinking: str = "high", timeout: int = 600, model:
             _hub_stop(cline_exe)
 
 
-def run_cline_review(plan_path: Path, thinking: str = "high", timeout: int = 600, model: str | None = None) -> str:
+def run_cline_review(plan_path: Path, thinking: str = "high", timeout: int = 3600, model: str | None = None) -> str:
     """Send a single plan/design doc to Cline and return its review text."""
     if not plan_path.is_file():
         raise ClineReviewError(f"plan file not found: {plan_path}")
@@ -233,7 +322,13 @@ def main() -> int:
         choices=["none", "low", "medium", "high", "xhigh"],
         help="Cline reasoning effort (default: high)",
     )
-    parser.add_argument("--timeout", type=int, default=600, help="Timeout in seconds (default: 600)")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=3600,
+        help="Safety-net timeout in seconds (default: 3600) -- I/O-silence freeze "
+        "detection is the primary cutoff, see AGENTS.md 19.x",
+    )
     parser.add_argument(
         "--model",
         default=None,

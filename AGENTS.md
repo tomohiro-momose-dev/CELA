@@ -615,9 +615,25 @@ the actual code/docs per §16.2, and fold what survives verification back into t
 paste the review to the user unfiltered and do not treat it as authoritative. Do this before
 calling `ExitPlanMode` (see the sequencing note above), not after.
 
-`--timeout` is the budget given to the `cline` CLI itself (`-t`); the Python subprocess call waits
-`--timeout + 30`s before giving up, so a slow review surfaces as a `cline CLI exited`/`did not
-finish` error rather than a silent hang — no extra margin needs to be added by the caller.
+`--timeout` (default 3600s) is a hard safety-net ceiling, not the primary cutoff. The primary
+freeze-detection cutoff watches this task's own `--json` stdout: if no new line arrives for 300s
+(`_FREEZE_SILENCE_SECONDS` in `scripts/cline_review.py`), the process is killed as frozen — checked
+every 10s (`_ACTIVITY_CHECK_INTERVAL_SECONDS`). **Established 2026-09-01 after two rejected
+approaches, do not rediscover by trial and error:**
+- A fixed wall-clock timeout alone can't tell "still genuinely working on a heavy review" from
+  "hung" — both a 600s and a 900s timeout were hit on reviews that were still actually progressing.
+- Polling the `cline` CLI subprocess's own I/O counters (via WMI) was tried first and produced
+  false "frozen" kills at 328s and 900s+ while the review was genuinely still running: the CLI
+  process is a thin client that hands work off to the shared hub daemon (§19.3) and barely moves
+  its own I/O.
+- Polling the hub daemon's I/O instead was considered but rejected: the hub is shared machine-wide
+  across concurrent Claude Code sessions (§19.2), so its counters reflect other sessions' work too
+  and would mask a genuinely frozen task.
+- Watching this task's own stdout line arrivals avoids both problems — it is scoped to exactly this
+  invocation, and the provider was observed streaming `reasoning` content token-by-token while
+  "thinking," so genuine silence should mean the provider actually stopped responding. Verified:
+  a review that previously false-triggered at 328s completed cleanly in 591s under this scheme.
+  Full investigation trail: `issue_backlog.md` BL-334.
 
 ### 19.2 Safety posture (do not change without user approval)
 
@@ -669,6 +685,14 @@ from this session's own actions.
 - The Cline CLI and the Cline VS Code extension share one local hub daemon per workspace
   (`ws://127.0.0.1:<port>`, `cline hub status`). A CLI task can therefore surface inside the VS Code
   extension's chat UI for the same workspace.
+- **Hub lifecycle (per user decision 2026-08-31):** `invoke_cline()` does not leave the hub daemon
+  running idle between reviews. It checks `cline hub status` before invoking the CLI; if the hub was
+  not already running, it starts one (`cline hub start`) and stops it again (`cline hub stop`) in a
+  `finally` block after the call. If the hub *was* already running — most likely because another
+  concurrent Claude Code session is using it — it is left alone; tearing down a daemon another
+  session's in-flight review depends on would break that session, which is worse than an idle
+  daemon. Both start/stop are best-effort (swallow errors, never turn a successful review into a
+  reported failure) — see `_hub_start`/`_hub_stop`/`_hub_is_running` in `scripts/cline_review.py`.
 - `-z`/`--zen` (documented as "run in the background hub") timed out with `zen_error` on CLI v3.0.60
   and is not a working workaround for the above — do not rely on it without re-verifying against a
   newer CLI version first.
