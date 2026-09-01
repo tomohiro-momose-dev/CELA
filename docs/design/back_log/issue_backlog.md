@@ -356,6 +356,7 @@
 | BL-329 | 高 | `cela_main.py`（`_validate_task_plan_depends_on_integrity`・`_build_protected_task_id_validator`・`_enforce_decision_lineage_json`・`task_planner_node`ほか、詳細は下記セクション参照） | **`done`。** 計画再構成が承認済みDeliverableを除去しないよう、生成時点で検証・自己修正させる。詳細は下記`### BL-329`セクション参照。 | P0 |
 | BL-330 | 高 | `cela_main.py`（`17957-17966`、decision_extractor_nodeのDeliverable UPDATE分岐）、`tests/test_bl330_deliverable_supersede_lookup_task_id_scoped.py`（新規4件） | **`done`（コード修正のみ。1917の実データ是正はユーザー判断により見送り、run自体は破損したままPAUSE凍結）。** 1917ログ実インシデント：Deliverable旧レコード検索がtask_id/entry_typeを見ずtopic文字列一致のみで照合し、task_4_2の承認済みポインタがtask_4_1のホワイトボードスロットへ誤って向いた（task_4_1自体も生きているDeliverable行が0件に）。当初「同型が独立に5箇所」と報告したが調査の結果1箇所のみと訂正（他3箇所は既にBL-084保護済み、1箇所は表示専用フォールバックで低リスク）。BL-084と同じ`_find_active_deliverable_agreement`（task_id基準）へ揃える修正を実施。詳細は下記`### BL-330`セクション参照。 | P1 |
 | BL-331 | 中 | `cela_main.py`（`tasks`/`phases`テーブル新設、`_sync_task_phase_identity`新設、`_resolve_ref_table`等7箇所へのref語彙追加、`split_from`フィールド・validator拡張）、`tests/test_bl331_tasks_phases_identity.py`（新規21件） | **`done`（Phase 1）。** task_id/phase_id/Deliverable識別をtopic文字列一致でなくDAG（グラフ）ベースの機械的紐づけへ再設計。BL-224（判断の系譜＝なぜ）とは別物で、「今どの記録が生きているか」という識別自体が対象。ユーザーが「CELAは当初state onlyの簡易アーキテクチャで実証確認が目的だったが、実証は十分済んだため堅牢な構造（グラフ等）へ改める」という方向性を明言（2026-09-01）。詳細は下記`### BL-331`セクション参照。 | P2 |
+| BL-332 | 中 | `cela_main.py`（`_validate_task_plan_depends_on_integrity`のsplit_from検証・`call_task_planner`のJSON自己修正リトライループ・`_task_plan_validator`クロージャ、詳細は下記セクション参照） | **`open`。** BL-331の`split_from`系譜が、初回計画のreviewer自己修正ループ内（コミット前）で発生する分割を捕捉できていないスコープギャップ。りんご音楽祭シナリオ実ラン（run_id=1788237935-49645c44）で発見。詳細は下記`### BL-332`セクション参照。 | P2 |
 
 ---
 
@@ -11582,7 +11583,7 @@ run自体を「topic文字列一致による識別破綻の実例」として参
 |------|------|
 | 状態 | `done`（Phase 1完了。バックフィルは別BLへ分離） |
 | 優先度 | P2 |
-| 関連 | BL-330（同根の実インシデントだが対症療法のみでスコープ別）、BL-224（`relation_edges`・判断の系譜、Phase 1実装済み・コミット`ab119be`、拡張の基盤として再利用）、BL-228（`relation_edges`のPhase 3拡張、統一活動系譜）、AGENTS.md §15.1・§15.4・§15.5、設計書: [BL331_basic_design.md](BL-331/BL331_basic_design.md) |
+| 関連 | BL-330（同根の実インシデントだが対症療法のみでスコープ別）、BL-224（`relation_edges`・判断の系譜、Phase 1実装済み・コミット`ab119be`、拡張の基盤として再利用）、BL-228（`relation_edges`のPhase 3拡張、統一活動系譜）、BL-332（本BLのsplit_from機構が初回計画のreviewer自己修正ループ内分割を捕捉できないスコープギャップ、実ラン監視で発見）、AGENTS.md §15.1・§15.4・§15.5、設計書: [BL331_basic_design.md](BL-331/BL331_basic_design.md) |
 
 **経緯**: BL-330の根本原因調査で、「今どのレコードが生きているか」の識別がtopic文字列一致に依存する脆弱な設計（5箇所重複）であることが判明したのを受け、ユーザーが「タスクプランナー・phase/task_idをlineageの様にDAG型にして機械的な紐づけを行うのが良いのでは」と提起。
 
@@ -11637,3 +11638,50 @@ Decision/Directive supersedeが依然topic一致のままの残存ギャップ�
 （BL-330の第2の識別子不整合経路、DAG構造とは別問題）、task_planner出力を1タスクずつの
 ツール呼び出しへ作り直す改修（BL-329で既に不採用済み）、成果物系テーブル書込時の`tasks`
 テーブルとのFK的整合性チェック（本Phase 1で土台は整ったが未実施、将来BL）。
+
+### BL-332: split_from系譜が初回計画のreviewer自己修正ループ内での分割を捕捉できないスコープギャップ
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `open` |
+| 優先度 | P2 |
+| 関連 | BL-331（本欠陥のsplit_from機構そのものを実装したBL）、BL-313（先送り集中によるサブタスク分割トリガー、BL-253該当の過大タスク指摘との組み合わせで本パターンが発生）、AGENTS.md §15.5（不変条件の網羅性） |
+
+**発見経緯**: BL-331実装後の定期監視（10分間隔cronジョブ、りんご音楽祭シナリオ実ラン
+run_id=1788237935-49645c44、2026-09-01開始）で発見。task_planner初回計画（v1）に対し
+task_plan_reviewerが「1タスクに複数シナリオ/観点を束ねすぎ（BL-253該当）」と指摘し、
+task_1_2/task_4_1/task_5_2/task_5_3をそれぞれ2〜3個に分割（task_1_4、task_4_4/4_5、
+task_5_4/5_5、task_5_6/5_7を新設）。task_plannerは分割元を`split_from`で明示しようと
+したが、バリデータ（`_validate_task_plan_depends_on_integrity`、BL-331のH-3反映分）に
+一律拒否され、5イテレーションの試行錯誤の末`split_from=""`にフォールバックして完了した。
+
+**根本原因**: バグではなく設計通りの挙動。この分割はtask_planner_nodeの1回の呼び出し内
+（JSON出力が不正だった際の自己修正リトライループ）で、`state["phases"]`がまだ一度も
+コミットされていない段階（＝初回計画）で発生した。BL-331のH-3設計は「`existing_phases`
+が空＝初回計画の場合、split_fromが非空のタスクは全て不正」としている（分割対象は
+既存タスクに限るという意図）が、ここでいう「既存」はtask_planner_nodeの**過去の呼び出し**
+で確定した`state["phases"]`のみを指し、**同一呼び出し内でreviewerが指摘した直前版の
+draft**は含まれない。しかしtask_plan_reviewerによるBL-253型の分割指摘は、性質上まさに
+この「初回計画がコミットされる前の自己修正ループ」で発生しやすく、実運用では
+split_from系譜が記録される再計画（re-plan）後の分割よりも、記録されないこの初回ループ
+内分割の方が高頻度で起きる可能性がある。
+
+**実害**: タスク構造自体（task_id一意性・depends_on整合性）は壊れていない
+（`_validate_task_plan_depends_on_integrity`の基本検証は正常に機能し、最終JSONは受理・
+実行フェーズへ正常に進行した）。失われるのは「task_1_4はtask_1_2の分割から生まれた」
+という系譜情報のみ——`relation_edges`に`split_from`エッジが1本も書かれず（実測0件）、
+`trace_lineage(ref="task:task_1_4")`でtask_1_2への遡及ができない。
+
+**対応方針（未着手・要設計）**: 以下のいずれか、または組み合わせを検討する。
+1. `existing_phases`の定義を「task_planner_nodeの過去呼び出しで確定した`phases`」に
+   加え、「同一呼び出し内でreviewerが指摘対象とした直前バージョンのplan draft
+   （`read_plan_draft`で取得可能なtask_id）」も許容するよう拡張する。
+2. task_plan_reviewerの指摘・task_plannerの自己修正ループ自体をsplit_fromの対象外と
+   明示的に割り切り、その代わりにreviewerの指摘理由（`edit_summary`）を新タスクの
+   `description`か別の監査経路に残すことで系譜の代替手段とする（DAGエッジ化はしない）。
+3. `_sync_task_phase_identity`側で、初回コミット時に「新規task_idのtitleが既存draftの
+   分割パターンに一致するか」を機械的に推測してsplit_fromを補完する（BL-331設計時に
+   却下した「命名規則からの推測」に近くAGENTS.md §15.5と緊張するため非推奨）。
+
+ユーザーへの提示・判断待ち。設計時は他に同種の「コミット前ループでの見落とし」が
+ないか（例: フェーズ丸ごとの分割・統合等）も併せて洗い出すこと。
