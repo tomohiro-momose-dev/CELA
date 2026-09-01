@@ -358,7 +358,7 @@
 | BL-331 | 中 | `cela_main.py`（`tasks`/`phases`テーブル新設、`_sync_task_phase_identity`新設、`_resolve_ref_table`等7箇所へのref語彙追加、`split_from`フィールド・validator拡張）、`tests/test_bl331_tasks_phases_identity.py`（新規21件） | **`done`（Phase 1）。** task_id/phase_id/Deliverable識別をtopic文字列一致でなくDAG（グラフ）ベースの機械的紐づけへ再設計。BL-224（判断の系譜＝なぜ）とは別物で、「今どの記録が生きているか」という識別自体が対象。ユーザーが「CELAは当初state onlyの簡易アーキテクチャで実証確認が目的だったが、実証は十分済んだため堅牢な構造（グラフ等）へ改める」という方向性を明言（2026-09-01）。詳細は下記`### BL-331`セクション参照。 | P2 |
 | BL-332 | 中 | `cela_main.py`（`_validate_task_plan_depends_on_integrity`のsplit_from検証・`call_task_planner`のJSON自己修正リトライループ・`_task_plan_validator`クロージャ、詳細は下記セクション参照） | **`open`。** BL-331の`split_from`系譜が、初回計画のreviewer自己修正ループ内（コミット前）で発生する分割を捕捉できていないスコープギャップ。りんご音楽祭シナリオ実ラン（run_id=1788237935-49645c44）で発見。詳細は下記`### BL-332`セクション参照。 | P2 |
 | BL-333 | 高 | `cela_main.py`（`_query_AI_live`のツールループ、`6709-6802`付近。最終iterationでの`tools`除去処理・ストリームからのtool_calls蓄積処理、詳細は下記セクション参照） | **`open`。** 「最終iterationはtoolsを外してテキスト最終応答を保証する」安全策（BL-016/BL-056b）が実際には保証になっておらず、モデル/プロバイダがtools無しでもtool_calls形式の出力を返し、コード側がそれを無条件実行してしまうためツールループ非収束クラッシュを防げない。りんご音楽祭シナリオ実ラン（run_id=1788237935-49645c44）のクラッシュで発見。詳細は下記`### BL-333`セクション参照。 | P1 |
-| BL-334 | 低 | `scripts/cline_review.py`（`invoke_cline`、詳細は下記セクション参照） | **`open`。** Cline CLIレビュー（AGENTS.md §19）のタイムアウトが繰り返し発生。固定秒数の待機のみでは推論中か本当にフリーズかを区別できないため、ディスクI/O・ネットワークI/Oの両方を監視し、両方が一定時間沈黙したらフリーズとみなす仕組みを検討する。詳細は下記`### BL-334`セクション参照。 | P3 |
+| BL-334 | 低 | `scripts/cline_review.py`（`invoke_cline`・`_drain_stream`、詳細は下記セクション参照） | **`done`。** Cline CLIレビュー（AGENTS.md §19）のタイムアウト連発を解消。当初案（プロセスI/Oカウンタ監視）は2回とも実運用で誤検知（正常な長考中にkill）したため設計変更し、このタスク自身の`--json`stdout行到着間隔を監視する方式へ切替。実測で誤検知なく591秒のレビューが完走することを確認。詳細は下記`### BL-334`セクション参照。 | P3 |
 
 ---
 
