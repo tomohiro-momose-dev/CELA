@@ -3983,7 +3983,17 @@
 
 ---
 
-## 決定の記録ルール
+### D-286: BL-335 Phase 2 — read_pdf_page_as_imageのVision API呼び出しに軽いリトライを追加
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-09-01 |
+| 状態 | `decided` |
+| 決定者 | t-momose（AskUserQuestionで「軽いリトライを入れてほしい」を選択） |
+| **決定理由** | BL335_basic_design.md §2.3は、`read_pdf_page_as_image`のVision API呼び出しを「リトライ/バックオフ/反復ガードなしの単発呼び出し」として設計提案していた（`_query_AI_live`のwhile True無限リトライループを持ち込むリスクを避けるため）。この設計上の判断はAGENTS.md §7の承認対象として明示的にユーザー確認待ちとしていたが、実装前の確認でユーザーは「完全リトライなし」ではなく「軽いリトライ」を要求した。一時的な接続断・タイムアウトは1回のAPI呼び出し失敗が即座にツールエラーとしてLLMへ返り、LLM自身に再試行させるコストの方が、1回だけの軽いリトライを内部で吸収するコストより高い（LLMターン消費・ユーザー体感のちらつき）と判断したため。ただし無限リトライループの再導入は避け、`_query_AI_live`と同じ設計上の懸念は残さない範囲に限定した。 |
+| 決定内容 | `_PDF_VISION_RETRY_ATTEMPTS = 2`（合計2試行＝初回+1回のみ再試行）とし、リトライ対象は一時的な接続断・タイムアウト（`APIConnectionError`/`APITimeoutError`/`httpx.RemoteProtocolError`/`httpx.TimeoutException`/`httpx.ReadError`）に限定した。`RateLimitError`・汎用`APIError`は実質的なエラーである可能性が高いためリトライ対象から除外し、即座にツールエラーとして返す（`_query_AI_live`の分類基準を参考にしたが、無限リトライは行わない）。バックオフ待機（sleep）は入れていない（2試行のみのため許容）。カウンタ・キャッシュはリトライ試行中は変更せず、最終的に成功した場合のみ加算・書き込みする。 |
+| 影響 | `cela_main.py`（`_read_pdf_page_as_image_handler`内のVision API呼び出しループ）、`tests/test_bl335_pdf_vision.py`（`test_light_retry_succeeds_on_second_attempt`・`test_gives_up_after_retry_exhausted`・`test_rate_limit_error_does_not_retry`）。§17.1リバート確認済み（`_PDF_VISION_RETRY_ATTEMPTS`を2→1へ戻すと該当2テストが失敗することを確認）。 |
+| 関連 BL | BL-335（本件、Phase 2） |
 
 ---
 
@@ -4007,3 +4017,4 @@
 | 2026-09-01 | D-283を追記（BL-330実装完了）。`cela_main.py`修正・テスト4件追加、§19.1/§19.4 Clineレビュー完了。 |
 | 2026-09-01 | D-284を追記（BL-331実装完了、Phase 1）。`tasks`/`phases`テーブル新設・テスト21件追加、§19.1/§19.4 Clineレビュー完了。 |
 | 2026-09-01 | D-285を追記（BL-335 Phase 1実装、web_fetchのリダイレクト追従方針転換）。Playwright常設フェッチ・raw_cache_file_path等をweb_tools.pyへ追加、tests/test_bl335_playwright_fetch.py新規14件、既存test_bl184_web_tools.py改修、§17.1リバート確認済み。 |
+| 2026-09-01 | D-286を追記（BL-335 Phase 2実装、read_pdf_page_as_imageツール新設）。pypdfium2でPDFページをPNG化しglm-5.3-flash Visionへ渡すツールをcela_main.py/web_tools.pyへ追加、軽いリトライ方針採用、5ノードのツール一覧へ登録、tests/test_bl335_pdf_vision.py新規14件、§17.1リバート確認済み。 |
