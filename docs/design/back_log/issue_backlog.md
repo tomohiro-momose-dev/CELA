@@ -11739,7 +11739,7 @@ split_from系譜が記録される再計画（re-plan）後の分割よりも、
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open`（Phase 1のみ`done`） |
+| 状態 | `open`（Phase 1〜3すべて`done`、最終合算diffレビューのみ残） |
 | 優先度 | P2 |
 | 関連 | BL-184/BL-188/BL-200/BL-221（web_fetch/markitdown系譜）、D-157（Chromium常設化はD-157のBrave Search API採用時とはコスト構造が異なると判断、`docs/design/back_log/BL-184/BL184_basic_design.md`参照）、D-285（Phase 1のリダイレクト追従方針転換）、AGENTS.md §13・§15.1・§15.4・§17.1・§19.1・§19.4 |
 
