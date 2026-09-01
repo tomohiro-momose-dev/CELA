@@ -11590,4 +11590,50 @@ run自体を「topic文字列一致による識別破綻の実例」として参
 
 **ユーザーが明言した背景（architecture全体の方向性）**: CELAは当初DBを持たないstate onlyの簡易アーキテクチャで、各ノードが連携して動作するかの実証確認が目的だった。実証は十分済んだと判断し、今後はとりあえずの実装を、グラフ構造など堅牢な姿へ各所で改めていく方針（2026-09-01、`project_cela_architecture_maturation_dag`memory参照）。本BLはその一環の最初の具体対象。
 
-**未着手**: 設計はまだ行っていない。着手する場合はBL-224/228の`relation_edges`基盤を再利用・拡張するか独立のtask/phase識別テーブルを設けるかを含め、Plan modeでの設計とCline独立レビュー（AGENTS.md §19.1）を経る。
+**設計（Plan mode + Explore/Plan agent調査 + Cline §19.1レビュー）**: 3並列Explore agentで
+(1) 現状のtask_id識別機構（`_find_active_deliverable_agreement`等task_id基準の堅牢な経路と、
+Decision/Directive supersedeが依然topic一致のままの残存ギャップ）、(2) BL-224 `relation_edges`
+の実装詳細（`task:`参照が「実表の行として検証できない」という理由で明示的に却下されていた
+事実、再帰CTEも「サイクル検知が無い」という理由でPython反復実装に一本化された経緯）、
+(3) task_planner再計画の全体構造（`Task`/`Phase` TypedDict、フェーズ・タスクの全件再送出
+契約、BL-329の`removed_task_ids`ループが既に「復元/真のsupersede」判定を計算済みである
+こと）を調査。調査結果をPlan agentへ渡し設計案を作成、ユーザーへ4点の設計判断
+（phasesテーブルを作るか・`task:`参照の解決条件・split系譜のrelation_type・バックフィルの
+扱い）をAskUserQuestionで確認した上で確定（詳細はdecision_lineage.md参照）。
+
+**実装**: `tasks`/`phases`テーブル新設（`PRIMARY KEY (run_id, task_id)`/`(run_id, phase_id)`が
+このスキーマで初めてtask_id/phase_id一意性をDB保証）。`task_planner_node`にBL-329が既に
+計算済みの復元/supersede判定をそのまま再利用する`_sync_task_phase_identity`を新設・配線
+（判定ロジックの重複なし）。`_resolve_ref_table`等7箇所（`_LINEAGE_REF_PREFIXES`・エラー
+メッセージ2箇所・`_resolve_ref_line`・`TRACE_LINEAGE_TOOL`description・
+`_TRACE_LINEAGE_USAGE_PARAGRAPH`共有段落）へ`task:`/`phase:`参照を追加し、BL-224が却下して
+いた`task:`参照をtasks実表の導入により有効化した。タスク分割系譜（task_5_2→task_5_2_1）は
+`split_from`フィールド＋新規`split_from` relation_type（4種目、ユーザー決定）として記録。
+`_validate_task_plan_depends_on_integrity`を`existing_phases`引数へ拡張し、split_fromの
+ダングリング参照・初回計画での不正使用・同一リビジョン内のネスト分割を検出する。
+
+**§19.1設計レビュー（Cline、`deepseek/deepseek-v4-flash`）**: H-1（`tasks.depends_on`列が
+無消費で§15.4違反になるリスク→列自体を削除）・H-2（ref語彙更新箇所が4箇所不足、特に
+`_TRACE_LINEAGE_USAGE_PARAGRAPH`共有プロンプト段落の更新漏れは「実装したのにAIが使えない」
+状態になる重要指摘）・H-3（`split_from`検証に`existing_phases`が必要、初期計画拒否・ネスト
+分割拒否の不変条件が未規定）を反映。M-1（phaseのsuperseded_reason欠落）・M-3（追加テスト
+4件）・L-1〜L-3も反映。
+
+**§19.4実装後レビュー（同モデル）**: 新規テスト21件・非退行115件（BL-224/228/329/084/330
+関連）すべてpassを確認した上で、**split_fromエッジがcheckpoint resume等での再同期時に
+重複蓄積する冪等性ギャップ**（tasks/phasesはON CONFLICT DO UPDATEで冪等だがrelation_edges
+の書込は無条件INSERTだった）を実コード実行で検証・発見。書込前の存在確認（dedup）を追加し、
+リバート確認済みの回帰テストで固定した。あわせて既存テスト`test_trace_lineage_handler_unknown_prefix`
+が`"task:xxx"`を「未知プレフィックス」の例に使っていたため（`task:`が既知化された影響で
+意図と異なる経路を検査してしまう）、`"bogus_prefix:xxx"`へ訂正した。
+
+**テスト・検証**: 新規`tests/test_bl331_tasks_phases_identity.py`21件、§17.1リバート確認済み
+（コード全体revertで21件全滅を確認、split_from冪等性修正は個別にrevert・再現確認）。
+フルオフラインスイート2218 passed / 5 deselected。
+
+**スコープ外（設計時に明示）**: バックフィル（既存run群への遡及登録、BL-230前例に倣い別BLへ
+分離）、Decision/Directiveのtopic文字列一致supersede（BL-084が意図的にスコープ外とした
+設計）、`_write_agreement_impl`の`tid = args.get("task_id") or task_id`暗黙フォールバック
+（BL-330の第2の識別子不整合経路、DAG構造とは別問題）、task_planner出力を1タスクずつの
+ツール呼び出しへ作り直す改修（BL-329で既に不採用済み）、成果物系テーブル書込時の`tasks`
+テーブルとのFK的整合性チェック（本Phase 1で土台は整ったが未実施、将来BL）。
