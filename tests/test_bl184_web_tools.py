@@ -387,13 +387,29 @@ def test_validate_url_dns_failure_raises(monkeypatch):
 # fetch_and_extract
 # ---------------------------------------------------------------------------
 
+class _FakeRequest:
+    """[Cline手動レビュー指摘1・BL-335] httpx.Request相当の最小フェイク。build_requestが
+    返し、send()の引数として渡される。responseを持たせておくと、send()がその応答を
+    返す（多段ホップの2段目以降を表現するのに使う）。"""
+    def __init__(self, url, response=None):
+        self.url = url
+        self.response = response
+
+
 class _FakeFetchResponse:
     def __init__(self, status_code=200, content_type="text/html; charset=utf-8",
-                 text="<p>Hello</p>", encoding="utf-8"):
+                 text="<p>Hello</p>", encoding="utf-8", url=None, next_request=None):
         self.status_code = status_code
         self.headers = {"content-type": content_type}
         self.content = text.encode(encoding)
         self.encoding = encoding
+        # [BL-335] 手動リダイレクト追従後の最終着地URL。テストが明示しなければ
+        # リクエストURLと同一（＝リダイレクト無し）として扱う。
+        self.url = url
+        # [Cline手動レビュー指摘1・BL-335] Noneでない場合、httpx.Response.next_requestと
+        # 同じ意味を持つ_FakeRequest（次ホップのURL＋そのホップのsend()が返すべき応答）。
+        # 多段リダイレクトを表現するのに使う。
+        self.next_request = next_request
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -403,6 +419,9 @@ class _FakeFetchResponse:
 class _FakeClient:
     def __init__(self, response, **kwargs):
         self._response = response
+        # [BL-335] httpx.Client()へ渡されたkwargsをテストから検証できるよう記録しておく。
+        self.init_kwargs = kwargs
+        self.sent_urls = []
 
     def __enter__(self):
         return self
@@ -410,16 +429,39 @@ class _FakeClient:
     def __exit__(self, *a):
         return False
 
-    def get(self, url, headers=None):
-        return self._response
+    def build_request(self, method, url, headers=None):
+        return _FakeRequest(url)
+
+    def send(self, request, follow_redirects=False):
+        # [Cline手動レビュー指摘1・BL-335] 手動1ホップ追従（web_tools._fetch_via_httpx_and_convert）
+        # を模擬する。requestが2段目以降の_FakeRequest（.responseを持つ）ならそれを返し、
+        # 初回（build_request由来、.responseなし）はClient構築時の_responseを返す。
+        self.sent_urls.append(request.url)
+        resp = request.response or self._response
+        if resp.url is None:
+            resp.url = request.url
+        return resp
 
 
-def _patch_httpx_client(monkeypatch, response):
+def _patch_httpx_client(monkeypatch, response, capture_kwargs=None):
     """httpx.Clientをコンテキストマネージャ互換のフェイクへ差し替える
     （ラムダを関数属性として代入するとインスタンスアクセス時に束縛メソッド化され
-    第一引数にselfが渡ってしまうため、functools.partialで回避する）。"""
+    第一引数にselfが渡ってしまうため、functools.partialで回避する）。
+    [BL-335] capture_kwargsにdictを渡すと、httpx.Client(**kwargs)へ渡された引数を
+    そこへ書き込める。戻り値は生成された_FakeClientインスタンス（sent_urls等の検証用）。"""
     import functools
-    monkeypatch.setattr(web_tools.httpx, "Client", functools.partial(_FakeClient, response))
+
+    client_holder = {}
+
+    def _factory(resp, **kwargs):
+        if capture_kwargs is not None:
+            capture_kwargs.update(kwargs)
+        client = _FakeClient(resp, **kwargs)
+        client_holder["client"] = client
+        return client
+
+    monkeypatch.setattr(web_tools.httpx, "Client", functools.partial(_factory, response))
+    return client_holder
 
 
 class _FakeMarkItDownResult:
@@ -444,8 +486,17 @@ def _patch_markitdown(monkeypatch, text_content=None, exc=None, capture=None):
     monkeypatch.setattr(web_tools._MARKITDOWN, "convert_stream", fake_convert_stream)
 
 
+def _force_httpx_path(monkeypatch):
+    """[BL-335] fetch_and_extractは`_DOCUMENT_EXTENSIONS`外のURLをまずPlaywright経路へ
+    通すのが既定になった。既存のhttpx経路（`_fetch_via_httpx_and_convert`）を単体で
+    検証するテストは、Playwrightが「非適用/失敗」だった場合（Noneを返す）を模擬して
+    フォールバックさせる——これは実運用でPlaywrightが使えない/失敗した場合と同じ経路。"""
+    monkeypatch.setattr(web_tools, "_fetch_html_via_playwright", lambda url: None)
+
+
 def test_fetch_and_extract_success(monkeypatch):
     monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    _force_httpx_path(monkeypatch)
     _patch_httpx_client(monkeypatch, _FakeFetchResponse(text="<p>本文</p>"))
     _patch_markitdown(monkeypatch, text_content="# 見出し\n\n本文です。")
     text = web_tools.fetch_and_extract("https://example.com/")
@@ -454,6 +505,7 @@ def test_fetch_and_extract_success(monkeypatch):
 
 def test_fetch_and_extract_passes_content_type_and_url_to_markitdown(monkeypatch):
     monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    _force_httpx_path(monkeypatch)
     _patch_httpx_client(monkeypatch, _FakeFetchResponse(content_type="text/html; charset=utf-8"))
     capture = {}
     _patch_markitdown(monkeypatch, text_content="本文", capture=capture)
@@ -466,6 +518,7 @@ def test_fetch_and_extract_resolves_relative_links(monkeypatch):
     """[BL-188] markitdownはconvert_stream(url=...)を渡しても相対リンクを自動解決しない
     （実データで確認済み）ため、fetch_and_extract側で絶対URLへ解決する。"""
     monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    _force_httpx_path(monkeypatch)
     _patch_httpx_client(monkeypatch, _FakeFetchResponse())
     _patch_markitdown(
         monkeypatch,
@@ -476,23 +529,96 @@ def test_fetch_and_extract_resolves_relative_links(monkeypatch):
     assert "[外部サイト](https://other.example.com/report.pdf)" in text
 
 
-def test_fetch_and_extract_blocks_redirect(monkeypatch):
-    monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
-    _patch_httpx_client(monkeypatch, _FakeFetchResponse(status_code=302))
+def test_fetch_and_extract_follows_redirect_and_validates_final_url(monkeypatch):
+    """[Cline手動レビューR1/指摘1・BL-335] リダイレクト方針転換後: 302応答→最終200応答の
+    2ホップ構成を模擬し、両ホップのURLがvalidate_url_for_fetchで検証されること、かつ
+    最終的に着地先の本文が取得できることを確認する。"""
+    monkeypatch.setattr(web_tools, "_fetch_html_via_playwright", lambda url: None)
+    validated_urls = []
+    monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: validated_urls.append(url))
+    client_kwargs = {}
+    final_response = _FakeFetchResponse(
+        text="<p>リダイレクト先本文</p>", url="https://example.com/landed/",
+    )
+    hop1_response = _FakeFetchResponse(
+        status_code=302,
+        next_request=_FakeRequest("https://example.com/landed/", response=final_response),
+    )
+    holder = _patch_httpx_client(monkeypatch, hop1_response, capture_kwargs=client_kwargs)
+    _patch_markitdown(monkeypatch, text_content="リダイレクト先の本文です。")
+    text = web_tools.fetch_and_extract("https://example.com/old-path/")
+    assert "リダイレクト先の本文です" in text
+    # [Cline手動レビュー指摘1・BL-335] follow_redirects=Trueの自動追従（blind SSRFの原因）は
+    # 撤去し、手動で1ホップずつsend(request, follow_redirects=False)する方式へ変更した。
+    assert client_kwargs.get("follow_redirects") is None
+    # 元URL（fetch_and_extract冒頭＋httpx経路1ホップ目）と最終着地URL（2ホップ目）が
+    # 接続前に検証されること。
+    assert validated_urls == [
+        "https://example.com/old-path/",
+        "https://example.com/old-path/",
+        "https://example.com/landed/",
+    ]
+    assert holder["client"].sent_urls == ["https://example.com/old-path/", "https://example.com/landed/"]
+
+
+def test_fetch_and_extract_blocks_intermediate_redirect_hop_before_connecting(monkeypatch):
+    """[Cline手動レビュー指摘1・BL-335] 中間リダイレクトホップ（最終着地URLではない）が
+    内部アドレスへ向いている場合、そのホップへ実際に接続（send）する前にSSRF検証で
+    拒否されること（blind SSRF対策の直接検証）。"""
+    monkeypatch.setattr(web_tools, "_fetch_html_via_playwright", lambda url: None)
+
+    def _validate(url):
+        if "169.254.169.254" in url:
+            raise web_tools.SsrfBlockedError("内部アドレスへの中間リダイレクトを検知しました。")
+
+    monkeypatch.setattr(web_tools, "validate_url_for_fetch", _validate)
+    intermediate_response = _FakeFetchResponse(
+        status_code=302,
+        next_request=_FakeRequest("http://169.254.169.254/latest/meta-data/"),
+    )
+    holder = _patch_httpx_client(monkeypatch, intermediate_response)
+
     with pytest.raises(web_tools.SsrfBlockedError):
-        web_tools.fetch_and_extract("https://example.com/")
+        web_tools.fetch_and_extract("https://example.com/redirect-me")
+
+    # 元URL（1回目のホップ）へは接続したが、内部アドレスへの2回目のホップは
+    # validate_url_for_fetchで例外化され、send()が2回目呼ばれてはいけない
+    # （＝実際には接続していない）。
+    assert holder["client"].sent_urls == ["https://example.com/redirect-me"]
+
+
+def test_fetch_and_extract_blocks_redirect_to_private_ip(monkeypatch):
+    """[Cline手動レビューR1・BL-335] リダイレクトは追従を許可するが、最終着地URLが
+    プライベートIP等（SSRF対象）であれば引き続き拒否されること。"""
+    monkeypatch.setattr(web_tools, "_fetch_html_via_playwright", lambda url: None)
+
+    def _validate(url):
+        if "internal.example" in url:
+            raise web_tools.SsrfBlockedError("内部アドレスへのリダイレクトを検知しました。")
+
+    monkeypatch.setattr(web_tools, "validate_url_for_fetch", _validate)
+    final_response = _FakeFetchResponse(text="<p>本文</p>", url="https://internal.example/secret")
+    hop1_response = _FakeFetchResponse(
+        status_code=302,
+        next_request=_FakeRequest("https://internal.example/secret", response=final_response),
+    )
+    _patch_httpx_client(monkeypatch, hop1_response)
+    with pytest.raises(web_tools.SsrfBlockedError):
+        web_tools.fetch_and_extract("https://example.com/redirect-me")
 
 
 def test_fetch_and_extract_rejects_non_text_non_pdf_content_type(monkeypatch):
     """[BL-188] text/*とapplication/pdf以外（例: application/octet-stream）は引き続き拒否する。"""
     monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    _force_httpx_path(monkeypatch)
     _patch_httpx_client(monkeypatch, _FakeFetchResponse(content_type="application/octet-stream"))
     with pytest.raises(web_tools.SsrfBlockedError):
         web_tools.fetch_and_extract("https://example.com/file.bin")
 
 
-def test_fetch_and_extract_accepts_pdf_content_type(monkeypatch):
+def test_fetch_and_extract_accepts_pdf_content_type(monkeypatch, tmp_path):
     monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))  # [BL-335] 生バイトキャッシュ書込先
     resp = _FakeFetchResponse(content_type="application/pdf")
     resp.content = b"%PDF-1.4 fake bytes for test"
     _patch_httpx_client(monkeypatch, resp)
@@ -507,6 +633,7 @@ def test_fetch_and_extract_rejects_oversized_content(monkeypatch):
     """[SAFETY] より厳密なパーサ（markitdown内部のpdfminer/BeautifulSoup等）へ渡す前提のため、
     HTML/PDFいずれもバイト列の途中切り捨てはせず、上限超過時は明示エラーにする。"""
     monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    _force_httpx_path(monkeypatch)
     resp = _FakeFetchResponse()
     resp.content = b"x" * (web_tools._MAX_FETCH_BYTES + 1)
     _patch_httpx_client(monkeypatch, resp)
@@ -514,11 +641,12 @@ def test_fetch_and_extract_rejects_oversized_content(monkeypatch):
         web_tools.fetch_and_extract("https://example.com/huge")
 
 
-def test_fetch_and_extract_wraps_markitdown_exception(monkeypatch):
+def test_fetch_and_extract_wraps_markitdown_exception(monkeypatch, tmp_path):
     """[BL-188] markitdownが変換に失敗した場合（壊れたPDF等）、MarkItDownExceptionを
     SsrfBlockedErrorへラップして返す（呼び出し元のweb_fetch_handlerが既存パターン通り
     エラーレスポンスへ変換できるようにする）。"""
     monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))  # [BL-335] 生バイトキャッシュ書込先
     _patch_httpx_client(monkeypatch, _FakeFetchResponse(content_type="application/pdf"))
     _patch_markitdown(monkeypatch, exc=web_tools.MarkItDownException("broken PDF"))
     with pytest.raises(web_tools.SsrfBlockedError):
@@ -539,10 +667,11 @@ def test_fetch_and_extract_accepts_docx_content_type(monkeypatch):
     assert capture["stream_info"].extension == ".docx"
 
 
-def test_fetch_and_extract_accepts_xlsx_via_extension_when_content_type_is_wrong(monkeypatch):
+def test_fetch_and_extract_accepts_xlsx_via_extension_when_content_type_is_wrong(monkeypatch, tmp_path):
     """[BL-218] 自治体サイトはContent-Typeが不正確（application/octet-stream等）なことが
     珍しくない。URLパスの拡張子で救えることを確認する（本テストの直接動機）。"""
     monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))  # [BL-335] 生バイトキャッシュ書込先
     resp = _FakeFetchResponse(content_type="application/octet-stream")
     _patch_httpx_client(monkeypatch, resp)
     capture = {}
@@ -559,9 +688,10 @@ def test_fetch_and_extract_accepts_xlsx_via_extension_when_content_type_is_wrong
     (".epub", "application/epub+zip"),
     (".csv", "text/csv"),
 ])
-def test_fetch_and_extract_accepts_document_formats(monkeypatch, ext, content_type):
+def test_fetch_and_extract_accepts_document_formats(monkeypatch, tmp_path, ext, content_type):
     """[BL-218] Excel(旧形式)/PowerPoint/EPUB/CSVも受理する。"""
     monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    monkeypatch.setattr(web_tools, "WEB_CACHE_DIR", str(tmp_path / "web_cache"))  # [BL-335] .xlsのみ生バイトキャッシュ対象
     resp = _FakeFetchResponse(content_type=content_type)
     _patch_httpx_client(monkeypatch, resp)
     _patch_markitdown(monkeypatch, text_content="変換結果")
@@ -573,6 +703,7 @@ def test_fetch_and_extract_still_rejects_content_type_and_extension_both_unrecog
     """[BL-218] 非退行：Content-Type・拡張子のどちらも文書系と認識できない場合は
     引き続き拒否する（zip爆弾リスク等を理由に対象外としたzip等を含む）。"""
     monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    _force_httpx_path(monkeypatch)
     _patch_httpx_client(monkeypatch, _FakeFetchResponse(content_type="application/zip"))
     with pytest.raises(web_tools.SsrfBlockedError):
         web_tools.fetch_and_extract("https://example.com/archive.zip")
@@ -580,6 +711,7 @@ def test_fetch_and_extract_still_rejects_content_type_and_extension_both_unrecog
 
 def test_fetch_and_extract_truncates_long_output(monkeypatch):
     monkeypatch.setattr(web_tools, "validate_url_for_fetch", lambda url: None)
+    _force_httpx_path(monkeypatch)
     _patch_httpx_client(monkeypatch, _FakeFetchResponse())
     _patch_markitdown(monkeypatch, text_content="あ" * 20000)
     text = web_tools.fetch_and_extract("https://example.com/")
@@ -697,26 +829,28 @@ def test_web_search_handler_clamps_max_results_to_15(monkeypatch):
     assert captured["max_results"] == 15
 
 
-def test_default_max_web_search_calls_fallback_is_200():
-    assert web_tools._DEFAULT_MAX_WEB_SEARCH_CALLS == 200
+def test_default_max_web_search_calls_fallback_is_400():
+    """[BL-314] 200→400へ再緩和（同run複数回のresumeを経た累積消費でTurn 8/30という
+    序盤で200/200が再度枯渇したため）。"""
+    assert web_tools._DEFAULT_MAX_WEB_SEARCH_CALLS == 400
 
 
-def test_web_search_handler_uses_200_fallback_limit_when_config_missing(monkeypatch):
+def test_web_search_handler_uses_400_fallback_limit_when_config_missing(monkeypatch):
     class _FakeProvider:
         def search(self, query, max_results):
             return []
 
     monkeypatch.setattr(web_tools, "get_search_provider", lambda: _FakeProvider())
-    state = {"web_search_call_count": 150}
+    state = {"web_search_call_count": 350}
     result = web_tools.web_search_handler({"query": "x"}, state, {})
-    assert "results" in result, "config未指定時、既定上限200未満なので拒否されてはならない"
+    assert "results" in result, "config未指定時、既定上限400未満なので拒否されてはならない"
 
 
-def test_cli_default_max_web_search_calls_is_200():
+def test_cli_default_max_web_search_calls_is_400():
     import inspect
     import cela_main
     src = inspect.getsource(cela_main)
-    assert '"max_web_search_calls": 200,' in src
+    assert '"max_web_search_calls": 400,' in src
 
 
 # ---------------------------------------------------------------------------

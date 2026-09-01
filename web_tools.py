@@ -15,6 +15,7 @@ cela_main.py固有のTypedDict定義には依存しない。
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import html.parser
 import io
@@ -29,6 +30,7 @@ from typing import Protocol
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import httpx
+import pypdfium2 as pdfium
 from markitdown import MarkItDown, MarkItDownException, StreamInfo
 
 # ---------------------------------------------------------------------------
@@ -74,6 +76,26 @@ _DOCUMENT_MIME_TYPE_PREFIXES = (
 _DOCUMENT_EXTENSIONS = (".pdf", ".docx", ".xlsx", ".xls", ".pptx", ".epub", ".csv")
 _USER_AGENT = "Mozilla/5.0 (compatible; CELA-research-bot/1.0)"
 
+# [BL-335] PlaywrightのDOMContentLoaded待機タイムアウト。
+_PLAYWRIGHT_NAV_TIMEOUT_MS = 30_000
+# [BL-335] domcontentloaded後、ベストエフォートで待つnetworkidleのタイムアウト。SPAが
+# 継続ポーリングし続けidleに到達しないページは珍しくないため、タイムアウトしても致命的
+# 失敗にはしない（取れた分でconvert_streamへ進む）。
+_PLAYWRIGHT_NETWORKIDLE_TIMEOUT_MS = 5_000
+# [BL-335] Chromiumの既知のメモリリーク傾向に対する二次防御。1runで数十〜数百の未
+# キャッシュURLを連続レンダリングする可能性があるため、一定ページ数ごとにブラウザ
+# プロセス自体を再起動する。
+_PLAYWRIGHT_RECYCLE_AFTER_N_PAGES = 50
+# [BL-335] Phase 2（PDF画像化）・Phase 3（xlsx pandas読み込み）が元の生バイト列を必要と
+# するため、markitdown変換後のMarkdownとは別に、PDF/xlsx/xlsのみ生バイトも保存する
+# （AGENTS.md §15.4「入口を作ったら出口も」— 消費経路がある形式に限定）。
+_RAW_CACHEABLE_EXTENSIONS = (".pdf", ".xlsx", ".xls")
+# [Cline手動レビュー指摘1・BL-335] httpx.Client(follow_redirects=True)のような自動追従は
+# 中間ホップへ実際に接続してから最終URLだけを検証するため、内部アドレスへの中間リダイレクトが
+# SSRF検証をすり抜けて実接続してしまう（blind SSRF）。手動で1ホップずつ追従するため、
+# 無限リダイレクトを防ぐ上限をhttpxの既定（20）より保守的に設定する。
+_MAX_REDIRECT_HOPS = 10
+
 # [BL-188] HTML/PDFの本文抽出をMicrosoft markitdown（Markdown化）へ一本化する。
 # ユーザー指摘：pypdf/html.parserベースの独自抽出は表構造・見出し階層・リンクの文脈的位置を
 # 失い、実ドライランで表が単語の羅列になる実害を確認した。markitdownはHTML/PDFいずれも
@@ -88,7 +110,7 @@ _MARKITDOWN = MarkItDown()
 # 自動解決は行わないため（実データで確認済み）、後処理で解決する。
 _MARKDOWN_LINK_RE = re.compile(r"\]\(([^)\s]+)")
 
-_DEFAULT_MAX_WEB_SEARCH_CALLS = 200  # [BL-282] configにキーが無い場合の最終フォールバック。CLI既定(200)と揃える。
+_DEFAULT_MAX_WEB_SEARCH_CALLS = 400  # [BL-314] configにキーが無い場合の最終フォールバック。CLI既定(400)と揃える。
 _DEFAULT_MAX_WEB_FETCH_CALLS = 20
 
 
@@ -413,6 +435,124 @@ def validate_url_for_fetch(url: str) -> None:
             )
 
 
+# ---------------------------------------------------------------------------
+# Playwright描画フェッチ（BL-335）
+# ---------------------------------------------------------------------------
+# [BL-335] web_fetchの既定パス。クライアントサイドJS描画コンテンツが静的httpx取得では
+# 取得できない実害（CAMPFIREクラウドファンディングページ等、docs/design/back_log/BL-335/
+# BL335_basic_design.md参照）を受けて導入した。web_fetchはURLキーのグローバル・永続
+# キャッシュ（BL-200）を持つため、Playwrightの起動コストは「URLごとに生涯1回」しか
+# 発生しない——毎回クエリが変わりキャッシュヒットしない検索自動化（D-157で依存重量を
+# 理由に見送られた）とはリスクプロファイルが異なる。
+_PLAYWRIGHT = None            # sync_playwright().start()の戻り値
+_BROWSER = None                # Chromium Browserインスタンス（プロセス生涯で1つ）
+_PAGES_RENDERED_SINCE_LAUNCH = 0
+
+
+def _ensure_browser():
+    """[BL-335] プロセス生涯で1つのChromiumを起動・使い回す遅延シングルトン。
+    _PythonReplSession（cela_main.py、BL-014）の「起動コストを毎回払わない」思想と同型。
+    1ページごとに新規BrowserContext/Pageを作るため、ブラウザ自体の使い回しは安全
+    （ページ間の状態共有はcontext単位で分離される）。"""
+    global _PLAYWRIGHT, _BROWSER
+    if _BROWSER is not None:
+        return _BROWSER
+    from playwright.sync_api import sync_playwright
+    _PLAYWRIGHT = sync_playwright().start()
+    _BROWSER = _PLAYWRIGHT.chromium.launch(headless=True)
+    return _BROWSER
+
+
+def _shutdown_browser() -> None:
+    """[BL-335] atexitフックとテストのteardown両方から呼ぶ。"""
+    global _PLAYWRIGHT, _BROWSER, _PAGES_RENDERED_SINCE_LAUNCH
+    if _BROWSER is not None:
+        try:
+            _BROWSER.close()
+        except Exception:
+            pass
+        _BROWSER = None
+    if _PLAYWRIGHT is not None:
+        try:
+            _PLAYWRIGHT.stop()
+        except Exception:
+            pass
+        _PLAYWRIGHT = None
+    _PAGES_RENDERED_SINCE_LAUNCH = 0
+
+
+atexit.register(_shutdown_browser)
+
+
+def _ssrf_route_guard(route, request) -> None:
+    """[BL-335][SAFETY] Playwrightはナビゲーション自体だけでなく、ページが読み込む
+    サブリソース（画像・スクリプト・XHR等）についても実際にネットワーク接続する。
+    これはhttpxパスには存在しなかった新しいSSRF面であり、全リクエストへ
+    validate_url_for_fetch相当のチェックをかけ、失敗したものはabortする。"""
+    try:
+        validate_url_for_fetch(request.url)
+    except SsrfBlockedError:
+        route.abort()
+        return
+    route.continue_()
+
+
+def _fetch_html_via_playwright(url: str) -> tuple[str, str] | None:
+    """[BL-335] 成功時は(HTML文字列, 最終着地URL)を返す。着地URLはリダイレクト追従後の
+    相対リンク解決（Cline手動レビューF2）に使う。既知の失敗（起動エラー・タイムアウト・
+    クラッシュ・4xx/5xx応答・非HTML着地・サイズ上限超過）はNoneを返しhttpx静的フェッチへの
+    フォールバックに委ねる。それ以外の予期しない例外は伝播させる（D-009: 一時的障害は
+    リトライ・ロジックエラーは即座に伝播）。
+    「レンダリング結果が短い/空だが例外は出ていない」ケースはフォールバック対象に
+    含めない——正当に短いページを誤ってフォールバックと混同しないため。
+    """
+    from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
+
+    global _PAGES_RENDERED_SINCE_LAUNCH
+    if _PAGES_RENDERED_SINCE_LAUNCH >= _PLAYWRIGHT_RECYCLE_AFTER_N_PAGES:
+        _shutdown_browser()
+    # [Cline手動レビューF1] ブラウザ起動・context生成・route登録もtry内に含める。
+    # 以前はこの3行がtryの外にあり、ここで発生したPlaywrightErrorがdocstringの
+    # 「フォールバックに委ねる」契約に反して伝播していた（chromium未インストール等の
+    # 環境不備でweb_fetchが全面的に使用不能になる実害を実プローブで確認）。
+    context = None
+    try:
+        browser = _ensure_browser()
+        context = browser.new_context(user_agent=_USER_AGENT)
+        context.route("**/*", _ssrf_route_guard)
+        page = context.new_page()
+        response = page.goto(url, wait_until="domcontentloaded", timeout=_PLAYWRIGHT_NAV_TIMEOUT_MS)
+        try:
+            page.wait_for_load_state("networkidle", timeout=_PLAYWRIGHT_NETWORKIDLE_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            pass  # SPAが継続ポーリングしidleに到達しないページは珍しくない。取れた分で進める。
+        # [SSRF][BL-335] JSリダイレクト等で着地した最終URLも再検証する（httpx経路と同様、
+        # リダイレクト自体は許可した上で最終URLを検証する方針、D-285）。
+        validate_url_for_fetch(page.url)
+        if response is not None:
+            # [Cline手動レビューR4] page.goto()はhttpxのraise_for_status()と異なり4xx/5xxで
+            # 例外を投げない。既存契約（raise_for_status()でエラー化）と揃えるため、
+            # 非2xxはPlaywright失敗として扱いhttpx経路へフォールスルーする。
+            if response.status >= 400:
+                return None
+            landed_ct = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+            if landed_ct and not landed_ct.startswith("text/html"):
+                return None  # 文書系(PDF等)に着地→Playwrightは不適、呼び出し元がhttpx文書経路へ
+        html = page.content()
+        # [Cline手動レビューR3] httpx経路が課しているサイズ上限（_MAX_FETCH_BYTES）を
+        # Playwright経路にも同一適用する（AGENTS.md §15.1: 同一ルールは同一箇所の判定に揃える）。
+        if len(html.encode("utf-8")) > _MAX_FETCH_BYTES:
+            return None  # httpx経路へフォールスルー（httpx側で同じ上限が改めて適用される）
+        _PAGES_RENDERED_SINCE_LAUNCH += 1
+        return html, page.url
+    except (PlaywrightError, PlaywrightTimeoutError) as e:
+        print(f"⚠️ [web_fetch] Playwright描画に失敗、httpx静的フェッチへフォールバック: {e}")
+        return None
+    finally:
+        if context is not None:
+            context.close()
+
+
 def _resolve_relative_markdown_links(markdown_text: str, base_url: str) -> str:
     """[BL-188] markitdown出力中のMarkdownリンク/画像記法 `](url)` の相対URLを、fetch元の
     base_urlを基準に絶対URLへ解決する。markitdownの`convert_stream(url=...)`はソースURLを
@@ -429,34 +569,81 @@ def _resolve_relative_markdown_links(markdown_text: str, base_url: str) -> str:
 
 
 def fetch_and_extract(url: str) -> str:
-    """[BL-184][BL-188] URLを検証・取得し、本文をMarkdownへ変換して返す（見出し・表・
-    リンクの文脈的位置を保持する）。HTML/PDFいずれもMicrosoft markitdownで変換する
-    （独自のhtml.parser/pypdfベース抽出は、実ドライランで表構造が失われる実害が確認された
-    ため置き換えた。依存重量は増えるが情報取得の質を優先するとユーザーが判断）。
-    リダイレクト（3xx）は追跡しない（リダイレクト先を明示的にweb_fetchすることを要求し、
-    リダイレクト経由のSSRFバイパスを構造的に防ぐ）。失敗時はSsrfBlockedError/
-    httpx例外/MarkItDownExceptionを送出する（呼び出し元でcatchしてエラーレスポンスへ
-    変換すること）。
+    """[BL-184][BL-188][BL-335] URLを検証・取得し、本文をMarkdownへ変換して返す（見出し・表・
+    リンクの文脈的位置を保持する）。HTML/PDFいずれもMicrosoft markitdownで変換する。
+
+    [BL-335] `_DOCUMENT_EXTENSIONS`に該当しないURL（＝HTMLページと推定）は、まず
+    Playwright（ヘッドレスChromium）で描画取得を試みる（クライアントサイドJS描画コンテンツが
+    静的httpx取得では取得できない実害への対応、BL335_basic_design.md参照）。文書系URL
+    （.pdf/.xlsx等）はブラウザで「開く」ものではない（ChromiumはPDFを内蔵ビューアで開いて
+    しまい素のバイト列が取れない）ため、既存のhttpxバイト取得経路へ直行する。
+
+    [Cline手動レビューR1・BL-335] リダイレクト（3xx）は追跡する（従来は明示的に拒否して
+    いたが、Playwrightがpage.goto()で透過的に追従するため、同じツールが経路によって
+    振る舞いが変わる矛盾を解消する方向へポリシーを転換した）。SSRFバイパス対策は
+    最終着地URLの再検証（本関数・_fetch_html_via_playwright双方）とPlaywright側の
+    サブリソースroute guardで構造的に維持する。失敗時はSsrfBlockedError/httpx例外/
+    MarkItDownExceptionを送出する（呼び出し元でcatchしてエラーレスポンスへ変換すること）。
     """
     validate_url_for_fetch(url)
-    with httpx.Client(follow_redirects=False, timeout=_REQUEST_TIMEOUT_SECONDS) as client:
-        resp = client.get(url, headers={"User-Agent": _USER_AGENT})
-    if resp.status_code in (301, 302, 303, 307, 308):
-        raise SsrfBlockedError(
-            f"リダイレクトは追跡していません（status={resp.status_code}）。"
-            "リダイレクト先URLを確認し、明示的にweb_fetchしてください。"
-        )
+    url_extension = Path(urlparse(url).path).suffix.lower()
+    if url_extension not in _DOCUMENT_EXTENSIONS:
+        playwright_result = _fetch_html_via_playwright(url)
+        if playwright_result is not None:
+            html, landed_url = playwright_result
+            try:
+                result = _MARKITDOWN.convert_stream(
+                    io.BytesIO(html.encode("utf-8")),
+                    stream_info=StreamInfo(mimetype="text/html", extension=".html"),
+                    url=landed_url,
+                )
+            except MarkItDownException as e:
+                raise SsrfBlockedError(f"コンテンツの変換に失敗しました（text/html）: {e}")
+            # [Cline手動レビューF2] 相対リンクの解決ベースは元urlでなく着地URL。
+            # ホストが変わるリダイレクトでは元urlを使うと誤った絶対URLになる。
+            extracted = _resolve_relative_markdown_links(result.text_content, landed_url)
+            if len(extracted) > _MAX_OUTPUT_CHARS:
+                extracted = extracted[:_MAX_OUTPUT_CHARS] + "\n[Fetch Output truncated]"
+            return extracted
+        print(f"ℹ️ [web_fetch] Playwright非適用/失敗のためhttpx静的フェッチへ: {url}")
+    return _fetch_via_httpx_and_convert(url, url_extension)
+
+
+def _fetch_via_httpx_and_convert(url: str, url_extension: str) -> str:
+    """[BL-184][BL-188][BL-335] 従来のhttpx静的取得＋markitdown変換経路。HTML/PDF/xlsx等
+    すべての文書形式に対応し、`fetch_and_extract`のPlaywright経路が非適用/失敗だった
+    場合のフォールバック先でもある。
+    """
+    # [Cline手動レビュー指摘1・BL-335] follow_redirects=Trueによる自動追従は、各中間ホップへ
+    # 実際に接続した後で最終URLだけを検証するため、内部アドレスへ向く中間リダイレクトが
+    # SSRF検証をすり抜けて実接続してしまう（blind SSRF）。1ホップずつ手動で追従し、
+    # 接続する前に毎回validate_url_for_fetchを通す（Playwright経路のroute guardが
+    # 全リクエストを個別検証しているのと同水準に揃える、AGENTS.md §15.1）。
+    with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
+        request = client.build_request("GET", url, headers={"User-Agent": _USER_AGENT})
+        hops = 0
+        while True:
+            validate_url_for_fetch(str(request.url))
+            resp = client.send(request, follow_redirects=False)
+            if resp.next_request is None:
+                break
+            hops += 1
+            if hops > _MAX_REDIRECT_HOPS:
+                raise SsrfBlockedError(f"リダイレクトが上限（{_MAX_REDIRECT_HOPS}回）を超えました。")
+            request = resp.next_request
+    landed_url = str(resp.url)
     resp.raise_for_status()
     content_type = resp.headers.get("content-type", "").split(";")[0].strip().lower()
     # [BL-218] URLパス末尾の拡張子もヒントとして使う。自治体サイトはContent-Typeが不正確
     # （application/octet-stream等）なことがあり、拡張子だけが正しい手がかりというケースを
-    # Content-Type単独の判定では取りこぼす。
-    url_extension = Path(urlparse(url).path).suffix.lower()
+    # Content-Type単独の判定では取りこぼす。着地後のURLで再計算する（リダイレクト先が
+    # 元URLと異なる拡張子を持つ場合があるため）。
+    landed_extension = Path(urlparse(landed_url).path).suffix.lower()
     is_recognized_mimetype = content_type.startswith("text/") or content_type.startswith(_DOCUMENT_MIME_TYPE_PREFIXES)
-    is_recognized_extension = url_extension in _DOCUMENT_EXTENSIONS
+    is_recognized_extension = landed_extension in _DOCUMENT_EXTENSIONS or url_extension in _DOCUMENT_EXTENSIONS
     if not is_recognized_mimetype and not is_recognized_extension:
         raise SsrfBlockedError(
-            f"許可されていない形式です（Content-Type={content_type!r}, 拡張子={url_extension!r}）。"
+            f"許可されていない形式です（Content-Type={content_type!r}, 拡張子={landed_extension!r}）。"
             "対応形式: text/*, PDF, Word(.docx), Excel(.xlsx/.xls), PowerPoint(.pptx), CSV, EPUB"
         )
     raw = resp.content
@@ -469,17 +656,25 @@ def fetch_and_extract(url: str) -> str:
         raise SsrfBlockedError(
             f"コンテンツのサイズが上限（{_MAX_FETCH_BYTES // (1024 * 1024)}MB）を超えています。"
         )
+    effective_extension = landed_extension or url_extension
+    if effective_extension in _RAW_CACHEABLE_EXTENSIONS:
+        # [BL-335] Phase 2/3の前提整備。markitdown変換の成否とは独立に生バイト列を保存する
+        # （変換が例外送出しても、テキスト抽出が完全失敗したPDFでもvisionツールは使える）。
+        write_raw_cache(raw_cache_file_path(url, effective_extension), raw)
     try:
         result = _MARKITDOWN.convert_stream(
             io.BytesIO(raw),
             # [BL-218] extensionも渡す。markitdownの各コンバータはmimetype/extensionのいずれか
             # 一致すれば受理するため、Content-Typeが誤っていても拡張子側で正しく変換できる。
-            stream_info=StreamInfo(mimetype=content_type, extension=url_extension or None),
-            url=url,
+            stream_info=StreamInfo(mimetype=content_type, extension=effective_extension or None),
+            url=landed_url,
         )
     except MarkItDownException as e:
         raise SsrfBlockedError(f"コンテンツの変換に失敗しました（{content_type}）: {e}")
-    extracted = _resolve_relative_markdown_links(result.text_content, url)
+    # [Cline手動レビューF2・BL-335] 相対リンクの解決ベースは元urlでなく着地URL
+    # （landed_url）。D-285でリダイレクト追従を許可した結果、ホストが変わるリダイレクトでは
+    # 元urlを使うと誤った絶対URLを[Links found on this page]に並べることになるため。
+    extracted = _resolve_relative_markdown_links(result.text_content, landed_url)
     if len(extracted) > _MAX_OUTPUT_CHARS:
         extracted = extracted[:_MAX_OUTPUT_CHARS] + "\n[Fetch Output truncated]"
     return extracted
@@ -516,6 +711,49 @@ def strip_cache_header(content: str) -> str:
     if len(parts) == 2 and parts[0].startswith("# Source:"):
         return parts[1]
     return content
+
+
+def raw_cache_file_path(url: str, extension: str) -> Path:
+    """[BL-335] cache_file_path()と同じsha256(url)[:16]ハッシュを使い、拡張子だけ差し替える
+    （.mdと同じキーで見つけられるようにする、AGENTS.md §15.1）。Phase 2（PDF画像化）・
+    Phase 3（xlsx pandas読み込み）が元の生バイト列を必要とするため、markitdown変換後の
+    Markdownとは別に、PDF/xlsx/xlsのみ保存する（`_RAW_CACHEABLE_EXTENSIONS`）。"""
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+    return Path(WEB_CACHE_DIR) / f"{digest}{extension}"
+
+
+def write_raw_cache(path: Path, raw: bytes) -> None:
+    """[BL-335] raw_cache_file_path()で決まるパスへ生バイト列をそのまま書き出す。
+    markitdown変換の成否とは独立に呼ぶ（変換が例外送出しても、テキスト抽出が完全失敗した
+    PDFでもPhase 2のvisionツールは使える）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+
+
+def pdf_vision_cache_file_path(url: str, page_number: int) -> Path:
+    """[BL-335] `read_pdf_page_as_image`のvisionモデル応答をキャッシュするパス。
+    write_cache/strip_cache_headerとヘッダ形式互換（AGENTS.md §15.1、既存の
+    キャッシュ読み書きコードをそのまま再利用できるようにする）。"""
+    digest = hashlib.sha256(f"{url}#page={page_number}".encode("utf-8")).hexdigest()[:16]
+    return Path(WEB_CACHE_DIR) / f"{digest}.pdfvision.md"
+
+
+def pdf_page_count(pdf_bytes: bytes) -> int:
+    """[BL-335 Phase 2] PDFの総ページ数を返す。read_pdf_page_as_imageのpage_number範囲検証に使う。"""
+    with pdfium.PdfDocument(pdf_bytes) as pdf:
+        return len(pdf)
+
+
+def render_pdf_page_to_png_bytes(pdf_bytes: bytes, page_number: int, dpi: int = 150) -> bytes:
+    """[BL-335 Phase 2] 1-indexed page_numberをPNGへレンダリングする（pypdfium2使用）。
+    scaleは72dpi=1.0基準（pypdfium2公式ドキュメント）のため、dpi/72で換算する。"""
+    with pdfium.PdfDocument(pdf_bytes) as pdf:
+        page = pdf[page_number - 1]
+        bitmap = page.render(scale=dpi / 72)
+        pil_image = bitmap.to_pil()
+        buf = io.BytesIO()
+        pil_image.save(buf, format="PNG")
+        return buf.getvalue()
 
 
 _CACHE_PREVIEW_BODY_CHARS = 300

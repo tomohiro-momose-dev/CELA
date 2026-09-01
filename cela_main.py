@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import base64
 from secrets import choice
 import time
 import sys
@@ -549,6 +550,12 @@ def _save_replay_fixtures(path: str, fixtures: dict) -> None:
 _ALLOWED_IMPORTS = {
     "math", "statistics", "datetime", "json", "fractions", "decimal",
     "itertools", "functools", "collections", "operator", "re",
+    # [BL-335 Phase 3・AGENTS.md §7承認済み変更] pandas/ioはこのホワイトリストが標榜してきた
+    # 「ゼロI/O/ファイルシステム/ネットワークアクセス」の不変条件を初めて破る追加。人口統計xlsx
+    # 等の崩れたレイアウトをAIがdropna/スライスで自力切り出しできるようにする一方、
+    # pandasはpd.read_excel(url)等でURLを直接読める＝SSRF/予算迂回の新しい経路になりうるため、
+    # REPL子プロセス側でsocket.socketを常時無効化して対処する（_REPL_NETWORK_DISABLE_PRELUDE）。
+    "pandas", "io",
 }
 
 # 危険な名前（import文なしで呼べるビルトイン・組み込み関数）。AST上のName/Attribute/Call参照として検査（D-006）。
@@ -591,12 +598,48 @@ def _check_repl_code_safety(code: str) -> str | None:
     return None
 
 
+# [BL-335 Phase 3] pandas追加により_ALLOWED_IMPORTSが初めて「ゼロネットワーク/ゼロファイルIO」の
+# 不変条件を破ったことへの対策。
+# (1) socket.socketを常時OSErrorを送出するダミーへ差し替える——pandasが内部で使う
+#     urllib3/requests/fsspec等のHTTPライブラリは最終的にすべてsocket.socket(...)を経由するため、
+#     個別ライブラリを追いかけずに1箇所で遮断できる。
+# (2) [Cline diffレビューF1] pandasは`open()`のAST禁止を経由せず、pandas.read_csv/read_excel/
+#     to_csv/to_excel等が内部で（C拡張のcパーサではなくPython側のbuiltins.open/io.open経由で）
+#     任意のローカルファイルを読み書きできることを実プローブで確認した
+#     （requirements.txtの読み取り・任意パスへの書き込みの両方が成立）。builtins.open/io.open自体を
+#     常時OSErrorのダミーへ差し替え、この経路も同時に塞ぐ（AGENTS.md §15.2: 検証の非対称性を解消）。
+# REPL側の両実行経路（_run_python_repl・_PythonReplSession双方）に適用する（AGENTS.md §13.4:
+# 同じ状態を書き込みうる経路は同じ不変条件を守らせる）。信頼済みの固定prelude（LLM生成コードでは
+# ない）としてexec前に前置するため、_check_repl_code_safetyのAST検査対象には含めない。
+_REPL_NETWORK_DISABLE_PRELUDE = (
+    "import socket as _socket_module\n"
+    "class _NetworkDisabledSocket:\n"
+    "    def __init__(self, *args, **kwargs):\n"
+    "        raise OSError(\n"
+    "            '[BL-335] Network access is disabled inside the python_repl sandbox.'\n"
+    "        )\n"
+    "_socket_module.socket = _NetworkDisabledSocket\n"
+    "import builtins as _builtins_module\n"
+    "import io as _io_module\n"
+    "class _FileAccessDisabled:\n"
+    "    def __init__(self, *args, **kwargs):\n"
+    "        raise OSError(\n"
+    "            '[BL-335] Local file access is disabled inside the python_repl sandbox '\n"
+    "            '(pandas read_csv/read_excel/to_csv/etc. bypass the open()-only AST check). '\n"
+    "            'Use read_cached_bytes(path) to read files from web_cache/ instead, if available.'\n"
+    "        )\n"
+    "_builtins_module.open = _FileAccessDisabled\n"
+    "_io_module.open = _FileAccessDisabled\n"
+)
+
+
 def _run_python_repl(code: str, timeout: float = 5.0, max_output_bytes: int = 10240) -> str:
     """【SLM要約】
     F-2.6/F-5.1向けの機械的検算用サンドボックス実行（ステートレス・単発版）。math/statistics/datetime/
-    json/fractions/decimalのみ許可し、危険な呼び出しをASTレベルで検査・拒否した上でサブプロセス分離実行
-    する（設計書§3.5.3）。呼び出しごとに独立プロセスなので状態は保持しない。単体テスト・将来の単発検算
-    用途向けに維持（対話セッションでの実運用は`_PythonReplSession`を使う、BL-014原因A）。
+    json/fractions/decimal/pandas等のみ許可し、危険な呼び出しをASTレベルで検査・拒否した上で
+    サブプロセス分離実行する（設計書§3.5.3）。呼び出しごとに独立プロセスなので状態は保持しない。
+    単体テスト・将来の単発検算用途向けに維持（対話セッションでの実運用は`_PythonReplSession`を
+    使う、BL-014原因A）。
     """
     safety_error = _check_repl_code_safety(code)
     if safety_error is not None:
@@ -609,8 +652,11 @@ def _run_python_repl(code: str, timeout: float = 5.0, max_output_bytes: int = 10
         # 子プロセスがcp932ロケール（Windows既定）で絵文字等をprint()すると子プロセス自身が
         # UnicodeEncodeErrorでクラッシュする。-X utf8は-Iと共存でき、子プロセスの標準入出力を
         # UTF-8に固定できる（実機確認済み）。親側のcapture_outputも同様にUTF-8を明示する。
+        # [BL-335 Phase 3] "python"はPATH解決に頼っており、cela_main.py自身を動かしている
+        # venv（pandas/openpyxlがインストールされている側）と一致する保証がない。
+        # sys.executableへ変更し、常に同じインタプリタで子プロセスを起動する。
         proc = subprocess.run(
-            ["python", "-I", "-X", "utf8", "-c", code],
+            [sys.executable, "-I", "-X", "utf8", "-c", _REPL_NETWORK_DISABLE_PRELUDE + code],
             capture_output=True, encoding="utf-8", errors="replace", timeout=timeout,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
@@ -622,9 +668,38 @@ def _run_python_repl(code: str, timeout: float = 5.0, max_output_bytes: int = 10
 
 
 _REPL_SESSION_SENTINEL = "\x00CELA_REPL_END\x00"
-_REPL_SESSION_BOOTSTRAP = f"""
+
+
+def _build_repl_session_bootstrap() -> str:
+    """[BL-335 Phase 3] web_tools.WEB_CACHE_DIRを起動のたびに読み直して埋め込む
+    （モジュールimport時に固定した文字列だと、テストでのmonkeypatchや将来のWEB_CACHE_DIR
+    実行時変更に追従できないため関数化した）。read_cached_bytes(path)はweb_cache/配下のみ
+    読める限定ファイルIO（read_reference_file_handler、web_tools.pyと同じresolve-and-contain
+    パターン）。open()自体は_DANGEROUS_NAMESで引き続き禁止したまま、この1関数だけが
+    LLM生成コードから呼べる例外——ブートストラップ自体は信頼済みの固定ソースであり、
+    _check_repl_code_safetyのAST検査はLLMが送信するcode文字列にのみ適用されるため、
+    ここでopen()/Path.read_bytes()を使うこと自体は禁止に反しない。
+    [Cline diffレビューF1] _REPL_NETWORK_DISABLE_PRELUDEがbuiltins.open/io.openを無効化する前に
+    元のopenを_real_openとして捕捉しておき、read_cached_bytes自身はそれを使う
+    （Path.read_bytes()は内部でio.open経由になるため、無効化後は使えない）。
+    """
+    web_cache_dir = str(Path(web_tools.WEB_CACHE_DIR).resolve())
+    return f"""
 import sys, json, traceback
-ns = {{}}
+from pathlib import Path
+
+_real_open = open
+
+{_REPL_NETWORK_DISABLE_PRELUDE}
+_WEB_CACHE_BASE_DIR = Path({web_cache_dir!r}).resolve()
+
+def read_cached_bytes(path):
+    resolved = (_WEB_CACHE_BASE_DIR / path).resolve()
+    resolved.relative_to(_WEB_CACHE_BASE_DIR)
+    with _real_open(resolved, "rb") as f:
+        return f.read()
+
+ns = {{"read_cached_bytes": read_cached_bytes}}
 while True:
     line = sys.stdin.readline()
     if not line:
@@ -658,8 +733,11 @@ class _PythonReplSession:
     def _ensure_started(self) -> None:
         if self._proc is not None:
             return
+        # [BL-335 Phase 3] "python"はPATH解決に頼っており、cela_main.py自身を動かしている
+        # venv（pandas/openpyxlがインストールされている側）と一致する保証がない。
+        # sys.executableへ変更し、常に同じインタプリタで子プロセスを起動する。
         self._proc = subprocess.Popen(
-            ["python", "-I", "-X", "utf8", "-c", _REPL_SESSION_BOOTSTRAP],
+            [sys.executable, "-I", "-X", "utf8", "-c", _build_repl_session_bootstrap()],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             encoding="utf-8", errors="replace", bufsize=1,
         )
@@ -751,8 +829,19 @@ PYTHON_REPL_TOOL = {
             "reach for this to programmatically locate the right entry instead of re-reading the raw "
             "text over and over. "
             "Sandboxed: only math/statistics/datetime/json/fractions/decimal/itertools/functools/"
-            "collections/operator/re allowed (plain string/list operations need no import at all), "
-            "no network/IO. "
+            "collections/operator/re/pandas/io allowed (plain string/list operations need no import "
+            "at all). No general file IO and no network access (socket is disabled -- pd.read_excel(url) "
+            "or similar direct network reads will fail with an OSError). "
+            "[BL-335] For messy real-world tables (e.g. a flattened xlsx with multiple blocks side by "
+            "side and decorative gutter columns, where NaN-filled Markdown dumps are useless), use "
+            "pandas instead: read_cached_bytes(path) returns the raw bytes of a web_fetch-cached PDF/"
+            "xlsx/xls (path is the SAME .md cache filename from web_fetch/read_reference_file, but with "
+            "its extension swapped to .pdf/.xlsx/.xls -- e.g. 'abc123.md' -> 'abc123.xlsx'), then wrap it "
+            "in io.BytesIO(...) and pass to pandas.read_excel(...)/etc. Use dropna()/slicing/filtering to "
+            "cut out the specific block you need instead of trying to parse the whole flattened dump. "
+            "If read_cached_bytes raises FileNotFoundError, this file was cached before pandas support "
+            "was added and has no raw bytes -- delete the cache file and re-run web_fetch on the URL to "
+            "regenerate it before pandas access will work. "
             "STATEFUL within this turn: variables/imports from your earlier python_repl calls in this "
             "same turn remain available in later calls (like a persistent REPL/notebook cell) — you do "
             "NOT need to redefine them each time. This state is reset at the start of your next turn. "
@@ -1252,7 +1341,15 @@ WEB_FETCH_TOOL = {
             "fetched page). "
             "[BL-188] Read the fetched content critically before treating it as fact -- check whether "
             "it is the primary/official source or a secondary summary, and whether it appears current. "
-            "Redirects are NOT followed (fetch the redirect target url directly instead). "
+            "[BL-335] For non-document URLs (not .pdf/.docx/.xlsx/.xls/.pptx/.epub/.csv), the page is "
+            "rendered in a headless browser first (so client-side JS content is captured) and falls "
+            "back to a plain static fetch only if rendering fails; document URLs are fetched directly "
+            "as bytes. Redirects ARE followed (the final landed URL is re-validated for safety). "
+            "[BL-335] If a fetched PDF's extracted text looks broken -- single kanji/kana characters "
+            "split onto separate lines (common for vertically-written Japanese table headers), doubled "
+            "characters, unmapped glyph markers like '(cid:1234)', or the page is self-evidently a "
+            "map/diagram -- use read_pdf_page_as_image on the specific page instead of trusting this "
+            "text extraction. "
             "Run-scoped call limit applies; cache hits do not consume the limit. "
             "[BL-110] Optionally call `think` (with a `summary`) alongside this or any other tool call "
             "to record your reasoning -- it is no longer required, and other tool calls are no "
@@ -1326,6 +1423,42 @@ READ_REFERENCE_FILE_TOOL = {
     },
 }
 
+
+# [BL-335 Phase 2] web_fetchでキャッシュ済みのPDFのうち、テキスト抽出が破綻している
+# ページ（縦書きヘッダの分離・文字重複・未マップグリフ・地図等の空間情報）をAIが自己判断で
+# オプトイン利用する画像化ツール。設計: docs/design/back_log/BL-335/BL335_basic_design.md §2。
+READ_PDF_PAGE_AS_IMAGE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_pdf_page_as_image",
+        "description": (
+            "[BL-335] Render a specific page of a web_fetch-cached PDF as an image and get a "
+            "vision-model transcription/description of it. Use this INSTEAD OF trusting the "
+            "plain-text extraction when that text looks broken: single kanji/kana characters "
+            "split onto separate lines (vertical Japanese table headers often extract this way, "
+            "e.g. '青森' becoming two lines '森'/'青'), doubled/repeated characters (e.g. "
+            "'車車山山高高原原'), unmapped glyph markers like '(cid:1234)', or when the page is "
+            "self-evidently a map/diagram/floorplan (its actual information cannot be expressed "
+            "as extracted text at all). Costs vision tokens and consumes a separate run-scoped "
+            "call limit -- do not use it as a first resort, only when the text extraction is "
+            "demonstrably unusable or the content is inherently spatial. 'path' is the same .md "
+            "cache filename returned by web_fetch/read_reference_file for this PDF. Results are "
+            "cached per page (cache hits do not consume the call limit). If this PDF was cached "
+            "before BL-335 (no sibling raw-byte file exists), this returns a permanent error -- "
+            "delete the cache file and re-run web_fetch on the URL to regenerate it with raw "
+            "bytes before this tool can be used on it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "The .md cache filename for this PDF (from web_fetch/read_reference_file)."},
+                "page_number": {"type": "integer", "description": "1-indexed page number to render."},
+                "page_count": {"type": "integer", "description": "Optional: render this many consecutive pages starting at page_number (max 3, default 1)."},
+            },
+            "required": ["path", "page_number"],
+        },
+    },
+}
 
 # [BL-199] 開発者がAGENTS.md §9に従い事前収集した、ゴール固有の参照データ（docs/refs/<goal>/）
 # をrun単位の呼び出し回数制限を消費せずに読む。web_searchより先に確認することで、既に
@@ -5756,16 +5889,20 @@ _RUNTIME_TOOL_LIMIT_KEYS = (
     "max_web_search_calls",
     "max_web_fetch_calls",
     "max_road_route_calls",
+    "max_pdf_vision_calls",
     "goal_reference_dir",
 )
 
 
 def _resume_config_overrides_from(config: dict) -> dict:
-    """[BL-203] AppConfigから実行時設定4フィールドを取り出す（既定値はLineageState初期化と同値）。"""
+    """[BL-203] AppConfigから実行時設定フィールドを取り出す（既定値はLineageState初期化と同値）。"""
     return {
         "max_web_search_calls": config.get("max_web_search_calls", 400),
         "max_web_fetch_calls": config.get("max_web_fetch_calls", 30),
         "max_road_route_calls": config.get("max_road_route_calls", 30),
+        # [BL-335 Phase 2] _DEFAULT_MAX_PDF_VISION_CALLS（15、ファイル後方で定義）は
+        # モジュールロード完了後にのみ呼ばれるため前方参照で問題ない。
+        "max_pdf_vision_calls": config.get("max_pdf_vision_calls", 15),
         "goal_reference_dir": config.get("goal_reference_dir", ""),
     }
 
@@ -5848,6 +5985,8 @@ TOOL_DISPATCH = {
     "verify_entity_geo": lambda args, state=None: _verify_entity_geo_handler(args, state),
     # [BL-224] C5: 判断の系譜を AI が能動取得する読み取り専用ツール（全ノード利用可）。
     "trace_lineage": lambda args, state=None: _trace_lineage_handler(args, state),
+    # [BL-335 Phase 2] web_fetchキャッシュ済みPDFの特定ページを画像化しVisionへ渡す。
+    "read_pdf_page_as_image": lambda args, state=None: _read_pdf_page_as_image_handler(args, state),
     # [BL-198] 地理データ実測ツール。web_search/web_fetchと同型に、stateをstate/config兼用で渡す。
     "gsi_geocode": lambda args, state=None: geo_tools.gsi_geocode_handler(args, state or {}, _tool_config(state)),
     "gsi_get_elevation": lambda args, state=None: geo_tools.gsi_get_elevation_handler(args, state or {}, _tool_config(state)),
@@ -8528,6 +8667,187 @@ def _trace_lineage_handler(args: dict, state: dict | None = None) -> dict:
     }
 
 
+# [BL-335 Phase 2] read_pdf_page_as_image用の定数群（AGENTS.md §7承認対象、2026-09-01
+# ユーザー承認：max_pdf_vision_calls=15、page数上限=3、DPI=150、単発タイムアウト=60秒）。
+_DEFAULT_MAX_PDF_VISION_CALLS = 15
+_MAX_PDF_VISION_PAGES_PER_CALL = 3
+_PDF_VISION_DPI = 150
+_PDF_VISION_API_TIMEOUT_SECONDS = 60
+# [2026-09-01ユーザー承認] 完全リトライなしではなく「軽いリトライ」を要求されたため、
+# 一時的な接続断・タイムアウトに限り1回だけ自動リトライする（合計2試行）。RateLimitError/
+# 汎用APIErrorは実質的なエラーである可能性が高いためリトライ対象に含めない。
+_PDF_VISION_RETRY_ATTEMPTS = 2
+
+_PDF_VISION_PROMPT = (
+    "This image is one page of a PDF whose plain-text extraction is unreliable for this page "
+    "(vertical Japanese table headers getting split across lines, doubled/repeated characters, "
+    "unmapped glyph markers, or the page being inherently spatial content like a map/diagram/"
+    "floorplan). Transcribe all readable text faithfully, preserving table structure using "
+    "Markdown tables where applicable. If the page is primarily a map, diagram, or floorplan, "
+    "describe its spatial content and any labeled text instead of attempting a literal "
+    "transcription."
+)
+
+
+def _read_pdf_page_as_image_handler(args: dict, state: dict | None = None) -> dict:
+    """[BL-335 Phase 2] read_pdf_page_as_imageツールの実体。TOOL_DISPATCH中で唯一、
+    自らLLM API呼び出しを行うハンドラ（他の全ハンドラはDB/ファイルIOのみ）。
+    `_query_AI_live`（全13+ノード共有の文字列content専用ホットパス）には手を入れず、
+    ここでclient_openrouterを直接、非ストリーミングの単発呼び出しとして使う
+    （オプトイン・低頻度な呼び出しであり、_query_AI_liveのwhile True無限リトライ
+    ループを持ち込むリスクを避けるため）。"""
+    path = (args.get("path") or "").strip()
+    if not path:
+        return {"status": "error", "message": "pathは必須です。"}
+    try:
+        page_number = int(args.get("page_number"))
+    except (TypeError, ValueError):
+        return {"status": "error", "message": "page_numberは整数で指定してください。"}
+    if page_number < 1:
+        return {"status": "error", "message": "page_numberは1以上を指定してください。"}
+    page_count_raw = args.get("page_count") or 1
+    try:
+        page_count = int(page_count_raw)
+    except (TypeError, ValueError):
+        return {"status": "error", "message": "page_countは整数で指定してください。"}
+    if page_count < 1 or page_count > _MAX_PDF_VISION_PAGES_PER_CALL:
+        return {
+            "status": "error",
+            "message": f"page_countは1〜{_MAX_PDF_VISION_PAGES_PER_CALL}の範囲で指定してください。",
+        }
+
+    base_dir = Path(web_tools.WEB_CACHE_DIR).resolve()
+    try:
+        resolved_md = (base_dir / path).resolve()
+        resolved_md.relative_to(base_dir)
+    except ValueError:
+        return {"status": "error", "message": "web_cache外へのアクセスは禁止されています。"}
+    if not resolved_md.exists() or not resolved_md.is_file():
+        return {"status": "not_found", "message": f"ファイルが見つかりません: {path}"}
+
+    md_content = resolved_md.read_text(encoding="utf-8")
+    first_line = md_content.split("\n", 1)[0]
+    if not first_line.startswith("# Source: "):
+        return {"status": "error", "message": "キャッシュファイルのフォーマットが不正です（Source行がありません）。"}
+    source_url = first_line[len("# Source: "):].strip()
+
+    # [Cline diffレビューF2] 元URL自身の拡張子でPDF判定すると、リダイレクト着地先が
+    # .pdfだが元URLに拡張子が無い/異なる場合（例: /get-report → cdn.example.com/report.pdf）に
+    # 誤って「PDFではない」と永続的に拒否してしまう（raw_cache_file_pathの生バイトは
+    # 着地拡張子=effective_extensionでキー化されており、元URLの拡張子とは独立のため）。
+    # 元URLの拡張子を先に判定するのではなく、実際に.pdf生バイトの兄弟ファイルが存在するかで
+    # 判定する。存在すればPDFとして扱い、存在しない場合のみ他の生バイト可能拡張子（.xlsx/.xls）の
+    # 兄弟が存在するかを確認し、存在すれば「PDFではない」正確な理由を返す（Cline手動レビュー指摘4の
+    # 意図はそのまま維持）。どちらも存在しなければBL-335適用前キャッシュとして扱う。
+    raw_pdf_path = web_tools.raw_cache_file_path(source_url, ".pdf")
+    if not raw_pdf_path.exists():
+        for other_ext in web_tools._RAW_CACHEABLE_EXTENSIONS:
+            if other_ext == ".pdf":
+                continue
+            if web_tools.raw_cache_file_path(source_url, other_ext).exists():
+                return {
+                    "status": "error",
+                    "message": (
+                        f"このキャッシュファイルはPDFではありません（実際の形式: {other_ext}）。"
+                        "read_pdf_page_as_imageはPDF専用です。"
+                    ),
+                }
+        return {
+            "status": "error",
+            "message": (
+                "このPDFはBL-335適用前にキャッシュされたため生バイトがなく、画像化できません。"
+                "再度web_fetchで生成し直すには、対象キャッシュファイルを手動で削除してください。"
+            ),
+        }
+    pdf_bytes = raw_pdf_path.read_bytes()
+
+    try:
+        total_pages = web_tools.pdf_page_count(pdf_bytes)
+    except Exception as e:  # noqa: BLE001
+        return {"status": "error", "message": f"PDFの読み込みに失敗しました: {e}"}
+    if page_number > total_pages:
+        return {
+            "status": "error",
+            "message": f"page_numberが範囲外です（このPDFは全{total_pages}ページです）。",
+        }
+    last_page = min(page_number + page_count - 1, total_pages)
+
+    config = _tool_config(state)
+    limit = config.get("max_pdf_vision_calls", _DEFAULT_MAX_PDF_VISION_CALLS)
+    count = (state or {}).get("pdf_vision_call_count", 0)
+
+    pages_result = []
+    for pn in range(page_number, last_page + 1):
+        cache_path = web_tools.pdf_vision_cache_file_path(source_url, pn)
+        if cache_path.exists():
+            description = web_tools.strip_cache_header(cache_path.read_text(encoding="utf-8"))
+            pages_result.append({"page_number": pn, "description": description})
+            continue
+
+        if count >= limit:
+            if pages_result:
+                break  # 取れた分だけ返す（部分成功、呼び出し自体は失敗にしない）
+            return {
+                "status": "error",
+                "message": f"read_pdf_page_as_imageの呼び出し上限（{limit}回/run）に達しました。",
+            }
+
+        try:
+            png_bytes = web_tools.render_pdf_page_to_png_bytes(pdf_bytes, pn, dpi=_PDF_VISION_DPI)
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "message": f"ページ{pn}のレンダリングに失敗しました: {e}"}
+
+        b64 = base64.b64encode(png_bytes).decode("ascii")
+        description = None
+        last_error: Exception | None = None
+        for _attempt in range(_PDF_VISION_RETRY_ATTEMPTS):
+            try:
+                response = client_openrouter.chat.completions.create(
+                    model=glm_5_3_flash,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": _PDF_VISION_PROMPT},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                        ],
+                    }],
+                    timeout=_PDF_VISION_API_TIMEOUT_SECONDS,
+                )
+                description = response.choices[0].message.content or ""
+                last_error = None
+                break
+            except (APIConnectionError, APITimeoutError, httpx.RemoteProtocolError,
+                    httpx.TimeoutException, httpx.ReadError) as e:
+                # [2026-09-01ユーザー承認] 一時的な接続断・タイムアウトのみ1回まで自動リトライ。
+                last_error = e
+                continue
+            except (APIError, RateLimitError) as e:
+                return {"status": "error", "message": f"read_pdf_page_as_image失敗（page={pn}）: {e}"}
+        if description is None:
+            return {
+                "status": "error",
+                "message": f"read_pdf_page_as_image失敗（page={pn}、接続エラー・リトライ済み）: {last_error}",
+            }
+        if not description:
+            # [Cline手動レビュー指摘2] 空応答をそのままキャッシュすると、以後の呼び出しが
+            # 空文字を「成功値」としてキャッシュヒットし続け、上限も消費せず、モデルが実際には
+            # 何も返せていないことに二度と気づけなくなる（§13.1相当）。キャッシュ・カウンタは
+            # 変更せずエラー化し、呼び出し元に再試行の余地を残す。
+            return {
+                "status": "error",
+                "message": f"read_pdf_page_as_image失敗（page={pn}）: Visionモデルが空の応答を返しました。",
+            }
+
+        web_tools.write_cache(cache_path, f"{source_url}#page={pn}", description)
+        count += 1
+        pages_result.append({"page_number": pn, "description": description})
+
+    if state is not None:
+        state["pdf_vision_call_count"] = count
+
+    return {"status": "ok", "pages": pages_result}
+
+
 # [BL-073] Deliverableが承認された際、対応するtask_idのDirective（Userの指示）がstatus='Proposed'の
 # ままDBに永久固定される問題への対処。従来はDirective自体を後から遷移させる経路が一切なく、
 # reflection_nodeの「未解決」抽出（agreements.status=="Proposed"の全件、entry_type不問）に
@@ -10788,6 +11108,10 @@ class LineageState(TypedDict):
     # 設けず、MAX_TOOL_ITERによるツールループ全体の上限に委ねる）。
     road_route_call_count: int
     max_road_route_calls: int
+    # [BL-335 Phase 2] read_pdf_page_as_imageのrun単位の累積呼び出し回数と上限。
+    # web_search/web_fetchと同型（キャッシュヒットは消費しない）。
+    pdf_vision_call_count: int
+    max_pdf_vision_calls: int
     # [BL-199] read_goal_referenceのベースディレクトリ（AppConfigからrun開始時にコピー）。
     # 未設定（空文字列）の場合、read_goal_referenceはnot_configuredを返しweb_searchへ委ねる。
     goal_reference_dir: str
@@ -10893,6 +11217,9 @@ class Appconfig(TypedDict):
     max_web_fetch_calls: int
     # [BL-198] calc_road_route（OpenRouteService無料枠）のrun単位の呼び出し回数上限。
     max_road_route_calls: int
+    # [BL-335 Phase 2] read_pdf_page_as_imageのrun単位の呼び出し回数上限
+    # （ユーザー確定値2026-09-01: 15回/run、vision token単価が高いためmax_web_fetch_callsより小さめ）。
+    max_pdf_vision_calls: int
     # [BL-199] read_goal_referenceが読む、開発者事前収集の参照データディレクトリ
     # （例: "docs/refs/chino_city"）。未指定なら空文字列扱いでツールは無効化される。
     goal_reference_dir: str
@@ -11680,6 +12007,17 @@ _TRACE_LINEAGE_USAGE_PARAGRAPH = (
     "読み取り専用ツールです。"
 )
 
+_PDF_VISION_USAGE_PARAGRAPH = (
+    "[BL-335] web_fetchで取得したPDFのテキスト抽出は、縦書きの日本語表ヘッダで特に壊れやすい\n"
+    "ことが分かっています（例：「青森」が2行「森」「青」に分離、「車山高原」が「車車山山高高原原」\n"
+    "のように文字重複、`(cid:7165)`のような未マップグリフIDが出現）。地図・図面・フロアマップの\n"
+    "ページはテキスト抽出自体が原理的に無意味です。このような症状に気づいたら、そのまま鵜呑みに\n"
+    "せず、read_pdf_page_as_imageで該当ページを画像化してVisionモデルに読ませてください。\n"
+    "vision tokenのコストがかかるrun単位の別枠（web_fetchとは別カウント）を消費するため、\n"
+    "まず試すのではなく、テキスト抽出が明らかに使い物にならない場合、または内容が本質的に\n"
+    "空間的（地図等）な場合にのみ使ってください。"
+)
+
 
 def _scratch_concerns_closure_instruction(final_output_field: str, escalation_tools: str = "") -> str:
     """[BL-220] 最終出力を書く直前に、thinkのscratch_concernsで追跡している未解決の懸念を
@@ -12300,8 +12638,9 @@ It serves as the initial planning layer for breaking down complex objectives acr
        【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・
        read_agreement（entry_type="Decision"/"Directive"の全文はこちら、read_deliverable_fileは
        entry_type="Deliverable"専用）・read_plan_draft・write_agreement・web_search・web_fetch・
-       read_reference_file・read_entity・think
+       read_reference_file・read_pdf_page_as_image・read_entity・think
        です。{_THINK_TRAILER_SENTENCE}
+       {_PDF_VISION_USAGE_PARAGRAPH}
     13. [BL-196: 実行環境に無い専用処理能力の行使をacceptance_criteriaに要求しない] acceptance_criteria/
        descriptionに「実測データの収集・抽出・生成」を書く際は、Expertが実際に使えるツール
        （python_repl・web_search・web_fetch・read_reference_file等）で到達可能な水準に
@@ -12429,7 +12768,7 @@ It serves as the initial planning layer for breaking down complex objectives acr
     _CURRENT_CALLER_ROLE = "task_planner"  # [BL-095]
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    _task_planner_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, READ_PLAN_DRAFT_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
+    _task_planner_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, READ_PLAN_DRAFT_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_PDF_PAGE_AS_IMAGE_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]
 
     # [BL-329] 再構成時（revision_reason非空）のみ、既に完了相当のDeliverableを持つ
     # 既存task_idを「保護対象」として収集し、生成された新計画から除去されていないかを
@@ -13147,9 +13486,10 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
         "read_agreement（entry_type=\"Decision\"/\"Directive\"の全文はこちら）・"
         "read_project_plan・write_agreement・escalate_premise_concern・ask_user_question・"
-        "web_search・web_fetch・read_reference_file・read_goal_reference・register_entity・write_entity_attribute・read_entity・gsi_geocode・"
+        "web_search・web_fetch・read_reference_file・read_pdf_page_as_image・read_goal_reference・register_entity・write_entity_attribute・read_entity・gsi_geocode・"
         "gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・thinkです。\n"
         + _TRACE_LINEAGE_USAGE_PARAGRAPH + "\n"
+        + _PDF_VISION_USAGE_PARAGRAPH + "\n"
         "[BL-204: 課題に登場する事物の事実はレジストリで管理する] 固有の名前を持つ実世界の"
         "対象（施設・場所・組織・路線・サービス等）についての事実は、read_entityで確認し"
         "write_entity_attributeで記録してください。レジストリが真実の源であり、成果物本文は"
@@ -13284,7 +13624,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
     _CURRENT_CALLER_ROLE = "expert"
     _CURRENT_TASK_ID = _effective_current_task_id_from(state)
     _reset_think_scratchpad()  # [BL-093]
-    _expert_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, REGISTER_ENTITY_TOOL, WRITE_ENTITY_ATTRIBUTE_TOOL, READ_ENTITY_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]  # [BL-228] Expertは唯一trace_lineageが未配線だった
+    _expert_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, READ_WHITEBOARD_EXCERPT_TOOL, READ_PROJECT_PLAN_TOOL, WRITE_AGREEMENT_TOOL, ESCALATE_PREMISE_CONCERN_TOOL, ASK_USER_QUESTION_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_PDF_PAGE_AS_IMAGE_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, REGISTER_ENTITY_TOOL, WRITE_ENTITY_ATTRIBUTE_TOOL, READ_ENTITY_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]  # [BL-228] Expertは唯一trace_lineageが未配線だった
     _expert_content = query_AI(messages, client=client_expert, model=model_expert, label=f"Expert:{expert_name}",
                      tools=_expert_tools, light_system_prompt=light_system_prompt, state=state)
     return _enforce_decision_lineage_freetext(messages, _expert_content, client=client_expert, model=model_expert,
@@ -13729,9 +14069,10 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"【重要】あなたが使えるツールはread_verified_fact・read_deliverable_file・read_agreement"
         f"（entry_type=\"Decision\"/\"Directive\"の全文はこちら）・"
         f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・"
-        f"web_search・web_fetch・read_reference_file・read_goal_reference・read_entity・verify_entity_geo・gsi_geocode・"
+        f"web_search・web_fetch・read_reference_file・read_pdf_page_as_image・read_goal_reference・read_entity・verify_entity_geo・gsi_geocode・"
         f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・mark_fact_audited・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
+        f"{_PDF_VISION_USAGE_PARAGRAPH}\n\n"
         f"{_build_decision_lineage_directive('\"Rejected\"（懸念を指摘する場合）または\"Reviewed\"（問題なしと判断した場合）')}\n"
         # ★[BL-312] 以下、旧来は動的ブロック（Freeze状況・本質・決定事項DB等）の直後に置かれて
         # いた静的指示文を、位置参照（「上記の」等）を見出し名・BL番号での自己完結文へ書き換えた
@@ -13830,7 +14171,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f'\nReturn ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用(無ければ空文字)", "observations": "気づき・懸念（自由記述、無ければ空文字）", "essence_sufficiency_concern": true/false, "essence_sufficiency_reason": "trueの場合、本質のどの記述が計画のどこにも反映されていないか（falseなら空文字）", "quantitative_sufficiency_concern": true/false, "quantitative_sufficiency_reason": "trueの場合、どの規模適合性の主張がどの規模指標に対して未検証か（falseなら空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
-    _detector_domain_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, MARK_FACT_AUDITED_TOOL, THINK_TOOL]  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線 [BL-294] 定義監査の記録用 [BL-300] log/2026-08-28/2049でgrep不可能な略号コード表を手作業突合しようとして生成崩壊したため、_detector_numeric_toolsとの唯一の差分だったPYTHON_REPL_TOOLを追加 [BL-324] FLAG_NEEDS_HUMAN_INPUT_TOOLを追加
+    _detector_domain_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_PDF_PAGE_AS_IMAGE_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, MARK_FACT_AUDITED_TOOL, THINK_TOOL]  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線 [BL-294] 定義監査の記録用 [BL-300] log/2026-08-28/2049でgrep不可能な略号コード表を手作業突合しようとして生成崩壊したため、_detector_numeric_toolsとの唯一の差分だったPYTHON_REPL_TOOLを追加 [BL-324] FLAG_NEEDS_HUMAN_INPUT_TOOLを追加
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
         domain_prompt, client=client_detector_domain, model=model_detector_domain, label="Detector (Domain Review)",
         tools=_detector_domain_tools,
@@ -14022,9 +14363,10 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"【重要】あなたが使えるツールはpython_repl・read_verified_fact・read_deliverable_file・"
         f"read_agreement（entry_type=\"Decision\"/\"Directive\"の全文はこちら）・"
         f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・"
-        f"web_search・web_fetch・read_reference_file・read_goal_reference・read_entity・verify_entity_geo・gsi_geocode・"
+        f"web_search・web_fetch・read_reference_file・read_pdf_page_as_image・read_goal_reference・read_entity・verify_entity_geo・gsi_geocode・"
         f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
+        f"{_PDF_VISION_USAGE_PARAGRAPH}\n\n"
         f"{_build_decision_lineage_directive('\"Rejected\"（懸念を指摘する場合）または\"Reviewed\"（問題なしと判断した場合）')}\n"
         # ★[BL-312] 以下、旧来は動的ブロック（決定事項DB・ホワイトボード）の直後に置かれていた
         # 静的指示文を、位置参照を見出し名での自己完結文へ書き換えた上でSTATIC-TOP側へ移動した。
@@ -14082,7 +14424,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f'Return ONLY JSON: {{"risk": "low/medium/high", "constraint_issue": "none/minor/major", "comment": "判定理由", "criteria_status": [true/false, ...], "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用（無ければ空文字）", "observations": "気づき・懸念（自由記述、無ければ空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
-    _detector_numeric_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]  # [BL-324] FLAG_NEEDS_HUMAN_INPUT_TOOLを追加
+    _detector_numeric_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_PDF_PAGE_AS_IMAGE_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, THINK_TOOL]  # [BL-324] FLAG_NEEDS_HUMAN_INPUT_TOOLを追加
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_detector_numeric, model=model_detector_numeric, label="Detector",
         tools=_detector_numeric_tools, fallback={"risk": "low", "constraint_issue": "none", "comment": "", "criteria_status": [], "target_excerpt": "", "observations": ""},
@@ -17120,7 +17462,8 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     read_agreement（entry_type="Decision"/"Directive"の全文はこちら。task_plannerが記録した
     phase_design_rationale等はここへ埋め込み済みのため通常は再取得不要）・
     diff_plan_draft_versions・write_agreement・web_search・web_fetch・read_reference_file・
-    read_entity・mark_fact_audited・thinkです。{_THINK_TRAILER_SENTENCE}
+    read_pdf_page_as_image・read_entity・mark_fact_audited・thinkです。{_THINK_TRAILER_SENTENCE}
+    {_PDF_VISION_USAGE_PARAGRAPH}
     {_scratch_concerns_closure_instruction("observations")}
 
     {_build_decision_lineage_directive('"Rejected"（判断根拠を無効化する場合）または"Reviewed"（計画に問題なしと判断した場合）')}
@@ -17147,7 +17490,7 @@ def call_task_plan_reviewer(phases: list[dict], goal: str, goal_essence_text: st
     _CURRENT_CALLER_ROLE = "task_plan_reviewer"  # [BL-095]
     _CURRENT_TASK_ID = ""
     _reset_think_scratchpad()  # [BL-093]
-    _task_plan_reviewer_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, MARK_FACT_AUDITED_TOOL, THINK_TOOL]  # [BL-294] 定義監査の記録用
+    _task_plan_reviewer_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, DIFF_PLAN_DRAFT_VERSIONS_TOOL, WRITE_AGREEMENT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_PDF_PAGE_AS_IMAGE_TOOL, READ_REFERENCE_FILE_TOOL, READ_ENTITY_TOOL, TRACE_LINEAGE_TOOL, MARK_FACT_AUDITED_TOOL, THINK_TOOL]  # [BL-294] 定義監査の記録用
     parsed, parse_failed = _query_and_parse_with_retry(
         prompt, client=client_task_plan_reviewer, model=model_task_plan_reviewer, label="Task Plan Reviewer",
         tools=_task_plan_reviewer_tools,
@@ -19738,6 +20081,8 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
                 "max_web_fetch_calls": config.get("max_web_fetch_calls", 30),
                 "road_route_call_count": 0,
                 "max_road_route_calls": config.get("max_road_route_calls", 30),
+                "pdf_vision_call_count": 0,
+                "max_pdf_vision_calls": config.get("max_pdf_vision_calls", 15),
                 "goal_reference_dir": config.get("goal_reference_dir", ""),
                 "global_constraints": [],
                 "phases": [],
@@ -20364,6 +20709,9 @@ if __name__ == "__main__":
         "max_web_search_calls": 400,
         "max_web_fetch_calls": 100,
         "max_road_route_calls": 100,
+        # [BL-335 Phase 2] ユーザー承認済み既定値（2026-09-01、AGENTS.md §7）。vision token
+        # 単価が高いため他の呼び出し上限のように緩和してこなかった経緯はまだ無く、15のまま。
+        "max_pdf_vision_calls": 15,
         "goal_reference_dir": "docs/refs/chino_city",
     }
 
