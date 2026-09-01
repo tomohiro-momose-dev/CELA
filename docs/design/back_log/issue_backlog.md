@@ -354,7 +354,7 @@
 | BL-327 | 中 | `cela_main.py`（`_adjacent_divergence_hint`ほか、詳細は下記セクション参照） | **`done`。** old_text不一致エラーへ機械的diffヒントを追加。詳細は下記`### BL-327`セクション参照。 | P2 |
 | BL-328 | 低 | 未定（発想のみ） | **`open`。** ツール失敗が繰り返された際に`--interactive-query`型のヘルパーAIを呼び診断させる汎用機構の提案。詳細は下記`### BL-328`セクション参照。 | P3 |
 | BL-329 | 高 | `cela_main.py`（`_validate_task_plan_depends_on_integrity`・`_build_protected_task_id_validator`・`_enforce_decision_lineage_json`・`task_planner_node`ほか、詳細は下記セクション参照） | **`done`。** 計画再構成が承認済みDeliverableを除去しないよう、生成時点で検証・自己修正させる。詳細は下記`### BL-329`セクション参照。 | P0 |
-| BL-330 | 高 | `cela_main.py`（`17957-17964`ほか、topic文字列一致による旧レコード検索が独立に5箇所） | **`open`（調査完了・設計/実装未着手）。** 1917ログ実インシデント：Deliverable旧レコード検索がtask_id/entry_typeを見ずtopic文字列一致のみで照合し、task_4_2の承認済みポインタがtask_4_1のホワイトボードスロットへ誤って向いた（task_4_1自体も生きているDeliverable行が0件に）。task_id条件追加による応急修正＋1917実データの是正（§18.3）が対象。詳細は下記`### BL-330`セクション参照。 | P1 |
+| BL-330 | 高 | `cela_main.py`（`17957-17966`、decision_extractor_nodeのDeliverable UPDATE分岐）、`tests/test_bl330_deliverable_supersede_lookup_task_id_scoped.py`（新規4件） | **`done`（コード修正のみ。1917実データの是正は別途§18.3協議）。** 1917ログ実インシデント：Deliverable旧レコード検索がtask_id/entry_typeを見ずtopic文字列一致のみで照合し、task_4_2の承認済みポインタがtask_4_1のホワイトボードスロットへ誤って向いた（task_4_1自体も生きているDeliverable行が0件に）。当初「同型が独立に5箇所」と報告したが調査の結果1箇所のみと訂正（他3箇所は既にBL-084保護済み、1箇所は表示専用フォールバックで低リスク）。BL-084と同じ`_find_active_deliverable_agreement`（task_id基準）へ揃える修正を実施。詳細は下記`### BL-330`セクション参照。 | P1 |
 | BL-331 | 中 | 未定（設計未着手、BL-224とは別スコープ） | **`open`（起票のみ）。** task_id/phase_id/Deliverable識別をtopic文字列一致でなくDAG（グラフ）ベースの機械的紐づけへ再設計。BL-224（判断の系譜＝なぜ）とは別物で、「今どの記録が生きているか」という識別自体が対象。ユーザーが「CELAは当初state onlyの簡易アーキテクチャで実証確認が目的だったが、実証は十分済んだため堅牢な構造（グラフ等）へ改める」という方向性を明言（2026-09-01）。詳細は下記`### BL-331`セクション参照。 | P2 |
 
 ---
