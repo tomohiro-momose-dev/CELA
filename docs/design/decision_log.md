@@ -3941,20 +3941,6 @@
 
 ---
 
-### D-284: BL-331実装 — tasks/phasesテーブル新設によるtask_id/phase_id識別のDAG化（Phase 1）
-
-| 項目 | 内容 |
-|------|------|
-| 日付 | 2026-09-01 |
-| 状態 | `decided` |
-| 決定者 | t-momose（Plan mode内でAskUserQuestionにより4点の設計判断を確認・選択。§19.1/§19.4のCline指摘反映も承認） |
-| **決定理由** | BL-330の根本原因調査で、CELAには「task_id/phase_idが今現在実在するか」を検証できるDBテーブルが1つも存在しないことが判明した。BL-224の`relation_edges`は`task:<task_id>`参照型を「タスクは`state["phases"]`のJSON内にしか存在せず、実表の行として検証できない」という理由で明示的に却下していた。3並列Explore agent調査（現状のtask_id識別機構・BL-224の却下理由の詳細・task_planner再計画の全体構造）とPlan agentによる設計案を経て、この欠けていた「タスク/フェーズの正本（identity）」を実テーブルとして導入し、`task:`/`phase:`参照をBL-224の既存インフラへ追加することで埋める方針を提示。ユーザーは4点の設計判断（(1) phasesテーブルも今回作る、(2) `task:`参照はstatus不問で解決、(3) タスク分割系譜は新規`split_from` relation_typeを追加、(4) 既存runへのバックフィルは別BLへ分離）を全てAskUserQuestionで確認・選択した。 |
-| 決定内容 | 新規`tasks`/`phases`テーブル（`PRIMARY KEY (run_id, task_id)`/`(run_id, phase_id)`）を導入し、`task_planner_node`が計画確定のたびに`_sync_task_phase_identity`で同期する（BL-329が既に計算済みの復元/supersede判定をそのまま再利用、判定ロジックを重複させない）。`_resolve_ref_table`等7箇所へ`task:`/`phase:`参照プレフィックスを追加。タスク分割系譜（task_5_2→task_5_2_1）は`Task.split_from`フィールド＋新規`split_from` relation_type（4種目）のrelation_edgesエッジとして記録し、`_validate_task_plan_depends_on_integrity`を`existing_phases`引数へ拡張して整合性を検証する。 |
-| 影響 | `cela_main.py`（`tasks`/`phases`テーブル・`_sync_task_phase_identity`新設、`_resolve_ref_table`等7箇所・`Task` TypedDict・`_validate_task_plan_depends_on_integrity`拡張）、`tests/test_bl331_tasks_phases_identity.py`（新規21件）、`tests/test_bl224_relation_edges.py`（`task:`が既知プレフィックス化した影響で1件のテスト文言を訂正）、`docs/design/back_log/BL-224/BL224_basic_design.md`（`task:`却下記載・relation_type種別数の追記更新）。§19.1レビューでH-1（`tasks.depends_on`列の無消費リスク→削除）・H-2（ref語彙更新箇所の網羅、特に共有プロンプト段落）・H-3（split_from検証の不変条件）を反映。§19.4レビューでsplit_fromエッジのresume冪等性ギャップを実行検証の上発見・修正・回帰テスト固定。§17.1リバート確認済み、フルオフラインスイート2218 passed / 5 deselected。 |
-| 関連 BL | BL-331（本件）、BL-330（本BLの直接の引き金）、BL-224（`relation_edges`基盤の再利用元、`task:`却下の解消元）、BL-228（同基盤のPhase 3拡張との整合）、BL-329（`removed_task_ids`判定の再利用元）、AGENTS.md §13.7・§15.1・§15.4・§15.5・§19.1・§19.4 |
-
----
-
 ### D-283: BL-330実装完了 — decision_extractorのDeliverable旧レコード検索をtask_id基準へ
 
 | 項目 | 内容 |
@@ -3966,6 +3952,20 @@
 | 決定内容 | `17957-17964`を`entry_type=="Deliverable"`分岐（`_find_active_deliverable_agreement`再利用、実体topicへ`target_topic`をスナップ）と非Deliverable分岐（従来のtopic一致を維持、BL-084のスコープ外という既存設計を継続）へ分割。§19.1設計レビュー（Cline、`deepseek/deepseek-v4-flash`）で計画作成時点のDBスナップショットが古く、第2の・別種の識別子不整合（`AG-1788174791944-9e5eac`、`write_agreement`ツール本体の`tid`暗黙フォールバックが原因）が発覚したため、本BLのスコープ外として明記し切り分けた。§19.4実装後レビュー（同モデル、`git apply -R`による独立revert実験込み）で承認。 |
 | 影響 | `cela_main.py`（`17957-17966`置換）、`tests/test_bl330_deliverable_supersede_lookup_task_id_scoped.py`（新規4件）、`scripts/cline_review.py`・`scripts/cline_review_diff.py`（`--model`一時上書き引数を新設、日次無料枠上限の回避策）。§17.1リバート確認済み（2/4件が修正なしで失敗）、フルオフラインスイート2197 passed / 5 deselected。1917の実データ是正は、DB前方修正案・checkpoint巻き戻し案（BL-174の`--checkpoint-id`、step=424/19:53:20が破損直前の最終クリーン点）の両案を提示した上で、ユーザーが「BL-331でタスクのDAG化をするので、このrunの修正はこれ以上不要」と判断し見送り。当該run（run_id=1787890406-1e73a89d）は破損したままPAUSE凍結。`tid`暗黙フォールバック問題は別途スコープとして残存。 |
 | 関連 BL | BL-330（本件）、BL-084（`_find_active_deliverable_agreement`原設計）、BL-206/212（同系譜の識別子不整合バグ）、BL-331（`tid`暗黙フォールバック問題の受け皿候補）、AGENTS.md §13.4・§19.1・§19.4 |
+
+---
+
+### D-284: BL-331実装 — tasks/phasesテーブル新設によるtask_id/phase_id識別のDAG化（Phase 1）
+
+| 項目 | 内容 |
+|------|------|
+| 日付 | 2026-09-01 |
+| 状態 | `decided` |
+| 決定者 | t-momose（Plan mode内でAskUserQuestionにより4点の設計判断を確認・選択。§19.1/§19.4のCline指摘反映も承認） |
+| **決定理由** | BL-330の根本原因調査で、CELAには「task_id/phase_idが今現在実在するか」を検証できるDBテーブルが1つも存在しないことが判明した。BL-224の`relation_edges`は`task:<task_id>`参照型を「タスクは`state["phases"]`のJSON内にしか存在せず、実表の行として検証できない」という理由で明示的に却下していた。3並列Explore agent調査（現状のtask_id識別機構・BL-224の却下理由の詳細・task_planner再計画の全体構造）とPlan agentによる設計案を経て、この欠けていた「タスク/フェーズの正本（identity）」を実テーブルとして導入し、`task:`/`phase:`参照をBL-224の既存インフラへ追加することで埋める方針を提示。ユーザーは4点の設計判断（(1) phasesテーブルも今回作る、(2) `task:`参照はstatus不問で解決、(3) タスク分割系譜は新規`split_from` relation_typeを追加、(4) 既存runへのバックフィルは別BLへ分離）を全てAskUserQuestionで確認・選択した。 |
+| 決定内容 | 新規`tasks`/`phases`テーブル（`PRIMARY KEY (run_id, task_id)`/`(run_id, phase_id)`）を導入し、`task_planner_node`が計画確定のたびに`_sync_task_phase_identity`で同期する（BL-329が既に計算済みの復元/supersede判定をそのまま再利用、判定ロジックを重複させない）。`_resolve_ref_table`等7箇所へ`task:`/`phase:`参照プレフィックスを追加。タスク分割系譜（task_5_2→task_5_2_1）は`Task.split_from`フィールド＋新規`split_from` relation_type（4種目）のrelation_edgesエッジとして記録し、`_validate_task_plan_depends_on_integrity`を`existing_phases`引数へ拡張して整合性を検証する。 |
+| 影響 | `cela_main.py`（`tasks`/`phases`テーブル・`_sync_task_phase_identity`新設、`_resolve_ref_table`等7箇所・`Task` TypedDict・`_validate_task_plan_depends_on_integrity`拡張）、`tests/test_bl331_tasks_phases_identity.py`（新規21件）、`tests/test_bl224_relation_edges.py`（`task:`が既知プレフィックス化した影響で1件のテスト文言を訂正）、`docs/design/back_log/BL-224/BL224_basic_design.md`（`task:`却下記載・relation_type種別数の追記更新）。§19.1レビューでH-1（`tasks.depends_on`列の無消費リスク→削除）・H-2（ref語彙更新箇所の網羅、特に共有プロンプト段落）・H-3（split_from検証の不変条件）を反映。§19.4レビューでsplit_fromエッジのresume冪等性ギャップを実行検証の上発見・修正・回帰テスト固定。§17.1リバート確認済み、フルオフラインスイート2218 passed / 5 deselected。 |
+| 関連 BL | BL-331（本件）、BL-330（本BLの直接の引き金）、BL-224（`relation_edges`基盤の再利用元、`task:`却下の解消元）、BL-228（同基盤のPhase 3拡張との整合）、BL-329（`removed_task_ids`判定の再利用元）、AGENTS.md §13.7・§15.1・§15.4・§15.5・§19.1・§19.4 |
 
 ---
 
