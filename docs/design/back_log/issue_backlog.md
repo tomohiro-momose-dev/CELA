@@ -11720,18 +11720,16 @@ split_from系譜が記録される再計画（re-plan）後の分割よりも、
 
 | 項目 | 内容 |
 |------|------|
-| 状態 | `open` |
+| 状態 | `done` |
 | 優先度 | P3 |
-| 関連 | AGENTS.md §19（Independent Design Review via Cline CLI）、`scripts/cline_review.py`（`invoke_cline`） |
+| 関連 | AGENTS.md §19（Independent Design Review via Cline CLI）、`scripts/cline_review.py`（`invoke_cline`・`_drain_stream`） |
 
 **発見経緯**: AGENTS.md §19のワークフローでClineへ複数回自動レビューを依頼したところ、タイムアウトがしばしば発生した（2026-08-31にデフォルトタイムアウトを600秒→1200秒へ延長済みだが、根本対策ではない）。ユーザーが「タスクマネージャーでcline.exeのディスクI/Oを見ていると、動いているうちは推論中（コードなどを読んでいる）はず」と指摘し、単純な固定秒数の待機だけでは「まだ処理中で単に時間がかかっている」のか「実際にハングして応答が返らないフリーズ状態」なのかを区別できていない点が課題として明確になった。
 
-**現状の実装**（`scripts/cline_review.py` `invoke_cline`）: `subprocess.run(cmd, timeout=timeout + 30)` による固定秒数の同期待機のみ。プロセスの活動状況を監視する仕組みは無い。
+**旧実装**（`subprocess.run(cmd, timeout=timeout + 30)`）: 固定秒数の同期待機のみで、プロセスの活動状況を監視する仕組みが無かった。
 
-**対応方針（未着手・要設計）**: 以下を軸に検討する。
-1. `cline`プロセスのPIDに対して、ディスクI/O（Windowsでは`Get-Process -Id <PID>`の`ReadTransferCount`/`WriteTransferCount`等、追加の依存関係不要）とネットワークI/O（`Get-Process`には直接のI/Oカウンタが無いため、`Get-Counter`のProcessカウンタセット等、別途調査が必要）を一定間隔でポーリングする。
-2. **両方**が一定時間（閾値は要検討）変化しなければフリーズとみなし、タイムアウト満了を待たずに早期終了・再試行するか、ユーザーに通知する。ディスクI/Oのみ・ネットワークI/Oのみでは、推論中でも「モデルの応答待ちでどちらも動かない」瞬間が普通に存在するため誤検知しうる——両方の沈黙を条件にする設計はユーザー指定通り。
-3. 現在の`invoke_cline`は`subprocess.run`による同期ブロック実装のため、監視ループを組み込むには`subprocess.Popen`＋ポーリングループへの書き換えが必要（設計変更を伴う）。
-4. psutilは未インストール（2026-09-01時点確認）。追加する場合はAGENTS.md ルール2（Controlled Dependencies）に従い、必要性を提案し承認を得てから`requirements.txt`に追加する。PowerShell単体で完結できるなら追加依存を避けられないか先に検討する。
+**試行1（棄却）: プロセスI/Oカウンタ監視**: `cline`のCLIサブプロセス自身のPIDに対し、WMI（`Get-CimInstance Win32_Process`の`ReadTransferCount`/`WriteTransferCount`、追加依存なしで取得可能——`Get-Process`本体にはこのプロパティが無いことを実地検証で確認）を`subprocess.Popen`＋20秒間隔ポーリングで監視し、300秒（5分）沈黙でkillする実装をまず作った。しかし実運用で2回とも誤検知（328秒・900秒超で、実際にはツール呼び出し3ラウンド完了後の正常なモデル応答待ち中にkill）が発生。原因はCLIプロセス自身の性質——Cline CLIとVSCode拡張が共有するローカルhubデーモン（AGENTS.md §19.3）にリクエストを委譲する薄いクライアントであり、実際のI/O活動はhubデーモン側で発生する。ユーザーの「pidは合っているか」という指摘で、`cline hub status`のPIDでI/O監視すると解決する可能性が浮上したが、hubは同時実行中の他セッションとも共有されるため（AGENTS.md §19.2）、他セッションの活動でこのタスクのフリーズが覆い隠される新たな誤検知リスクが生じることが判明し、ユーザー判断で「より正確な方法」を再検討することになった。
 
-設計時はPlan mode + Cline独立レビュー（AGENTS.md §19.1）の対象とする。
+**採用実装: stdout行到着間隔の監視**: `invoke_cline`が既に持っていた`--json`stdout/stderrの非同期読み取りスレッド（`_drain_stream`、パイプのフルバッファによるデッドロック回避のため元々必要）に、行を受信するたびに`activity["last"] = time.monotonic()`を刻む処理を追加。メインループは`_ACTIVITY_CHECK_INTERVAL_SECONDS`（10秒）ごとにこの値を確認し、`_FREEZE_SILENCE_SECONDS`（300秒）沈黙したらプロセスをkillする。プロセスI/Oカウンタと異なり「このタスク固有の出力ストリーム」だけを見るため、hub共有による誤検知が構造的に起きない。`--json`出力を実地観察すると、モデルの`reasoning`思考中もトークン単位でcontent deltaイベントがストリーミングされるため、本当に何も届かない状態はプロバイダが実際に無応答（レート制限・接続断等）になっているケースに限られると判断した。`timeout`パラメータ（デフォルト3600秒）は安全網として残し、フリーズ検知の主判定はI/O沈黙側に委ねる形へ設計変更した。
+
+**検証**: 誤検知を起こした`docs/design/experiment_design_baseline_comparison.md`のレビュー（`thinking=medium`）を新実装で再実行し、591.2秒かけてkillされることなく完走、86行の実質的なレビュー内容を得たことを確認した（2026-09-01）。
