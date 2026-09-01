@@ -74,6 +74,7 @@ def run_cline_diff_review(
     plan_paths: list[Path] | None,
     thinking: str = "high",
     timeout: int = 600,
+    model: str | None = None,
 ) -> str:
     """Capture a git diff to a temp file and send it (plus optional plan docs) to Cline."""
     diff_text = get_git_diff(diff_range, paths)
@@ -95,7 +96,7 @@ def run_cline_diff_review(
         else:
             plan_clause = ""
         prompt = DIFF_REVIEW_INSTRUCTION_TEMPLATE.format(diff_path=diff_path, plan_clause=plan_clause)
-        return invoke_cline(prompt, thinking=thinking, timeout=timeout)
+        return invoke_cline(prompt, thinking=thinking, timeout=timeout, model=model)
     finally:
         diff_path.unlink(missing_ok=True)
 
@@ -125,6 +126,11 @@ def main() -> int:
         help="Cline reasoning effort (default: high)",
     )
     parser.add_argument("--timeout", type=int, default=600, help="Timeout in seconds (default: 600)")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="One-off model override passed as `cline -m <id>` (default: cline's own persistent default)",
+    )
     args = parser.parse_args()
 
     try:
@@ -134,6 +140,7 @@ def main() -> int:
             args.plan_paths,
             thinking=args.thinking,
             timeout=args.timeout,
+            model=args.model,
         )
     except ClineReviewError as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -17948,20 +17948,40 @@ def decision_extractor_node(state: LineageState) -> LineageState:
             if action_type == "UPDATE" or status == "Approved_with_Conditions":
                 target_topic = item.get("target_topic", topic)
                 old_content = ""
-                # [BL-206] entry_type不一致（例: 却下がentry_type='Decision'として抽出された）でも
-                # topicが一致するだけでこのループがDeliverable行をsuperseded化してしまい、
-                # _find_active_deliverable_agreement（entry_type='Deliverable'必須）が二度と
-                # 発見できない識別子で置き換わる「孤児化」バグの原因になっていた（実ログで
-                # edits失敗が空文字への照合として観測された、log/2026-08-11/0016で確定）。
-                # supersede対象は同じentry_typeの行に限定する。
-                for a in reversed(get_agreements_from_db(_conn, _run_id)):
-                    if (a["topic"] == target_topic and a.get("entry_type") == entry_type
-                            and a.get("status") != "Superseded"):
-                        old_content = a["decision_what"]
-                        db_supersede_agreement(a["id"], _conn, _run_id)
+                if entry_type == "Deliverable":
+                    # [BL-330] BL-084と同じ理由（topicドリフト・誤task_id行への追従防止）で、
+                    # この直接書き込みフォールバック経路（write_agreementツール本体＝
+                    # _write_agreement_implとは別の書き込み口）も_find_active_deliverable_agreement
+                    # （task_id基準）へ揃える。_write_agreement_impl側の同型3箇所（4041/4098/4241）
+                    # は既にBL-084でこの分岐を持つが、decision_extractorのこの経路だけ非対称に
+                    # 取り残されていた（AGENTS.md §13.4、log/2026-08-31/1917で実害確認：
+                    # topic一致のみでtask_id誤登録行を掴み、他タスクのホワイトボードポインタを
+                    # 継承してしまった）。
+                    target_agreement = _find_active_deliverable_agreement(_conn, _run_id, phase_id, task_id)
+                    if target_agreement is not None:
+                        # BL-084同様、実体のtopicへ揃える（呼び出し元のtarget_topicがtopicドリフト
+                        # している場合の保険。_write_agreement_impl:4100と同じパターン）。
+                        target_topic = target_agreement["topic"]
+                        old_content = target_agreement["decision_what"]
+                        db_supersede_agreement(target_agreement["id"], _conn, _run_id)
                         if proposed_by == "Unknown" or not proposed_by:
-                            proposed_by = a.get("proposed_by", "Unknown")
-                        break
+                            proposed_by = target_agreement.get("proposed_by", "Unknown")
+                else:
+                    # [BL-206] entry_type不一致（例: 却下がentry_type='Decision'として抽出された）でも
+                    # topicが一致するだけでこのループがDeliverable行をsuperseded化してしまい、
+                    # _find_active_deliverable_agreement（entry_type='Deliverable'必須）が二度と
+                    # 発見できない識別子で置き換わる「孤児化」バグの原因になっていた（実ログで
+                    # edits失敗が空文字への照合として観測された、log/2026-08-11/0016で確定）。
+                    # supersede対象は同じentry_typeの行に限定する。Decision/Directiveは
+                    # BL-084のスコープ外のためtopic一致のまま維持する。
+                    for a in reversed(get_agreements_from_db(_conn, _run_id)):
+                        if (a["topic"] == target_topic and a.get("entry_type") == entry_type
+                                and a.get("status") != "Superseded"):
+                            old_content = a["decision_what"]
+                            db_supersede_agreement(a["id"], _conn, _run_id)
+                            if proposed_by == "Unknown" or not proposed_by:
+                                proposed_by = a.get("proposed_by", "Unknown")
+                            break
                         
                 # [BL-212追補/F5] 従来はold_contentの文字列プレフィックスだけで「ホワイトボード
                 # 済みか」を判定していたため、BL-212の短い無効化理由文がold_contentに入っていると
