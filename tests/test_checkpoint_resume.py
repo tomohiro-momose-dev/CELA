@@ -174,6 +174,40 @@ def test_run_ai_vs_ai_loop_fresh_run_never_calls_get_state(tmp_path, monkeypatch
     assert fake_graph.get_state_calls == 0
 
 
+def test_resume_refreshes_config_derived_limits_from_current_config(tmp_path, monkeypatch, capsys):
+    """[BL-201] チェックポイントから復元したstateは、そのrunが開始された時点のconfigの値
+    （呼び出し回数上限・goal_reference_dir）を固定で保持している。BL-199でmax_web_search_calls
+    を30→50へ緩和した後もresumeしたrunが30回で頭打ちになっていた
+    （log/2026-08-09/2313で実機確認）ため、resume時に現在のconfigの値へ再同期する。
+    会話状態（chat_history等）は上書きしないことを、stateにそれらのキーを含めず検証する。"""
+    stale_state = {
+        "db_path": str(tmp_path / "cela.db"),
+        "turn_count": 5,
+        "halt": True,  # 早期returnさせ、グラフ実行やDB接続を発生させずに済ませる
+        "discussion_status": "halted",
+        "max_web_search_calls": 30,
+        "max_web_fetch_calls": 30,
+        "max_road_route_calls": 30,
+        "goal_reference_dir": "",
+    }
+    fake_graph = _FakeCompiledGraph(_FakeSnapshot(values=stale_state, next_nodes=()))
+    monkeypatch.setattr(cela_main, "build_graph", lambda checkpointer=None: fake_graph)
+    monkeypatch.setattr(cela_main, "CELA_CHECKPOINT_DB_PATH", str(tmp_path / "ckpt.db"))
+
+    cela_main.run_ai_vs_ai_loop(
+        target_goal="テスト目標",
+        config={"pattern": 4, "is_stateless_mode": True, "initial_max_turnval": 30, "reflection_interval": 3,
+                "agent_has_guardrail": True, "max_web_search_calls": 50, "max_web_fetch_calls": 40,
+                "max_road_route_calls": 25, "goal_reference_dir": "docs/refs/chino_city"},
+        resume_run_id="run-with-stale-limits",
+    )
+
+    assert stale_state["max_web_search_calls"] == 50
+    assert stale_state["max_web_fetch_calls"] == 40
+    assert stale_state["max_road_route_calls"] == 25
+    assert stale_state["goal_reference_dir"] == "docs/refs/chino_city"
+
+
 def test_task_planner_node_skips_replanning_when_phases_already_exist():
     """再開時、turn_count==1のままtask_planner_nodeを再度通っても、
     既にphasesが確定済みならcall_task_plannerを再実行しない（冪等性ガード）。"""

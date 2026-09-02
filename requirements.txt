@@ -2,3 +2,34 @@
 # BL-105/D-086（docs/design/back_log/BL-105/BL105_basic_design.md）で、一時停止・再開機構を
 # LangGraph公式checkpointerへ移行するために追加。SqliteSaver/AsyncSqliteSaverを提供する。
 langgraph-checkpoint-sqlite
+
+# BL-188（docs/design/back_log/BL-188/BL188_basic_design.md）で、web_fetchのHTML/PDF本文抽出を
+# Microsoft markitdown（Markdown化）へ統一するために追加。当初はpypdf（純Python、依存軽量）を
+# 追加したが、実ドライランで表構造が失われる実害が確認されたため、見出し・表・リンクの文脈的
+# 位置を保持できるmarkitdownへ置き換えた（D-161）。依存重量（onnxruntime/numpy/Pillow等、
+# 約100MB）は増えるが、情報取得の質を優先するとユーザーが判断した。
+# BL-218で、自治体サイト（茅野市HP等）が配布するWord/Excel/PowerPoint文書もweb_fetchで
+# 読めるようdocx/xlsx/xls/pptxのextraを追加した（ユーザー承認、文書系のみに限定。
+# zip/audio-transcription等は意図的に対象外——docs/design/back_log/issue_backlog.md BL-218参照）。
+markitdown[pdf,docx,xlsx,xls,pptx]
+
+# BL-335（docs/design/back_log/BL-335/BL335_basic_design.md）で追加。
+# クライアントサイドJS描画コンテンツがweb_fetchの静的httpx取得では取得できない実害
+# （CAMPFIREクラウドファンディングページ等）が確認されたため、web_fetchの既定パスとして
+# Playwright（ヘッドレスChromium）による描画取得を導入した。ブラウザバイナリの別途取得
+# （`playwright install chromium`、約100〜300MB）がpip installとは別に必要。
+playwright
+
+# BL-335で追加。人間向けレイアウト（複数ブロック横並び等）のExcelがNaNだらけのMarkdown
+# ダンプになる実害が確認されたため、python_repl内でpandasによるプログラム的アクセス
+# （dropna/スライス/フィルタでのブロック切り出し）を可能にする。openpyxlはpandasの
+# .xlsx読み込みエンジンとして必要（LLM側コードが直接importする想定はない）。
+pandas
+openpyxl
+
+# BL-335で追加。縦書き日本語表ヘッダのPDF抽出破損・地図/図面PDFの原理的なテキスト化
+# 不能に対応するため、PDFページをページ画像へレンダリングしvisionモデルへ渡す
+# `read_pdf_page_as_image`ツールで使用。pdf2image（poppler-utils必須）ではなく、
+# システムバイナリ不要でインメモリPNG化できるpypdfium2（BSD/Apache系ライセンス、
+# Google PDFiumのバインディング）を採用した（PyMuPDFはAGPL-3.0のため不採用）。
+pypdfium2

@@ -73,7 +73,12 @@ def test_daily_quota_error_raises_immediately_without_retry_backoff(monkeypatch)
 def test_non_daily_rate_limit_error_still_uses_normal_retry(monkeypatch):
     """"per-day"を含まない（例: per-minuteの）RateLimitErrorは、従来通り通常の
     指数バックオフリトライを経由し、最終的にフォールバック文字列を返すこと
-    （BL-171の変更が既存のリトライ経路を壊していないことの回帰確認）。"""
+    （BL-171の変更が既存のリトライ経路を壊していないことの回帰確認）。
+    [BL-202] delays（8/16/32/64/128の5回）を使い切った後、即座にプレースホルダーを
+    返すのではなく、loop_messagesを保持したままノード自体を最大
+    _MAX_NODE_REDO_ON_API_EXHAUSTION(=2)回やり直すようになった。常に失敗し続ける
+    フェイククライアントでは、1サイクル6回（初回＋5リトライ）×(1+2サイクル)＝18回
+    呼ばれてから、初めてプレースホルダーへフォールバックする。"""
     sleep_calls = []
     monkeypatch.setattr(cela_main.time, "sleep", lambda s: sleep_calls.append(s))
 
@@ -85,9 +90,16 @@ def test_non_daily_rate_limit_error_still_uses_normal_retry(monkeypatch):
     )
 
     assert result == "(サーバー高負荷によるAPIエラー)"
-    assert fake_client.chat.completions.call_count == 6, "5回のバックオフリトライ＋最終試行で計6回呼ばれるはず"
-    # 各attempt冒頭の固定sleep(5)×6回 + attempt<5の各回のバックオフsleep（8/16/32/64/128）×5回 = 11回
-    assert sleep_calls == [5, 8, 5, 16, 5, 32, 5, 64, 5, 128, 5], sleep_calls
+    # [BL-202] _MAX_NODE_REDO_ON_API_EXHAUSTION（=2）・_NODE_REDO_COOLDOWN_SECONDS（=180）は
+    # _query_AI_live内のローカル変数のためテストからは参照できない。cela_main.py内の
+    # 定義箇所（コメント"[BL-202] delaysを全て使い切った後..."付近）と値を揃えること。
+    max_node_redo = 2
+    node_redo_cooldown_seconds = 180
+    calls_per_cycle = 6  # 初回＋5回のバックオフリトライ
+    cycles = 1 + max_node_redo  # 初回サイクル＋ノードやり直し2回
+    assert fake_client.chat.completions.call_count == calls_per_cycle * cycles
+    # ノードやり直し前のクールダウン（180秒）が、やり直し回数分だけ含まれること
+    assert sleep_calls.count(node_redo_cooldown_seconds) == max_node_redo
 
 
 def test_run_ai_vs_ai_loop_catches_daily_quota_exhausted_like_keyboard_interrupt():

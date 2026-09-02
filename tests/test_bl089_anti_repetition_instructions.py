@@ -24,13 +24,20 @@ import cela_main  # noqa: E402
 
 
 def test_call_expert_has_anti_repetition_instruction():
+    """[BL-256] 文面は共有ヘルパー_verification_throttle_warning()へ集約されたため、
+    call_resource_arbiter同様、呼び出し式そのものを存在確認のマーカーとする。"""
     src = inspect.getsource(cela_main.call_expert)
-    assert "同じ検証・計算を繰り返さない" in src
+    assert '_verification_throttle_warning(' in src
+    idx = src.index("_verification_throttle_warning(")
+    assert 'output_form="answer"' in src[idx: idx + 100]
 
 
 def test_call_detector_has_anti_repetition_instruction():
+    """[BL-295] Pass 2の手書き重複ブロック（§15.1違反）を共有ヘルパー
+    _verification_throttle_warning()呼び出しへ置換したため、他の3テスト（BL-256）と
+    同様に呼び出し式そのものを存在確認のマーカーとする。"""
     src = inspect.getsource(cela_main.call_detector)
-    assert "同じ計算を繰り返さない" in src
+    assert "_verification_throttle_warning(" in src
 
 
 def test_call_resource_arbiter_has_anti_repetition_instruction():
@@ -66,9 +73,10 @@ def test_call_goal_essence_analyst_has_anti_repetition_instruction():
 def test_call_task_plan_reviewer_has_anti_repetition_instruction_and_single_block_rule():
     """task_plan_reviewerは、1705/1814ログの両方の実例（過剰な再検討・複数JSON
     ブロックの混在）を踏まえ、追加で「最終回答のJSONブロックは1つだけ」という
-    指示も持つこと。"""
+    指示も持つこと。[BL-256] 文面は共有ヘルパー_verification_throttle_warning()へ
+    集約されたため、存在確認は呼び出し式そのものをマーカーとする。"""
     src = inspect.getsource(cela_main.call_task_plan_reviewer)
-    assert "同じ検証・計算を繰り返さない" in src
+    assert "_verification_throttle_warning(" in src
     assert "1つだけ" in src
 
 

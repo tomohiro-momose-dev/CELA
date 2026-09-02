@@ -8,11 +8,20 @@ BL-093/D-074: thinkツールを呼ぶかどうかをモデルの任意判断に�
 毎iter無条件にdigestへ蓄積されるようになり、思考ログの引き継ぎ自体はthink無しでも成立するように
 なったため、機械的強制（差し戻し）は撤廃し、thinkツール自体は任意呼び出しとして残した。
 
+[BL-237] 「think無しでも生reasoningが無条件に引き継がれる」設計自体が、迷い・撤回を含む
+生の言い回しをそのまま次iterationへ運び、後続iterationが同じ結論を延々と再導出し続ける
+生成崩壊の一因と判明した（log/2026-08-15/1735・1954）。thinkを毎iteration必須のプロンプト
+指示へ戻したが（機械的な差し戻しは伴わない、往復コスト増を避けるため）、当初検討した
+「thinkを呼んだiterationは生reasoningの代わりにthinkのsummaryだけを引き継ぐ」swap案は、
+web検索結果の統合過程・下書きなどsummaryに収まらない実質的内容が失われる副作用がある
+（ユーザー指摘）ため撤回し、**生reasoningの引き継ぎは常に無条件のまま維持**している
+（本ファイルの既存テストが検証する挙動そのものに変更なし）。
+
 この一連の挙動は`_query_AI_live`の内部ループそのものを検証する必要があり、既存テストが行っている
 `query_AI`/`_query_and_parse_with_retry`レベルのモンキーパッチでは到達できないため、OpenAIの
 streamingレスポンスを模したフェイククライアントで直接検証する。
 
-参照: docs/design/issue_backlog.md BL-093/BL-108/BL-110、docs/design/decision_log.md D-074。
+参照: docs/design/issue_backlog.md BL-093/BL-108/BL-110/BL-237、docs/design/decision_log.md D-074。
 """
 
 import json
@@ -187,7 +196,9 @@ def test_auto_reasoning_digest_accumulates_without_summarizing():
 
 
 def test_auto_reasoning_digest_content_captured_via_create_kwargs():
-    """digestメッセージの内容を、create()に渡された実際のmessages配列から直接検証する。"""
+    """digestメッセージの内容を、create()に渡された実際のmessages配列から直接検証する。
+    [BL-237] 全iterationでthinkを呼んでいても、生reasoningのdigestは省略されない
+    （thinkの構造化summaryは加算されるだけで、生reasoningの引き継ぎを置き換えない）。"""
     captured_messages_per_call = []
 
     class _CapturingCompletions(_FakeCompletions):
@@ -217,7 +228,8 @@ def test_auto_reasoning_digest_content_captured_via_create_kwargs():
     # [BL-111] 全iter分を1メッセージに再結合する（BL-108）のをやめ、iterationごとに独立した
     # 新規systemメッセージを末尾に追記するだけ（真の単調増加）にしたため、末尾メッセージには
     # 直近iter（iter3）の生reasoningのみが入り、iter1/iter2は末尾より手前の別メッセージとして
-    # 個別に残っている。
+    # 個別に残っている。[BL-237] thinkを毎iteration呼んでいてもこの生reasoning引き継ぎは
+    # 省略されない（加算のみ、置き換えではない）。
     last_msg = messages_before_iter4[-1]
     assert last_msg["role"] == "system"
     assert "iter3の生reasoning内容" in last_msg["content"]

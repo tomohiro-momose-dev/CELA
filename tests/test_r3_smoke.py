@@ -143,7 +143,7 @@ def test_r3a_t4_read_deliverable_file_path_validation():
         f.write("hello r3a")
     try:
         ok = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"file_path": legit_path})
-        assert ok == "hello r3a"
+        assert ok == {"content": "hello r3a"}  # [BL-289] file_path経路はdict化された
 
         traversal = cela_main.TOOL_DISPATCH["read_deliverable_file"]({
             "file_path": os.path.join(test_dir, "..", "..", "cela_main.py")
@@ -311,6 +311,11 @@ def test_r3b_t5_decision_extractor_skips_agreement_write_when_write_agreement_su
             {"task_id": "task_2_1", "owns_variables": ["vehicle_count"], "acceptance_criteria": []}
         ]}],
         "expert_wrote_agreement": True,  # ★今ターンwrite_agreementが成功済み
+        # [BL-223] ターン単位のブールだけでなく、実際に書き込まれた項目の(entry_type, task_id)も
+        # 必要（項目単位の重複判定へ変更したため）。canned_itemsと同じ(entry_type="Decision",
+        # task_id="task_2_1")を直接書き込み済みとして与え、「同じ項目の二重書き込み防止」という
+        # このテスト本来の意図を項目単位の判定でも再現する。
+        "expert_wrote_agreement_items": [{"entry_type": "Decision", "task_id": "task_2_1"}],
     }
     cela_main.decision_extractor_node(state)
 
@@ -562,11 +567,12 @@ def test_bl040_read_deliverable_file_lookup_by_task_id(db_conn):
 
         # [BL-147] task_id指定時は計画への実在チェックが先に走るため、state経由でpending_task_idsを渡す。
         read_state = {"pending_task_ids": ["task_1_1"]}
+        # [BL-289] ホワイトボード経路はdict化された
         by_task_id = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"task_id": "task_1_1"}, read_state)
-        assert isinstance(by_task_id, str) and by_task_id.startswith("Z" * 10)
+        assert isinstance(by_task_id, dict) and by_task_id["content"].startswith("Z" * 10)
 
         by_topic = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"topic_keyword": "BL040"})
-        assert isinstance(by_topic, str) and by_topic.startswith("Z" * 10)
+        assert isinstance(by_topic, dict) and by_topic["content"].startswith("Z" * 10)
 
         # [BL-147] 計画にもpending_task_idsにも実在しないtask_idは、成果物の有無を見る前に
         # 「計画に存在しない」エラーで拒否されるようになった（従来はnot_foundとして素通りしていた）。

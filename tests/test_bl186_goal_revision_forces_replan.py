@@ -80,6 +80,14 @@ def _revise_goal(run_id: str, old_goal: str, new_text_pair: tuple[str, str]):
         "suggested_reframe": "フェーズ分割方式へ変更",
     })["escalation_id"]
 
+    # [BL-236] revise_goalは人間のHIL承認（--answer-human-input相当）を必須とするため、
+    # このテストヘルパーでも承認済み状態を再現する。
+    cela_main.upsert_verified_fact(
+        cela_main.get_active_conn(), run_id,
+        cela_main._goal_escalation_hil_variable(escalation_id),
+        "approved", "", "", "", "human_operator", confidence="confirmed",
+    )
+
     cela_main._CURRENT_CALLER_ROLE = "user"
     cela_main._CURRENT_GOAL_TEXT = old_goal
     return cela_main.TOOL_DISPATCH["revise_goal"]({

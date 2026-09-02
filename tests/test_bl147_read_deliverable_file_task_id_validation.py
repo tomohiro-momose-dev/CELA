@@ -104,8 +104,9 @@ def test_reading_other_existing_task_deliverable_is_still_allowed(db_conn):
     result = cela_main.TOOL_DISPATCH["read_deliverable_file"](
         {"task_id": "task_1_2"}, state,
     )
-    assert isinstance(result, str)
-    assert "task_1_2の成果物本文" in result
+    # [BL-289] ホワイトボード経路はdict化され、author_role/edit_summary/timestamp/draft_idも返る
+    assert isinstance(result, dict)
+    assert "task_1_2の成果物本文" in result["content"]
 
 
 def test_pending_task_id_is_accepted_even_if_not_in_formal_phases(db_conn):

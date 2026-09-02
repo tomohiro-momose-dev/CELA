@@ -144,11 +144,17 @@ def test_generate_user_utterance_prompt_body_disambiguates_scratch_concerns_from
     assert "scratch_concerns" in src
 
 
-def test_max_tool_iter_raised_to_30():
+def test_max_tool_iter_raised_beyond_20():
     """[BL-155] task_plan_reviewerによる差し戻し後、task_plannerが差戻しタスクを1件ずつ
-    把握し直す過程でiter=20（旧上限）に迫る実績がドライランで観測されたため、20→30へ引き上げ。"""
+    把握し直す過程でiter=20（旧上限）に迫る実績がドライランで観測されたため、20から引き上げ。
+    その後もドライランの実績に応じて調整されている（30→50）ため、特定の数値ではなく
+    「元の20より緩和されていること」だけを固定する（BL-199のmax_web_search_calls
+    テストと同じ考え方）。"""
+    import re
     src = inspect.getsource(cela_main._query_AI_live)
-    assert "MAX_TOOL_ITER = 30" in src
+    m = re.search(r"MAX_TOOL_ITER = (\d+)", src)
+    assert m, "MAX_TOOL_ITERの代入が見つかりません"
+    assert int(m.group(1)) > 20
 
 
 def test_query_ai_live_stamps_mechanical_iteration_globally():
@@ -206,13 +212,18 @@ def test_all_nodes_wire_think_tool_and_reset(func_name):
 
 
 def test_call_detector_domain_review_pass_also_wires_think_tool():
-    """[BL-093] ドメイン妥当性レビュー（tools=None→[THINK_TOOL]）も全ノード対象化に含まれる。"""
+    """[BL-093] ドメイン妥当性レビュー（tools=None→[THINK_TOOL]）も全ノード対象化に含まれる。
+    [BL-204] tools=[...]の一覧はBL-198/199/204等で継続的にツールが追加されており、
+    固定の文字数窓では脆くなる。
+    [BL-283] ツール一覧が呼び出し直前の変数（例: `_detector_domain_tools = [...]`）へ
+    抽出されたため、`tools=[`直後の1行だけを見る判定はもう成立しない。labelの前後の
+    windowにTHINK_TOOLが現れるかで判定する（変数抽出・インライン列挙のどちらでも通る）。"""
     src = inspect.getsource(cela_main.call_detector)
     assert 'label="Detector (Domain Review)"' in src
-    # ドメイン妥当性レビューの呼び出しブロックにTHINK_TOOLが含まれていること
     domain_call_idx = src.index('label="Detector (Domain Review)"')
-    nearby = src[max(0, domain_call_idx - 400):domain_call_idx + 400]
-    assert "THINK_TOOL" in nearby
+    window_start = max(0, domain_call_idx - 400)
+    window_end = min(len(src), domain_call_idx + 400)
+    assert "THINK_TOOL" in src[window_start:window_end]
 
 
 def test_bl109_single_shot_judgment_nodes_reverted_to_tools_none():
@@ -244,15 +255,17 @@ def test_bl126_stage_d_call_facilitator_is_tool_loop_capable():
 def test_bl148_call_orchestrator_is_tool_loop_capable():
     """[BL-148] call_orchestratorはcurrent_task_id/計画/成果物を能動的に確認できるよう、
     読み取り専用ツール（read_project_plan/read_deliverable_file/read_verified_fact/think）を
-    持つツールループパスへ変更された（BL-109からの意図的な差し戻し）。専門家選定メタデータの
-    生成以外の役割は持たず状態も変更しないため、write_agreement等の書き込み系ツールは
-    意図的に持たないことをレグレッションガードとして固定する。"""
+    持つツールループパスへ変更された（BL-109からの意図的な差し戻し）。
+    [BL-280] 専門家選定自体が複数候補からの分岐点であるため、意思決定系譜の記録用に
+    write_agreementを追加した（BL-148当時の「書き込み系ツールは一切持たない」という設計を
+    上書きする意図的な変更）。escalate_premise_concern等それ以外の書き込み系ツールは
+    引き続き持たないことをレグレッションガードとして固定する。"""
     src = inspect.getsource(cela_main.call_orchestrator)
     assert "THINK_TOOL" in src
     assert "READ_PROJECT_PLAN_TOOL" in src
     assert "READ_DELIVERABLE_FILE_TOOL" in src
     assert "READ_VERIFIED_FACT_TOOL" in src
-    assert "WRITE_AGREEMENT_TOOL" not in src
+    assert "WRITE_AGREEMENT_TOOL" in src
     assert "ESCALATE_PREMISE_CONCERN_TOOL" not in src
 
 

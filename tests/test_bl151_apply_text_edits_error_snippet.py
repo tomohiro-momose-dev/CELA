@@ -51,7 +51,9 @@ def test_bl151_custom_content_label_is_used_in_error():
     )
     assert merged is None
     assert "現在のゴール文に見つかりませんでした" in err
-    assert "【参考：現在のゴール文の実際の先頭部分】" in err
+    # [BL-193] スニペットの見出し文言が「実際の先頭部分」固定から「old_textに最も近い実際の内容」
+    # （文書サイズに応じてold_textとの最長一致箇所周辺へ差し替え）へ変更された。
+    assert "【参考：現在のゴール文のうち、あなたのold_textに最も近い実際の内容】" in err
 
 
 def test_bl151_snippet_is_truncated_for_long_content():
@@ -114,6 +116,13 @@ def test_bl151_revise_goal_mismatch_error_reveals_actual_goal_text(db_conn):
         "concern_summary": "s", "implicated_constraint": "c",
         "why_conflicts_with_true_need": "w", "suggested_reframe": "r",
     })["escalation_id"]
+
+    # [BL-236] revise_goalは人間のHIL承認（--answer-human-input相当）を必須とするため、
+    # このテスト（edits不一致エラーの中身を確認する）でも承認済み状態を再現する。
+    cela_main.upsert_verified_fact(
+        conn, run_id, cela_main._goal_escalation_hil_variable(escalation_id),
+        "approved", "", "", "", "human_operator", confidence="confirmed",
+    )
 
     cela_main._CURRENT_CALLER_ROLE = "user"
     cela_main._CURRENT_GOAL_TEXT = "過疎地域向け「AIオンデマンド自動運転バス」の導入計画と安全基準策定"

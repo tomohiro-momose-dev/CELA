@@ -16,10 +16,13 @@ import cela_main  # noqa: E402
 
 
 def test_bl062_call_detector_receives_agreements_context():
-    """call_detectorのソース内で、既存の【決定事項DB】（_build_agreements_context_from_db）
-    を取得しプロンプトへ埋め込んでいること（従来はDetectorに一切見えていなかった配線漏れの修正）。"""
+    """call_detectorのソース内で、既存の【決定事項DB】を取得しプロンプトへ埋め込んで
+    いること（従来はDetectorに一切見えていなかった配線漏れの修正）。
+    [BL-317] 呼び出しは_build_agreements_context_for_state（内部で
+    _build_agreements_context_from_dbを呼ぶ共有ヘルパー）へ統一されたため、
+    直接の関数名参照ではなくagreements_textの配線自体を確認する。"""
     src = inspect.getsource(cela_main.call_detector)
-    assert "_build_agreements_context_from_db" in src
+    assert "_build_agreements_context_for_state" in src
     assert "agreements_text" in src
 
 

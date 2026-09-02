@@ -57,12 +57,15 @@ def test_apply_and_get_latest_whiteboard_roundtrip(db_conn):
     v1 = cela_main.apply_whiteboard_patch(conn, run_id, "phase_1", "task_1_1", "内容V1", "expert", "初版")
     assert v1 == 1
     latest = cela_main.get_latest_whiteboard(conn, run_id, "phase_1", "task_1_1")
-    assert latest == {"version": 1, "content": "内容V1"}
+    # [BL-289] author_role/edit_summary/timestamp/draft_idも返るようになった
+    assert latest["version"] == 1 and latest["content"] == "内容V1"
+    assert latest["author_role"] == "expert" and latest["edit_summary"] == "初版"
 
     v2 = cela_main.apply_whiteboard_patch(conn, run_id, "phase_1", "task_1_1", "内容V2", "expert", "修正")
     assert v2 == 2
     latest2 = cela_main.get_latest_whiteboard(conn, run_id, "phase_1", "task_1_1")
-    assert latest2 == {"version": 2, "content": "内容V2"}
+    assert latest2["version"] == 2 and latest2["content"] == "内容V2"
+    assert latest2["author_role"] == "expert" and latest2["edit_summary"] == "修正"
 
 
 # ===========================================================================
@@ -161,7 +164,8 @@ def test_write_agreement_deliverable_create_saves_to_whiteboard_v1(db_conn):
     assert row["decision_what"] == "WHITEBOARD:phase_1:task_1_1"
 
     wb = cela_main.get_latest_whiteboard(conn, run_id, "phase_1", "task_1_1")
-    assert wb == {"version": 1, "content": long_content}
+    # [BL-289] author_role/edit_summary/timestamp/draft_idも返るようになった
+    assert wb["version"] == 1 and wb["content"] == long_content
 
 
 def test_write_agreement_deliverable_update_with_edits_applies_diff(db_conn):
@@ -177,6 +181,8 @@ def test_write_agreement_deliverable_update_with_edits_applies_diff(db_conn):
         "reason_why": "r", "entry_type": "Deliverable", "phase_id": "phase_1",
     })
     assert create_result["success"] is True
+    # [BL-265] editsを使うUPDATEはread_whiteboard_excerptでの確認記録を要求する。
+    cela_main._LAST_WHITEBOARD_READS.add("task_1_1")
 
     update_result = cela_main.TOOL_DISPATCH["write_agreement"]({
         "action_type": "UPDATE", "status": "Proposed", "topic": "R4差分テスト",
@@ -203,6 +209,9 @@ def test_write_agreement_deliverable_update_with_bad_old_text_fails_without_writ
         "action_type": "CREATE", "status": "Proposed", "topic": "R4異常系テスト",
         "decision_what": "本文" * 150, "reason_why": "r", "entry_type": "Deliverable", "phase_id": "phase_1",
     })
+    # [BL-265] editsを使うUPDATEはread_whiteboard_excerptでの確認記録を要求する。この
+    # テストの主眼はold_text不一致時の挙動であり、read-before-write自体は満たしておく。
+    cela_main._LAST_WHITEBOARD_READS.add("task_1_1")
 
     result = cela_main.TOOL_DISPATCH["write_agreement"]({
         "action_type": "UPDATE", "status": "Proposed", "topic": "R4異常系テスト",
@@ -277,7 +286,10 @@ def test_decision_extractor_fallback_protects_whiteboard_pointer_from_plaintext_
     cela_main.decision_extractor_node(state)
 
     rows = [a for a in cela_main.get_agreements_from_db(conn, run_id) if a["topic"] == "水ノ守町 分析レポート"]
-    latest = max(rows, key=lambda a: a["id"])
+    # [BL-215] idは`AG-{ミリ秒}-{uuid断片}`となり、文字列の大小は挿入順を表さない
+    # （そもそも修正前もミリ秒衝突時は同値で最大が定まらなかった）。
+    # get_agreements_from_dbはrowid昇順＝真の挿入順を返すため、末尾が最新である。
+    latest = rows[-1]
     assert latest["decision_what"] == "WHITEBOARD:phase_1:task_1_1", (
         "decision_extractorのフォールバック経路がWHITEBOARDポインタをプレーンテキストで"
         "上書きしてしまった（実ドライランで観測した事故の再発）"
@@ -298,11 +310,12 @@ def test_read_deliverable_file_resolves_whiteboard_pointer_by_task_id(db_conn):
         "decision_what": "Z" * 300, "reason_why": "r", "entry_type": "Deliverable", "phase_id": "phase_1",
     })
 
+    # [BL-289] ホワイトボード経路はdict化された
     content = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"task_id": "task_1_1"})
-    assert isinstance(content, str) and content.startswith("Z" * 10)
+    assert isinstance(content, dict) and content["content"].startswith("Z" * 10)
 
     content_by_topic = cela_main.TOOL_DISPATCH["read_deliverable_file"]({"topic_keyword": "R4読み取り"})
-    assert isinstance(content_by_topic, str) and content_by_topic.startswith("Z" * 10)
+    assert isinstance(content_by_topic, dict) and content_by_topic["content"].startswith("Z" * 10)
 
 
 # ===========================================================================

@@ -72,6 +72,9 @@ def test_update_edits_falls_back_to_current_phase_when_phase_id_omitted(db_conn)
     state = {"run_id": run_id, "phases": _PHASES, "current_task_id": "task_1_1",
              "current_phase": _PHASES[0]}
     _create_deliverable(state)
+    # [BL-265] editsを使うUPDATEはread_whiteboard_excerptでの確認記録を要求する。
+    # 本テストの主眼はphase_idフォールバック（BL-161）のため読み取り済みを直接シミュレートする。
+    cela_main._LAST_WHITEBOARD_READS.add("task_1_1")
 
     result = cela_main.TOOL_DISPATCH["write_agreement"](
         {
@@ -88,14 +91,21 @@ def test_update_edits_falls_back_to_current_phase_when_phase_id_omitted(db_conn)
     assert "修正済みの原文断片" in latest["content"]
 
 
-def test_update_edits_without_fallback_target_reports_not_found_regression(db_conn):
-    """回帰確認: フォールバック元になるstate情報（current_phase）自体が無い場合は、従来通り
-    「見つからない」エラーになること（クラッシュしない、フェイルオープンで別タスクを誤更新しない）。"""
+def test_update_edits_without_fallback_target_still_succeeds_via_task_id(db_conn):
+    """[BL-206] 従来（BL-161時点）はフォールバック元のstate情報（current_phase）自体が
+    無い場合、phase_idがどこにも見つからず`_find_active_deliverable_agreement`が
+    Deliverableを発見できず「見つからない」エラーになっていた。BL-206で
+    `_find_active_deliverable_agreement`をtask_id単独検索（BL-131/`get_latest_whiteboard`と
+    同じ規約）へ変更したため、phase_idの手掛かりが一切無くても、task_idが一意であれば
+    正しくDeliverableを発見・更新できるようになった（phase_idドリフトによる孤児化を
+    構造的に防ぐ狙い）。"""
     conn, run_id = db_conn
     state_no_phase_context = {"run_id": run_id, "phases": _PHASES}
     _create_deliverable(
         {"run_id": run_id, "phases": _PHASES, "current_task_id": "task_1_1", "current_phase": _PHASES[0]}
     )
+    # [BL-265] editsを使うUPDATEはread_whiteboard_excerptでの確認記録を要求する。
+    cela_main._LAST_WHITEBOARD_READS.add("task_1_1")
 
     result = cela_main.TOOL_DISPATCH["write_agreement"](
         {
@@ -106,8 +116,7 @@ def test_update_edits_without_fallback_target_reports_not_found_regression(db_co
         },
         state_no_phase_context,
     )
-    assert result["success"] is False
-    assert "見つかりません" in result["error"]
+    assert result["success"] is True
 
 
 def test_explicit_phase_id_in_args_still_takes_precedence(db_conn):

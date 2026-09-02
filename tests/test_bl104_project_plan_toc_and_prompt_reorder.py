@@ -159,18 +159,20 @@ def test_generate_user_utterance_still_shows_full_phases_json():
 
 
 def test_generate_user_utterance_static_stance_block_precedes_dynamic_agreements_text():
-    """「🔥発注者としての絶対的なスタンス」（自己完結・位置的参照なし）が、
+    """「発注者としてのスタンス」（自己完結・位置的参照なし）が、
     最も変動が激しいagreements_textの埋め込み位置よりソースコード上で前にあることを確認する。
     """
     src = inspect.getsource(cela_main.generate_user_utterance)
-    static_idx = src.index("🔥 【発注者としての絶対的なスタンス（質について）】")
+    static_idx = src.index("【発注者としてのスタンス（質について）】")
     dynamic_idx = src.index("現在までの決定事項・検討状況DB】")
     assert static_idx < dynamic_idx
 
 
 def test_generate_user_utterance_anti_repetition_block_precedes_dynamic_agreements_text():
+    """[BL-256] 文面は共有ヘルパー_verification_throttle_warning()へ集約されたため、
+    静的ブロックの位置マーカーは呼び出し式そのものとする（実際の文面はヘルパー内）。"""
     src = inspect.getsource(cela_main.generate_user_utterance)
-    static_idx = src.index("【同じ検証・計算を繰り返さない（重要）】")
+    static_idx = src.index("_verification_throttle_warning(")
     dynamic_idx = src.index("現在までの決定事項・検討状況DB】")
     assert static_idx < dynamic_idx
 
@@ -211,14 +213,16 @@ def test_call_detector_domain_prompt_static_blocks_precede_dynamic_history_text(
     assert static_idx < dynamic_idx
 
 
-def test_call_detector_domain_prompt_bl076_block_stays_after_whiteboard_block():
-    """「上記ホワイトボードの本文から」はwhiteboard_blockへの位置的参照を持つため、
-    whiteboard_blockの後という相対位置を維持していることを確認する。
+def test_call_detector_domain_prompt_bl076_block_precedes_whiteboard_block():
+    """[BL-312] BL-076は元々「上記ホワイトボードの本文から」という後方参照を持ち
+    whiteboard_blockの直後に固定されていたが、キャッシュ効率化のため「後述の【R4: ...】節」
+    という自己完結な前方参照へ書き換えた上でSTATIC-TOP側（whiteboard_blockより前）へ
+    移動した。新しい相対位置（BL-076が先、whiteboard_blockが後）を確認する。
     """
     src = inspect.getsource(cela_main.call_detector)
+    bl076_idx = src.index("後述の【R4: 現在タスクの成果物・")
     whiteboard_idx = src.index('f"{whiteboard_block}"')
-    bl076_idx = src.index("上記ホワイトボードの本文から")
-    assert whiteboard_idx < bl076_idx
+    assert bl076_idx < whiteboard_idx
 
 
 def test_call_detector_domain_prompt_tool_list_precedes_frozen_agreements():
@@ -280,27 +284,28 @@ def test_call_detector_numeric_prompt_thought_process_audit_stays_after_python_c
     assert python_calls_idx < thought_audit_idx
 
 
-def test_call_detector_numeric_prompt_bl076_block_stays_after_whiteboard_block():
-    """数値監査パスのBL-076（「上記ホワイトボードの本文から」）もwhiteboard_blockの後という
-    相対位置を維持していることを確認する。
+def test_call_detector_numeric_prompt_bl076_block_precedes_whiteboard_block():
+    """[BL-312] 数値監査パスのBL-076も、「後述の【R4: ...】節」という自己完結な前方参照へ
+    書き換えた上でSTATIC-TOP側（whiteboard_blockより前）へ移動した。
     """
     src = inspect.getsource(cela_main.call_detector)
     start = _numeric_prompt_start(src)
+    bl076_idx = src.index("後述の【R4: 現在タスクの成果物・", start)
     whiteboard_idx = src.index('f"{whiteboard_block}"', start)
-    bl076_idx = src.index("上記ホワイトボードの本文から", start)
-    assert whiteboard_idx < bl076_idx
+    assert bl076_idx < whiteboard_idx
 
 
-def test_call_detector_numeric_prompt_bl086_bl062_stay_after_agreements_text():
-    """BL-086/BL-062はいずれも「上記DB」（agreements_text）への位置的参照を持つため、
-    agreements_textの後という相対位置を維持していることを確認する。
+def test_call_detector_numeric_prompt_bl086_bl062_precede_agreements_text():
+    """[BL-312] BL-086/BL-062はいずれも元々「上記DB」（agreements_text）への後方参照を
+    持っていたが、「後述の【プロジェクトの合意・決定事項・検討状況DB】」という自己完結な
+    前方参照へ書き換えた上でSTATIC-TOP側（agreements_textより前）へ移動した。
     """
     src = inspect.getsource(cela_main.call_detector)
     start = _numeric_prompt_start(src)
+    bl086_idx = src.index("🔒アイコンが付いている項目は", start)
+    bl062_idx = src.index("その原因が後述の", start)
     agreements_idx = src.index('【プロジェクトの合意・決定事項・検討状況DB】\\n{agreements_text}', start)
-    bl086_idx = src.index("上記DBで🔒アイコンが付いている項目は", start)
-    bl062_idx = src.index("その原因が上記DB内の", start)
-    assert agreements_idx < bl086_idx < bl062_idx
+    assert bl086_idx < bl062_idx < agreements_idx
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +334,7 @@ def test_call_orchestrator_user_input_precedes_agreements_and_history():
 def test_call_resource_arbiter_static_instructions_precede_goal_and_overrun():
     src = inspect.getsource(cela_main.call_resource_arbiter)
     static_idx = src.index("【F-2.6 機械的検算ゲート（必須）】予算超過判定は")
-    goal_idx = src.index("■ 絶対目標: {goal}")
+    goal_idx = src.index("■ 目標: {goal}")
     overrun_idx = src.index("リソース「{overrun['constraint']}」が")
     assert static_idx < goal_idx < overrun_idx
 
@@ -369,7 +374,7 @@ def test_call_integrator_static_instructions_precede_goal_and_merged_text():
     集約されたため、呼び出し式そのものを静的ブロックの位置マーカーとして使う。"""
     src = inspect.getsource(cela_main.call_integrator)
     static_idx = src.index("_verification_throttle_warning()")
-    goal_idx = src.index("■ 絶対目標: {goal}")
+    goal_idx = src.index("■ 目標: {goal}")
     merged_idx = src.index("{merged_text}")
     assert static_idx < goal_idx < merged_idx
 
@@ -381,7 +386,7 @@ def test_call_integrator_static_instructions_precede_goal_and_merged_text():
 def test_call_reviewer_static_instructions_precede_goal_and_deliverable_text():
     src = inspect.getsource(cela_main.call_reviewer)
     static_idx = src.index("【F-2.6 機械的検算ゲート（必須）】成果物中の数値的主張")
-    goal_idx = src.index("■ 達成すべき【絶対目標(Goal)】:")
+    goal_idx = src.index("■ 達成すべき【目標(Goal)】:")
     deliverable_idx = src.index("{deliverable_text}")
     assert static_idx < goal_idx < deliverable_idx
 
@@ -393,7 +398,7 @@ def test_call_reviewer_static_instructions_precede_goal_and_deliverable_text():
 def test_call_task_plan_reviewer_static_criteria_precede_goal_and_phases_json():
     src = inspect.getsource(cela_main.call_task_plan_reviewer)
     static_idx = src.index("1. 曖昧な表記")
-    goal_idx = src.index("■ 絶対目標: {goal}")
+    goal_idx = src.index("■ 目標: {goal}")
     phases_json_idx = src.index("{phases_json}")
     assert static_idx < goal_idx < phases_json_idx
 

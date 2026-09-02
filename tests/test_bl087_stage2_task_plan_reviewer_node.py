@@ -107,14 +107,15 @@ def test_reviewer_rejects_plan_and_clears_phases_for_regeneration(db_conn, monke
 
 
 def test_reviewer_gives_up_after_retry_limit_reached(db_conn, monkeypatch):
-    """retry_countが上限（2）に達した状態でmajorが出ても、無限ループにせず承認して進行する。"""
+    """retry_countが上限（5、ユーザーが手動で2から変更）に達した状態でmajorが出ても、
+    無限ループにせず承認して進行する。"""
     _, run_id = db_conn
     monkeypatch.setattr(
         cela_main, "call_task_plan_reviewer",
         lambda phases, goal, **kwargs: {"risk": "low", "constraint_issue": "major", "comment": "まだ懸念あり", "observations": ""},
     )
 
-    state = {"run_id": run_id, "goal": "テスト目標", "phases": SAMPLE_PHASES, "plan_reviewer_retry_count": 2}
+    state = {"run_id": run_id, "goal": "テスト目標", "phases": SAMPLE_PHASES, "plan_reviewer_retry_count": 5}
     result = cela_main.task_plan_reviewer_node(state)
 
     assert result["plan_review_done"] is True
@@ -309,6 +310,10 @@ def test_task_planner_node_seeds_plan_drafts_skeleton_for_every_task(db_conn, mo
     事前生成すること（従来は_append_deferred_note_to_plan等が呼ばれるまで存在せず、
     task_plan_reviewer_nodeが動く時点で書き込み先が無かった問題への対策）。"""
     conn, run_id = db_conn
+    # [BL-204] task_planner_nodeはcall_task_plannerと同じガード内でseed_entities_from_goalも呼ぶ。
+    # 実LLM呼び出しを伴うため、call_task_plannerと同様にスタブ化する（未スタブだと日次クォータ
+    # 枯渇時に実ネットワーク呼び出しへ落ちてテストが壊れる）。
+    monkeypatch.setattr(cela_main, "seed_entities_from_goal", lambda *a, **k: {"registered": [], "rejected": [], "skipped": True})
     monkeypatch.setattr(cela_main, "call_task_planner", lambda *a, **k: SAMPLE_PHASES)
 
     state = {"turn_count": 1, "phases": [], "run_id": run_id, "goal": "テスト目標"}
