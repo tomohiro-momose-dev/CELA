@@ -360,6 +360,8 @@
 | BL-333 | 高 | `cela_main.py`（`_query_AI_live`のツールループ、`6709-6802`付近。最終iterationでの`tools`除去処理・ストリームからのtool_calls蓄積処理、詳細は下記セクション参照） | **`open`。** 「最終iterationはtoolsを外してテキスト最終応答を保証する」安全策（BL-016/BL-056b）が実際には保証になっておらず、モデル/プロバイダがtools無しでもtool_calls形式の出力を返し、コード側がそれを無条件実行してしまうためツールループ非収束クラッシュを防げない。りんご音楽祭シナリオ実ラン（run_id=1788237935-49645c44）のクラッシュで発見。詳細は下記`### BL-333`セクション参照。 | P1 |
 | BL-334 | 低 | `scripts/cline_review.py`（`invoke_cline`・`_drain_stream`、詳細は下記セクション参照） | **`done`。** Cline CLIレビュー（AGENTS.md §19）のタイムアウト連発を解消。当初案（プロセスI/Oカウンタ監視）は2回とも実運用で誤検知（正常な長考中にkill）したため設計変更し、このタスク自身の`--json`stdout行到着間隔を監視する方式へ切替。実測で誤検知なく591秒のレビューが完走することを確認。詳細は下記`### BL-334`セクション参照。 | P3 |
 | BL-335 | 中 | `web_tools.py`（`fetch_and_extract`・`_fetch_html_via_playwright`・`_ssrf_route_guard`・`raw_cache_file_path`・`render_pdf_page_to_png_bytes`・`pdf_page_count`等）、`cela_main.py`（`WEB_FETCH_TOOL`description・`READ_PDF_PAGE_AS_IMAGE_TOOL`・`_read_pdf_page_as_image_handler`・`_ALLOWED_IMPORTS`・`_build_repl_session_bootstrap`・`_REPL_NETWORK_DISABLE_PRELUDE`）、`tests/test_bl335_playwright_fetch.py`（新規18件）、`tests/test_bl335_pdf_vision.py`（新規18件）、`tests/test_bl335_repl_pandas.py`（新規11件）、`tests/test_bl184_web_tools.py`（改修）、詳細は下記セクション参照 | **`done`。** web_fetch/PDFレンダリング/xlsx実務限界の3段階改善。Phase 1（Playwright描画フェッチを既定パス化、リダイレクト追従方針転換＝D-285、blind SSRF修正＝D-287）・Phase 2（`read_pdf_page_as_image`ツール新設、D-286）・Phase 3（python_repl内pandasアクセス、socket/ファイルIO無効化によるSSRF・サンドボックス迂回対策＝D-288）を実装・テスト済み。実装後diffレビュー（AGENTS.md §19.4）を2ラウンド実施し検出した指摘は全て修正済み（テスト計143件、フルオフラインスイート2263件全パス）。設計は`docs/design/back_log/BL-335/BL335_basic_design.md`参照（旧BL-334番号から本セッションで振り直し、Cline CLIレビュー機構自体の改善＝別件がBL-334番号を先取していたための衝突解消）。詳細は下記`### BL-335`セクション参照。 | P2 |
+| BL-336 | 低 | `cela_main.py`（`_ENTITY_MULTI_ITEM_TRIGGER_SENTENCE`共有定数・`_LAST_ENTITY_WRITES`/`get_last_entity_writes`・`expert_last_entity_writes`state・`call_detector`のentity_writes_block・`_write_entity_attribute_handler`のconfidence機械的強制・`_detector_domain_tools`）、`tests/test_bl336_entity_writes_tracking.py`（新規8件）、`tests/test_bl336_detector_entity_insurance.py`（新規9件）、`tests/test_bl204_entity_registry.py`（改修） | **`done`。** GAIAパイロットでExpertが複数タスクにまたがり一次資料を毎回読み直していた問題。当初「entity DB誘導の欠落」と診断したが実コード再調査で誤りと判明（AGENTS.md §16.3）——真因はfull/light system_promptでentity対象の例示範囲が食い違う単一ソース分裂（§15.1）。文言統一に加え、Detector側にprovisional代理登録の保険機構（confidenceはハンドラ側で機械的強制）を追加。設計は`docs/design/back_log/BL-336/BL336_basic_design.md`参照。詳細は下記`### BL-336`セクション参照。 | P3 |
+| BL-337 | 高 | `cela_main.py`（`integrator_node`の抽出フィルタ・完全性ゲート・`route_after_integrator`のhalt/pending分岐・`needs_revision_phases`クリア修正）、`tests/test_bl337_integrator_completeness_gate.py`（新規11件） | **`done`。** GAIAパイロット最終統合文書からtask_1_2・task_1_3が欠落。原因1: `integrator_node`が`status == "Approved"`完全一致のみでApproved_with_Conditions/Implicitly_Acceptedを取りこぼし（`RESOLVING_DELIVERABLE_STATUSES`単一ソースへ修正）。原因2: 周期的reflectionがUser AIの4段階承認フローをバイパスしうる構造的な穴（`round_count % reflection_interval`）を確定、integrator側に完全性ゲートを新設し未承認タスクを`generate_user_utterance`へ差し戻す設計で対処。実装後diffレビューでhalt安全弁自体が機能しない配線バグを発見し即日修正。設計は`docs/design/back_log/BL-337/BL337_basic_design.md`参照。詳細は下記`### BL-337`セクション参照。 | P1 |
 
 ---
 
@@ -11770,4 +11772,64 @@ split_from系譜が記録される再計画（re-plan）後の分割よりも、
 いずれもテスト追加（新規4件）・§17.1リバート確認済み——pandas経由のファイル読み書き遮断は無効化すると実際にファイル読み取り・書き込みが成立することを確認、F2修正も無効化すると回帰テストが失敗することを確認。テスト計143件、フルオフラインスイート2263件全パス。BL-335全Phase完了。
 
 **未確定事項・実装後の手順**: `BL335_basic_design.md`の「実装着手前にユーザー判断が必要な未確定事項」「独立レビュー所見」「実装後の手順」各節を参照。Playwright sync APIのスレッド親和性リスク（前ラウンドの低・情報所見）は実ドライランでの検証が未対応のまま残っている。
+
+---
+
+### BL-336: 複数タスク・複数バージョンにまたがる一次資料の事実を、Expertがentity DBへ登録せず毎回読み直している
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P3 |
+| 関連 | BL-204（`entities`/`entity_attributes`テーブル・`register_entity`/`write_entity_attribute`ツールの導入元）、AGENTS.md §15.1・§15.3・§15.4（入口と出口）、`docs/goal/gaia_pilot_1959_dehydrated_standards.md`（発見元のGAIAパイロット）、`log/2026-09-02/0816/log_no_prompt.md`、`docs/design/back_log/BL-336/BL336_basic_design.md`（設計書） |
+
+**発見経緯**: GAIAベンチマーク単発パイロット（1959年米国脱水青果物等級規格の改廃率）の実ドライランログ監査中に発見。本タスクはUSDA/AMSの1959年規格文書（44品目）を1959年時点の内容で確定し（task_1_1）、続けて各品目の現行版との改訂有無を照合する（task_1_2）という2タスク構成だった。task_1_1のExpertは1959年文書のFROZEN/CHILLEDセクション44品目（品目名・1959年時点のeffective date）をarchive.orgのPDFから読み解いたが、その成果をpython_repl内のただのdict/list変数としてその場限りで組み立てただけで、DBには一切残さなかった。結果、task_1_2のExpertは同じPDFページ（`5193ffc31fe45ba2.pdfvision.md`・`b2d29eab241b661b.pdfvision.md`）を最初から読み直す羽目になった（ログ1968〜2394行目 vs 6942〜7075行目、ほぼ同一内容を2回読んでいる）。task_1_2内でも、品目ごとのAMS現行版PDF・Federal Register改正履歴をweb_search/web_fetchでその都度引き直しており、これがツール呼び出し予算を圧迫する一因になった（同じセッション内で別のExpert試行がBL-287のツール呼び出し反復ガードにより強制終了している）。
+
+**既存インフラとのギャップ**: この用途にちょうど合う機構（BL-204の`entities`/`entity_attributes`テーブル、「名前を持つ実世界の事物」を1級市民として登録し属性ごとに出典・確度を紐づける設計）は既にCELAに存在し、`register_entity`/`write_entity_attribute`ツールも`_expert_tools`に配線済みだった（`cela_main.py:13627`）。つまり機能不足ではなく、「複数タスク・複数バージョンにまたがる照合作業ではentity DBに記録せよ」という誘導がExpert向けプロンプトに欠けていたための未活用、という運用ギャップである。
+
+**差し戻し時にExpertの調査過程が完全消失することの実コード確認（2026-09-02、ユーザー指摘を受けて検証）**: `call_expert`（`cela_main.py:13347`）はDetectorからの差し戻しのたびに`messages = []`で**新規に組み立て直しており**、前回のExpert実行が行った`read_reference_file`/`web_search`/`web_fetch`の呼び出しと結果（一次資料の生データ）は一切引き継がれない。差し戻し時にsystem_prompt末尾へ注入されるのは「却下された前回の**最終提案テキスト**（`previous_output`）」と「Detectorの指摘事項ログの直近1件（`constraint_issue_log[-1:]`）」のみで、該当箇所のコメントにも「※チャット履歴からは削除済」と明記されている（`cela_main.py:13441-13444`）。つまり、entity DBに登録し損ねた一次資料の事実は、Detectorの差し戻し1回で完全に失われ、次のExpert試行はキャッシュ済みファイルの再読み込みからやり直すほかない——これはtask_1_1→task_1_2という**別タスクへの遷移**でも同型で起きていたのと同じ構造的問題（発見経緯参照）で、差し戻しの場合はより極端（前回のprose要約すら失われうる）。
+
+**実装（2026-09-02、`docs/design/back_log/BL-336/BL336_basic_design.md`）**: 設計着手時に実コードを再調査した結果、上記「誘導が欠けていた」という当初診断は不正確と判明した（AGENTS.md §16.3に従い訂正）——`register_entity`/`write_entity_attribute`の使用ガイダンスはExpertのsystem_prompt（iter=1）とlight_system_prompt（iter=2以降）の両方に既に存在していた。本当のギャップは§15.1（単一ソースの分裂）で、full版は「施設・場所・組織・路線・**制度**・サービス等、**種類は問いません**」と広い例示だったのに対し、ツールループの大半で有効なlight版は「制度」「種類は問いません」が欠落した狭い例示のままだった。USDA等級規格（regulatory standard）はまさに「制度」の一種であり、その語が抜けたlight版だけを見ていたため3回とも認識されなかった可能性が高い。
+
+1. **一次対策（Expert側、実装済み）**: light版の文言をfull版に合わせて拡張し、「対象が複数（品目・地点・版など）にわたり後続タスクが同じ事実を再度必要としうる場合はentity DBに記録せよ」という1文を`_ENTITY_MULTI_ITEM_TRIGGER_SENTENCE`という共有定数（`_TRACE_LINEAGE_USAGE_PARAGRAPH`と同型）としてfull/light両方へ追加。`register_entity`のツール説明文にも"a regulation, standard, or law"の例示を追加（`read_entity`の説明文に既にあった"law"と統一）。
+2. **保険（Detector側、実装済み）**: `_LAST_ENTITY_WRITES`グローバル（BL-033/BL-242と同型のノードまたぎ一時バッファ）でExpertのentity DB書き込みを機械的に追跡し、`expert_last_entity_writes`としてstateへコピー。Detectorのドメインレビュー用プロンプト（`target_role=="expert"`の場合のみ、User AIターン監査時のstale data混入を防止）に書き込み件数を提示し、0件かつ複数事物×属性の列挙が見られる場合は`register_entity`/`write_entity_attribute`で代理登録するよう指示。confidenceはプロンプト指示に加え、`_CURRENT_CALLER_ROLE=="detector"`時にハンドラ側で機械的に`"provisional"`へ強制（§15.3：自己申告に頼らない）。`_detector_domain_tools`（ドメインレビューのみ、数値監査パスには広げない）へ両ツールを新規配線。
+3. **独立レビュー**: 設計段階（§19.1、Cline CLI）でP1指摘3件（entity_writes_blockが実際には数値監査プロンプトにしか補間されないpython_calls_blockの誤参照／confidence強制のプロンプト依存／target_role="user"時のstale data）を実コードで検証の上反映。実装後diffレビュー（§19.4）ではブロッカーなし——BL-283（Decision記録漏れ検出時の`query_AI`再呼び出しで`_LAST_ENTITY_WRITES`がリセットされうる）は既存の`_LAST_PYTHON_CALLS`等と同型の既知の限界として設計書に記録済み、保険はbest-effortのため実害は限定的。
+4. **テスト**: `tests/test_bl336_entity_writes_tracking.py`（新規8件）・`tests/test_bl336_detector_entity_insurance.py`（新規9件）で検証済み、§17.1リバート確認済み（confidence機械的強制・query_AI()のglobal宣言漏れの両方を個別にrevertしテスト失敗を確認）。既存`tests/test_bl204_entity_registry.py`の`test_detector_gets_read_and_audit_tools_on_both_passes`は「DetectorはWRITE_ENTITY_ATTRIBUTE_TOOLを一切持たない」という旧BL-204の前提を検証しており、BL-336によるこの前提の意図的な転換に合わせて`test_detector_write_entity_tools_are_domain_pass_only`（新規）へ置き換え。フルオフラインスイート2285件全パス。
+
+---
+
+### BL-337: `integrator_node`が承認済みDeliverableを`status == "Approved"`の文字列完全一致でのみ抽出し、`Approved_with_Conditions`/`Implicitly_Accepted`を統合対象から取りこぼす
+
+| 項目 | 内容 |
+|------|------|
+| 状態 | `done` |
+| 優先度 | P1（最終成果物の完全性に関わる） |
+| 関連 | `docs/goal/gaia_pilot_1959_dehydrated_standards.md`（発見元のGAIAパイロット）、`log/2026-09-02/0816/log_no_prompt.md`、`log/2026-09-02/0816/deliverables/★最終統合要件定義書（Lineage完全版）_V1.md`、`cela.db`（run_id=`1788304616-c630b3e6`）、`docs/design/back_log/BL-337/BL337_basic_design.md`（設計書） |
+
+**発見経緯**: GAIAパイロット完走後、ユーザーが最終統合要件定義書（`★最終統合要件定義書（Lineage完全版）_V1.md`）を開き「内容が中途半端」と指摘。実際に読むとtask_1_1のセクションしかなく、task_1_2（改訂照合・supersede判定）とtask_1_3（FINAL ANSWER: 66%を含む最終回答）が完全に欠落していた。`cela.db`をrun_idで直接クエリし、各タスクのDeliverableの最終`status`を確認：
+
+| タスク | 最終status |
+|--------|-----------|
+| task_1_1 | `Approved` |
+| task_1_2 | `Implicitly_Accepted` |
+| task_1_3 | `Proposed`（Stage3を一度も経ていない） |
+
+**根本原因1（確定）**: `integrator_node`（`cela_main.py:19387`）のDeliverable抽出フィルタが
+
+```python
+deliverables = [a for a in get_agreements_from_db(_conn, _run_id) if a["entry_type"] == "Deliverable" and a["status"] == "Approved"]
+```
+
+と`"Approved"`との文字列完全一致のみで判定しており、CELAが既に持つ承認系ステータス集合`RESOLVING_DELIVERABLE_STATUSES = {"Approved", "Approved_with_Conditions", "Implicitly_Accepted"}`（`cela_main.py:8856`、Stage3の承認判定など他の箇所では使用済み）をここでは使っていない（AGENTS.md §15.1「単一ソース」違反——同じ「承認済みか」という判定が2箇所で異なる基準になっている）。結果、正当にUser AIから承認されたtask_1_2（`Implicitly_Accepted`）が統合対象から機械的に漏れた。
+
+**根本原因2（設計時に確定）**: task_1_3は、通常タスクが経る4段階レビュー（Stage1: レビュー→Stage2: issue確認→Stage3: 統合承認判断→Stage4: 次タスク指示）を一度も経ないまま、Detector監査（`expert_detector`）の直後に`reflection`へ直行し、そのまま`integrator`へ進んでいた（ログ9457〜9918行目、`------ [detector] が思考中 ------`の次が直接`------ [reflection] が思考中 ------`）。設計時の調査で、`route_after_expert_decision`の周期的reflection条件（`round_count % state["reflection_interval"] == 0`、既定値3）が原因であることを確定した。これは「最後のタスクだから」という特別扱いではなく、単に定期reflectionの発火タイミングと重なっただけであり、単一フェーズ・少数タスク構成のプロジェクトほど再現しやすい構造的な穴——個別タスクの4段階承認フローと、周期的reflectionによる完了判定という2つの独立した仕組みの間で、後者が前者を待たずにintegratorへ進めてしまう。
+
+**実害**: 最終成果物として提出された統合ドキュメントが、実質的に最も重要な最終回答（task_1_3のFINAL ANSWER: 66%）を含まないまま生成された。今回はreviewerが自発的に`read_deliverable_file`/`read_agreement`でDB側を直接確認し「網羅性の問題は生じていない」と判断してPassしたため実害は顕在化しなかったが、これはreviewerの追加検証という偶然の回避に依存しており、統合ドキュメント自体の欠陥（§13.3「authoritative store」の観点でも、統合ドキュメントという派生物とDBという正が食い違っている）を隠しただけである。reviewerがこの追加確認をしなければ、不完全な統合ドキュメントがそのまま最終成果物として出力されていた。
+
+**実装（2026-09-02、`docs/design/back_log/BL-337/BL337_basic_design.md`）**:
+1. **修正1**: `integrator_node`のフィルタ条件を`a["status"] == "Approved"`から`a["status"] in RESOLVING_DELIVERABLE_STATUSES`へ変更。
+2. **修正2（完全性ゲート）**: 根本原因2の経路（周期的reflectionのタイミング）そのものは塞がず、実害が生じる場所（integrator）に完全性ゲートを設置する方針を採用。`integrator_node`冒頭で計画上の全タスクが`RESOLVING_DELIVERABLE_STATUSES`のDeliverableを持つか確認し（既存の`_find_active_deliverable_agreement`を再利用）、未承認タスクが残っていれば統合せず`generate_user_utterance`（`orchestrator`ではない——`orchestrator`はExpertへ直行しUser AIを経由しないため、`round_count`が増えず周期的reflectionの衝突が再発しライブロックになりうる）へ差し戻す。差し戻し時は`current_task_id`/`current_phase`をpending先頭タスクへ明示的に向け、差し戻しサイクルに上限（3回、超過でhalt）を設けた。
+3. **副次発見・同時修正**: 完全性ゲートの実装過程で、既存の`needs_revision_phases`（矛盾検知フラグ）にも同型の未クリアバグ（成功分岐で一度も`[]`にリセットされず、矛盾解消後も`orchestrator`へ差し戻し続ける）が実在することを発見し、§13.5「Fix the class, not the instance」に従い同時修正した。
+4. **独立レビュー**: 設計段階（§19.1、Cline CLI、2回実施）でC-1（state未クリアによるライブロック）・C-2（current_task_id未指定）・C-3（差し戻し上限欠如）等の必須指摘を検出・反映。実装後diffレビュー（§19.4）では、`route_after_integrator`が`state["halt"]`を一切チェックしておらずC-3のhalt安全弁が実質機能しない（fail-open）重大な配線バグを発見し即日修正——他の`route_after_*`関数が先頭でhaltを見る既存規約を移植する際の見落とし。
+5. **テスト**: `tests/test_bl337_integrator_completeness_gate.py`（新規11件）で検証済み、§17.1リバート確認済み（修正1・完全性ゲート本体・C-1のクリア処理・C-3の上限処理・needs_revision_phasesクリア・ルーティング分岐・halt優先順位、いずれも個別にrevertしテスト失敗を確認）。フルオフラインスイート2296件全パス。
 

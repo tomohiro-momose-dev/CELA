@@ -358,7 +358,27 @@ def test_detector_gets_read_and_audit_tools_on_both_passes():
     src = inspect.getsource(cela_main.call_detector)
     assert src.count("READ_ENTITY_TOOL") >= 2
     assert src.count("VERIFY_ENTITY_GEO_TOOL") >= 2
-    assert "WRITE_ENTITY_ATTRIBUTE_TOOL" not in src
+
+
+def test_detector_write_entity_tools_are_domain_pass_only():
+    """[BL-336] Detectorのentity DB書き込み（register_entity/write_entity_attribute）は
+    provisional代理登録の保険機構としてドメイン妥当性レビュー（Pass1）のみへ配線され、
+    数値監査（Pass2）へは意図的に広げない（名前付き事物の事実と計算値の検算は性質が
+    異なるため、要ユーザー判断の上でドメインのみに限定した設計決定）。旧BL-204の
+    「Detectorはentity DBへ一切書き込まない」という前提はBL-336で覆されたため、
+    ここで新しい不変条件（ドメインパスのみ・数値パスには広げない）を明示的に検証する。"""
+    src = inspect.getsource(cela_main.call_detector)
+    numeric_start = src.index("_detector_numeric_tools = [")
+    numeric_line_end = src.index("\n", numeric_start)
+    numeric_tools_line = src[numeric_start:numeric_line_end]
+    assert "WRITE_ENTITY_ATTRIBUTE_TOOL" not in numeric_tools_line
+    assert "REGISTER_ENTITY_TOOL" not in numeric_tools_line
+
+    domain_start = src.index("_detector_domain_tools = [")
+    domain_line_end = src.index("\n", domain_start)
+    domain_tools_line = src[domain_start:domain_line_end]
+    assert "WRITE_ENTITY_ATTRIBUTE_TOOL" in domain_tools_line
+    assert "REGISTER_ENTITY_TOOL" in domain_tools_line
 
 
 def test_expert_prompt_guidance_is_domain_agnostic():

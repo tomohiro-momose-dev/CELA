@@ -1474,7 +1474,8 @@ REGISTER_ENTITY_TOOL = {
         "name": "register_entity",
         "description": (
             "Register a real-world thing (a place, organization, service, facility, route, "
-            "product ... anything with a proper name) that appears in this project but was NOT "
+            "product, a regulation, standard, or law ... anything with a proper name) that "
+            "appears in this project but was NOT "
             "in the goal statement -- e.g. something you legitimately discovered via web_search. "
             "Things named in the goal statement are ALREADY registered at run start; do not "
             "re-register them. [BL-204] citations are REQUIRED here: if you are introducing a "
@@ -2341,6 +2342,9 @@ def _register_entity_handler(args: dict, state: dict | None = None) -> dict:
     except ValueError as e:
         return {"status": "error", "message": str(e)}
     print(f"  🗂️ [BL-204] 事物を登録しました（discovered）: {canonical_name}（{entity_type}）")
+    # [BL-336] 真に新規登録された場合のみ記録する（already_registeredの冪等リターンは含めない）。
+    global _LAST_ENTITY_WRITES
+    _LAST_ENTITY_WRITES.append({"entity": canonical_name, "attr_name": None})
     return {"status": "registered", "entity_id": entity_id, "origin": "discovered"}
 
 
@@ -2371,6 +2375,11 @@ def _write_entity_attribute_handler(args: dict, state: dict | None = None) -> di
         }
 
     confidence = (args.get("confidence") or "provisional").strip()
+    # [BL-336 §2.6] Detectorによる代理登録は常にprovisional固定とする（§15.3: プロンプト指示
+    # だけに頼らず機械的に強制する）。Detectorはドメイン専門知識を保証されない監査役であり、
+    # Expertの主張を独立検証したわけではないため、出典を添えてもconfirmedへ昇格させない。
+    if _CURRENT_CALLER_ROLE == "detector" and confidence != "provisional":
+        confidence = "provisional"
     if confidence not in _ENTITY_CONFIDENCE_VALUES:
         return {"status": "error",
                 "message": f"confidenceは{list(_ENTITY_CONFIDENCE_VALUES)}のいずれかです。"
@@ -2395,6 +2404,9 @@ def _write_entity_attribute_handler(args: dict, state: dict | None = None) -> di
         args.get("unit", "") or "", confidence, citations, reason,
         _task_id_from(state), _phase_id_from(state), _CURRENT_CALLER_ROLE,
     )
+    # [BL-336] write_entity_attributeの成功（confidence強制上書き後も含め常に成功パス）を記録する。
+    global _LAST_ENTITY_WRITES
+    _LAST_ENTITY_WRITES.append({"entity": ent["canonical_name"], "attr_name": attr_name})
     result = {"status": "ok", "entity_id": ent["entity_id"],
               "canonical_name": ent["canonical_name"], "attr_name": attr_name}
     if is_new_attr:
@@ -5999,6 +6011,12 @@ TOOL_DISPATCH = {
 # 一時バッファ（stateにはシリアライズ不要な生実行ログを持たせない方針、_DB_CONNと同様）。
 _LAST_PYTHON_CALLS: list[dict] = []
 
+# [BL-336] 直前のquery_AI呼び出しのツールループ内でregister_entity/write_entity_attributeが
+# 実際に新規登録に成功した記録（{"entity": ..., "attr_name": ...}のリスト。register_entityは
+# attr_name=None）。_LAST_PYTHON_CALLSと同じ「ノードをまたいでも参照できる一時バッファ」パターン。
+# 冪等な"already_registered"応答時はappendしない（真に新規書き込みが起きた場合のみを反映する）。
+_LAST_ENTITY_WRITES: list[dict] = []
+
 # [R3b §3.5.1] 直前のquery_AI呼び出しのツールループ内でwrite_agreementが
 # 1回でも成功したか（success=Trueで返ったか）を記録するフラグ。
 # decision_extractor_node側で「write_agreementが呼ばれたターンか」を
@@ -6097,6 +6115,12 @@ def get_last_deliverable_reads() -> list[str]:
     """[BL-242] 直前のquery_AI呼び出しでread_deliverable_fileがtask_id指定付きで
     実際に成功したtask_idの一覧のコピーを返す。"""
     return list(_LAST_DELIVERABLE_READ_TASK_IDS)
+
+
+def get_last_entity_writes() -> list[dict]:
+    """[BL-336] 直前のquery_AI呼び出しでregister_entity/write_entity_attributeが
+    実際に新規登録に成功した記録のコピーを返す。"""
+    return list(_LAST_ENTITY_WRITES)
 
 
 def get_last_whiteboard_reads() -> set[str]:
@@ -6223,10 +6247,11 @@ def query_AI(messages: list[dict], client: OpenAI, model: str, label: str = "Unk
     [BL-131/TOOL_DISPATCH state化] `state`は_query_AI_liveへそのまま透過する（レコード/リプレイの
     キャッシュキーには影響しない）。
     """
-    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_PREMISE_ESCALATION, _LAST_HUMAN_JUDGMENT_FLAG, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION, _LAST_REPETITION_GUARD_TRIPPED, _LAST_DELIVERABLE_READ_TASK_IDS, _LAST_WHITEBOARD_READS
+    global _call_seq_counter, _LAST_PYTHON_CALLS, _LAST_WRITE_AGREEMENT_SUCCEEDED, _LAST_WRITE_AGREEMENT_ITEMS, _LAST_WRITE_ISSUE_RESOLVE_OR_DEFER_SUCCEEDED, _LAST_WHITEBOARD_EDIT, _LAST_REASONING_TEXT, _LAST_GOAL_REVISION, _LAST_PREMISE_ESCALATION, _LAST_HUMAN_JUDGMENT_FLAG, _LAST_ASK_USER_QUESTION, _LAST_ESSENCE_PROPOSAL, _LAST_SCHEDULING_DECISION, _LAST_REPETITION_GUARD_TRIPPED, _LAST_DELIVERABLE_READ_TASK_IDS, _LAST_WHITEBOARD_READS, _LAST_ENTITY_WRITES
     _LAST_PYTHON_CALLS = []
     _LAST_DELIVERABLE_READ_TASK_IDS = []
     _LAST_WHITEBOARD_READS = set()  # [BL-265]
+    _LAST_ENTITY_WRITES = []  # [BL-336]
     _LAST_REPETITION_GUARD_TRIPPED = None  # [BL-231]
     _LAST_WRITE_AGREEMENT_SUCCEEDED = False
     _LAST_WRITE_AGREEMENT_ITEMS = []
@@ -11070,6 +11095,9 @@ class LineageState(TypedDict):
     expert_retry_count: int
     expert_last_python_calls: list[dict]  # BL-033: 直前Expert呼び出しのpython_repl実行記録（code/result）
     expert_last_deliverable_reads: list[str]  # BL-242: 直前Expert呼び出しでread_deliverable_fileが成功したtask_id一覧
+    expert_last_entity_writes: list[dict]  # BL-336: 直前Expert呼び出しでregister_entity/write_entity_attributeが新規成功した記録
+    pending_task_review_task_ids: list[str]  # BL-337: integratorの完全性ゲートで検知した、User AI未承認のtask_id一覧
+    pending_task_review_count: int  # BL-337: 完全性ゲートによる差し戻し回数（上限3、超過でhalt）
     # [R5 F-2.1] 直前Expert/User AI呼び出しのreasoning（思考過程）全文。Detectorの思考プロセス監査に使う。
     expert_last_reasoning: str
     user_last_reasoning: str
@@ -12005,6 +12033,16 @@ _TRACE_LINEAGE_USAGE_PARAGRAPH = (
     "系譜エッジは持たない）のいずれかを\n"
     "指定できます。このツールはLLMを呼ばず、DBに構造化保存済みの根拠のみを機械的に返す\n"
     "読み取り専用ツールです。"
+)
+
+# [BL-336] BL-204のentity DB使用ガイダンス（full/light system_promptの両方）が共有する1文。
+# 単に両版へ同じ文をコピペするのではなく単一の定数を参照させることで、BL-336の根本原因だった
+# 「同じ文言が2箇所に分裂し片方だけ更新漏れする」（§15.1）という事態の再発を構造的に防ぐ。
+_ENTITY_MULTI_ITEM_TRIGGER_SENTENCE = (
+    "特に、対象が複数（品目・地点・版など）にわたり、後続タスクが同じ事実を再度必要と\n"
+    "しうる場合は、python変数や成果物本文への埋め込みだけで済ませず、事物ごとに\n"
+    "register_entity／write_entity_attributeで記録してください（同じ一次資料を複数タスクが\n"
+    "都度読み直す事故を防ぐため）。\n"
 )
 
 _PDF_VISION_USAGE_PARAGRAPH = (
@@ -13116,6 +13154,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "run開始時に登録済みであり、未登録の名前を渡すと候補付きで差し戻されます。"
         "ゴール文に無い事物をweb_search等で新たに発見した場合のみ、register_entityで"
         "出典を添えて登録してください。\n"
+        + _ENTITY_MULTI_ITEM_TRIGGER_SENTENCE
     )
 
     system_prompt += _build_decision_lineage_directive('"Proposed"')
@@ -13491,7 +13530,8 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         + _TRACE_LINEAGE_USAGE_PARAGRAPH + "\n"
         + _PDF_VISION_USAGE_PARAGRAPH + "\n"
         "[BL-204: 課題に登場する事物の事実はレジストリで管理する] 固有の名前を持つ実世界の"
-        "対象（施設・場所・組織・路線・サービス等）についての事実は、read_entityで確認し"
+        "対象（施設・場所・組織・路線・制度・サービス等、種類は問いません）についての事実は、"
+        "read_entityで確認し"
         "write_entity_attributeで記録してください。レジストリが真実の源であり、成果物本文は"
         "その提示です。記憶や本文からの再構成で事実を組み立てないでください。値には必ず"
         "citations（出典）とconfidence（confirmed/provisional の2値）を添えてください"
@@ -13499,6 +13539,7 @@ def call_expert(expert_name: str, state: LineageState, config: Appconfig) -> str
         "**事物の名称はゴール文の表記をそのまま使い**、記憶による言い換え・略称を使わないで"
         "ください（未登録の名前は候補付きで差し戻されます）。ゴール文に無い事物を新たに"
         "発見した場合のみ、register_entityで出典を添えて登録してください。\n"
+        + _ENTITY_MULTI_ITEM_TRIGGER_SENTENCE +
         "[BL-205] read_entityは名前を持つ事物専用です。対象を持たない単独の値は"
         "read_verified_factを使い、read_entityをentity未指定の「一覧確認」目的で"
         "多用しないでください（一覧は名前のみで属性を含みません）。\n"
@@ -13733,6 +13774,20 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
             f"constraint_issueの根拠にしてください。\n"
         ) if _unread_deps else ""
     )
+
+    # [BL-336] Expertが今回のターンでentity DB（register_entity/write_entity_attribute）へ
+    # 実際に新規書き込みしたかを機械的に提示する。target_role=="expert"のときのみ意味を持つ
+    # （expert_last_entity_writesはExpertノードのみが書くstateであり、target_role=="user"等で
+    # 参照すると前回Expertターンの残骸を見てしまい誤った「0件」信号になるため——BL-033の
+    # python_calls_blockが抱える同型の陳腐化を、この新規機構では踏襲しない）。
+    entity_writes_block = ""
+    if target_role == "expert":
+        _entity_writes = state.get("expert_last_entity_writes", [])
+        entity_writes_block = (
+            f"【BL-336: 今回のExpertターンのentity DB書き込み】{len(_entity_writes)}件: {_entity_writes}\n"
+            if _entity_writes else
+            "【BL-336: 今回のExpertターンはentity DBへの書き込みが0件でした】\n"
+        )
 
     # [BL-091] 今回評価対象のターンで、write_agreementが実際に成功したかどうかをDetectorに
     # 明示する。最終iterationでツールが強制的に外された際、モデルが独自のツール呼び出し風の
@@ -14058,6 +14113,21 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"座標の妥当性を検算できます。\n"
         f"[BL-205] read_entityは名前を持つ事物専用です。対象を持たない単独の値の検算は"
         f"read_verified_factを使ってください。\n\n"
+        f"{entity_writes_block}"
+        f"[BL-336: entity DB登録漏れの保険（provisional代理登録）] 上記のentity DB書き込み件数が"
+        f"0件で、かつwhiteboard本文や直近の会話に「複数の名前付き事物×属性」（例：複数の品目・"
+        f"地点・版それぞれについての事実の列挙）が見られる場合、それは後続タスクが同じ事実を"
+        f"再度調べ直す原因になりえます。該当する場合、あなた自身がregister_entity（未登録な"
+        f"事物のみ、web_search同様に出典が必須です——whiteboard本文や会話で確認した出典を"
+        f"citationsに必ず添えてください）→write_entity_attributeで代理登録してください。"
+        f"confidenceは常にprovisional固定です（自身が独立検証したわけではないため、出典を"
+        f"添えてもconfirmedにはなりません）。reasonには「Detectorが今回のExpertターンの出力から"
+        f"代理登録（BL-336保険機構）」等、代理登録である旨を必ず明記してください。"
+        f"これはベストエフォートの保険であり必須のブロッキングゲートではありません——0件で"
+        f"あること自体をconstraint_issueの根拠にしないでください。監査本業（矛盾検知）を優先し、"
+        f"残りのツール呼び出し予算の範囲内で、後続タスクが再利用しそうな事物から優先的に登録"
+        f"してください。品目数が多く網羅できない場合は部分的な登録で構わず、それ自体をExpertへの"
+        f"追加指摘対象にしないでください。\n\n"
         f"[BL-203: 拠点の名称と座標の由来を確認する] 実測値は「正しい場所を測った」場合にのみ"
         f"正しく、誤った座標を測れば「誤った場所の正しい実測値」になります。これは推測値より"
         f"気づきにくいため、次の2点を重点確認してください。①**拠点の名称がゴール文の表記と"
@@ -14069,7 +14139,8 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f"【重要】あなたが使えるツールはread_verified_fact・read_deliverable_file・read_agreement"
         f"（entry_type=\"Decision\"/\"Directive\"の全文はこちら）・"
         f"write_agreement・verify_whiteboard_excerpt・write_issue・read_issues・"
-        f"web_search・web_fetch・read_reference_file・read_pdf_page_as_image・read_goal_reference・read_entity・verify_entity_geo・gsi_geocode・"
+        f"web_search・web_fetch・read_reference_file・read_pdf_page_as_image・read_goal_reference・read_entity・verify_entity_geo・"
+        f"register_entity・write_entity_attribute・gsi_geocode・"
         f"gsi_get_elevation・gsi_calc_distance_bearing・calc_road_route・trace_lineage・mark_fact_audited・thinkです。"
         f"{_THINK_TRAILER_SENTENCE}\n\n"
         f"{_PDF_VISION_USAGE_PARAGRAPH}\n\n"
@@ -14171,7 +14242,7 @@ def call_detector(state: LineageState, target_role: str, review_mode: str = "tas
         f'\nReturn ONLY JSON: {{"constraint_issue": "none/minor/major", "comment": "ドメイン妥当性レビューの判定理由", "target_excerpt": "指摘対象のホワイトボード本文からの一字一句引用(無ければ空文字)", "observations": "気づき・懸念（自由記述、無ければ空文字）", "essence_sufficiency_concern": true/false, "essence_sufficiency_reason": "trueの場合、本質のどの記述が計画のどこにも反映されていないか（falseなら空文字）", "quantitative_sufficiency_concern": true/false, "quantitative_sufficiency_reason": "trueの場合、どの規模適合性の主張がどの規模指標に対して未検証か（falseなら空文字）"}}'
     )
     _reset_think_scratchpad()  # [BL-093]
-    _detector_domain_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_PDF_PAGE_AS_IMAGE_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, MARK_FACT_AUDITED_TOOL, THINK_TOOL]  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線 [BL-294] 定義監査の記録用 [BL-300] log/2026-08-28/2049でgrep不可能な略号コード表を手作業突合しようとして生成崩壊したため、_detector_numeric_toolsとの唯一の差分だったPYTHON_REPL_TOOLを追加 [BL-324] FLAG_NEEDS_HUMAN_INPUT_TOOLを追加
+    _detector_domain_tools = [PYTHON_REPL_TOOL, READ_VERIFIED_FACT_TOOL, READ_DELIVERABLE_FILE_TOOL, READ_AGREEMENT_TOOL, READ_ESCALATION_TOOL, WRITE_AGREEMENT_TOOL, VERIFY_WHITEBOARD_EXCERPT_TOOL, WRITE_ISSUE_TOOL, READ_ISSUES_TOOL, FLAG_NEEDS_HUMAN_INPUT_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL, READ_PDF_PAGE_AS_IMAGE_TOOL, READ_REFERENCE_FILE_TOOL, READ_GOAL_REFERENCE_TOOL, READ_ENTITY_TOOL, VERIFY_ENTITY_GEO_TOOL, REGISTER_ENTITY_TOOL, WRITE_ENTITY_ATTRIBUTE_TOOL, GSI_GEOCODE_TOOL, GSI_GET_ELEVATION_TOOL, GSI_CALC_DISTANCE_BEARING_TOOL, CALC_ROAD_ROUTE_TOOL, TRACE_LINEAGE_TOOL, MARK_FACT_AUDITED_TOOL, THINK_TOOL]  # [BL-228] ドメイン妥当性レビュー段も数値監査段と揃えて配線 [BL-294] 定義監査の記録用 [BL-300] log/2026-08-28/2049でgrep不可能な略号コード表を手作業突合しようとして生成崩壊したため、_detector_numeric_toolsとの唯一の差分だったPYTHON_REPL_TOOLを追加 [BL-324] FLAG_NEEDS_HUMAN_INPUT_TOOLを追加
     domain_parsed, domain_parse_failed = _query_and_parse_with_retry(
         domain_prompt, client=client_detector_domain, model=model_detector_domain, label="Detector (Domain Review)",
         tools=_detector_domain_tools,
@@ -17678,6 +17749,9 @@ Updates system state with the expert's output, decisions, and conversational his
     # [BL-242] Expertがread_deliverable_fileで実際に読んだtask_idの一覧を、次のDetectorが
     # 「依存タスクの成果物を読まずに書いていないか」を機械的に把握できるようstateへ保存する。
     state["expert_last_deliverable_reads"] = get_last_deliverable_reads()
+    # [BL-336] Expertが実際に成功させたentity DB書き込みを、次のDetectorが「複数事物の事実を
+    # 列挙したのにentity DBへ0件だった」パターンを機械的に検知できるようstateへ保存する。
+    state["expert_last_entity_writes"] = get_last_entity_writes()
     # [R5 F-2.1] Expertのreasoningを、次のDetectorが思考プロセス監査に使えるようstateへ保存する。
     state["expert_last_reasoning"] = get_last_reasoning_text()
     # [R3b §3.5.1] 今ターンでwrite_agreementが1回でも成功したかをstateに保存
@@ -19383,9 +19457,86 @@ def integrator_node(state: LineageState) -> LineageState:
     _conn = get_active_conn()
     _run_id = state["run_id"]
 
+    # [BL-337] 統合前に、計画上の全タスクが承認済み(resolvedステータスの)Deliverableを
+    # 持つか確認する。周期的reflection（route_after_expert_decisionのround_count %
+    # reflection_interval判定）がUser AIの4段階承認フロー（Stage1-4）を経由せず直接
+    # reflectionへ到達しうるため（GAIAパイロットのtask_1_3実例、issue_backlog.md BL-337）、
+    # Detector監査は通ったがUser AIが一度もレビューしていないDeliverable（status="Proposed"
+    # のまま）が統合対象から漏れる、または本来レビューされるべきなのに黙って無視される
+    # ことを防ぐ。前提: 計画に含まれる全タスクは最終的にDeliverableを産出する
+    # （計画再構成で削除されたタスクはremoved_task_idsとしてSupersede記録の上
+    # state["phases"]自体から除外されるため、本ゲートには残らない——cela_main.py:17229付近）。
+    _pending_task_ids = []
+    _pending_phase_for_task = {}
+    for _phase in state.get("phases", []):
+        _phase_id = _phase.get("phase_id", "")
+        for _task in _phase.get("tasks", []):
+            _task_id = _task.get("task_id", "")
+            if not _task_id:
+                # [BL-214/§13.2と同じ規律] 計画上のタスクにtask_idが無いのは計画破損であり、
+                # 黙ってcontinueせず可視化する。fail-closedの対象には含めない
+                # （正体不明なtask_idを差し戻し先にできないため）が、警告は必ず出す。
+                print(f"  ⚠️ [integrator][BL-337] phase_id='{_phase_id}'に task_id を持たない"
+                      f"タスクがあります。計画データの破損の可能性があるため確認してください。")
+                continue
+            # [BL-206フェイルセーフに依存] _find_active_deliverable_agreementはphase_id
+            # 不一致を警告のみとし照合条件には含めないため、_phase_id（計画由来）と実際の
+            # Deliverable行のphase_idが食い違っていても判定は破綻しない。
+            _active = _find_active_deliverable_agreement(_conn, _run_id, _phase_id, _task_id)
+            if not _active or _active.get("status") not in RESOLVING_DELIVERABLE_STATUSES:
+                _pending_task_ids.append(_task_id)
+                _pending_phase_for_task[_task_id] = _phase
+
+    # [重要] 空でも必ず代入する。LangGraphのstate channelはノード間で値を保持するため、
+    # 「非空のときだけ書く」実装だと、1回目のゲート発火でセットした値が2回目以降
+    # （今度は全タスク解消済み）の呼び出しでもroute_after_integratorに残り続け、解消後も
+    # 永遠にgenerate_user_utteranceへ差し戻され続けるライブロックになる。
+    state["pending_task_review_task_ids"] = _pending_task_ids
+
+    if _pending_task_ids:
+        print(f"⚠️ [integrator] 未承認（User AIレビュー未完了）のタスクが残っています: "
+              f"{_pending_task_ids}。統合せず、User AIのレビューへ差し戻します。")
+        state["ready_for_review"] = False
+        # 差し戻し後にUser AIがどのタスクをレビューするかを明示的に指定する。未指定だと
+        # current_task_id/current_phaseが指す別タスク（既に承認済みの可能性が高い）を
+        # Stage3が再承認するだけになり、ゲートが解消されない。1ターンで1タスクという
+        # Stage3の既存設計に合わせ、pending先頭の1件のみを対象にする——複数件が残っている
+        # 場合は、このタスクが承認されて再びintegratorに到達した次のゲート発火で、
+        # 残りが順次処理される。
+        _first_pending = _pending_task_ids[0]
+        state["current_task_id"] = _first_pending
+        state["current_phase"] = _pending_phase_for_task[_first_pending]
+        # 差し戻しサイクルに上限を設ける（reviewer_nodeのreview_count > 3と同じパターン、
+        # cela_main.py:19532/19573）。User AIが繰り返しRejectedを出す等でゲートが永遠に
+        # 解消しないケースの安全弁。
+        state["pending_task_review_count"] = state.get("pending_task_review_count", 0) + 1
+        if state["pending_task_review_count"] > 3:
+            print(f"🛑 [integrator][BL-337] 未承認タスクの差し戻し上限(3回)を超えました"
+                  f"（pending_task_review_count={state['pending_task_review_count']}）。"
+                  f"state['halt']=Trueで強制停止します。")
+            state["halt"] = True
+            db_append_decision(make_decision(
+                "system", "強制停止(BL-337差し戻し上限超過)",
+                f"未承認task_id={_pending_task_ids}の解消が3回の差し戻しでも完了しませんでした。"
+            ), _conn, _run_id)
+            return state
+        db_append_decision(make_decision(
+            "integrator", "統合差し戻し(未承認タスク残存・BL-337)",
+            f"以下のtask_idはUser AIの承認（Stage1-4）を経ていないため統合を差し戻す: "
+            f"{_pending_task_ids}（今回のレビュー対象: {_first_pending}、"
+            f"差し戻し{state['pending_task_review_count']}回目/3回）"
+        ), _conn, _run_id)
+        return state
+    else:
+        # ゲート解消時はリトライカウンタもリセットする（次に別のタスクが未承認になった際、
+        # カウントを1から数え直すため）。
+        state["pending_task_review_count"] = 0
+
     # DBから承認済みの「成果物(Deliverable)」をすべて抽出
-    deliverables = [a for a in get_agreements_from_db(_conn, _run_id) if a["entry_type"] == "Deliverable" and a["status"] == "Approved"]
-    
+    # [BL-337] "Approved"の文字列完全一致ではなく、既存の単一ソースRESOLVING_DELIVERABLE_
+    # STATUSESを使う（従来はApproved_with_Conditions/Implicitly_Acceptedが取りこぼされていた）。
+    deliverables = [a for a in get_agreements_from_db(_conn, _run_id) if a["entry_type"] == "Deliverable" and a["status"] in RESOLVING_DELIVERABLE_STATUSES]
+
     if not deliverables:
         print("⚠️ 結合すべき成果物(Deliverable)が見つかりませんでした。")
         state["discussion_status"] = "stagnant"
@@ -19430,7 +19581,12 @@ def integrator_node(state: LineageState) -> LineageState:
         db_append_decision(make_decision("integrator", "矛盾検知", result.get("details")), _conn, _run_id)
     else:
         print("✅ [integrator] 成果物間の矛盾なし。統合要件定義書をファイル保存・DB登録します。")
-        
+        # [BL-337] needs_revision_phasesはstate channelとして値を保持するため、矛盾検知分岐
+        # でのみ代入し成功分岐で一度もクリアしないと、1回目に矛盾検知→2回目に矛盾解消でも
+        # route_after_integratorが古い値を読んでorchestratorへ差し戻し続ける
+        # （BL-337の完全性ゲートと同型の未クリアバグ、§13.5「Fix the class, not the instance」）。
+        state["needs_revision_phases"] = []
+
         # マスター文書もファイルに保存
         master_filepath = save_deliverable_to_file("★最終統合要件定義書（Lineage完全版）", final_text)
 
@@ -19865,15 +20021,32 @@ Otherwise, routing to "user_decision_extractor."
         """【SLM要約】
         Decision point determining subsequent workflow based on the lineage state, routing to "orchestrator" if revisions are needed or "arbiter" otherwise.
         """
+        # [BL-337・実装後diffレビューで発見] integrator_nodeは差し戻し上限超過時に
+        # state["halt"]=Trueを設定してreturnするが、その際pending_task_review_task_idsは
+        # 非空のままなので、haltチェックが無いとここが先に真になりgenerate_user_utterance
+        # へ差し戻してしまい、haltが実質無視される（fail-open。route_after_user_decision
+        # 等の既存route_after_*関数が先頭でhaltを見る規約と同じにする）。
+        if state.get("halt"):
+            print("\n[route_after_integrator]------ !!! Halt !!! ------\n")
+            return "halt"
+        # [BL-337] 未承認タスクの完全性ゲートは、矛盾検知（needs_revision_phases）より
+        # 意味的に先に判定する: pending=統合自体が未実施、needs_revision=統合済みだが
+        # 矛盾あり。generate_user_utteranceへ差し戻す（orchestratorではない——orchestratorは
+        # Expertへ直行しUser AIを経由しないため、round_countが増えず周期的reflectionの
+        # 衝突が再発しうる。cela_main.py:19820付近のgraph.add_edge("orchestrator", "expert")参照）。
+        if state.get("pending_task_review_task_ids"):
+            print("\n[route_after_integrator]------ !!! BL-337: 未承認タスクが残っているため"
+                  "generate_user_utteranceへ差し戻します ------\n")
+            return "generate_user_utterance"
         if state.get("needs_revision_phases"):
-            print("\n[route_after_integrator]------ revisionが必要です ------\n")   
+            print("\n[route_after_integrator]------ revisionが必要です ------\n")
             return "orchestrator"
         return "arbiter"
 
     graph.add_conditional_edges(
         "integrator",
         route_after_integrator,
-        {"orchestrator": "orchestrator", "arbiter": "arbiter"}
+        {"halt": "halt", "orchestrator": "orchestrator", "arbiter": "arbiter", "generate_user_utterance": "generate_user_utterance"}
     )
 
     def route_after_arbiter(state: LineageState):
@@ -20101,6 +20274,9 @@ def run_ai_vs_ai_loop(target_goal: str, config: Appconfig, db_path: str = "cela.
                 "task_criteria_status": {},
                 "expert_last_python_calls": [],
                 "expert_last_deliverable_reads": [],
+                "expert_last_entity_writes": [],
+                "pending_task_review_task_ids": [],
+                "pending_task_review_count": 0,
                 "expert_last_reasoning": "",
                 "user_last_reasoning": "",
                 "risk_register": [],
